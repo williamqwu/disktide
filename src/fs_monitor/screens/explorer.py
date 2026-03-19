@@ -1,0 +1,237 @@
+"""Main explorer screen: tree + visualization side-by-side."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from textual import on, work
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.screen import Screen
+from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
+import humanize
+
+from fs_monitor.models.tree import FSNode
+from fs_monitor.scanner.engine import ScanEngine
+from fs_monitor.scanner.progress import ScanProgress
+from fs_monitor.widgets.size_tree import SizeTree
+from fs_monitor.widgets.breadcrumb import Breadcrumb
+from fs_monitor.widgets.info_panel import InfoPanel
+from fs_monitor.widgets.treemap_view import TreemapView
+from fs_monitor.widgets.sunburst_view import SunburstView
+from fs_monitor.widgets.scan_progress import ScanProgressOverlay
+
+
+class ExplorerScreen(Screen):
+    """Main filesystem explorer screen."""
+
+    BINDINGS = [
+        Binding("1", "switch_viz('treemap')", "Treemap", show=True),
+        Binding("2", "switch_viz('sunburst')", "Sunburst", show=True),
+        Binding("3", "switch_viz('details')", "Details", show=True),
+        Binding("s", "cycle_sort", "Sort", show=True),
+        Binding("r", "rescan", "Rescan", show=True),
+        Binding("backspace", "go_up", "Up", show=True),
+        Binding("slash", "search", "Search", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    ExplorerScreen {
+        layout: vertical;
+    }
+
+    #explorer-main {
+        height: 1fr;
+    }
+
+    #tree-panel {
+        width: 40%;
+        min-width: 30;
+    }
+
+    #viz-panel {
+        width: 60%;
+    }
+
+    #status-bar {
+        height: 1;
+        dock: bottom;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    ScanProgressOverlay {
+        display: none;
+    }
+
+    ScanProgressOverlay.scanning {
+        display: block;
+    }
+    """
+
+    def __init__(self, scan_path: str, **kwargs):
+        super().__init__(**kwargs)
+        self._scan_path = scan_path
+        self._root: FSNode | None = None
+        self._current: FSNode | None = None
+        self._engine: ScanEngine | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Breadcrumb(self._scan_path, id="breadcrumb")
+        with Horizontal(id="explorer-main"):
+            with Vertical(id="tree-panel"):
+                yield SizeTree(id="size-tree")
+            with Vertical(id="viz-panel"):
+                with TabbedContent(id="viz-tabs"):
+                    with TabPane("Treemap", id="tab-treemap"):
+                        yield TreemapView(id="treemap-view")
+                    with TabPane("Sunburst", id="tab-sunburst"):
+                        yield SunburstView(id="sunburst-view")
+                    with TabPane("Details", id="tab-details"):
+                        yield InfoPanel(id="info-panel")
+        yield ScanProgressOverlay(id="scan-progress")
+        yield Static("", id="status-bar")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._start_scan()
+
+    def _start_scan(self, force: bool = False) -> None:
+        """Kick off a filesystem scan."""
+        overlay = self.query_one("#scan-progress", ScanProgressOverlay)
+        overlay.add_class("scanning")
+        self._run_scan()
+
+    @work(thread=True)
+    def _run_scan(self) -> None:
+        """Run filesystem scan in a worker thread."""
+
+        def on_progress(progress: ScanProgress) -> None:
+            self.app.call_from_thread(self._apply_progress, progress)
+
+        self._engine = ScanEngine(progress_callback=on_progress)
+        root = self._engine.scan(self._scan_path)
+
+        self.app.call_from_thread(self._on_scan_complete, root)
+
+    def _apply_progress(self, progress: ScanProgress) -> None:
+        """Apply progress update on the main thread."""
+        overlay = self.query_one("#scan-progress", ScanProgressOverlay)
+        overlay.update_progress(progress)
+
+    def _on_scan_complete(self, root: FSNode) -> None:
+        """Handle scan completion on the main thread."""
+        self._root = root
+        self._current = root
+
+        # Update overlay
+        overlay = self.query_one("#scan-progress", ScanProgressOverlay)
+        overlay.scan_complete()
+        overlay.remove_class("scanning")
+
+        # Load tree
+        tree = self.query_one("#size-tree", SizeTree)
+        tree.reload(root)
+
+        # Update viz
+        self._update_viz(root)
+        self._update_status()
+
+    def _update_viz(self, node: FSNode) -> None:
+        """Update visualization panels with given node."""
+        treemap = self.query_one("#treemap-view", TreemapView)
+        treemap.set_node(node)
+
+        sunburst = self.query_one("#sunburst-view", SunburstView)
+        sunburst.set_node(node)
+
+        info = self.query_one("#info-panel", InfoPanel)
+        info.update_node(node)
+
+    def _update_status(self) -> None:
+        """Update the status bar."""
+        if self._root is None:
+            return
+        status = self.query_one("#status-bar", Static)
+        size = humanize.naturalsize(self._root.size, binary=True)
+        status.update(
+            f"  {self._root.file_count:,} files, "
+            f"{self._root.dir_count:,} dirs  |  "
+            f"Total: {size}  |  "
+            f"Sort: {self.query_one('#size-tree', SizeTree).sort_key}"
+        )
+
+    @on(Tree.NodeHighlighted)
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[FSNode]) -> None:
+        """Update viz when tree selection changes."""
+        if event.node.data is None:
+            return
+        node = event.node.data
+        info = self.query_one("#info-panel", InfoPanel)
+        info.update_node(node)
+
+    @on(Tree.NodeSelected)
+    def on_tree_node_selected(self, event: Tree.NodeSelected[FSNode]) -> None:
+        """Drill into directory on select."""
+        if event.node.data is None or not event.node.data.is_dir:
+            return
+        self._drill_into(event.node.data)
+
+    @on(TreemapView.NodeClicked)
+    @on(SunburstView.NodeClicked)
+    def on_viz_node_clicked(
+        self, event: TreemapView.NodeClicked | SunburstView.NodeClicked
+    ) -> None:
+        """Handle click in visualization."""
+        if event.node.is_dir:
+            self._drill_into(event.node)
+
+    @on(TreemapView.NodeHovered)
+    @on(SunburstView.NodeHovered)
+    def on_viz_node_hovered(
+        self, event: TreemapView.NodeHovered | SunburstView.NodeHovered
+    ) -> None:
+        """Update info panel on hover."""
+        info = self.query_one("#info-panel", InfoPanel)
+        info.update_node(event.node)
+
+    def _drill_into(self, node: FSNode) -> None:
+        """Drill into a directory node."""
+        self._current = node
+        breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
+        breadcrumb.update_path(node.path)
+        self._update_viz(node)
+
+    def action_go_up(self) -> None:
+        """Navigate up one directory level."""
+        if self._current is None or self._root is None:
+            return
+        if self._current.path == self._root.path:
+            return
+        parent_path = self._current.parent_path
+        parent = self._root.find(parent_path)
+        if parent:
+            self._drill_into(parent)
+
+    def action_switch_viz(self, viz: str) -> None:
+        """Switch visualization tab."""
+        tabs = self.query_one("#viz-tabs", TabbedContent)
+        tab_map = {"treemap": "tab-treemap", "sunburst": "tab-sunburst", "details": "tab-details"}
+        if viz in tab_map:
+            tabs.active = tab_map[viz]
+
+    def action_cycle_sort(self) -> None:
+        """Cycle sort order."""
+        tree = self.query_one("#size-tree", SizeTree)
+        tree.cycle_sort()
+        self._update_status()
+
+    def action_rescan(self) -> None:
+        """Rescan the current path."""
+        self._start_scan(force=True)
+
+    def action_search(self) -> None:
+        """Open search (placeholder)."""
+        pass
