@@ -4,7 +4,7 @@ import os
 import tempfile
 
 import pytest
-from fs_monitor.config import load_config, AppConfig
+from fs_monitor.config import load_config, save_config, AppConfig
 
 
 class TestConfig:
@@ -64,3 +64,48 @@ show_hidden = true
         # Defaults preserved
         assert config.scan.max_depth is None
         assert config.ui.default_sort == "size"
+
+    def test_save_and_reload(self, tmp_path):
+        config = AppConfig()
+        config.scan.workers = 4
+        config.scan.max_depth = 5
+        config.scan.follow_symlinks = True
+        config.scan.exclude_patterns = [".git", "node_modules"]
+        config.cleanup.require_confirm_dangerous = False
+        config.monitor.default_interval = 7200
+        config.ui.color_theme = "dark"
+        config.ui.default_sort = "name"
+        config.ui.default_viz = "sunburst"
+        config.ui.show_hidden = True
+
+        config_file = tmp_path / "saved.toml"
+        save_config(config, config_file)
+
+        loaded = load_config(config_file)
+        assert loaded.scan.workers == 4
+        assert loaded.scan.max_depth == 5
+        assert loaded.scan.follow_symlinks is True
+        assert loaded.scan.exclude_patterns == [".git", "node_modules"]
+        assert loaded.cleanup.require_confirm_dangerous is False
+        assert loaded.monitor.default_interval == 7200
+        assert loaded.ui.color_theme == "dark"
+        assert loaded.ui.default_sort == "name"
+        assert loaded.ui.default_viz == "sunburst"
+        assert loaded.ui.show_hidden is True
+
+    def test_save_creates_parent_dirs(self, tmp_path):
+        config = AppConfig()
+        config_file = tmp_path / "sub" / "dir" / "config.toml"
+        save_config(config, config_file)
+        assert config_file.exists()
+
+    def test_save_with_none_optionals(self, tmp_path):
+        config = AppConfig()
+        config.scan.workers = None
+        config.scan.max_depth = None
+        config_file = tmp_path / "defaults.toml"
+        save_config(config, config_file)
+
+        loaded = load_config(config_file)
+        assert loaded.scan.workers is None
+        assert loaded.scan.max_depth is None

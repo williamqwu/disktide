@@ -26,7 +26,7 @@ class FSMonitorApp(App):
         Binding("e", "switch_mode('explorer')", "[E]xplorer [C]leanup [M]onitor", show=True, key_display="Mode"),
         Binding("c", "switch_mode('cleanup')", "Cleanup", show=False),
         Binding("m", "switch_mode('monitor')", "Monitor", show=False),
-        Binding("question_mark", "push_screen('settings')", "Settings", show=False),
+        Binding("question_mark", "push_screen('settings')", "Settings", show=True, key_display="?"),
         Binding("q", "quit", "Quit", show=True),
     ]
 
@@ -39,7 +39,7 @@ class FSMonitorApp(App):
     def on_mount(self) -> None:
         # Override MODES to pass arguments
         # We need to install screens manually since MODES requires no-arg constructors
-        self._explorer = ExplorerScreen(self._scan_path)
+        self._explorer = ExplorerScreen(self._scan_path, config=self._config)
         self._cleanup = CleanupScreen()
         self._monitor = MonitorScreen(db=self._db, root_path=self._scan_path)
 

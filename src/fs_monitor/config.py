@@ -52,6 +52,49 @@ def _config_path() -> Path:
     return Path(config_dir) / "fsmonitor-cli" / "config.toml"
 
 
+def save_config(config: AppConfig, path: str | Path | None = None) -> None:
+    """Save configuration to TOML file."""
+    config_file = Path(path) if path else _config_path()
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    lines: list[str] = []
+
+    lines.append("[scan]")
+    if config.scan.max_depth is not None:
+        lines.append(f"max_depth = {config.scan.max_depth}")
+    if config.scan.workers is not None:
+        lines.append(f"workers = {config.scan.workers}")
+    lines.append(f"follow_symlinks = {'true' if config.scan.follow_symlinks else 'false'}")
+    if config.scan.exclude_patterns:
+        patterns = ", ".join(f'"{p}"' for p in config.scan.exclude_patterns)
+        lines.append(f"exclude_patterns = [{patterns}]")
+    lines.append("")
+
+    lines.append("[cleanup]")
+    if config.cleanup.enabled_rules:
+        rules = ", ".join(f'"{r}"' for r in config.cleanup.enabled_rules)
+        lines.append(f"enabled_rules = [{rules}]")
+    if config.cleanup.disabled_rules:
+        rules = ", ".join(f'"{r}"' for r in config.cleanup.disabled_rules)
+        lines.append(f"disabled_rules = [{rules}]")
+    lines.append(f"require_confirm_dangerous = {'true' if config.cleanup.require_confirm_dangerous else 'false'}")
+    lines.append("")
+
+    lines.append("[monitor]")
+    lines.append(f"default_interval = {config.monitor.default_interval}")
+    lines.append(f"snapshot_retention = {config.monitor.snapshot_retention}")
+    lines.append("")
+
+    lines.append("[ui]")
+    lines.append(f'color_theme = "{config.ui.color_theme}"')
+    lines.append(f'default_sort = "{config.ui.default_sort}"')
+    lines.append(f'default_viz = "{config.ui.default_viz}"')
+    lines.append(f"show_hidden = {'true' if config.ui.show_hidden else 'false'}")
+    lines.append("")
+
+    config_file.write_text("\n".join(lines))
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     """Load configuration from TOML file.
 

@@ -6,17 +6,17 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Static, Switch, Label
+from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 from textual.containers import Horizontal
 
-from fs_monitor.config import AppConfig
+from fs_monitor.config import AppConfig, save_config
 
 
 class SettingsScreen(Screen):
     """Configuration settings screen."""
 
     BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back", show=True),
+        Binding("escape", "dismiss_settings", "Back", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -33,14 +33,33 @@ class SettingsScreen(Screen):
         width: 30;
     }
 
+    .input-hint {
+        width: 30;
+        color: $text-muted;
+    }
+
+    .setting-input {
+        width: 16;
+    }
+
+    .viz-select {
+        width: 20;
+    }
+
     #settings-container {
         padding: 1 2;
+    }
+
+    .sysinfo-value {
+        padding: 0 2;
+        height: 1;
     }
     """
 
     def __init__(self, config: AppConfig, **kwargs):
         super().__init__(**kwargs)
         self._config = config
+        self._system_info = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -48,6 +67,34 @@ class SettingsScreen(Screen):
             yield Static("Settings", classes="title")
             yield Static("")
 
+            yield Static("System Information", classes="section-title")
+            yield Static("  Detecting...", id="sysinfo-cpus", classes="sysinfo-value")
+            yield Static("", id="sysinfo-memory", classes="sysinfo-value")
+            yield Static("", id="sysinfo-load", classes="sysinfo-value")
+            yield Static("", id="sysinfo-storage", classes="sysinfo-value")
+            yield Static("", id="sysinfo-recommendation", classes="sysinfo-value")
+
+            yield Static("")
+            yield Static("Scan Performance", classes="section-title")
+            with Horizontal(classes="setting-row"):
+                yield Label("Workers", classes="setting-label")
+                yield Input(
+                    placeholder="auto",
+                    id="workers-input",
+                    classes="setting-input",
+                )
+                yield Label("", id="workers-hint", classes="input-hint")
+
+            with Horizontal(classes="setting-row"):
+                yield Label("Max depth", classes="setting-label")
+                yield Input(
+                    placeholder="unlimited",
+                    id="max-depth-input",
+                    classes="setting-input",
+                )
+                yield Label("(blank = unlimited)", classes="input-hint")
+
+            yield Static("")
             yield Static("Scan Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
                 yield Label("Show hidden files", classes="setting-label")
@@ -70,9 +117,90 @@ class SettingsScreen(Screen):
             yield Static("UI Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
                 yield Label("Default visualization", classes="setting-label")
-                yield Static(self._config.ui.default_viz)
+                yield Select(
+                    [
+                        ("Treemap", "treemap"),
+                        ("Sunburst", "sunburst"),
+                        ("Details", "details"),
+                    ],
+                    value=self._config.ui.default_viz,
+                    id="default-viz",
+                    classes="viz-select",
+                    allow_blank=False,
+                )
 
         yield Footer()
+
+    def on_mount(self) -> None:
+        # Pre-fill inputs from config
+        if self._config.scan.workers is not None:
+            self.query_one("#workers-input", Input).value = str(self._config.scan.workers)
+        if self._config.scan.max_depth is not None:
+            self.query_one("#max-depth-input", Input).value = str(self._config.scan.max_depth)
+
+        # Detect system info
+        self._detect_system()
+
+    def _detect_system(self) -> None:
+        """Detect system info and update display."""
+        from fs_monitor.scanner.sysinfo import detect_system_info
+
+        info = detect_system_info("/")
+        self._system_info = info
+
+        self.query_one("#sysinfo-cpus", Static).update(
+            f"  CPUs: {info.available_cpus} available / {info.cpu_count} total"
+        )
+
+        if info.memory_total_mb > 0:
+            total_str = self._format_memory(info.memory_total_mb)
+            avail_str = self._format_memory(info.memory_available_mb)
+            self.query_one("#sysinfo-memory", Static).update(
+                f"  Memory: {avail_str} available / {total_str} total"
+            )
+        else:
+            self.query_one("#sysinfo-memory", Static).update(
+                "  Memory: unavailable"
+            )
+
+        load = info.load_average
+        self.query_one("#sysinfo-load", Static).update(
+            f"  Load: {load[0]:.2f} (1min) / {load[1]:.2f} (5min) / {load[2]:.2f} (15min)"
+        )
+
+        storage_desc = info.fs_type
+        if info.is_rotational is True:
+            storage_desc += " (HDD)"
+        elif info.is_rotational is False:
+            storage_desc += " (SSD)"
+        self.query_one("#sysinfo-storage", Static).update(
+            f"  Storage: {storage_desc}"
+        )
+
+        self.query_one("#sysinfo-recommendation", Static).update(
+            f"  Recommended workers: {info.recommendation_reason}"
+        )
+
+        # Update hint next to workers input
+        self.query_one("#workers-hint", Label).update(
+            f"(recommended: {info.recommended_workers})"
+        )
+
+    @staticmethod
+    def _format_memory(mb: int) -> str:
+        """Format memory as GB when >= 1024 MB, otherwise MB."""
+        if mb >= 1024:
+            gb = mb / 1024
+            return f"{gb:,.1f} GB"
+        return f"{mb:,} MB"
+
+    def action_dismiss_settings(self) -> None:
+        """Save config and go back."""
+        try:
+            save_config(self._config)
+        except OSError:
+            pass  # Best-effort save
+        self.app.pop_screen()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "show-hidden":
@@ -81,3 +209,30 @@ class SettingsScreen(Screen):
             self._config.scan.follow_symlinks = event.value
         elif event.switch.id == "confirm-dangerous":
             self._config.cleanup.require_confirm_dangerous = event.value
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "default-viz":
+            self._config.ui.default_viz = str(event.value)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        value = event.value.strip()
+        if event.input.id == "workers-input":
+            if value == "":
+                self._config.scan.workers = None
+            else:
+                try:
+                    parsed = int(value)
+                    if parsed > 0:
+                        self._config.scan.workers = parsed
+                except ValueError:
+                    pass  # Silently ignore non-numeric input
+        elif event.input.id == "max-depth-input":
+            if value == "":
+                self._config.scan.max_depth = None
+            else:
+                try:
+                    parsed = int(value)
+                    if parsed >= 0:
+                        self._config.scan.max_depth = parsed
+                except ValueError:
+                    pass  # Silently ignore non-numeric input

@@ -9,9 +9,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, TabbedContent, TabPane, Tree
+from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 import humanize
 
+from fs_monitor.config import AppConfig
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.engine import ScanEngine
 from fs_monitor.scanner.progress import ScanProgress
@@ -27,13 +28,13 @@ class ExplorerScreen(Screen):
     """Main filesystem explorer screen."""
 
     BINDINGS = [
-        Binding("1", "switch_viz('treemap')", "Treemap", show=True),
-        Binding("2", "switch_viz('sunburst')", "Sunburst", show=True),
-        Binding("3", "switch_viz('details')", "Details", show=True),
-        Binding("s", "cycle_sort", "Sort", show=True),
-        Binding("r", "rescan", "Rescan", show=True),
-        Binding("u", "go_up", "Up", show=True),
-        Binding("i", "go_into", "Into", show=True),
+        Binding("1", "switch_viz('treemap')", "[1]Treemap [2]Sunburst [3]Details", show=True, key_display="Viz"),
+        Binding("2", "switch_viz('sunburst')", "Sunburst", show=False),
+        Binding("3", "switch_viz('details')", "Details", show=False),
+        Binding("u", "go_up", "[U]p [I]nto", show=True, key_display="Nav"),
+        Binding("i", "go_into", "Into", show=False),
+        Binding("s", "cycle_sort", "[S]ort [R]escan", show=True, key_display="Action"),
+        Binding("r", "rescan", "Rescan", show=False),
         Binding("slash", "search", "Search", show=False),
     ]
 
@@ -51,6 +52,13 @@ class ExplorerScreen(Screen):
         min-width: 30;
     }
 
+    #sort-indicator {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+        background: $surface;
+    }
+
     #viz-panel {
         width: 60%;
     }
@@ -64,9 +72,10 @@ class ExplorerScreen(Screen):
     }
     """
 
-    def __init__(self, scan_path: str, **kwargs):
+    def __init__(self, scan_path: str, config: AppConfig | None = None, **kwargs):
         super().__init__(**kwargs)
         self._scan_path = scan_path
+        self._config = config
         self._root: FSNode | None = None
         self._current: FSNode | None = None
         self._engine: ScanEngine | None = None
@@ -76,6 +85,7 @@ class ExplorerScreen(Screen):
         yield Breadcrumb(self._scan_path, id="breadcrumb")
         with Horizontal(id="explorer-main"):
             with Vertical(id="tree-panel"):
+                yield Static("Sort: size", id="sort-indicator")
                 yield SizeTree(id="size-tree")
             with Vertical(id="viz-panel"):
                 with TabbedContent(id="viz-tabs"):
@@ -105,7 +115,14 @@ class ExplorerScreen(Screen):
         def on_progress(progress: ScanProgress) -> None:
             self.app.call_from_thread(self._apply_progress, progress)
 
-        self._engine = ScanEngine(progress_callback=on_progress)
+        workers = self._config.scan.workers if self._config else None
+        max_depth = self._config.scan.max_depth if self._config else None
+        self._engine = ScanEngine(
+            workers=workers,
+            progress_callback=on_progress,
+            max_depth=max_depth,
+            scan_path=self._scan_path,
+        )
         root = self._engine.scan(self._scan_path)
 
         self.app.call_from_thread(self._on_scan_complete, root)
@@ -145,18 +162,25 @@ class ExplorerScreen(Screen):
         elif active == "tab-details":
             self.query_one("#info-panel", InfoPanel).update_node(node)
 
+    _SORT_DISPLAY = {"size": "Size", "name": "Name", "mtime": "Modified"}
+
     def _update_status(self) -> None:
-        """Update the header subtitle with scan stats."""
+        """Update the header subtitle and sort indicator."""
         if self._root is None:
             return
         size = humanize.naturalsize(self._root.size, binary=True)
-        sort_key = self.query_one("#size-tree", SizeTree).sort_key
         self.app.sub_title = (
             f"{self._root.file_count:,} files, "
             f"{self._root.dir_count:,} dirs  |  "
-            f"Total: {size}  |  "
-            f"Sort: {sort_key}"
+            f"Total: {size}"
         )
+        self._update_sort_indicator()
+
+    def _update_sort_indicator(self) -> None:
+        """Update the sort indicator label."""
+        sort_key = self.query_one("#size-tree", SizeTree).sort_key
+        label = self._SORT_DISPLAY.get(sort_key, sort_key)
+        self.query_one("#sort-indicator", Static).update(f"Sort: {label}")
 
     @on(Tree.NodeHighlighted)
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[FSNode]) -> None:
@@ -229,7 +253,7 @@ class ExplorerScreen(Screen):
         """Cycle sort order."""
         tree = self.query_one("#size-tree", SizeTree)
         tree.cycle_sort()
-        self._update_status()
+        self._update_sort_indicator()
 
     def action_rescan(self) -> None:
         """Rescan the current path."""
