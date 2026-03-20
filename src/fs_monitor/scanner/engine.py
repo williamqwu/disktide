@@ -20,8 +20,14 @@ class ScanEngine:
         workers: int | None = None,
         progress_callback: Callable[[ScanProgress], None] | None = None,
         max_depth: int | None = None,
+        scan_path: str | None = None,
     ):
-        self._workers = workers or min(os.cpu_count() or 4, 8)
+        if workers is not None:
+            self._workers = workers
+        else:
+            from fs_monitor.scanner.sysinfo import detect_system_info
+            info = detect_system_info(scan_path or "/")
+            self._workers = info.recommended_workers
         self._cancel_event = threading.Event()
         self._max_depth = max_depth
         self._lock = threading.Lock()
@@ -53,9 +59,13 @@ class ScanEngine:
         except OSError:
             pass
 
-        # Collect top-level entries
+        # Collect top-level entries (streaming scandir)
+        top_files: list[FSNode] = []
+        top_dirs: list[str] = []
+        own_size = 0
+
         try:
-            entries = list(os.scandir(path))
+            scandir_it = os.scandir(path)
         except PermissionError:
             root.error = f"Permission denied: {path}"
             self._progress.force_report()
@@ -65,52 +75,51 @@ class ScanEngine:
             self._progress.force_report()
             return root
 
-        # Separate files and dirs at top level
-        top_files: list[FSNode] = []
-        top_dirs: list[str] = []
-        own_size = 0
-
-        for entry in entries:
-            if self._cancel_event.is_set():
-                break
-            try:
-                if entry.is_symlink():
-                    try:
-                        st = entry.stat(follow_symlinks=False)
-                        child = FSNode(
-                            name=entry.name, path=entry.path,
-                            size=st.st_size, own_size=st.st_size,
-                            is_dir=False, mtime=st.st_mtime, depth=1,
-                        )
-                        top_files.append(child)
-                        own_size += st.st_size
-                    except OSError:
-                        pass
+        try:
+            for entry in scandir_it:
+                if self._cancel_event.is_set():
+                    break
+                try:
+                    if entry.is_symlink():
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                            child = FSNode(
+                                name=entry.name, path=entry.path,
+                                size=st.st_size, own_size=st.st_size,
+                                is_dir=False, mtime=st.st_mtime, depth=1,
+                            )
+                            top_files.append(child)
+                            own_size += st.st_size
+                        except OSError:
+                            pass
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        top_dirs.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                            child = FSNode(
+                                name=entry.name, path=entry.path,
+                                size=st.st_size, own_size=st.st_size,
+                                is_dir=False, mtime=st.st_mtime, depth=1,
+                                file_count=1,
+                            )
+                            top_files.append(child)
+                            own_size += st.st_size
+                        except OSError:
+                            pass
+                except OSError:
                     continue
-                if entry.is_dir(follow_symlinks=False):
-                    top_dirs.append(entry.path)
-                elif entry.is_file(follow_symlinks=False):
-                    try:
-                        st = entry.stat(follow_symlinks=False)
-                        child = FSNode(
-                            name=entry.name, path=entry.path,
-                            size=st.st_size, own_size=st.st_size,
-                            is_dir=False, mtime=st.st_mtime, depth=1,
-                            file_count=1,
-                        )
-                        top_files.append(child)
-                        own_size += st.st_size
-                    except OSError:
-                        pass
-            except OSError:
-                continue
+        finally:
+            scandir_it.close()
 
         # Scan subdirectories in parallel
         dir_results: list[FSNode] = []
 
-        max_sub_depth = None
-        if self._max_depth is not None:
-            max_sub_depth = self._max_depth  # walker uses absolute depth from its own root
+        # Running accumulators for progress stats
+        running_files = len(top_files)
+        running_dirs = 0
+        running_size = own_size
 
         self._progress.update(top_dir_total=len(top_dirs))
 
@@ -130,23 +139,21 @@ class ScanEngine:
                     try:
                         child_node = future.result()
                         if child_node is not None:
-                            # Fix depth: walker returns depth starting from 0,
-                            # but these are children of root (depth 1)
-                            self._adjust_depth(child_node, 1)
                             dir_results.append(child_node)
+                            # Update running accumulators
+                            running_files += child_node.file_count
+                            running_dirs += 1 + child_node.dir_count
+                            running_size += child_node.size
                     except Exception:
                         pass
 
-                    # Update progress
+                    # Update progress using accumulators
                     completed += 1
                     with self._lock:
-                        total_files = sum(c.file_count for c in dir_results) + len(top_files)
-                        total_dirs = sum(c.dir_count for c in dir_results) + len(dir_results)
-                        total_size = sum(c.size for c in dir_results) + own_size
                         self._progress.update(
-                            dirs_scanned=total_dirs,
-                            files_scanned=total_files,
-                            total_size=total_size,
+                            dirs_scanned=running_dirs,
+                            files_scanned=running_files,
+                            total_size=running_size,
                             top_dirs_done=completed,
                         )
 
@@ -175,18 +182,12 @@ class ScanEngine:
 
         max_depth = None
         if self._max_depth is not None:
-            max_depth = self._max_depth - 1  # subtract 1 since we're 1 level deep
-            if max_depth < 0:
+            max_depth = self._max_depth
+            if max_depth < 1:
                 return FSNode(
                     name=os.path.basename(path),
-                    path=path, is_dir=True, depth=0,
+                    path=path, is_dir=True, depth=1,
                 )
 
         self._progress.update(current_path=path)
-        return scan_directory(path, depth=0, max_depth=max_depth)
-
-    def _adjust_depth(self, node: FSNode, base_depth: int) -> None:
-        """Adjust depth of all nodes in subtree relative to base."""
-        node.depth = base_depth + node.depth
-        for child in node.children:
-            self._adjust_depth(child, base_depth)
+        return scan_directory(path, depth=1, max_depth=max_depth)

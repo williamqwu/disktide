@@ -106,3 +106,57 @@ class TestEngine:
         engine = ScanEngine()
         with pytest.raises(ValueError, match="Not a directory"):
             engine.scan("/nonexistent/path")
+
+    def test_depth_correctness(self, sample_dir):
+        """Verify depths are correct without _adjust_depth."""
+        engine = ScanEngine(workers=2)
+        root = engine.scan(sample_dir)
+        assert root.depth == 0
+
+        for child in root.children:
+            assert child.depth == 1, f"{child.name} should be depth 1, got {child.depth}"
+            if child.is_dir:
+                for grandchild in child.children:
+                    assert grandchild.depth == 2, (
+                        f"{grandchild.name} should be depth 2, got {grandchild.depth}"
+                    )
+
+    def test_depth_deep_tree(self, sample_dir):
+        """Verify depth correctness through a deep tree."""
+        engine = ScanEngine(workers=1)
+        root = engine.scan(sample_dir)
+
+        # Walk all nodes and verify depth matches path depth
+        for node in root.walk():
+            # Calculate expected depth from path
+            rel = os.path.relpath(node.path, root.path)
+            if rel == ".":
+                expected = 0
+            else:
+                expected = len(rel.split(os.sep))
+            assert node.depth == expected, (
+                f"{node.path}: expected depth {expected}, got {node.depth}"
+            )
+
+    def test_accumulator_accuracy(self, sample_dir):
+        """Verify progress accumulators produce accurate final stats."""
+        last_report = [None]
+
+        def capture(progress):
+            last_report[0] = progress
+
+        engine = ScanEngine(workers=2, progress_callback=capture)
+        root = engine.scan(sample_dir)
+
+        # Final progress report should match the root node stats
+        assert last_report[0] is not None
+        assert last_report[0].files_scanned == root.file_count
+        assert last_report[0].dirs_scanned == root.dir_count
+        assert last_report[0].total_size == root.size
+
+    def test_scan_path_parameter(self, sample_dir):
+        """Verify scan_path parameter is accepted."""
+        engine = ScanEngine(workers=2, scan_path=sample_dir)
+        root = engine.scan(sample_dir)
+        assert root.is_dir
+        assert root.size == 100 + 200 + 300 + 400
