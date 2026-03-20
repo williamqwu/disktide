@@ -20,11 +20,12 @@ class FSMonitorApp(App):
 
     TITLE = "fsmonitor-cli"
     SUB_TITLE = "Disk Usage Explorer"
+    ENABLE_COMMAND_PALETTE = False
 
     BINDINGS = [
-        Binding("ctrl+e", "switch_mode('explorer')", "Explorer", show=True),
-        Binding("ctrl+d", "switch_mode('cleanup')", "Cleanup", show=True),
-        Binding("ctrl+m", "switch_mode('monitor')", "Monitor", show=True),
+        Binding("e", "switch_mode('explorer')", "[E]xplorer [C]leanup [M]onitor", show=True, key_display="Mode"),
+        Binding("c", "switch_mode('cleanup')", "Cleanup", show=False),
+        Binding("m", "switch_mode('monitor')", "Monitor", show=False),
         Binding("question_mark", "push_screen('settings')", "Settings", show=False),
         Binding("q", "quit", "Quit", show=True),
     ]

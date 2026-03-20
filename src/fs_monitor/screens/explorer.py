@@ -9,7 +9,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
+from textual.widgets import Footer, Header, TabbedContent, TabPane, Tree
 import humanize
 
 from fs_monitor.models.tree import FSNode
@@ -32,7 +32,8 @@ class ExplorerScreen(Screen):
         Binding("3", "switch_viz('details')", "Details", show=True),
         Binding("s", "cycle_sort", "Sort", show=True),
         Binding("r", "rescan", "Rescan", show=True),
-        Binding("backspace", "go_up", "Up", show=True),
+        Binding("u", "go_up", "Up", show=True),
+        Binding("i", "go_into", "Into", show=True),
         Binding("slash", "search", "Search", show=False),
     ]
 
@@ -52,13 +53,6 @@ class ExplorerScreen(Screen):
 
     #viz-panel {
         width: 60%;
-    }
-
-    #status-bar {
-        height: 1;
-        dock: bottom;
-        background: $surface;
-        padding: 0 1;
     }
 
     ScanProgressOverlay {
@@ -92,7 +86,6 @@ class ExplorerScreen(Screen):
                     with TabPane("Details", id="tab-details"):
                         yield InfoPanel(id="info-panel")
         yield ScanProgressOverlay(id="scan-progress")
-        yield Static("", id="status-bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -152,16 +145,16 @@ class ExplorerScreen(Screen):
             self.query_one("#info-panel", InfoPanel).update_node(node)
 
     def _update_status(self) -> None:
-        """Update the status bar."""
+        """Update the header subtitle with scan stats."""
         if self._root is None:
             return
-        status = self.query_one("#status-bar", Static)
         size = humanize.naturalsize(self._root.size, binary=True)
-        status.update(
-            f"  {self._root.file_count:,} files, "
+        sort_key = self.query_one("#size-tree", SizeTree).sort_key
+        self.app.sub_title = (
+            f"{self._root.file_count:,} files, "
             f"{self._root.dir_count:,} dirs  |  "
             f"Total: {size}  |  "
-            f"Sort: {self.query_one('#size-tree', SizeTree).sort_key}"
+            f"Sort: {sort_key}"
         )
 
     @on(Tree.NodeHighlighted)
@@ -195,15 +188,34 @@ class ExplorerScreen(Screen):
         self._update_active_viz(node)
 
     def action_go_up(self) -> None:
-        """Navigate up one directory level."""
-        if self._current is None or self._root is None:
+        """Navigate up one directory level, rescanning from parent if at scan root."""
+        if (
+            self._current is not None
+            and self._root is not None
+            and self._current.path != self._root.path
+        ):
+            parent_path = self._current.parent_path
+            parent = self._root.find(parent_path)
+            if parent:
+                self._drill_into(parent)
+                return
+        # At scan root: rescan from parent directory
+        parent_dir = str(Path(self._scan_path).parent)
+        if parent_dir != self._scan_path:
+            self._scan_path = parent_dir
+            self._start_scan()
+
+    def action_go_into(self) -> None:
+        """Rescan from the currently highlighted directory."""
+        tree = self.query_one("#size-tree", SizeTree)
+        node = tree.cursor_node
+        if node is None or node.data is None or not node.data.is_dir:
             return
-        if self._current.path == self._root.path:
+        new_root = node.data.path
+        if new_root == self._scan_path:
             return
-        parent_path = self._current.parent_path
-        parent = self._root.find(parent_path)
-        if parent:
-            self._drill_into(parent)
+        self._scan_path = new_root
+        self._start_scan()
 
     def action_switch_viz(self, viz: str) -> None:
         """Switch visualization tab."""

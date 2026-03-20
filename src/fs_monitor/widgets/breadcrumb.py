@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
@@ -25,13 +24,6 @@ class Breadcrumb(Widget):
     """
 
     current_path: reactive[str] = reactive("")
-
-    class PathClicked(Message):
-        """Posted when a breadcrumb segment is clicked."""
-
-        def __init__(self, path: str) -> None:
-            super().__init__()
-            self.path = path
 
     def __init__(self, path: str = "", **kwargs):
         super().__init__(**kwargs)

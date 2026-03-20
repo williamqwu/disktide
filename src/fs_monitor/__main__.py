@@ -38,7 +38,7 @@ def cli(ctx, max_depth: int | None, workers: int | None):
             config.scan.workers = workers
 
         app = FSMonitorApp(scan_path=str(Path(".").resolve()), config=config)
-        app.run()
+        app.run(mouse=False)
 
 
 @cli.command()

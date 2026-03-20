@@ -28,14 +28,6 @@ Footer {
     width: 60%;
 }
 
-#status-bar {
-    height: 1;
-    dock: bottom;
-    background: $surface;
-    color: $text;
-    padding: 0 1;
-}
-
 Breadcrumb {
     height: 1;
     dock: top;
