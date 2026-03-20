@@ -148,6 +148,13 @@ def _layout_node(
 ) -> None:
     """Recursively lay out a node and its children."""
     if w < 1 or h < 1:
+        # Too small to subdivide but still claim whatever cells we overlap
+        # so the area doesn't show as parent-border bleed.
+        rects.append(TreemapRect(
+            x=x, y=y, w=w, h=h, node=node,
+            depth=depth, label="", size_label="",
+            is_leaf=True,
+        ))
         return
 
     children = node.sorted_children
@@ -162,9 +169,17 @@ def _layout_node(
         ))
         return
 
+    # Adaptive padding: only add the 1-char border when the rect is large
+    # enough that children still get meaningful space (inner area >= 4x3).
+    # Without this, nested padding compounds and eats all content at small
+    # viewports (e.g. 69% border at 15x8, 87% at 11x5).
+    pad = 1 if depth < max_depth - 1 and w >= 6 and h >= 5 else 0
+    inner_w = w - 2 * pad
+    inner_h = h - 2 * pad
+
     # Add parent rect first (for background / border)
-    # Show directory name on depth 0/1 borders
-    dir_label = node.name if depth <= 1 and w >= len(node.name) + 2 else ""
+    # Only show dir label when there is actually a visible border row.
+    dir_label = node.name if depth <= 1 and pad > 0 and w >= len(node.name) + 2 else ""
     rects.append(TreemapRect(
         x=x, y=y, w=w, h=h, node=node,
         depth=depth, label=dir_label, is_leaf=False,
@@ -179,13 +194,6 @@ def _layout_node(
     sizes = [c.size for c in sized]
     total = sum(sizes)
     if total <= 0:
-        return
-
-    # 1-char padding at non-leaf levels for visible borders
-    pad = 1 if depth < max_depth - 1 else 0
-    inner_w = w - 2 * pad
-    inner_h = h - 2 * pad
-    if inner_w < 1 or inner_h < 1:
         return
 
     normed = squarify.normalize_sizes(sizes, inner_w, inner_h)
