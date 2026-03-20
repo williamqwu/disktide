@@ -70,3 +70,71 @@ def gradient_color(ratio: float, depth: int = 0) -> str:
     sat = 70
     lum = max(30, 60 - depth * 8)
     return f"rgb({hsl_to_rgb(hue, sat, lum)})"
+
+
+# ---------------------------------------------------------------------------
+# Shared file-type category mapping (used by treemap and sunburst)
+# ---------------------------------------------------------------------------
+
+EXT_CATEGORIES: dict[str, str] = {}
+CATEGORY_HUES: dict[str, int] = {
+    "document": 210,
+    "image": 30,
+    "code": 140,
+    "config": 170,
+    "data": 270,
+    "archive": 50,
+    "media": 320,
+    "build": 0,
+    "other": 90,
+}
+
+for _cat, _exts in [
+    ("document", "pdf doc docx odt tex txt md rst"),
+    ("image", "png jpg jpeg gif svg bmp webp"),
+    ("code", "py js ts c cpp h java go rs rb sh css html"),
+    ("config", "json yaml yml toml xml ini cfg"),
+    ("data", "csv sqlite db sql parquet npy"),
+    ("archive", "zip tar gz bz2 xz 7z"),
+    ("media", "mp3 mp4 wav avi mkv flac"),
+    ("build", "o so pyc class whl egg"),
+]:
+    for _ext in _exts.split():
+        EXT_CATEGORIES[_ext] = _cat
+
+
+def file_category(name: str) -> str:
+    """Determine file-type category from filename extension."""
+    dot = name.rfind(".")
+    if dot >= 0:
+        ext = name[dot + 1:].lower()
+        return EXT_CATEGORIES.get(ext, "other")
+    return "other"
+
+
+def file_type_color(name: str, depth: int, is_dir: bool) -> str:
+    """Get an RGB color string based on file type and depth.
+
+    Directories get neutral gray; files get hue from their extension category.
+    """
+    if is_dir:
+        lum = max(30, 50 - depth * 5)
+        return f"rgb({hsl_to_rgb(0, 0, lum)})"
+    cat = file_category(name)
+    hue = CATEGORY_HUES[cat]
+    sat = 60
+    lum = max(30, 55 - depth * 5)
+    return f"rgb({hsl_to_rgb(hue, sat, lum)})"
+
+
+def darken_rgb(color: str, factor: float = 0.4) -> str:
+    """Darken an ``rgb(R,G,B)`` color string by *factor*."""
+    if color.startswith("rgb(") and color.endswith(")"):
+        inner = color[4:-1]
+        parts = inner.split(",")
+        if len(parts) == 3:
+            r = int(int(parts[0]) * factor)
+            g = int(int(parts[1]) * factor)
+            b = int(int(parts[2]) * factor)
+            return f"rgb({r},{g},{b})"
+    return color

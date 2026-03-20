@@ -168,3 +168,39 @@ class TestSunburst:
         rows2 = layout.rendered_rows
         assert rows1 is rows2
 
+    def test_sunburst_fills_width(self):
+        """Sunburst should use more than 50% of the widget width with deep data."""
+        # Build a tree deep enough to fill the chart (5 depth levels)
+        root = FSNode(
+            name="root", path="/root", size=1000, own_size=0, is_dir=True, depth=0,
+        )
+        d1 = FSNode(name="src", path="/root/src", size=600, own_size=0, is_dir=True, depth=1)
+        d2 = FSNode(name="lib", path="/root/src/lib", size=400, own_size=0, is_dir=True, depth=2)
+        d3 = FSNode(name="core", path="/root/src/lib/core", size=300, own_size=0, is_dir=True, depth=3)
+        f1 = FSNode(name="main.py", path="/root/src/lib/core/main.py", size=300, own_size=300, is_dir=False, depth=4)
+        f2 = FSNode(name="util.py", path="/root/src/lib/util.py", size=100, own_size=100, is_dir=False, depth=3)
+        f3 = FSNode(name="app.py", path="/root/src/app.py", size=200, own_size=200, is_dir=False, depth=2)
+        f4 = FSNode(name="readme.md", path="/root/readme.md", size=400, own_size=400, is_dir=False, depth=1)
+        root.children = [d1, f4]
+        d1.children = [d2, f3]
+        d2.children = [d3, f2]
+        d3.children = [f1]
+
+        layout = compute_sunburst(root, 60, 25)
+        cols_with_content = set()
+        for y in range(layout.char_height):
+            if y < len(layout.rendered_rows):
+                for x, (ch, _color) in enumerate(layout.rendered_rows[y]):
+                    if ch not in (" ", "\u2800", ""):
+                        cols_with_content.add(x)
+        assert len(cols_with_content) > layout.char_width // 2, \
+            f"Chart should use >50% width, only {len(cols_with_content)}/{layout.char_width}"
+
+    def test_sunburst_labels_present(self):
+        """Large arcs should have text labels."""
+        root = make_viz_tree()
+        layout = compute_sunburst(root, 60, 25)
+        assert len(layout.labels) > 0, "Sunburst should have labels"
+        label_texts = [lb.text for lb in layout.labels]
+        assert any("root" in t for t in label_texts), "Should have root label"
+

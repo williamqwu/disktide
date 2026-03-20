@@ -11,46 +11,10 @@ from rich.segment import Segment
 from rich.style import Style
 
 from fs_monitor.models.tree import FSNode
-from fs_monitor.viz.colors import hsl_to_rgb
+from fs_monitor.viz.colors import CATEGORY_HUES, file_category, hsl_to_rgb
 
 # Border / directory background
 _BORDER_BG = "rgb(50,50,50)"
-
-# Extension → category mapping for file-type coloring
-_EXT_CATEGORIES: dict[str, str] = {}
-_CATEGORY_HUES: dict[str, int] = {
-    "document": 210,
-    "image": 30,
-    "code": 140,
-    "config": 170,
-    "data": 270,
-    "archive": 50,
-    "media": 320,
-    "build": 0,
-    "other": 90,
-}
-
-for _cat, _exts in [
-    ("document", "pdf doc docx odt tex txt md rst"),
-    ("image", "png jpg jpeg gif svg bmp webp"),
-    ("code", "py js ts c cpp h java go rs rb sh css html"),
-    ("config", "json yaml yml toml xml ini cfg"),
-    ("data", "csv sqlite db sql parquet npy"),
-    ("archive", "zip tar gz bz2 xz 7z"),
-    ("media", "mp3 mp4 wav avi mkv flac"),
-    ("build", "o so pyc class whl egg"),
-]:
-    for _ext in _exts.split():
-        _EXT_CATEGORIES[_ext] = _cat
-
-
-def _file_category(name: str) -> str:
-    """Determine file-type category from filename extension."""
-    dot = name.rfind(".")
-    if dot >= 0:
-        ext = name[dot + 1:].lower()
-        return _EXT_CATEGORIES.get(ext, "other")
-    return "other"
 
 
 def _rect_bg(node: FSNode, depth: int, is_leaf: bool) -> str:
@@ -61,8 +25,8 @@ def _rect_bg(node: FSNode, depth: int, is_leaf: bool) -> str:
     if node.is_dir:
         # Directory leaf (hit max_depth while still a dir) — neutral gray
         return "rgb(70,70,70)"
-    cat = _file_category(node.name)
-    hue = _CATEGORY_HUES[cat]
+    cat = file_category(node.name)
+    hue = CATEGORY_HUES[cat]
     sat = 60
     if depth <= 1:
         lum = 40

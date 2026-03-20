@@ -69,3 +69,20 @@ class TestColorBrailleCanvas:
         for row in rows:
             for ch, _ in row:
                 assert ch == " " or ch == ""
+
+    def test_bg_color(self):
+        c = ColorBrailleCanvas(10, 10)
+        assert c.get_bg_color(0, 0) is None
+        c.set_bg(0, 0, "red")
+        assert c.get_bg_color(0, 0) == "red"
+        c.set_bg(0, 0, "blue")
+        assert c.get_bg_color(0, 0) == "blue"  # last write wins
+        c.clear()
+        assert c.get_bg_color(0, 0) is None
+
+    def test_bg_color_out_of_bounds(self):
+        c = ColorBrailleCanvas(10, 10)
+        # Should not raise
+        c.set_bg(-1, -1, "red")
+        c.set_bg(100, 100, "red")
+        assert c.get_bg_color(-1, -1) is None

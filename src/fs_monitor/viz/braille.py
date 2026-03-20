@@ -29,6 +29,8 @@ class ColorBrailleCanvas:
         self._colors: dict[tuple[int, int], str] = {}
         # Track color votes per cell for dominant color
         self._color_votes: dict[tuple[int, int], dict[str, int]] = {}
+        # Background color per cell (char_x, char_y) -> color
+        self._bg_colors: dict[tuple[int, int], str] = {}
         # Cached rendered rows (invalidated on set/clear)
         self._rendered: list[list[tuple[str, str]]] | None = None
 
@@ -46,6 +48,15 @@ class ColorBrailleCanvas:
     def get_color(self, char_x: int, char_y: int) -> str:
         """Get the dominant color for a character cell."""
         return self._colors.get((char_x, char_y), "white")
+
+    def set_bg(self, char_x: int, char_y: int, color: str) -> None:
+        """Set background color for a character cell."""
+        if 0 <= char_x < self.char_width and 0 <= char_y < self.char_height:
+            self._bg_colors[(char_x, char_y)] = color
+
+    def get_bg_color(self, char_x: int, char_y: int) -> str | None:
+        """Get background color for a character cell, or None if unset."""
+        return self._bg_colors.get((char_x, char_y))
 
     def line(self, x0: int, y0: int, x1: int, y1: int, color: str = "white") -> None:
         """Draw a line from (x0,y0) to (x1,y1) using Bresenham's algorithm."""
@@ -118,4 +129,5 @@ class ColorBrailleCanvas:
         self._canvas.clear()
         self._colors.clear()
         self._color_votes.clear()
+        self._bg_colors.clear()
         self._rendered = None
