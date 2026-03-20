@@ -76,6 +76,8 @@ class ScanProgressOverlay(Widget):
 
         self._stats.update(stats_text)
 
+        self._bar.update(progress=progress.percent)
+
     def scan_complete(self) -> None:
         """Mark scan as complete."""
         self.is_scanning = False

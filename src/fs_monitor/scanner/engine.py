@@ -112,6 +112,8 @@ class ScanEngine:
         if self._max_depth is not None:
             max_sub_depth = self._max_depth  # walker uses absolute depth from its own root
 
+        self._progress.update(top_dir_total=len(top_dirs))
+
         if top_dirs:
             with ThreadPoolExecutor(max_workers=self._workers) as pool:
                 futures = {}
@@ -121,6 +123,7 @@ class ScanEngine:
                     f = pool.submit(self._scan_subdir, d)
                     futures[f] = d
 
+                completed = 0
                 for future in as_completed(futures):
                     if self._cancel_event.is_set():
                         break
@@ -135,6 +138,7 @@ class ScanEngine:
                         pass
 
                     # Update progress
+                    completed += 1
                     with self._lock:
                         total_files = sum(c.file_count for c in dir_results) + len(top_files)
                         total_dirs = sum(c.dir_count for c in dir_results) + len(dir_results)
@@ -143,6 +147,7 @@ class ScanEngine:
                             dirs_scanned=total_dirs,
                             files_scanned=total_files,
                             total_size=total_size,
+                            top_dirs_done=completed,
                         )
 
         # Assemble root

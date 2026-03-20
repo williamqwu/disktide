@@ -13,6 +13,8 @@ class ScanProgress:
     total_size: int = 0
     current_path: str = ""
     errors: int = 0
+    top_dir_total: int = 0
+    top_dirs_done: int = 0
     started_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -25,6 +27,13 @@ class ScanProgress:
         if elapsed == 0:
             return 0.0
         return (self.dirs_scanned + self.files_scanned) / elapsed
+
+    @property
+    def percent(self) -> float:
+        """Completion percentage based on top-level directories processed."""
+        if self.top_dir_total <= 0:
+            return 0.0
+        return min(100.0, (self.top_dirs_done / self.top_dir_total) * 100)
 
 
 class ProgressThrottle:
