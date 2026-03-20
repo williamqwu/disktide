@@ -8,57 +8,41 @@ Interactive terminal disk usage explorer built with Python and Textual.
 pip install -e .
 ```
 
-## Usage
+## Quick Start
 
 ```bash
-# Launch interactive TUI
-fsmonitor-cli /path/to/explore
+# Launch interactive TUI (opens welcome screen)
+fsmonitor-cli
 
-# CLI scan
+# Scan a directory directly
 fsmonitor-cli scan /path --snapshot
 
-# Watch mode
+# Watch for changes over time
 fsmonitor-cli watch /path --interval 6h
 
-# Cleanup mode
+# Find and clean up unnecessary files
 fsmonitor-cli cleanup /path
 ```
-
-## Configuration
-
-Settings are stored in `~/.config/fsmonitor-cli/config.toml` (respects `XDG_CONFIG_HOME`). You can edit the file directly or use the settings screen (`?` key in the TUI).
-
-```toml
-[scan]
-max_depth = 10
-workers = 4
-follow_symlinks = false
-exclude_patterns = [".git", "node_modules"]
-
-[cleanup]
-require_confirm_dangerous = true
-
-[monitor]
-default_interval = 21600
-snapshot_retention = 30
-
-[ui]
-color_theme = "default"
-default_sort = "size"
-default_viz = "treemap"
-show_hidden = false
-```
-
-All fields are optional — missing values use defaults. Workers defaults to an adaptive value based on CPU count, system load, filesystem type, and available memory.
 
 ## Key Bindings
 
 | Key | Action |
 |-----|--------|
-| e/c/m | Switch mode (Explorer/Cleanup/Monitor) |
-| 1/2/3 | Switch visualization (Treemap/Sunburst/Details) |
-| u/i | Navigate up / drill into directory |
-| s | Cycle sort (Size/Name/Modified) |
-| r | Rescan |
-| ? | Settings |
-| q | Quit |
+| `e` / `c` / `m` | Switch mode (Explorer / Cleanup / Monitor) |
+| `1` / `2` / `3` | Switch visualization (Treemap / Sunburst / Details) |
+| `u` / `i` | Navigate up / drill into directory |
+| `s` | Cycle sort (Size / Name / Modified) |
+| `r` | Rescan / refresh |
+| `?` | Settings |
+| `q` | Quit |
+
+## Configuration
+
+Settings live in `~/.config/fsmonitor-cli/config.toml` (respects `XDG_CONFIG_HOME`), or press `?` in the TUI. All fields are optional with sensible defaults. See the [User Guide](docs/user-guide.md) for the full reference.
+
+## Documentation
+
+- **[User Guide](docs/user-guide.md)** -- Usage, configuration, CLI commands, all key bindings
+- **[Architecture](docs/architecture.md)** -- Internals: scanner threading, database schema, visualization algorithms, screen management
+- **[Filesystem Compatibility](docs/fs.md)** -- Supported filesystems, every syscall the tool makes, platform-specific behavior
+- **[Contributing](docs/contributing.md)** -- Dev setup, testing, how to add rules/screens/visualizations
