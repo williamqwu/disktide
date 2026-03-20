@@ -46,7 +46,7 @@ class FSNode:
         """Children sorted by size descending (cached on first access)."""
         if self._sorted_cache is None:
             self._sorted_cache = sorted(
-                self.children, key=lambda n: n.size, reverse=True
+                self.children, key=lambda n: (-n.size, n.name)
             )
         return self._sorted_cache
 

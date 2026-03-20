@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import humanize
@@ -73,8 +72,8 @@ class TreemapLayout:
         for rect in self.rects:
             x0 = max(0, int(rect.x))
             y0 = max(0, int(rect.y))
-            x1 = min(self.width, math.ceil(rect.x + rect.w))
-            y1 = min(self.height, math.ceil(rect.y + rect.h))
+            x1 = min(self.width, int(rect.x + rect.w))
+            y1 = min(self.height, int(rect.y + rect.h))
             for y in range(y0, y1):
                 for x in range(x0, x1):
                     self.grid[y][x] = rect
@@ -104,9 +103,43 @@ def compute_layout(
     return layout
 
 
+def _snap_rects(
+    float_rects: list[dict],
+    cx: int, cy: int, cw: int, ch: int,
+) -> list[dict]:
+    """Snap squarify float output to integer grid coordinates.
+
+    Rounds endpoints (not widths) so adjacent rects that share a float
+    boundary produce the same integer — no gaps or overlaps.  Guarantees
+    every rect is at least 1×1 when there is room, so tiny children are
+    never silently dropped.
+    """
+    result = []
+    for sr in float_rects:
+        x0 = int(round(sr["x"] - cx))
+        y0 = int(round(sr["y"] - cy))
+        x1 = int(round(sr["x"] - cx + sr["dx"]))
+        y1 = int(round(sr["y"] - cy + sr["dy"]))
+        x0, y0 = max(0, min(x0, cw)), max(0, min(y0, ch))
+        x1, y1 = max(x0, min(x1, cw)), max(y0, min(y1, ch))
+        # Ensure minimum 1-cell size when there is room
+        if x1 == x0:
+            if x1 < cw:
+                x1 = x0 + 1
+            elif x0 > 0:
+                x0 = x1 - 1
+        if y1 == y0:
+            if y1 < ch:
+                y1 = y0 + 1
+            elif y0 > 0:
+                y0 = y1 - 1
+        result.append({"x": cx + x0, "y": cy + y0, "dx": x1 - x0, "dy": y1 - y0})
+    return result
+
+
 def _layout_node(
     node: FSNode,
-    x: float, y: float, w: float, h: float,
+    x: int, y: int, w: int, h: int,
     depth: int, max_depth: int,
     rects: list[TreemapRect],
 ) -> None:
@@ -161,12 +194,17 @@ def _layout_node(
         return
 
     normed = squarify.normalize_sizes(sizes, inner_w, inner_h)
-    sub_rects = squarify.squarify(normed, x + pad, y + pad, inner_w, inner_h)
+    float_rects = squarify.squarify(normed, x + pad, y + pad, inner_w, inner_h)
+    sub_rects = _snap_rects(float_rects, x + pad, y + pad, inner_w, inner_h)
 
-    for i, (sr, child) in enumerate(zip(sub_rects, sized)):
+    for sr, child in zip(sub_rects, sized):
+        sw, sh = sr["dx"], sr["dy"]
+        # Skip children whose rect collapsed to zero area after snapping
+        if sw <= 0 or sh <= 0:
+            continue
         _layout_node(
             child,
-            sr["x"], sr["y"], sr["dx"], sr["dy"],
+            sr["x"], sr["y"], sw, sh,
             depth + 1, max_depth, rects,
         )
 

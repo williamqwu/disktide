@@ -103,6 +103,32 @@ class TestTreemap:
         assert found
 
 
+    def test_area_proportionality(self):
+        """Leaf areas should be roughly proportional to data sizes."""
+        root = FSNode(
+            name="root", path="/root", size=1000,
+            own_size=0, is_dir=True, depth=0,
+            children=[
+                FSNode(name="big", path="/root/big", size=600, is_dir=False, depth=1),
+                FSNode(name="med", path="/root/med", size=300, is_dir=False, depth=1),
+                FSNode(name="sml", path="/root/sml", size=100, is_dir=False, depth=1),
+            ],
+        )
+        layout = compute_layout(root, 80, 24)
+        areas = {}
+        for rect in layout.rects:
+            if rect.is_leaf:
+                areas[rect.node.name] = rect.w * rect.h
+        assert "big" in areas and "med" in areas and "sml" in areas
+        # big should have more area than med, med more than sml
+        assert areas["big"] > areas["med"], (
+            f"big area {areas['big']} should exceed med area {areas['med']}"
+        )
+        assert areas["med"] > areas["sml"], (
+            f"med area {areas['med']} should exceed sml area {areas['sml']}"
+        )
+
+
 class TestSunburst:
     def test_compute_sunburst(self):
         root = make_viz_tree()

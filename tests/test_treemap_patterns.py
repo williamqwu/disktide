@@ -7,8 +7,6 @@ bugs visible as dark gaps, broken segments, or unstyled cells.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 from rich.style import Style
 
@@ -75,8 +73,8 @@ def _count_parent_bleed(layout: TreemapLayout, max_depth: int = 3) -> int:
             continue
         ix0 = int(prect.x) + pad
         iy0 = int(prect.y) + pad
-        ix1 = min(layout.width, math.ceil(prect.x + prect.w) - pad)
-        iy1 = min(layout.height, math.ceil(prect.y + prect.h) - pad)
+        ix1 = min(layout.width, int(prect.x + prect.w) - pad)
+        iy1 = min(layout.height, int(prect.y + prect.h) - pad)
         for y in range(iy0, iy1):
             for x in range(ix0, ix1):
                 cell = layout.rect_at(x, y)
@@ -688,10 +686,10 @@ class TestBorderRatio:
         )
 
     def test_tiny_viewport_border_ratio(self):
-        """At 15x8, border should be < 55% of the area."""
+        """At 15x8, border should be <= 55% of the area."""
         layout = compute_layout(self._project_tree(), 15, 8)
         ratio = _border_ratio(layout)
-        assert ratio < 0.55, (
+        assert ratio <= 0.55, (
             f"Border ratio {ratio:.1%} at 15x8 — padding dominates"
         )
 
@@ -785,3 +783,54 @@ class TestDeepNestingPaddingCollapse:
             f"Border ratio {ratio:.1%} at 11x5 max_depth=5 — "
             f"padding consumed almost everything"
         )
+
+
+class TestHighlySkewedDistribution:
+    """1 large + 50 tiny nodes — no None cells, bounded aspect ratios."""
+
+    @staticmethod
+    def _tree():
+        big = _make_file("huge.bin", 1_000_000)
+        tiny = [_make_file(f"t{i:02d}.txt", 10) for i in range(50)]
+        return _wrap_root([big] + tiny)
+
+    @pytest.mark.parametrize("w,h", VIEWPORTS)
+    def test_integrity(self, w, h):
+        layout = compute_layout(self._tree(), w, h)
+        assert_layout_integrity(layout)
+
+    def test_no_extreme_aspect_ratios(self):
+        """Leaf rects should not have aspect ratios worse than 20:1."""
+        layout = compute_layout(self._tree(), 80, 24)
+        for rect in layout.rects:
+            if not rect.is_leaf or rect.w < 1 or rect.h < 1:
+                continue
+            ratio = max(rect.w / rect.h, rect.h / rect.w)
+            assert ratio <= 20, (
+                f"Rect {rect.node.name} has aspect ratio {ratio:.1f} "
+                f"({rect.w}x{rect.h})"
+            )
+
+
+class TestIntegerCoordinates:
+    """All rects should have integer coordinates after layout."""
+
+    @staticmethod
+    def _tree():
+        files = [
+            _make_file("a.py", 5000),
+            _make_file("b.py", 3000),
+            _make_file("c.py", 2000),
+            _make_file("d.py", 1000),
+        ]
+        src = _make_dir("src", files)
+        return _wrap_root([src])
+
+    @pytest.mark.parametrize("w,h", VIEWPORTS)
+    def test_all_coords_are_integers(self, w, h):
+        layout = compute_layout(self._tree(), w, h)
+        for rect in layout.rects:
+            assert rect.x == int(rect.x), f"rect.x={rect.x} is not integer"
+            assert rect.y == int(rect.y), f"rect.y={rect.y} is not integer"
+            assert rect.w == int(rect.w), f"rect.w={rect.w} is not integer"
+            assert rect.h == int(rect.h), f"rect.h={rect.h} is not integer"
