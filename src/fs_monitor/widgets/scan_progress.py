@@ -44,6 +44,14 @@ class ScanProgressOverlay(Widget):
         yield Static("")
         yield self._bar
 
+    def start(self) -> None:
+        """Reset state for a new scan."""
+        self.is_scanning = True
+        self._title.update(Text("Scanning...", style="bold"))
+        self._path_display.update("")
+        self._stats.update("")
+        self._bar.update(progress=0)
+
     def update_progress(self, progress: ScanProgress) -> None:
         """Update the display with current scan progress."""
         self.is_scanning = True

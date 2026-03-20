@@ -64,9 +64,14 @@ class CleanupScreen(Screen):
             self._scan_targets()
 
     def set_root(self, root: FSNode) -> None:
-        """Update the root node and rescan for targets."""
+        """Update the root node and rescan for targets.
+
+        If the screen hasn't been composed yet (first switch), just store
+        the root — on_mount will trigger the scan once widgets exist.
+        """
         self._root = root
-        self._scan_targets()
+        if self.is_mounted:
+            self._scan_targets()
 
     def _scan_targets(self) -> None:
         """Detect cleanup targets."""

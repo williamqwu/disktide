@@ -94,6 +94,7 @@ class ExplorerScreen(Screen):
     def _start_scan(self, force: bool = False) -> None:
         """Kick off a filesystem scan."""
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
+        overlay.start()
         overlay.add_class("scanning")
         self._run_scan()
 
