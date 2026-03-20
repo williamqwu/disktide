@@ -14,7 +14,6 @@ from fs_monitor.models.tree import FSNode
 from fs_monitor.viz.colors import file_category as _file_category
 from fs_monitor.viz.treemap import (
     TreemapLayout,
-    _BORDER_BG,
     compute_layout,
     render_line,
 )

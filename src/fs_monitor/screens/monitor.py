@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from textual import on
+from datetime import datetime
+
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -146,6 +148,17 @@ class MonitorScreen(Screen):
 
     def action_refresh(self) -> None:
         self._load_data()
+        self._flash_refresh()
+
+    @work
+    async def _flash_refresh(self) -> None:
+        """Briefly highlight the title to confirm refresh."""
+        import asyncio
+        title = self.query_one("#snap-title", Static)
+        now = datetime.now().strftime("%H:%M:%S")
+        title.update(Text(f"  Snapshots — refreshed at {now}", style="bold green"))
+        await asyncio.sleep(2)
+        title.update(Text("  Snapshots", style="bold"))
 
 
 def _truncate_path(path: str, max_len: int) -> str:

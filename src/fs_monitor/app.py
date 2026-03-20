@@ -8,6 +8,7 @@ from textual.app import App
 from textual.binding import Binding
 
 from fs_monitor.config import AppConfig, load_config
+from fs_monitor.viz.colors import set_color_scheme
 from fs_monitor.storage.database import Database
 from fs_monitor.screens.explorer import ExplorerScreen
 from fs_monitor.screens.cleanup import CleanupScreen
@@ -37,6 +38,8 @@ class FSMonitorApp(App):
         self._db = Database()
 
     def on_mount(self) -> None:
+        set_color_scheme(self._config.ui.color_theme)
+
         # Override MODES to pass arguments
         # We need to install screens manually since MODES requires no-arg constructors
         self._explorer = ExplorerScreen(self._scan_path, config=self._config)

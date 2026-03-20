@@ -2,7 +2,7 @@
 
 import pytest
 from fs_monitor.models.tree import FSNode
-from fs_monitor.viz.colors import size_color, depth_color, gradient_color
+from fs_monitor.viz.colors import size_color, depth_color, gradient_color, set_color_scheme
 from fs_monitor.viz.treemap import compute_layout, render_line
 from fs_monitor.viz.sunburst import compute_sunburst, render_sunburst_line
 
@@ -26,6 +26,12 @@ def make_viz_tree():
 
 
 class TestColors:
+    @pytest.fixture(autouse=True)
+    def _use_default_scheme(self):
+        set_color_scheme("default")
+        yield
+        set_color_scheme("default")
+
     def test_size_color_small(self):
         color = size_color(500)  # < 1MB
         assert color == "dodger_blue2"

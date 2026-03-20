@@ -9,6 +9,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 
 from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration
+from fs_monitor.viz.colors import SCHEMES, set_color_scheme
 
 
 class SettingsScreen(Screen):
@@ -158,6 +159,22 @@ class SettingsScreen(Screen):
                     allow_blank=False,
                 )
 
+            with Horizontal(classes="setting-row"):
+                yield Label("Color theme", classes="setting-label")
+                yield Select(
+                    [
+                        ("Default", "default"),
+                        ("Cold", "cold"),
+                        ("Warm", "warm"),
+                        ("Vivid", "vivid"),
+                        ("Mono", "mono"),
+                    ],
+                    value=self._config.ui.color_theme,
+                    id="color-theme",
+                    classes="viz-select",
+                    allow_blank=False,
+                )
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -244,6 +261,9 @@ class SettingsScreen(Screen):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "default-viz":
             self._config.ui.default_viz = str(event.value)
+        elif event.select.id == "color-theme":
+            self._config.ui.color_theme = str(event.value)
+            set_color_scheme(str(event.value))
 
     def on_input_changed(self, event: Input.Changed) -> None:
         value = event.value.strip()

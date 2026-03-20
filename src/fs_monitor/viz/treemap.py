@@ -10,23 +10,19 @@ from rich.segment import Segment
 from rich.style import Style
 
 from fs_monitor.models.tree import FSNode
-from fs_monitor.viz.colors import CATEGORY_HUES, file_category, hsl_to_rgb
-
-# Border / directory background
-_BORDER_BG = "rgb(50,50,50)"
+from fs_monitor.viz.colors import file_category, get_color_scheme, hsl_to_rgb
 
 
 def _rect_bg(node: FSNode, depth: int, is_leaf: bool) -> str:
     """Background color based on file-type category and depth."""
+    scheme = get_color_scheme()
     if not is_leaf:
-        # Directory border
-        return _BORDER_BG
+        return scheme.border_bg
     if node.is_dir:
-        # Directory leaf (hit max_depth while still a dir) — neutral gray
-        return "rgb(70,70,70)"
+        return scheme.dir_leaf_bg
     cat = file_category(node.name)
-    hue = CATEGORY_HUES[cat]
-    sat = 60
+    hue = scheme.category_hues.get(cat, 90)
+    sat = scheme.category_saturation
     if depth <= 1:
         lum = 40
     elif depth == 2:
@@ -220,7 +216,7 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
     while x < layout.width:
         rect = layout.rect_at(x, y)
         if rect is None:
-            segments.append(Segment(" ", Style(bgcolor=_BORDER_BG)))
+            segments.append(Segment(" ", Style(bgcolor=get_color_scheme().border_bg)))
             x += 1
             continue
 
@@ -240,7 +236,7 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
             # Directory border label: show on first row of the border rect
             if rel_y == 0 and run >= len(rect.label) + 2:
                 text = " " + rect.label + " " * (run - len(rect.label) - 1)
-                segments.append(Segment(text, Style(bgcolor=_BORDER_BG, color="white", bold=True)))
+                segments.append(Segment(text, Style(bgcolor=get_color_scheme().border_bg, color="white", bold=True)))
                 x += run
                 continue
 

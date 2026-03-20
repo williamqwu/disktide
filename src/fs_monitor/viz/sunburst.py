@@ -12,10 +12,10 @@ from rich.style import Style
 from fs_monitor.models.tree import FSNode
 from fs_monitor.viz.braille import ColorBrailleCanvas
 from fs_monitor.viz.colors import (
-    CATEGORY_HUES,
     darken_rgb,
     file_category,
     file_type_color,
+    get_color_scheme,
     hsl_to_rgb,
 )
 
@@ -134,8 +134,9 @@ def _arc_color(arc: ArcSegment) -> str:
     node = arc.node
     depth = arc.depth
     if node.is_dir:
+        scheme = get_color_scheme()
         lum = max(30, 55 - depth * 10)
-        return f"rgb({hsl_to_rgb(0, 0, lum)})"
+        return f"rgb({hsl_to_rgb(scheme.dir_hue, scheme.dir_saturation, lum)})"
     return file_type_color(node.name, depth, is_dir=False)
 
 
@@ -288,14 +289,15 @@ def _compute_legend(layout: SunburstLayout) -> None:
     if not present:
         return
 
+    scheme = get_color_scheme()
     lines: list[list[tuple[str, str]]] = []
     for i in range(0, len(present), 2):
         row: list[tuple[str, str]] = []
         for j in range(2):
             if i + j < len(present):
                 cat = present[i + j]
-                hue = CATEGORY_HUES[cat]
-                color = f"rgb({hsl_to_rgb(hue, 60, 50)})"
+                hue = scheme.category_hues.get(cat, 90)
+                color = f"rgb({hsl_to_rgb(hue, scheme.category_saturation, 50)})"
                 row.append((f"\u25a0 {cat:<10}", color))
         lines.append(row)
 

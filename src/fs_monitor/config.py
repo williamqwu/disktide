@@ -56,7 +56,7 @@ class MonitorConfig:
 
 @dataclass
 class UIConfig:
-    color_theme: str = "default"
+    color_theme: str = "warm"
     default_sort: str = "size"
     default_viz: str = "treemap"
     show_hidden: bool = False

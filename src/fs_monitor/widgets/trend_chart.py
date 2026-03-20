@@ -69,9 +69,6 @@ class TrendChart(Widget):
             label = path.split("/")[-1] or path
             plt.plot(x_vals, y_vals, label=label)
 
-        if self._data:
-            plt.legend()
-
         self._plot.refresh()
 
     def add_point(self, path: str, timestamp: str, size: int) -> None:
