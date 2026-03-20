@@ -46,30 +46,6 @@ class SunburstLayout:
             self._rows_cache = self.canvas.render_rows()
         return self._rows_cache or []
 
-    def arc_at_polar(self, angle: float, radius: float) -> ArcSegment | None:
-        """Find the arc segment at the given polar coordinates."""
-        for arc in reversed(self.arcs):
-            if (arc.r_inner <= radius <= arc.r_outer and
-                    arc.angle_start <= angle <= arc.angle_end):
-                return arc
-        return None
-
-    def arc_at_xy(self, char_x: int, char_y: int) -> ArcSegment | None:
-        """Find arc segment at character coordinates."""
-        if self.canvas is None:
-            return None
-        # Convert char position to pixel center
-        px = char_x * 2 + 1
-        py = char_y * 4 + 2
-        cx = self.canvas.pixel_width // 2
-        cy = self.canvas.pixel_height // 2
-        dx = px - cx
-        dy = py - cy
-        angle = math.atan2(dy, dx)
-        if angle < 0:
-            angle += 2 * math.pi
-        radius = math.sqrt(dx * dx + dy * dy)
-        return self.arc_at_polar(angle, radius)
 
 
 def compute_sunburst(
@@ -208,11 +184,11 @@ def _build_arcs(
 def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
     """Render a single line of the sunburst as Rich Segments."""
     if layout.canvas is None or y < 0 or y >= layout.char_height:
-        return [Segment("\n")]
+        return []
 
     rows = layout.rendered_rows
     if y >= len(rows):
-        return [Segment("\n")]
+        return []
 
     segments: list[Segment] = []
     row = rows[y]
@@ -221,5 +197,4 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
         style = Style(color=color)
         segments.append(Segment(ch, style))
 
-    segments.append(Segment("\n"))
     return segments

@@ -86,7 +86,7 @@ class TestTreemap:
         root = make_viz_tree()
         layout = compute_layout(root, 40, 20)
         segments = render_line(layout, -1)
-        assert len(segments) == 1  # Just newline
+        assert len(segments) == 0  # Empty for out-of-bounds
 
     def test_rect_at(self):
         root = make_viz_tree()
@@ -156,9 +156,9 @@ class TestSunburst:
         root = make_viz_tree()
         layout = compute_sunburst(root, 40, 20)
         segments = render_sunburst_line(layout, -1)
-        assert len(segments) == 1  # Just newline
+        assert len(segments) == 0  # Empty for out-of-bounds
         segments = render_sunburst_line(layout, 999)
-        assert len(segments) == 1
+        assert len(segments) == 0
 
     def test_rendered_rows_cached(self):
         """rendered_rows property should return same object on repeated calls."""
@@ -168,17 +168,3 @@ class TestSunburst:
         rows2 = layout.rendered_rows
         assert rows1 is rows2
 
-    def test_arc_at_xy(self):
-        root = make_viz_tree()
-        layout = compute_sunburst(root, 60, 25)
-        # Scan for any arc hit
-        found = False
-        for y in range(layout.char_height):
-            for x in range(layout.char_width):
-                if layout.arc_at_xy(x, y) is not None:
-                    found = True
-                    break
-            if found:
-                break
-        # Should find at least one arc somewhere
-        assert found, "Should find at least one arc via xy lookup"

@@ -30,10 +30,10 @@ def depth_color(depth: int, lightness: float = 0.5) -> str:
     hue = DEPTH_HUES[depth % len(DEPTH_HUES)]
     sat = max(40, 80 - depth * 5)
     lum = int(lightness * 100)
-    return f"rgb({_hsl_to_rgb(hue, sat, lum)})"
+    return f"rgb({hsl_to_rgb(hue, sat, lum)})"
 
 
-def _hsl_to_rgb(h: int, s: int, l: int) -> str:
+def hsl_to_rgb(h: int, s: int, l: int) -> str:
     """Convert HSL to RGB string for Rich."""
     s_f = s / 100
     l_f = l / 100
@@ -69,4 +69,4 @@ def gradient_color(ratio: float, depth: int = 0) -> str:
     hue = (hue + depth * 60) % 360
     sat = 70
     lum = max(30, 60 - depth * 8)
-    return f"rgb({_hsl_to_rgb(hue, sat, lum)})"
+    return f"rgb({hsl_to_rgb(hue, sat, lum)})"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from textual import events
+from textual.events import Resize
 from textual.strip import Strip
 from textual.widget import Widget
 
@@ -32,8 +32,9 @@ class SunburstView(Widget):
         self._stale = True
         self.refresh()
 
-    def on_resize(self, event: events.Resize) -> None:
+    def on_resize(self, event: Resize) -> None:
         self._stale = True
+        self.refresh()
 
     def _ensure_layout(self) -> None:
         """Recompute layout if stale."""
@@ -55,4 +56,6 @@ class SunburstView(Widget):
         if self._layout is None:
             return Strip.blank(self.size.width)
         segments = render_sunburst_line(self._layout, y)
+        if not segments:
+            return Strip.blank(self.size.width)
         return Strip(segments)
