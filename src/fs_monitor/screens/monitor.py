@@ -81,6 +81,9 @@ class MonitorScreen(Screen):
     def on_mount(self) -> None:
         self._load_data()
 
+    def on_screen_resume(self) -> None:
+        self._load_data()
+
     def _load_data(self) -> None:
         """Load snapshot data from database."""
         if self._db is None:

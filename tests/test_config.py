@@ -109,3 +109,22 @@ show_hidden = true
         loaded = load_config(config_file)
         assert loaded.scan.workers is None
         assert loaded.scan.max_depth is None
+
+    def test_default_scan_path_roundtrip(self, tmp_path):
+        config = AppConfig()
+        config.ui.default_scan_path = "/home/user/projects"
+        config_file = tmp_path / "config.toml"
+        save_config(config, config_file)
+
+        loaded = load_config(config_file)
+        assert loaded.ui.default_scan_path == "/home/user/projects"
+
+    def test_default_scan_path_none(self, tmp_path):
+        config = AppConfig()
+        assert config.ui.default_scan_path is None
+
+        config_file = tmp_path / "config.toml"
+        save_config(config, config_file)
+
+        loaded = load_config(config_file)
+        assert loaded.ui.default_scan_path is None

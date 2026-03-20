@@ -103,11 +103,18 @@ class Database:
         return snapshot_id
 
     def list_snapshots(self, root_path: str | None = None) -> list[Snapshot]:
-        """List all snapshots, optionally filtered by root path."""
+        """List all snapshots, optionally filtered by root path.
+
+        When root_path is given, returns snapshots whose root_path is an
+        ancestor of (or equal to) the requested path — so exploring a
+        subfolder still surfaces snapshots from a parent watch.
+        """
         if root_path:
             rows = self.conn.execute(
-                "SELECT * FROM snapshots WHERE root_path = ? ORDER BY timestamp DESC",
-                (root_path,),
+                "SELECT * FROM snapshots WHERE ? = root_path"
+                " OR ? LIKE root_path || '/%'"
+                " ORDER BY timestamp DESC",
+                (root_path, root_path),
             ).fetchall()
         else:
             rows = self.conn.execute(

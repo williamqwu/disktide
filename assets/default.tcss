@@ -137,3 +137,39 @@ ScanProgressOverlay {
 .button-row Button {
     margin: 0 1;
 }
+
+/* Welcome Screen */
+#welcome-dialog {
+    align: center middle;
+    padding: 2 4;
+    max-width: 80;
+    height: auto;
+}
+
+#welcome-title {
+    text-align: center;
+    padding: 1 0;
+    text-style: bold;
+}
+
+#welcome-commands {
+    padding: 1 0;
+}
+
+#welcome-path-label {
+    padding: 1 0 0 0;
+}
+
+#welcome-path-input {
+    margin: 0 0 1 0;
+}
+
+#welcome-completions {
+    max-height: 4;
+    color: $text-muted;
+    padding: 0 0 1 0;
+}
+
+#welcome-save-default {
+    padding: 0 0 1 0;
+}

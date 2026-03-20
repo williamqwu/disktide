@@ -31,17 +31,39 @@ class FSMonitorApp(App):
         Binding("q", "quit", "Quit", show=True),
     ]
 
-    def __init__(self, scan_path: str, config: AppConfig | None = None, **kwargs):
+    def __init__(
+        self,
+        scan_path: str | None = None,
+        config: AppConfig | None = None,
+        show_welcome: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self._scan_path = str(Path(scan_path).resolve())
+        self._scan_path = str(Path(scan_path).resolve()) if scan_path else None
         self._config = config or load_config()
         self._db = Database()
+        self._show_welcome = show_welcome
 
     def on_mount(self) -> None:
         set_color_scheme(self._config.ui.color_theme)
 
-        # Override MODES to pass arguments
-        # We need to install screens manually since MODES requires no-arg constructors
+        if self._show_welcome:
+            from fs_monitor.screens.welcome import WelcomeScreen
+
+            self.push_screen(WelcomeScreen(), callback=self._on_welcome_result)
+        else:
+            self._launch_explorer(self._scan_path or str(Path(".").resolve()))
+
+    def _on_welcome_result(self, path: str | None) -> None:
+        """Callback from WelcomeScreen with the chosen path."""
+        if path is None or self._exit:
+            return
+        self._launch_explorer(path)
+
+    def _launch_explorer(self, scan_path: str) -> None:
+        """Install mode screens and push the explorer."""
+        self._scan_path = scan_path
+
         self._explorer = ExplorerScreen(self._scan_path, config=self._config)
         self._cleanup = CleanupScreen()
         self._monitor = MonitorScreen(db=self._db, root_path=self._scan_path)
