@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -75,7 +75,7 @@ class Database:
 
         # Bulk insert nodes
         nodes_data = []
-        for node in root.walk():
+        for node in root.walk_dirs():
             nodes_data.append((
                 snapshot_id,
                 node.path,
@@ -175,6 +175,16 @@ class Database:
         # Root is the node with minimum depth
         root = min(nodes_by_path.values(), key=lambda n: n.depth)
         return root
+
+    def prune_snapshots(self, root_path: str, retention_days: int) -> int:
+        """Delete snapshots older than retention_days. Returns count deleted."""
+        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
+        cursor = self.conn.execute(
+            "DELETE FROM snapshots WHERE root_path = ? AND timestamp < ?",
+            (root_path, cutoff),
+        )
+        self.conn.commit()
+        return cursor.rowcount
 
     # ── Diffs ──
 

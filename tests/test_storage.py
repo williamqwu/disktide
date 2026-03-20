@@ -2,7 +2,7 @@
 
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from fs_monitor.models.tree import FSNode
@@ -67,7 +67,7 @@ class TestDatabase:
         assert loaded is not None
         assert loaded.name == "root"
         assert loaded.size == 1000
-        assert len(loaded.children) == 2
+        assert len(loaded.children) == 1  # only directories are stored
 
     def test_compare_snapshots(self, db):
         # First snapshot
@@ -104,6 +104,29 @@ class TestDatabase:
         assert len(rules) == 1
         assert rules[0]["path"] == "/test"
         assert rules[0]["max_size"] == 1000000
+
+    def test_prune_snapshots(self, db):
+        root = FSNode(
+            name="root", path="/test/root", size=1000, is_dir=True, depth=0,
+        )
+        now = datetime.now()
+
+        # Save 5 snapshots: 3 old (10 days ago) + 2 recent (now)
+        for days_ago in [10, 10, 10, 0, 0]:
+            snap = Snapshot(
+                root_path="/test/root",
+                total_size=1000,
+                timestamp=now - timedelta(days=days_ago),
+            )
+            db.save_snapshot(snap, root)
+
+        assert len(db.list_snapshots("/test/root")) == 5
+
+        pruned = db.prune_snapshots("/test/root", retention_days=1)
+        assert pruned == 3
+
+        remaining = db.list_snapshots("/test/root")
+        assert len(remaining) == 2
 
     def test_size_history(self, db):
         for i in range(3):

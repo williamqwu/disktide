@@ -109,23 +109,33 @@ def scan(path: str, snapshot: bool, force_rescan: bool, max_depth: int | None, w
 
 @cli.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
-@click.option("--interval", "-i", default="6h", help="Scan interval (e.g., 1h, 6h, 1d)")
+@click.option("--interval", "-i", default=None, help="Scan interval (e.g., 1h, 6h, 1d)")
+@click.option("--max-time", "-t", default=None, help="Max watch time (e.g., 2h, 1d)")
 @click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
-def watch(path: str, interval: str, workers: int | None):
+def watch(path: str, interval: str | None, max_time: str | None, workers: int | None):
     """Watch a directory for changes with periodic scanning."""
     import asyncio
+    from fs_monitor.config import load_config, parse_duration, format_duration
 
     path = str(Path(path).resolve())
+    config = load_config()
 
-    # Parse interval
-    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    unit = interval[-1].lower()
-    if unit in multipliers:
-        seconds = int(interval[:-1]) * multipliers[unit]
+    # Parse interval (CLI flag > config > default 6h)
+    if interval is not None:
+        seconds = parse_duration(interval)
     else:
-        seconds = int(interval)
+        seconds = config.monitor.default_interval
 
-    click.echo(f"Watching {path} every {interval} (Ctrl+C to stop)")
+    # Parse max watch time (CLI flag > config > unlimited)
+    max_seconds: int | None = None
+    if max_time is not None:
+        max_seconds = parse_duration(max_time)
+    elif config.monitor.max_watch_time is not None:
+        max_seconds = config.monitor.max_watch_time
+
+    click.echo(f"Watching {path} every {format_duration(seconds)} (Ctrl+C to stop)")
+    if max_seconds is not None:
+        click.echo(f"  Max watch time: {format_duration(max_seconds)}")
 
     async def run():
         from fs_monitor.scanner.engine import ScanEngine
@@ -135,6 +145,7 @@ def watch(path: str, interval: str, workers: int | None):
 
         db = Database()
         db.connect()
+        watch_start = time.monotonic()
 
         while True:
             start = time.monotonic()
@@ -151,12 +162,22 @@ def watch(path: str, interval: str, workers: int | None):
                 scan_duration=elapsed,
             )
             snap_id = db.save_snapshot(snap, root)
+            pruned = db.prune_snapshots(path, config.monitor.snapshot_retention)
 
-            click.echo(
+            status = (
                 f"[{datetime.now():%H:%M:%S}] Scan complete: "
                 f"{humanize.naturalsize(root.size, binary=True)}, "
                 f"{root.file_count:,} files (snapshot #{snap_id}, {elapsed:.1f}s)"
             )
+            if pruned:
+                status += f", pruned {pruned} old snapshot(s)"
+            click.echo(status)
+
+            if max_seconds is not None:
+                total_elapsed = time.monotonic() - watch_start
+                if total_elapsed + seconds >= max_seconds:
+                    click.echo("Max watch time reached. Stopping.")
+                    return
 
             await asyncio.sleep(seconds)
 

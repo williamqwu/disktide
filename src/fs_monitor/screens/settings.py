@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
-from textual.containers import Horizontal
 
-from fs_monitor.config import AppConfig, save_config
+from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration
 
 
 class SettingsScreen(Screen):
@@ -48,6 +47,7 @@ class SettingsScreen(Screen):
 
     #settings-container {
         padding: 1 2;
+        height: 1fr;
     }
 
     .sysinfo-value {
@@ -63,7 +63,7 @@ class SettingsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="settings-container"):
+        with VerticalScroll(id="settings-container"):
             yield Static("Settings", classes="title")
             yield Static("")
 
@@ -114,6 +114,35 @@ class SettingsScreen(Screen):
                 )
 
             yield Static("")
+            yield Static("Monitor Settings", classes="section-title")
+            with Horizontal(classes="setting-row"):
+                yield Label("Snapshot retention (days)", classes="setting-label")
+                yield Input(
+                    value=str(self._config.monitor.snapshot_retention),
+                    id="retention-input",
+                    classes="setting-input",
+                )
+                yield Label("(default: 30)", classes="input-hint")
+
+            with Horizontal(classes="setting-row"):
+                yield Label("Default interval", classes="setting-label")
+                yield Input(
+                    value=format_duration(self._config.monitor.default_interval),
+                    id="interval-input",
+                    classes="setting-input",
+                )
+                yield Label("(e.g., 6h, 30m, 1d)", classes="input-hint")
+
+            with Horizontal(classes="setting-row"):
+                yield Label("Max watch time", classes="setting-label")
+                yield Input(
+                    placeholder="unlimited",
+                    id="max-watch-time-input",
+                    classes="setting-input",
+                )
+                yield Label("(e.g., 2h, 1d; blank = unlimited)", classes="input-hint")
+
+            yield Static("")
             yield Static("UI Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
                 yield Label("Default visualization", classes="setting-label")
@@ -137,6 +166,8 @@ class SettingsScreen(Screen):
             self.query_one("#workers-input", Input).value = str(self._config.scan.workers)
         if self._config.scan.max_depth is not None:
             self.query_one("#max-depth-input", Input).value = str(self._config.scan.max_depth)
+        if self._config.monitor.max_watch_time is not None:
+            self.query_one("#max-watch-time-input", Input).value = format_duration(self._config.monitor.max_watch_time)
 
         # Detect system info
         self._detect_system()
@@ -235,4 +266,28 @@ class SettingsScreen(Screen):
                     if parsed >= 0:
                         self._config.scan.max_depth = parsed
                 except ValueError:
-                    pass  # Silently ignore non-numeric input
+                    pass
+        elif event.input.id == "retention-input":
+            try:
+                parsed = int(value)
+                if parsed > 0:
+                    self._config.monitor.snapshot_retention = parsed
+            except ValueError:
+                pass
+        elif event.input.id == "interval-input":
+            try:
+                parsed = parse_duration(value)
+                if parsed > 0:
+                    self._config.monitor.default_interval = parsed
+            except (ValueError, IndexError):
+                pass
+        elif event.input.id == "max-watch-time-input":
+            if value == "":
+                self._config.monitor.max_watch_time = None
+            else:
+                try:
+                    parsed = parse_duration(value)
+                    if parsed > 0:
+                        self._config.monitor.max_watch_time = parsed
+                except (ValueError, IndexError):
+                    pass

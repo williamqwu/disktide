@@ -7,6 +7,30 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+_DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(value: str) -> int:
+    """Parse a duration string like '6h', '30m', '1d' into seconds.
+
+    Also accepts plain integers (treated as seconds).
+    """
+    value = value.strip()
+    unit = value[-1].lower()
+    if unit in _DURATION_MULTIPLIERS:
+        return int(value[:-1]) * _DURATION_MULTIPLIERS[unit]
+    return int(value)
+
+
+def format_duration(seconds: int) -> str:
+    """Format seconds into a human-friendly duration string."""
+    if seconds <= 0:
+        return "0s"
+    for unit, mult in [("d", 86400), ("h", 3600), ("m", 60)]:
+        if seconds >= mult and seconds % mult == 0:
+            return f"{seconds // mult}{unit}"
+    return f"{seconds}s"
+
 
 @dataclass
 class ScanConfig:
@@ -27,6 +51,7 @@ class CleanupConfig:
 class MonitorConfig:
     default_interval: int = 21600  # 6 hours in seconds
     snapshot_retention: int = 30  # days
+    max_watch_time: int | None = None  # seconds, None = unlimited
 
 
 @dataclass
@@ -83,6 +108,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     lines.append("[monitor]")
     lines.append(f"default_interval = {config.monitor.default_interval}")
     lines.append(f"snapshot_retention = {config.monitor.snapshot_retention}")
+    if config.monitor.max_watch_time is not None:
+        lines.append(f"max_watch_time = {config.monitor.max_watch_time}")
     lines.append("")
 
     lines.append("[ui]")
@@ -129,6 +156,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         monitor = data["monitor"]
         config.monitor.default_interval = monitor.get("default_interval", 21600)
         config.monitor.snapshot_retention = monitor.get("snapshot_retention", 30)
+        config.monitor.max_watch_time = monitor.get("max_watch_time")
 
     if "ui" in data:
         ui = data["ui"]
