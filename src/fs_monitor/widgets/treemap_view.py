@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from textual import events
-from textual.message import Message
 from textual.strip import Strip
 from textual.widget import Widget
 
@@ -12,7 +11,7 @@ from fs_monitor.viz.treemap import TreemapLayout, compute_layout, render_line
 
 
 class TreemapView(Widget):
-    """Widget that renders an interactive treemap visualization."""
+    """Widget that renders a treemap visualization."""
 
     DEFAULT_CSS = """
     TreemapView {
@@ -21,36 +20,26 @@ class TreemapView(Widget):
     }
     """
 
-    class NodeClicked(Message):
-        """Posted when a treemap rectangle is clicked."""
-
-        def __init__(self, node: FSNode) -> None:
-            super().__init__()
-            self.node = node
-
-    class NodeHovered(Message):
-        """Posted when hovering over a treemap rectangle."""
-
-        def __init__(self, node: FSNode | None) -> None:
-            super().__init__()
-            self.node = node
-
     def __init__(self, node: FSNode | None = None, **kwargs):
         super().__init__(**kwargs)
         self._node = node
         self._layout: TreemapLayout | None = None
+        self._stale = True
 
     def set_node(self, node: FSNode | None) -> None:
-        """Set the root node and recompute layout."""
+        """Set the root node. Layout recomputed on next render."""
         self._node = node
-        self._recompute()
+        self._stale = True
         self.refresh()
 
     def on_resize(self, event: events.Resize) -> None:
-        self._recompute()
+        self._stale = True
 
-    def _recompute(self) -> None:
-        """Recompute layout for current size."""
+    def _ensure_layout(self) -> None:
+        """Recompute layout if stale."""
+        if not self._stale:
+            return
+        self._stale = False
         if self._node is None:
             self._layout = None
             return
@@ -62,21 +51,8 @@ class TreemapView(Widget):
         )
 
     def render_line(self, y: int) -> Strip:
+        self._ensure_layout()
         if self._layout is None:
             return Strip.blank(self.size.width)
         segments = render_line(self._layout, y)
         return Strip(segments)
-
-    def on_click(self, event: events.Click) -> None:
-        if self._layout is None:
-            return
-        rect = self._layout.rect_at(event.x, event.y)
-        if rect is not None:
-            self.post_message(self.NodeClicked(rect.node))
-
-    def on_mouse_move(self, event: events.MouseMove) -> None:
-        if self._layout is None:
-            return
-        rect = self._layout.rect_at(event.x, event.y)
-        node = rect.node if rect else None
-        self.post_message(self.NodeHovered(node))

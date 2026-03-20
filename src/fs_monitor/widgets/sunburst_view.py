@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from textual import events
-from textual.message import Message
 from textual.strip import Strip
 from textual.widget import Widget
 
@@ -12,7 +11,7 @@ from fs_monitor.viz.sunburst import SunburstLayout, compute_sunburst, render_sun
 
 
 class SunburstView(Widget):
-    """Widget that renders an interactive sunburst (ring chart) visualization."""
+    """Widget that renders a sunburst (ring chart) visualization."""
 
     DEFAULT_CSS = """
     SunburstView {
@@ -21,36 +20,26 @@ class SunburstView(Widget):
     }
     """
 
-    class NodeClicked(Message):
-        """Posted when a sunburst arc is clicked."""
-
-        def __init__(self, node: FSNode) -> None:
-            super().__init__()
-            self.node = node
-
-    class NodeHovered(Message):
-        """Posted when hovering over a sunburst arc."""
-
-        def __init__(self, node: FSNode | None) -> None:
-            super().__init__()
-            self.node = node
-
     def __init__(self, node: FSNode | None = None, **kwargs):
         super().__init__(**kwargs)
         self._node = node
         self._layout: SunburstLayout | None = None
+        self._stale = True
 
     def set_node(self, node: FSNode | None) -> None:
-        """Set the root node and recompute layout."""
+        """Set the root node. Layout recomputed on next render."""
         self._node = node
-        self._recompute()
+        self._stale = True
         self.refresh()
 
     def on_resize(self, event: events.Resize) -> None:
-        self._recompute()
+        self._stale = True
 
-    def _recompute(self) -> None:
-        """Recompute layout for current size."""
+    def _ensure_layout(self) -> None:
+        """Recompute layout if stale."""
+        if not self._stale:
+            return
+        self._stale = False
         if self._node is None:
             self._layout = None
             return
@@ -62,21 +51,8 @@ class SunburstView(Widget):
         )
 
     def render_line(self, y: int) -> Strip:
+        self._ensure_layout()
         if self._layout is None:
             return Strip.blank(self.size.width)
         segments = render_sunburst_line(self._layout, y)
         return Strip(segments)
-
-    def on_click(self, event: events.Click) -> None:
-        if self._layout is None:
-            return
-        arc = self._layout.arc_at_xy(event.x, event.y)
-        if arc is not None:
-            self.post_message(self.NodeClicked(arc.node))
-
-    def on_mouse_move(self, event: events.MouseMove) -> None:
-        if self._layout is None:
-            return
-        arc = self._layout.arc_at_xy(event.x, event.y)
-        node = arc.node if arc else None
-        self.post_message(self.NodeHovered(node))

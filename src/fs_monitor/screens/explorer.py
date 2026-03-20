@@ -135,20 +135,21 @@ class ExplorerScreen(Screen):
         tree = self.query_one("#size-tree", SizeTree)
         tree.reload(root)
 
-        # Update viz
-        self._update_viz(root)
+        # Update only the active viz tab
+        self._update_active_viz(root)
         self._update_status()
 
-    def _update_viz(self, node: FSNode) -> None:
-        """Update visualization panels with given node."""
-        treemap = self.query_one("#treemap-view", TreemapView)
-        treemap.set_node(node)
+    def _update_active_viz(self, node: FSNode) -> None:
+        """Update only the currently visible visualization panel."""
+        tabs = self.query_one("#viz-tabs", TabbedContent)
+        active = tabs.active
 
-        sunburst = self.query_one("#sunburst-view", SunburstView)
-        sunburst.set_node(node)
-
-        info = self.query_one("#info-panel", InfoPanel)
-        info.update_node(node)
+        if active == "tab-treemap":
+            self.query_one("#treemap-view", TreemapView).set_node(node)
+        elif active == "tab-sunburst":
+            self.query_one("#sunburst-view", SunburstView).set_node(node)
+        elif active == "tab-details":
+            self.query_one("#info-panel", InfoPanel).update_node(node)
 
     def _update_status(self) -> None:
         """Update the status bar."""
@@ -165,7 +166,7 @@ class ExplorerScreen(Screen):
 
     @on(Tree.NodeHighlighted)
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[FSNode]) -> None:
-        """Update viz when tree selection changes."""
+        """Update info panel when tree selection changes."""
         if event.node.data is None:
             return
         node = event.node.data
@@ -179,30 +180,19 @@ class ExplorerScreen(Screen):
             return
         self._drill_into(event.node.data)
 
-    @on(TreemapView.NodeClicked)
-    @on(SunburstView.NodeClicked)
-    def on_viz_node_clicked(
-        self, event: TreemapView.NodeClicked | SunburstView.NodeClicked
-    ) -> None:
-        """Handle click in visualization."""
-        if event.node.is_dir:
-            self._drill_into(event.node)
-
-    @on(TreemapView.NodeHovered)
-    @on(SunburstView.NodeHovered)
-    def on_viz_node_hovered(
-        self, event: TreemapView.NodeHovered | SunburstView.NodeHovered
-    ) -> None:
-        """Update info panel on hover."""
-        info = self.query_one("#info-panel", InfoPanel)
-        info.update_node(event.node)
+    @on(TabbedContent.TabActivated)
+    def on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Refresh viz when switching tabs so the newly visible panel is current."""
+        if self._current is None:
+            return
+        self._update_active_viz(self._current)
 
     def _drill_into(self, node: FSNode) -> None:
         """Drill into a directory node."""
         self._current = node
         breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
         breadcrumb.update_path(node.path)
-        self._update_viz(node)
+        self._update_active_viz(node)
 
     def action_go_up(self) -> None:
         """Navigate up one directory level."""
