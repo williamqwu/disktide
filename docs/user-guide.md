@@ -153,6 +153,18 @@ show_hidden = false
 
 All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory.
 
+## File Locations
+
+fsmonitor-cli stores persistent files following the [XDG Base Directory](https://specifications.freedesktop.org/basedir-spec/latest/) spec:
+
+| File | Default path | XDG override |
+|------|-------------|--------------|
+| Configuration | `~/.config/fsmonitor-cli/config.toml` | `$XDG_CONFIG_HOME` |
+| Database (snapshots, history) | `~/.local/share/fsmonitor-cli/data.db` | `$XDG_DATA_HOME` |
+| Scan cache | `~/.cache/fsmonitor-cli/*.json` | `$XDG_CACHE_HOME` |
+
+No other files are written to the home directory.
+
 ## Quick Reference
 
 | Key | Scope | Action |
