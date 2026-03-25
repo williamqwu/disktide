@@ -21,10 +21,17 @@ Since `29b6eaf` (Add file locations section to user guide).
 - Data loading moved to background thread with loading indicator.
 - Snapshot table capped at 200 most recent entries.
 
+**Welcome Screen**
+
+- Three path options: current directory, saved default, and last visited. Use Tab to switch.
+- Hostname-aware path storage: paths are stored per hostname by default (`hostname_aware_paths` config).
+- Path completion capped at 200 entries to avoid blocking on large directories (e.g. `/home`).
+
 **Settings**
 
 - Shows database file size and path under System Information.
 - Added "Strict path matching" toggle under Monitor Settings.
+- Added "Hostname-aware paths" toggle under UI Settings.
 
 **Documentation**
 

@@ -11,11 +11,15 @@ pip install -e .
 fsmonitor-cli
 ```
 
-The welcome screen appears with a path input pre-filled with your home directory. Type or edit the path, then press Enter or click Explore to begin scanning.
+The welcome screen shows up to three path options:
 
-To accept the ghost-text suggestion that appears as you type, press the right arrow key. The completions list below the input updates live as you type, showing available files and directories.
+1. **Current directory** -- the directory you launched `fsmonitor-cli` from
+2. **Saved default** -- your previously saved default path (if any)
+3. **Last visited** -- the most recently explored path (if different from the above)
 
-Check "Save as default path" to remember your choice for next time.
+Use **Tab** to switch between options. Press **Enter** to explore the focused path, or edit it first. The right arrow key accepts the ghost-text suggestion; completions update live as you type.
+
+Check "Save as default path" to remember your choice for next time. Paths are stored per hostname by default, so they stay relevant when sharing a home directory across servers. Set `hostname_aware_paths = false` under `[ui]` to disable this.
 
 ## TUI
 
@@ -167,6 +171,7 @@ default_sort = "size"                    # size, name, mtime
 default_viz = "treemap"                  # treemap, sunburst, details
 show_hidden = false
 # default_scan_path = "/home/user/data" # pre-fill welcome screen
+# hostname_aware_paths = false           # store paths per hostname (default: true)
 ```
 
 All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory.
