@@ -313,23 +313,32 @@ class Database:
         return row[0] if row else None
 
     def list_snapshots(
-        self, root_path: str | None = None, limit: int = 0
+        self, root_path: str | None = None, limit: int = 0,
+        strict_path: bool = False,
     ) -> list[Snapshot]:
         """List snapshots, optionally filtered by root path.
 
-        When root_path is given, returns snapshots whose root_path is an
-        ancestor of (or equal to) the requested path — so exploring a
-        subfolder still surfaces snapshots from a parent watch.
+        When strict_path is False (default), matches snapshots whose
+        root_path is an ancestor of, equal to, or a descendant of the
+        requested path.  When True, only exact matches are returned.
 
         When limit > 0, returns at most that many (newest first).
         """
         if root_path:
-            sql = (
-                "SELECT * FROM snapshots WHERE ? = root_path"
-                " OR ? LIKE root_path || '/%'"
-                " ORDER BY timestamp DESC"
-            )
-            params: list = [root_path, root_path]
+            if strict_path:
+                sql = (
+                    "SELECT * FROM snapshots WHERE root_path = ?"
+                    " ORDER BY timestamp DESC"
+                )
+                params: list = [root_path]
+            else:
+                sql = (
+                    "SELECT * FROM snapshots WHERE ? = root_path"
+                    " OR ? LIKE root_path || '/%'"
+                    " OR root_path LIKE ? || '/%'"
+                    " ORDER BY timestamp DESC"
+                )
+                params = [root_path, root_path, root_path]
             if limit > 0:
                 sql += " LIMIT ?"
                 params.append(limit)

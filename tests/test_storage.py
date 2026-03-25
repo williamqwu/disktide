@@ -82,15 +82,21 @@ class TestDatabase:
         assert snapshots[0].baseline_id == snapshots[1].id
 
     def test_list_snapshots_subfolder(self, db):
-        """Exploring a/b should find snapshots watching a."""
+        """Exploring a/b should find snapshots watching a, and vice versa."""
         root = make_tree()
         snap = Snapshot(root_path="/test/root", total_size=1000)
         db.save_snapshot(snap, root)
 
+        # Exact match
         assert len(db.list_snapshots("/test/root")) == 1
+        # Subfolder should find parent watch
         assert len(db.list_snapshots("/test/root/sub")) == 1
+        # Parent should find child watch
+        assert len(db.list_snapshots("/test")) == 1
+        # Sibling path should NOT match
         assert len(db.list_snapshots("/test/rootextra")) == 0
-        assert len(db.list_snapshots("/test")) == 0
+        # Unrelated path
+        assert len(db.list_snapshots("/other")) == 0
 
     def test_load_tree(self, db):
         root = make_tree()

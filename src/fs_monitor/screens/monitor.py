@@ -80,10 +80,12 @@ class MonitorScreen(Screen):
     }
     """
 
-    def __init__(self, db: Database | None = None, root_path: str = "", **kwargs):
+    def __init__(self, db: Database | None = None, root_path: str = "",
+                 strict_path: bool = False, **kwargs):
         super().__init__(**kwargs)
         self._db = db
         self._root_path = root_path
+        self._strict_path = strict_path
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -120,30 +122,41 @@ class MonitorScreen(Screen):
 
         self.app.call_from_thread(self._show_loading, True)
 
-        # Open a dedicated read-only connection for this thread — SQLite
-        # connections cannot be shared across threads.  Skip migrations
-        # since the main-thread connection already handles those.
-        db = Database(path=self._db._path, run_migrations=False)
-        db.connect()
         try:
-            snapshots = db.list_snapshots(
-                self._root_path or None, limit=_SNAPSHOT_DISPLAY_LIMIT
-            )
-
-            history = []
-            if self._root_path:
-                history = db.get_size_history(self._root_path)
-
-            deltas = []
-            if len(snapshots) >= 2:
-                deltas = db.compare_snapshots(
-                    snapshots[1].id, snapshots[0].id, min_delta=_MIN_CHANGE_BYTES
+            # Open a dedicated read-only connection for this thread — SQLite
+            # connections cannot be shared across threads.  Skip migrations
+            # since the main-thread connection already handles those.
+            db = Database(path=self._db._path, run_migrations=False)
+            db.connect()
+            try:
+                snapshots = db.list_snapshots(
+                    self._root_path or None, limit=_SNAPSHOT_DISPLAY_LIMIT,
+                    strict_path=self._strict_path,
                 )
-        finally:
-            db.close()
 
-        self.app.call_from_thread(self._populate_ui, snapshots, history, deltas)
-        self.app.call_from_thread(self._show_loading, False)
+                history = []
+                history_path = self._root_path
+                if snapshots:
+                    # Use the actual root_path from snapshots — it may
+                    # differ from self._root_path when ancestor/descendant
+                    # matching is in effect.
+                    history_path = snapshots[0].root_path
+                if history_path:
+                    history = db.get_size_history(history_path)
+
+                deltas = []
+                if len(snapshots) >= 2:
+                    deltas = db.compare_snapshots(
+                        snapshots[1].id, snapshots[0].id, min_delta=_MIN_CHANGE_BYTES
+                    )
+            finally:
+                db.close()
+
+            self.app.call_from_thread(
+                self._populate_ui, snapshots, history, deltas, history_path,
+            )
+        finally:
+            self.app.call_from_thread(self._show_loading, False)
 
     def _show_loading(self, show: bool) -> None:
         """Toggle loading indicator visibility."""
@@ -164,6 +177,7 @@ class MonitorScreen(Screen):
         snapshots,
         history: list[tuple[str, int]],
         deltas: list[SizeDelta],
+        history_path: str = "",
     ) -> None:
         """Populate all UI elements (must be called from main thread)."""
         # Snapshots table
@@ -181,7 +195,7 @@ class MonitorScreen(Screen):
         # Trend chart
         if history:
             chart = self.query_one("#trend-chart", TrendChart)
-            chart.set_data({self._root_path: history})
+            chart.set_data({history_path or self._root_path: history})
 
         # Changes table
         self._show_deltas(deltas, snapshots)
