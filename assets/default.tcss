@@ -156,18 +156,24 @@ ScanProgressOverlay {
     padding: 1 0;
 }
 
-#welcome-path-label {
-    padding: 1 0 0 0;
+#welcome-tab-hint {
+    text-align: center;
+    padding: 0 0 1 0;
 }
 
-#welcome-path-input {
-    margin: 0 0 1 0;
+.path-option {
+    height: auto;
+    padding: 0 0 1 0;
 }
 
-#welcome-completions {
+.path-option-label {
+    padding: 0;
+    color: $primary;
+}
+
+.completions-display {
     max-height: 4;
     color: $text-muted;
-    padding: 0 0 1 0;
 }
 
 #welcome-save-default {

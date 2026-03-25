@@ -13,7 +13,12 @@ from textual.suggester import Suggester
 from textual.widgets import Static, Input, Button, Checkbox
 
 from fs_monitor import __version__
-from fs_monitor.config import load_config, save_config
+from fs_monitor.config import (
+    load_config, save_config, get_effective_paths, set_effective_paths,
+)
+
+# Limit scandir iterations to avoid blocking on huge directories (e.g. /home).
+_MAX_SCANDIR_ENTRIES = 200
 
 
 class PathSuggester(Suggester):
@@ -28,7 +33,6 @@ class PathSuggester(Suggester):
 
         expanded = os.path.expanduser(value)
 
-        # Split into parent directory and prefix
         if expanded.endswith("/"):
             parent_dir = expanded
             prefix = ""
@@ -40,16 +44,18 @@ class PathSuggester(Suggester):
             return None
 
         try:
+            count = 0
             for entry in os.scandir(parent_dir):
+                count += 1
+                if count > _MAX_SCANDIR_ENTRIES:
+                    break
                 name = entry.name
                 if prefix and not name.startswith(prefix):
                     continue
                 if not prefix and name.startswith("."):
                     continue
-                # Return first match with trailing / for dirs
                 suffix = "/" if entry.is_dir(follow_symlinks=False) else ""
                 result = os.path.join(parent_dir, name) + suffix
-                # Preserve ~ prefix in suggestion
                 if value.startswith("~"):
                     home = os.path.expanduser("~")
                     if result.startswith(home):
@@ -80,7 +86,11 @@ def _get_completions(value: str) -> list[str]:
 
     matches = []
     try:
+        count = 0
         for entry in os.scandir(parent_dir):
+            count += 1
+            if count > _MAX_SCANDIR_ENTRIES:
+                break
             name = entry.name
             if prefix and not name.startswith(prefix):
                 continue
@@ -101,6 +111,15 @@ def _get_completions(value: str) -> list[str]:
 
 _MAX_COMPLETIONS_DISPLAY = 15
 
+# Input IDs that are path options on the welcome screen.
+_PATH_INPUT_IDS = ("path-cwd", "path-saved", "path-last")
+
+_INPUT_TO_COMPLETIONS = {
+    "path-cwd": "completions-cwd",
+    "path-saved": "completions-saved",
+    "path-last": "completions-last",
+}
+
 
 class WelcomeScreen(Screen[str]):
     """Welcome screen with path selection and quick reference."""
@@ -109,12 +128,19 @@ class WelcomeScreen(Screen[str]):
         Binding("escape", "quit_app", "Quit", show=False),
     ]
 
-    def compose(self) -> ComposeResult:
-        config = load_config()
-        saved_path = config.ui.default_scan_path
-        default_path = saved_path or str(Path.home()) + "/"
-        has_saved = saved_path is not None
+    def __init__(
+        self,
+        cwd_path: str = "",
+        saved_path: str | None = None,
+        last_visited_path: str | None = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self._cwd_path = cwd_path or str(Path.home()) + "/"
+        self._saved_path = saved_path
+        self._last_visited_path = last_visited_path
 
+    def compose(self) -> ComposeResult:
         with Vertical(id="welcome-dialog"):
             yield Static(
                 f"[bold]fsmonitor-cli[/bold] v{__version__}\n"
@@ -135,19 +161,63 @@ class WelcomeScreen(Screen[str]):
                 id="welcome-commands",
             )
             yield Static(
-                "Path to explore ([dim]→ to accept suggestion[/dim]):",
-                id="welcome-path-label",
+                "[dim]Use [bold]Tab[/bold] to switch between path options, "
+                "[bold]Enter[/bold] to explore, "
+                "[bold]\u2192[/bold] to accept suggestion[/dim]",
+                id="welcome-tab-hint",
             )
-            yield Input(
-                value=default_path,
-                placeholder="Enter a directory path...",
-                suggester=PathSuggester(),
-                id="welcome-path-input",
-            )
-            yield Static("", id="welcome-completions")
+
+            # Option 1: Current directory (always shown)
+            with Vertical(classes="path-option"):
+                yield Static(
+                    "[bold]Current directory[/bold]",
+                    classes="path-option-label",
+                )
+                yield Input(
+                    value=self._cwd_path,
+                    placeholder="Enter a directory path...",
+                    suggester=PathSuggester(),
+                    id="path-cwd",
+                )
+                yield Static("", id="completions-cwd", classes="completions-display")
+
+            # Option 2: Saved default (only if set)
+            if self._saved_path is not None:
+                with Vertical(classes="path-option"):
+                    yield Static(
+                        "[bold]Saved default[/bold]",
+                        classes="path-option-label",
+                    )
+                    yield Input(
+                        value=self._saved_path,
+                        placeholder="Enter a directory path...",
+                        suggester=PathSuggester(),
+                        id="path-saved",
+                    )
+                    yield Static("", id="completions-saved", classes="completions-display")
+
+            # Option 3: Last visited (only if set and differs from saved)
+            if (
+                self._last_visited_path is not None
+                and self._last_visited_path != self._saved_path
+                and self._last_visited_path != self._cwd_path
+            ):
+                with Vertical(classes="path-option"):
+                    yield Static(
+                        "[bold]Last visited[/bold]",
+                        classes="path-option-label",
+                    )
+                    yield Input(
+                        value=self._last_visited_path,
+                        placeholder="Enter a directory path...",
+                        suggester=PathSuggester(),
+                        id="path-last",
+                    )
+                    yield Static("", id="completions-last", classes="completions-display")
+
             yield Checkbox(
                 "Save as default path",
-                value=has_saved,
+                value=self._saved_path is not None,
                 id="welcome-save-default",
             )
             with Horizontal(classes="button-row"):
@@ -155,14 +225,18 @@ class WelcomeScreen(Screen[str]):
                 yield Button("Quit", variant="default", id="welcome-quit")
 
     def on_mount(self) -> None:
-        path_input = self.query_one("#welcome-path-input", Input)
+        path_input = self.query_one("#path-cwd", Input)
         path_input.cursor_position = len(path_input.value)
         path_input.focus()
-        self._update_completions(path_input.value)
+        self._update_completions(path_input.value, "completions-cwd")
 
-    def _update_completions(self, value: str) -> None:
+    def _update_completions(self, value: str, completions_id: str) -> None:
         """Update the completions display for the given input value."""
-        comp_widget = self.query_one("#welcome-completions", Static)
+        try:
+            comp_widget = self.query_one(f"#{completions_id}", Static)
+        except Exception:
+            return
+
         completions = _get_completions(value)
 
         if not completions:
@@ -183,13 +257,13 @@ class WelcomeScreen(Screen[str]):
         comp_widget.update(display)
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "welcome-path-input":
-            self._update_completions(event.value)
+        comp_id = _INPUT_TO_COMPLETIONS.get(event.input.id)
+        if comp_id:
+            self._update_completions(event.value, comp_id)
 
-    def _submit_path(self) -> None:
-        """Validate and submit the selected path."""
-        path_input = self.query_one("#welcome-path-input", Input)
-        raw = path_input.value.strip()
+    def _submit_from_input(self, input_widget: Input) -> None:
+        """Validate and submit the path from the given input."""
+        raw = input_widget.value.strip()
         if not raw:
             self.notify("Please enter a path", severity="error")
             return
@@ -202,20 +276,27 @@ class WelcomeScreen(Screen[str]):
         save_checkbox = self.query_one("#welcome-save-default", Checkbox)
         if save_checkbox.value:
             config = load_config()
-            config.ui.default_scan_path = str(resolved)
+            paths = get_effective_paths(config)
+            paths.default_scan_path = str(resolved)
+            set_effective_paths(config, paths)
             save_config(config)
 
         self.dismiss(str(resolved))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "welcome-explore":
-            self._submit_path()
+            # Submit from whichever path input is focused, or fall back to cwd
+            focused = self.focused
+            if isinstance(focused, Input) and focused.id in _PATH_INPUT_IDS:
+                self._submit_from_input(focused)
+            else:
+                self._submit_from_input(self.query_one("#path-cwd", Input))
         elif event.button.id == "welcome-quit":
             self.app.exit()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "welcome-path-input":
-            self._submit_path()
+        if event.input.id in _PATH_INPUT_IDS:
+            self._submit_from_input(event.input)
 
     def action_quit_app(self) -> None:
         self.app.exit()

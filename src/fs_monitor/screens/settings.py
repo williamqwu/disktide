@@ -8,7 +8,7 @@ from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 
-from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration
+from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration, current_hostname
 from fs_monitor.storage.database import Database
 from fs_monitor.viz.colors import SCHEMES, set_color_scheme
 
@@ -185,6 +185,17 @@ class SettingsScreen(Screen):
                     allow_blank=False,
                 )
 
+            with Horizontal(classes="setting-row"):
+                yield Label("Hostname-aware paths", classes="setting-label")
+                yield Switch(
+                    value=self._config.ui.hostname_aware_paths,
+                    id="hostname-aware-paths",
+                )
+                yield Label(
+                    f"(host: {current_hostname()})",
+                    classes="input-hint",
+                )
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -287,6 +298,8 @@ class SettingsScreen(Screen):
             self._config.cleanup.require_confirm_dangerous = event.value
         elif event.switch.id == "strict-path":
             self._config.monitor.strict_path = event.value
+        elif event.switch.id == "hostname-aware-paths":
+            self._config.ui.hostname_aware_paths = event.value
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "default-viz":

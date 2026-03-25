@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,7 +62,15 @@ class UIConfig:
     default_sort: str = "size"
     default_viz: str = "treemap"
     show_hidden: bool = False
+    default_scan_path: str | None = None  # legacy flat field
+    hostname_aware_paths: bool = True
+
+
+@dataclass
+class HostPaths:
+    """Per-hostname path storage."""
     default_scan_path: str | None = None
+    last_visited_path: str | None = None
 
 
 @dataclass
@@ -70,6 +79,40 @@ class AppConfig:
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    host_paths: dict[str, HostPaths] = field(default_factory=dict)
+
+
+def current_hostname() -> str:
+    """Return the current machine's hostname."""
+    return socket.gethostname()
+
+
+def get_effective_paths(config: AppConfig) -> HostPaths:
+    """Return the HostPaths for the current host (or legacy fallback)."""
+    if config.ui.hostname_aware_paths:
+        key = current_hostname()
+    else:
+        key = "_default"
+
+    hp = config.host_paths.get(key, HostPaths())
+
+    # Legacy migration: if no per-host default but legacy field exists, use it
+    if hp.default_scan_path is None and config.ui.default_scan_path is not None:
+        hp.default_scan_path = config.ui.default_scan_path
+
+    return hp
+
+
+def set_effective_paths(config: AppConfig, paths: HostPaths) -> None:
+    """Write back HostPaths for the current host."""
+    if config.ui.hostname_aware_paths:
+        key = current_hostname()
+    else:
+        key = "_default"
+
+    config.host_paths[key] = paths
+    # Keep legacy field in sync for backward compat
+    config.ui.default_scan_path = paths.default_scan_path
 
 
 def _config_path() -> Path:
@@ -123,7 +166,18 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     lines.append(f"show_hidden = {'true' if config.ui.show_hidden else 'false'}")
     if config.ui.default_scan_path is not None:
         lines.append(f'default_scan_path = "{config.ui.default_scan_path}"')
+    if not config.ui.hostname_aware_paths:
+        lines.append("hostname_aware_paths = false")
     lines.append("")
+
+    # Per-hostname path storage
+    for hostname, hp in config.host_paths.items():
+        lines.append(f'[paths."{hostname}"]')
+        if hp.default_scan_path is not None:
+            lines.append(f'default_scan_path = "{hp.default_scan_path}"')
+        if hp.last_visited_path is not None:
+            lines.append(f'last_visited_path = "{hp.last_visited_path}"')
+        lines.append("")
 
     config_file.write_text("\n".join(lines))
 
@@ -172,5 +226,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.default_viz = ui.get("default_viz", "treemap")
         config.ui.show_hidden = ui.get("show_hidden", False)
         config.ui.default_scan_path = ui.get("default_scan_path")
+        config.ui.hostname_aware_paths = ui.get("hostname_aware_paths", True)
+
+    if "paths" in data:
+        for hostname, hp_data in data["paths"].items():
+            config.host_paths[hostname] = HostPaths(
+                default_scan_path=hp_data.get("default_scan_path"),
+                last_visited_path=hp_data.get("last_visited_path"),
+            )
 
     return config

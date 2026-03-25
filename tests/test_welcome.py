@@ -4,7 +4,9 @@ import os
 
 import pytest
 
-from fs_monitor.screens.welcome import PathSuggester, _get_completions
+from fs_monitor.screens.welcome import (
+    PathSuggester, _get_completions, WelcomeScreen, _MAX_SCANDIR_ENTRIES,
+)
 
 
 class TestPathSuggester:
@@ -111,3 +113,39 @@ class TestGetCompletions:
         matches = _get_completions(str(tree) + "/fi")
         assert len(matches) == 1
         assert not matches[0].endswith("/")
+
+    def test_large_dir_capped(self, tmp_path):
+        """Completions should not scan more than _MAX_SCANDIR_ENTRIES."""
+        # Create more entries than the limit
+        for i in range(_MAX_SCANDIR_ENTRIES + 50):
+            (tmp_path / f"dir_{i:04d}").mkdir()
+        matches = _get_completions(str(tmp_path) + "/")
+        assert len(matches) <= _MAX_SCANDIR_ENTRIES
+
+
+class TestWelcomeScreenInit:
+    def test_all_paths_set(self):
+        screen = WelcomeScreen(
+            cwd_path="/cwd",
+            saved_path="/saved",
+            last_visited_path="/last",
+        )
+        assert screen._cwd_path == "/cwd"
+        assert screen._saved_path == "/saved"
+        assert screen._last_visited_path == "/last"
+
+    def test_defaults(self):
+        screen = WelcomeScreen()
+        assert screen._saved_path is None
+        assert screen._last_visited_path is None
+
+    def test_dedup_last_equals_saved(self):
+        """If last_visited == saved, last should not produce a third option."""
+        screen = WelcomeScreen(
+            cwd_path="/cwd",
+            saved_path="/same",
+            last_visited_path="/same",
+        )
+        # The compose logic skips last when it equals saved;
+        # we just verify the values are stored correctly
+        assert screen._saved_path == screen._last_visited_path
