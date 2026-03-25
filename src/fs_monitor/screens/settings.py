@@ -9,6 +9,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 
 from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration
+from fs_monitor.storage.database import Database
 from fs_monitor.viz.colors import SCHEMES, set_color_scheme
 
 
@@ -57,9 +58,10 @@ class SettingsScreen(Screen):
     }
     """
 
-    def __init__(self, config: AppConfig, **kwargs):
+    def __init__(self, config: AppConfig, db: Database | None = None, **kwargs):
         super().__init__(**kwargs)
         self._config = config
+        self._db = db
         self._system_info = None
 
     def compose(self) -> ComposeResult:
@@ -74,6 +76,7 @@ class SettingsScreen(Screen):
             yield Static("", id="sysinfo-load", classes="sysinfo-value")
             yield Static("", id="sysinfo-storage", classes="sysinfo-value")
             yield Static("", id="sysinfo-recommendation", classes="sysinfo-value")
+            yield Static("", id="sysinfo-dbsize", classes="sysinfo-value")
 
             yield Static("")
             yield Static("Scan Performance", classes="section-title")
@@ -188,6 +191,7 @@ class SettingsScreen(Screen):
 
         # Detect system info
         self._detect_system()
+        self._detect_db_size()
 
     def _detect_system(self) -> None:
         """Detect system info and update display."""
@@ -233,6 +237,23 @@ class SettingsScreen(Screen):
         self.query_one("#workers-hint", Label).update(
             f"(recommended: {info.recommended_workers})"
         )
+
+    def _detect_db_size(self) -> None:
+        """Show database file size."""
+        import os
+        import humanize
+
+        if self._db is None:
+            return
+        try:
+            size = os.path.getsize(self._db._path)
+            self.query_one("#sysinfo-dbsize", Static).update(
+                f"  Database: {humanize.naturalsize(size, binary=True)} ({self._db._path})"
+            )
+        except OSError:
+            self.query_one("#sysinfo-dbsize", Static).update(
+                "  Database: not found"
+            )
 
     @staticmethod
     def _format_memory(mb: int) -> str:

@@ -61,14 +61,24 @@ class TrendChart(Widget):
             if not points:
                 continue
 
-            # Convert timestamps to indices and sizes to MB
-            x_vals = list(range(len(points)))
-            y_vals = [size / (1024 * 1024) for _, size in points]
+            # Parse timestamps and convert sizes to MB
+            dates = []
+            y_vals = []
+            for ts, size in points:
+                try:
+                    dates.append(datetime.fromisoformat(ts))
+                except (ValueError, TypeError):
+                    dates.append(datetime.now())
+                y_vals.append(size / (1024 * 1024))
+
+            # Use plotext date support for proper time axis
+            x_vals = plt.datetimes_to_string(dates)
 
             # Use basename for legend
             label = path.split("/")[-1] or path
             plt.plot(x_vals, y_vals, label=label)
 
+        plt.date_form("Y-m-d H:M")
         self._plot.refresh()
 
     def add_point(self, path: str, timestamp: str, size: int) -> None:
