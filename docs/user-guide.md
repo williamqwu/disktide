@@ -17,9 +17,9 @@ To accept the ghost-text suggestion that appears as you type, press the right ar
 
 Check "Save as default path" to remember your choice for next time.
 
-## Modes
+## TUI
 
-The TUI has three modes, switched with the `E`, `C`, and `M` keys:
+The interactive TUI has three modes, switched with the `E`, `C`, and `M` keys.
 
 ### Explorer (E)
 
@@ -55,13 +55,28 @@ Switch to cleanup mode after scanning in explorer. A table lists all targets gro
 
 ### Monitor (M)
 
-Shows historical snapshots and size trends. The monitor displays data from the `watch` command (see below) or any scans saved with `--snapshot`.
+Shows historical snapshots and size trends. The monitor displays data from the `watch` command or any scans saved with `--snapshot`.
 
 The top half shows a snapshot table and a trend chart. The bottom half shows the largest changes between the two most recent snapshots.
 
 Press `r` to refresh data. The monitor also refreshes automatically each time you switch to it.
 
 If you are watching directory `/data` and then explore `/data/logs` in the TUI, the monitor will show the snapshots from the parent `/data` watch.
+
+### Key Binding Reference
+
+| Key | Scope | Action |
+|-----|-------|--------|
+| `e` / `c` / `m` | Global | Switch to Explorer / Cleanup / Monitor |
+| `?` | Global | Open settings |
+| `q` | Global | Quit |
+| `1` / `2` / `3` | Explorer | Treemap / Sunburst / Details |
+| `u` / `i` | Explorer | Navigate up / drill into directory |
+| `s` | Explorer | Cycle sort order |
+| `r` | Explorer, Cleanup, Monitor | Rescan / refresh |
+| `d` | Cleanup | Delete selected |
+| `a` | Cleanup | Select all |
+| Space | Cleanup | Toggle row selection |
 
 ## CLI Commands
 
@@ -137,6 +152,8 @@ exclude_patterns = [".git", "node_modules"]
 
 [cleanup]
 require_confirm_dangerous = true
+# enabled_rules = ["node_modules", "old_logs"]   # only run these rules
+# disabled_rules = ["ide_caches"]                # skip these rules
 
 [monitor]
 default_interval = 21600                 # 6 hours, in seconds
@@ -152,30 +169,3 @@ show_hidden = false
 ```
 
 All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory.
-
-## File Locations
-
-fsmonitor-cli stores persistent files following the [XDG Base Directory](https://specifications.freedesktop.org/basedir-spec/latest/) spec:
-
-| File | Default path | XDG override |
-|------|-------------|--------------|
-| Configuration | `~/.config/fsmonitor-cli/config.toml` | `$XDG_CONFIG_HOME` |
-| Database (snapshots, history) | `~/.local/share/fsmonitor-cli/data.db` | `$XDG_DATA_HOME` |
-| Scan cache | `~/.cache/fsmonitor-cli/*.json` | `$XDG_CACHE_HOME` |
-
-No other files are written to the home directory.
-
-## Quick Reference
-
-| Key | Scope | Action |
-|-----|-------|--------|
-| `e` / `c` / `m` | Global | Switch to Explorer / Cleanup / Monitor |
-| `?` | Global | Open settings |
-| `q` | Global | Quit |
-| `1` / `2` / `3` | Explorer | Treemap / Sunburst / Details |
-| `u` / `i` | Explorer | Navigate up / drill into directory |
-| `s` | Explorer | Cycle sort order |
-| `r` | Explorer, Cleanup, Monitor | Rescan / refresh |
-| `d` | Cleanup | Delete selected |
-| `a` | Cleanup | Select all |
-| Space | Cleanup | Toggle row selection |

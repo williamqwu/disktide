@@ -52,6 +52,7 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - **scanner/** -- filesystem I/O only. No Textual imports.
 - **storage/** -- SQLite I/O only. No Textual imports.
 - **cleanup/** -- operates on FSNode trees. No Textual imports.
+- **monitor/** -- alerting, tree diffs, scan scheduling. No Textual imports.
 - **viz/** -- rendering logic. Produces Rich Segments, no direct Textual widget deps.
 - **screens/** and **widgets/** -- Textual UI layer. Can import everything above.
 

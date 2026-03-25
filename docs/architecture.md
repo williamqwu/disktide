@@ -31,6 +31,11 @@ src/fs_monitor/
     rules.py             8 built-in cleanup rules
     actions.py           Deletion with dry-run + audit logging
 
+  monitor/
+    alerts.py            Threshold alert rules and event checking
+    diff.py              Tree-level snapshot comparison (SizeDelta)
+    scheduler.py         Interval-based periodic scan scheduling
+
   viz/
     treemap.py           Squarified treemap layout + rendering
     sunburst.py          Ring chart via braille canvas
