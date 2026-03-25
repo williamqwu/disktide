@@ -18,6 +18,8 @@ class Snapshot:
     dir_count: int = 0
     scan_duration: float = 0.0
     label: str = ""
+    is_baseline: bool = False
+    baseline_id: int | None = None
 
     @property
     def display_time(self) -> str:

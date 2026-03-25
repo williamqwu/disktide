@@ -24,13 +24,14 @@ class TestMigrations:
 
     def test_migrate_creates_tables(self, conn):
         migrate(conn)
-        # Verify core tables exist
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
         table_names = {t[0] for t in tables}
         assert "snapshots" in table_names
         assert "nodes" in table_names
+        assert "paths" in table_names
+        assert "deltas" in table_names
         assert "alert_rules" in table_names
         assert "alert_events" in table_names
         assert "deletion_log" in table_names
@@ -51,5 +52,30 @@ class TestMigrations:
             "SELECT name FROM sqlite_master WHERE type='index'"
         ).fetchall()
         index_names = {i[0] for i in indexes}
-        assert "idx_nodes_snapshot_path" in index_names
-        assert "idx_nodes_snapshot_parent" in index_names
+        assert "idx_nodes_snapshot" in index_names
+        assert "idx_nodes_path_id" in index_names
+        assert "idx_deltas_snapshot" in index_names
+        assert "idx_deltas_path_id" in index_names
+        assert "idx_snapshots_baseline" in index_names
+
+    def test_snapshots_has_baseline_columns(self, conn):
+        migrate(conn)
+        # Verify the columns exist by inserting a row
+        conn.execute(
+            """INSERT INTO snapshots
+               (root_path, timestamp, is_baseline, baseline_id)
+               VALUES ('/test', '2025-01-01T00:00:00', 1, NULL)"""
+        )
+        row = conn.execute("SELECT is_baseline, baseline_id FROM snapshots").fetchone()
+        assert row[0] == 1
+        assert row[1] is None
+
+    def test_paths_table_unique_constraint(self, conn):
+        migrate(conn)
+        conn.execute(
+            "INSERT INTO paths (path, name, depth) VALUES ('/test', 'test', 0)"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO paths (path, name, depth) VALUES ('/test', 'test', 0)"
+            )
