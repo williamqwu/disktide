@@ -66,7 +66,10 @@ class FSMonitorApp(App):
 
         self._explorer = ExplorerScreen(self._scan_path, config=self._config)
         self._cleanup = CleanupScreen()
-        self._monitor = MonitorScreen(db=self._db, root_path=self._scan_path)
+        self._monitor = MonitorScreen(
+            db=self._db, root_path=self._scan_path,
+            strict_path=self._config.monitor.strict_path,
+        )
 
         self.install_screen(self._explorer, name="explorer")
         self.install_screen(self._cleanup, name="cleanup")

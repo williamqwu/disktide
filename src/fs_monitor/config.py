@@ -52,6 +52,7 @@ class MonitorConfig:
     default_interval: int = 21600  # 6 hours in seconds
     snapshot_retention: int = 30  # days
     max_watch_time: int | None = None  # seconds, None = unlimited
+    strict_path: bool = False  # True = exact path match only
 
 
 @dataclass
@@ -111,6 +112,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     lines.append(f"snapshot_retention = {config.monitor.snapshot_retention}")
     if config.monitor.max_watch_time is not None:
         lines.append(f"max_watch_time = {config.monitor.max_watch_time}")
+    if config.monitor.strict_path:
+        lines.append("strict_path = true")
     lines.append("")
 
     lines.append("[ui]")
@@ -160,6 +163,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.monitor.default_interval = monitor.get("default_interval", 21600)
         config.monitor.snapshot_retention = monitor.get("snapshot_retention", 30)
         config.monitor.max_watch_time = monitor.get("max_watch_time")
+        config.monitor.strict_path = monitor.get("strict_path", False)
 
     if "ui" in data:
         ui = data["ui"]

@@ -15,13 +15,16 @@ Since `29b6eaf` (Add file locations section to user guide).
 
 - Fixed empty Changes table (`min_delta` was 1 MB, now 0).
 - Changes title shows compared snapshot timestamps.
-- Trend chart x-axis shows real timestamps instead of integer indices.
+- Fixed trend chart: adaptive time axis (HH:MM intraday, MM-DD HH:MM multi-day, YYYY-MM-DD weeks+).
+- Snapshot path matching is now bidirectional (parent finds child watches and vice versa).
+- `strict_path` config option to restrict to exact path matches only.
 - Data loading moved to background thread with loading indicator.
 - Snapshot table capped at 200 most recent entries.
 
 **Settings**
 
 - Shows database file size and path under System Information.
+- Added "Strict path matching" toggle under Monitor Settings.
 
 **Documentation**
 

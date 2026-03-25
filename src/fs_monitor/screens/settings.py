@@ -146,6 +146,13 @@ class SettingsScreen(Screen):
                 )
                 yield Label("(e.g., 2h, 1d; blank = unlimited)", classes="input-hint")
 
+            with Horizontal(classes="setting-row"):
+                yield Label("Strict path matching", classes="setting-label")
+                yield Switch(
+                    value=self._config.monitor.strict_path,
+                    id="strict-path",
+                )
+
             yield Static("")
             yield Static("UI Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
@@ -278,6 +285,8 @@ class SettingsScreen(Screen):
             self._config.scan.follow_symlinks = event.value
         elif event.switch.id == "confirm-dangerous":
             self._config.cleanup.require_confirm_dangerous = event.value
+        elif event.switch.id == "strict-path":
+            self._config.monitor.strict_path = event.value
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "default-viz":

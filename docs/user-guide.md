@@ -61,7 +61,7 @@ The top half shows a snapshot table and a trend chart. The bottom half shows the
 
 Press `r` to refresh data. The monitor also refreshes automatically each time you switch to it.
 
-If you are watching directory `/data` and then explore `/data/logs` in the TUI, the monitor will show the snapshots from the parent `/data` watch.
+By default, path matching is bidirectional: exploring `/data` surfaces watches at `/data/logs`, and exploring `/data/logs` surfaces watches at `/data`. Set `strict_path = true` under `[monitor]` in config to restrict to exact path matches only.
 
 ### Key Binding Reference
 
@@ -159,6 +159,7 @@ require_confirm_dangerous = true
 default_interval = 21600                 # 6 hours, in seconds
 snapshot_retention = 30                  # days
 # max_watch_time = 86400                # optional cap in seconds
+# strict_path = true                    # only show exact path matches in Monitor
 
 [ui]
 color_theme = "warm"                     # default, cold, warm, vivid, mono
