@@ -2,18 +2,31 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from textual.widget import Widget
 from textual.app import ComposeResult
 
 try:
     from textual_plotext import PlotextPlot
+    import plotext
     HAS_PLOTEXT = True
 except ImportError:
     HAS_PLOTEXT = False
 
 from textual.widgets import Static
+
+
+def _pick_date_form(dates: list[datetime]) -> str:
+    """Choose a date format string based on the time span of the data."""
+    if len(dates) < 2:
+        return "Y-m-d H:M"
+    span = max(dates) - min(dates)
+    if span < timedelta(hours=24):
+        return "H:M"
+    if span < timedelta(days=7):
+        return "m-d H:M"
+    return "Y-m-d"
 
 
 class TrendChart(Widget):
@@ -71,14 +84,16 @@ class TrendChart(Widget):
                     dates.append(datetime.now())
                 y_vals.append(size / (1024 * 1024))
 
-            # Use plotext date support for proper time axis
-            x_vals = plt.datetimes_to_string(dates)
+            # Pick adaptive date format based on time span
+            date_form = _pick_date_form(dates)
+            plt.date_form(date_form)
+
+            x_vals = plotext.datetimes_to_string(dates, output_form=date_form)
 
             # Use basename for legend
             label = path.split("/")[-1] or path
             plt.plot(x_vals, y_vals, label=label)
 
-        plt.date_form("Y-m-d H:M")
         self._plot.refresh()
 
     def add_point(self, path: str, timestamp: str, size: int) -> None:
