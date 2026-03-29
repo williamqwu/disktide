@@ -18,6 +18,7 @@ from fs_monitor.screens.explorer import ExplorerScreen
 from fs_monitor.screens.cleanup import CleanupScreen
 from fs_monitor.screens.monitor import MonitorScreen
 from fs_monitor.screens.settings import SettingsScreen
+from fs_monitor.screens.fs_overview import FSOverviewScreen
 
 
 class FSMonitorApp(App):
@@ -28,9 +29,10 @@ class FSMonitorApp(App):
     ENABLE_COMMAND_PALETTE = False
 
     BINDINGS = [
-        Binding("e", "switch_mode('explorer')", "[E]xplorer [M]onitor", show=True, key_display="Mode"),
+        Binding("e", "switch_mode('explorer')", "[E]xplorer [M]onitor [F]S-Overview", show=True, key_display="Mode"),
         Binding("c", "switch_mode('cleanup')", "Cleanup", show=False),
         Binding("m", "switch_mode('monitor')", "Monitor", show=False),
+        Binding("f", "switch_mode('fs_overview')", "FS Overview", show=False),
         Binding("question_mark", "push_screen('settings')", "Settings", show=True, key_display="?"),
         Binding("q", "quit", "Quit", show=True),
     ]
@@ -97,10 +99,12 @@ class FSMonitorApp(App):
             db=self._db, root_path=self._scan_path,
             strict_path=self._config.monitor.strict_path,
         )
+        self._fs_overview = FSOverviewScreen()
 
         self.install_screen(self._explorer, name="explorer")
         self.install_screen(self._cleanup, name="cleanup")
         self.install_screen(self._monitor, name="monitor")
+        self.install_screen(self._fs_overview, name="fs_overview")
         self.install_screen(
             SettingsScreen(self._config, db=self._db, scan_path=self._scan_path),
             name="settings",
@@ -109,7 +113,7 @@ class FSMonitorApp(App):
         self.push_screen("explorer")
 
     def action_switch_mode(self, mode: str) -> None:
-        """Switch between explorer/cleanup/monitor modes."""
+        """Switch between explorer/cleanup/monitor/fs_overview modes."""
         if mode == "explorer":
             self.switch_screen("explorer")
         elif mode == "cleanup":
@@ -125,3 +129,5 @@ class FSMonitorApp(App):
             self.switch_screen("cleanup")
         elif mode == "monitor":
             self.switch_screen("monitor")
+        elif mode == "fs_overview":
+            self.switch_screen("fs_overview")
