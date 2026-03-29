@@ -3,11 +3,8 @@
 Interactive terminal disk usage explorer built with Python and [Textual](https://github.com/Textualize/textual).
 
 <p align="center">
-  <img src="docs/images/treemap.png" width="49%" alt="Explorer with treemap visualization" />
   <img src="docs/images/sunburst.png" width="49%" alt="Explorer with sunburst visualization" />
-</p>
-<p align="center">
-  <img src="docs/images/monitor.png" width="70%" alt="Monitor with snapshot history and size trends" />
+  <img src="docs/images/monitor.png" width="49%" alt="Monitor with snapshot history and size trends" />
 </p>
 
 ## Installation
