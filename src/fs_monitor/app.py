@@ -112,6 +112,22 @@ class FSMonitorApp(App):
 
         self.push_screen("explorer")
 
+    def action_quit(self) -> None:
+        """Cancel active background tasks, notify the user, then exit."""
+        # Cancel any in-progress scan so the thread finishes quickly
+        try:
+            engine = self._explorer._engine
+            if engine is not None:
+                engine.cancel()
+        except AttributeError:
+            pass
+        self.notify(
+            "Finishing background tasks — this may take a few seconds…",
+            title="Closing",
+            timeout=30,
+        )
+        self.exit()
+
     def action_switch_mode(self, mode: str) -> None:
         """Switch between explorer/cleanup/monitor/fs_overview modes."""
         if mode == "explorer":

@@ -39,6 +39,7 @@ def cli(ctx, max_depth: int | None, workers: int | None):
 
         app = FSMonitorApp(show_welcome=True, config=config)
         app.run(mouse=False)
+        click.echo("fsmonitor-cli closed. Goodbye!")
 
 
 @cli.command()
