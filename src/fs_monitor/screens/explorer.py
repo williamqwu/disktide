@@ -28,8 +28,8 @@ class ExplorerScreen(Screen):
     """Main filesystem explorer screen."""
 
     BINDINGS = [
-        Binding("1", "switch_viz('treemap')", "[1]Treemap [2]Sunburst [3]Details", show=True, key_display="Viz"),
-        Binding("2", "switch_viz('sunburst')", "Sunburst", show=False),
+        Binding("1", "switch_viz('sunburst')", "[1]Sunburst [2]Treemap [3]Details", show=True, key_display="Viz"),
+        Binding("2", "switch_viz('treemap')", "Treemap", show=False),
         Binding("3", "switch_viz('details')", "Details", show=False),
         Binding("u", "go_up", "[U]p [I]nto", show=True, key_display="Nav"),
         Binding("i", "go_into", "Into", show=False),
@@ -89,16 +89,21 @@ class ExplorerScreen(Screen):
                 yield SizeTree(id="size-tree")
             with Vertical(id="viz-panel"):
                 with TabbedContent(id="viz-tabs"):
-                    with TabPane("Treemap", id="tab-treemap"):
-                        yield TreemapView(id="treemap-view")
                     with TabPane("Sunburst", id="tab-sunburst"):
                         yield SunburstView(id="sunburst-view")
+                    with TabPane("Treemap", id="tab-treemap"):
+                        yield TreemapView(id="treemap-view")
                     with TabPane("Details", id="tab-details"):
                         yield InfoPanel(id="info-panel")
         yield ScanProgressOverlay(id="scan-progress")
         yield Footer()
 
     def on_mount(self) -> None:
+        if self._config and self._config.ui.default_viz:
+            viz = self._config.ui.default_viz
+            tab_map = {"sunburst": "tab-sunburst", "treemap": "tab-treemap", "details": "tab-details"}
+            if viz in tab_map:
+                self.query_one("#viz-tabs", TabbedContent).active = tab_map[viz]
         self._start_scan()
 
     def _start_scan(self, force: bool = False) -> None:

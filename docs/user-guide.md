@@ -30,8 +30,8 @@ The interactive TUI has three modes, switched with the `E`, `M`, and `F` keys.
 
 The main view. A file tree on the left shows directories sorted by size, with inline size bars. The right panel shows one of three visualizations:
 
-- **Treemap** (`1`) -- Rectangles sized proportionally to disk usage. Drill into directories by clicking or selecting them.
-- **Sunburst** (`2`) -- Concentric rings radiating outward by depth. Each arc's angle represents its share of the parent.
+- **Sunburst** (`1`) -- Concentric rings radiating outward by depth. Each arc's angle represents its share of the parent.
+- **Treemap** (`2`) -- Rectangles sized proportionally to disk usage. Drill into directories by clicking or selecting them.
 - **Details** (`3`) -- Text panel with metadata about the selected file or directory.
 
 Navigation:
@@ -96,7 +96,7 @@ Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in t
 | `c` | Global | Switch to Cleanup (must be enabled in Settings) |
 | `?` | Global | Open settings |
 | `q` | Global | Quit |
-| `1` / `2` / `3` | Explorer | Treemap / Sunburst / Details |
+| `1` / `2` / `3` | Explorer | Sunburst / Treemap / Details |
 | `u` / `i` | Explorer | Navigate up / drill into directory |
 | `s` | Explorer | Cycle sort order |
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
