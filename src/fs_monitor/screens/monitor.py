@@ -122,6 +122,11 @@ class MonitorScreen(Screen):
 
         self.app.call_from_thread(self._show_loading, True)
 
+        snapshots: list = []
+        history: list = []
+        deltas: list = []
+        history_path = self._root_path
+
         try:
             # Open a dedicated read-only connection for this thread — SQLite
             # connections cannot be shared across threads.  Skip migrations
@@ -134,8 +139,6 @@ class MonitorScreen(Screen):
                     strict_path=self._strict_path,
                 )
 
-                history = []
-                history_path = self._root_path
                 if snapshots:
                     # Use the actual root_path from snapshots — it may
                     # differ from self._root_path when ancestor/descendant
@@ -144,19 +147,21 @@ class MonitorScreen(Screen):
                 if history_path:
                     history = db.get_size_history(history_path)
 
-                deltas = []
                 if len(snapshots) >= 2:
                     deltas = db.compare_snapshots(
                         snapshots[1].id, snapshots[0].id, min_delta=_MIN_CHANGE_BYTES
                     )
             finally:
                 db.close()
+        except Exception:
+            # Database may not be migrated yet, or may have no data.
+            # Show empty results rather than crashing.
+            pass
 
-            self.app.call_from_thread(
-                self._populate_ui, snapshots, history, deltas, history_path,
-            )
-        finally:
-            self.app.call_from_thread(self._show_loading, False)
+        self.app.call_from_thread(
+            self._populate_ui, snapshots, history, deltas, history_path,
+        )
+        self.app.call_from_thread(self._show_loading, False)
 
     def _show_loading(self, show: bool) -> None:
         """Toggle loading indicator visibility."""
