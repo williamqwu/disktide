@@ -6,6 +6,7 @@ import pytest
 
 from fs_monitor.screens.welcome import (
     PathSuggester, _get_completions, WelcomeScreen, _MAX_SCANDIR_ENTRIES,
+    _build_suggestions,
 )
 
 
@@ -149,3 +150,66 @@ class TestWelcomeScreenInit:
         # The compose logic skips last when it equals saved;
         # we just verify the values are stored correctly
         assert screen._saved_path == screen._last_visited_path
+
+    def test_recent_paths_stored(self):
+        screen = WelcomeScreen(
+            cwd_path="/cwd",
+            recent_paths=["/recent1", "/recent2"],
+        )
+        assert screen._recent_paths == ["/recent1", "/recent2"]
+
+    def test_recent_paths_default_empty(self):
+        screen = WelcomeScreen(cwd_path="/cwd")
+        assert screen._recent_paths == []
+
+
+class TestBuildSuggestions:
+    """Tests for _build_suggestions() deduplication and ordering."""
+
+    def test_cwd_only(self):
+        result = _build_suggestions("/home/user", None, None)
+        assert len(result) == 1
+        assert result[0].label == "Current directory"
+        assert result[0].path == "/home/user"
+
+    def test_all_sources(self):
+        result = _build_suggestions("/a", "/b", "/c", ["/d"])
+        assert len(result) == 4
+        assert [s.label for s in result] == [
+            "Current directory", "Saved default", "Last visited", "Recent",
+        ]
+
+    def test_dedup_saved_equals_cwd(self, tmp_path):
+        """Saved path resolving to same dir as cwd is deduplicated."""
+        path = str(tmp_path)
+        result = _build_suggestions(path, path, None)
+        assert len(result) == 1
+
+    def test_dedup_last_equals_saved(self):
+        result = _build_suggestions("/a", "/b", "/b")
+        assert len(result) == 2
+        labels = [s.label for s in result]
+        assert "Last visited" not in labels
+
+    def test_dedup_recent_duplicates(self):
+        """Recent paths that match cwd or saved are filtered out."""
+        result = _build_suggestions("/a", "/b", None, ["/a", "/b", "/c"])
+        assert len(result) == 3
+        assert result[2].label == "Recent"
+        assert result[2].path == "/c"
+
+    def test_multiple_recent(self):
+        result = _build_suggestions("/a", None, None, ["/b", "/c", "/d"])
+        assert len(result) == 4
+        recent_labels = [s.label for s in result if s.label == "Recent"]
+        assert len(recent_labels) == 3
+
+    def test_empty_recent_list(self):
+        result = _build_suggestions("/a", "/b", "/c", [])
+        assert len(result) == 3
+
+    def test_order_preserved(self):
+        """cwd first, then saved, then last visited, then recent."""
+        result = _build_suggestions("/cwd", "/saved", "/last", ["/r1", "/r2"])
+        paths = [s.path for s in result]
+        assert paths == ["/cwd", "/saved", "/last", "/r1", "/r2"]

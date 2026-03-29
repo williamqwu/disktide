@@ -358,3 +358,48 @@ class TestDatabase:
         promoted = db.get_snapshot(id2)
         assert promoted.is_baseline is True
         assert promoted.baseline_id is None
+
+    def test_recent_paths_empty(self, db):
+        assert db.recent_paths() == []
+
+    def test_recent_paths_returns_distinct(self, db):
+        root = make_tree()
+        # Save snapshots for two different paths
+        snap_a = Snapshot(root_path="/path/a", total_size=1000)
+        db.save_snapshot(snap_a, root)
+        snap_b = Snapshot(root_path="/path/b", total_size=2000)
+        db.save_snapshot(snap_b, root)
+        # Save another snapshot for /path/a (duplicate root_path)
+        snap_a2 = Snapshot(root_path="/path/a", total_size=1100)
+        db.save_snapshot(snap_a2, root)
+
+        result = db.recent_paths()
+        assert len(result) == 2
+        assert set(result) == {"/path/a", "/path/b"}
+
+    def test_recent_paths_ordered_by_most_recent(self, db):
+        root = make_tree()
+        # /path/old saved first
+        snap_old = Snapshot(root_path="/path/old", total_size=1000)
+        db.save_snapshot(snap_old, root)
+        # /path/new saved second (more recent)
+        snap_new = Snapshot(root_path="/path/new", total_size=2000)
+        db.save_snapshot(snap_new, root)
+
+        result = db.recent_paths()
+        assert result[0] == "/path/new"
+        assert result[1] == "/path/old"
+
+    def test_recent_paths_respects_limit(self, db):
+        root = make_tree()
+        for i in range(5):
+            snap = Snapshot(root_path=f"/path/{i}", total_size=1000)
+            db.save_snapshot(snap, root)
+
+        result = db.recent_paths(limit=2)
+        assert len(result) == 2
+
+    def test_recent_paths_no_connection(self):
+        """Returns empty list when database is not connected."""
+        database = Database(path="/tmp/nonexistent.db")
+        assert database.recent_paths() == []

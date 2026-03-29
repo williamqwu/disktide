@@ -213,3 +213,31 @@ show_hidden = true
 
         loaded = load_config(config_file)
         assert loaded.ui.hostname_aware_paths is False
+
+    def test_show_cleanup_default_false(self):
+        config = AppConfig()
+        assert config.ui.show_cleanup is False
+
+    def test_show_cleanup_roundtrip(self, tmp_path):
+        config = AppConfig()
+        config.ui.show_cleanup = True
+
+        config_file = tmp_path / "config.toml"
+        save_config(config, config_file)
+
+        loaded = load_config(config_file)
+        assert loaded.ui.show_cleanup is True
+
+    def test_show_cleanup_false_not_written(self, tmp_path):
+        """show_cleanup=False is omitted from TOML (only written when True)."""
+        config = AppConfig()
+        config.ui.show_cleanup = False
+
+        config_file = tmp_path / "config.toml"
+        save_config(config, config_file)
+
+        content = config_file.read_text()
+        assert "show_cleanup" not in content
+
+        loaded = load_config(config_file)
+        assert loaded.ui.show_cleanup is False
