@@ -11,19 +11,20 @@ pip install -e .
 fsmonitor-cli
 ```
 
-The welcome screen shows up to three path options:
+The welcome screen shows a single path input with a list of suggested starting directories:
 
-1. **Current directory** -- the directory you launched `fsmonitor-cli` from
-2. **Saved default** -- your previously saved default path (if any)
-3. **Last visited** -- the most recently explored path (if different from the above)
+- **Current directory** -- the directory you launched `fsmonitor-cli` from
+- **Saved default** -- your previously saved default path (if any)
+- **Last visited** -- the most recently explored path (if different from the above)
+- **Recent** -- paths from previous `watch` or `scan --snapshot` runs
 
-Use **Tab** to switch between options. Press **Enter** to explore the focused path, or edit it first. The right arrow key accepts the ghost-text suggestion; completions update live as you type.
+Press **Up/Down** to cycle through suggestions (the active suggestion is highlighted and fills the input). You can also type any path directly. The right arrow key accepts the ghost-text suggestion; completions update live as you type. Press **Enter** to explore.
 
-Check "Save as default path" to remember your choice for next time. Paths are stored per hostname by default, so they stay relevant when sharing a home directory across servers. Set `hostname_aware_paths = false` under `[ui]` to disable this.
+Check "Save as default path" to remember the current path as your default for next time. Paths are stored per hostname by default, so they stay relevant when sharing a home directory across servers. Set `hostname_aware_paths = false` under `[ui]` to disable this.
 
 ## TUI
 
-The interactive TUI has three modes, switched with the `E`, `C`, and `M` keys.
+The interactive TUI has three modes, switched with the `E`, `M`, and `F` keys.
 
 ### Explorer (E)
 

@@ -4,16 +4,39 @@
 
 Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
 
+**Welcome Screen**
+
+- **add** Redesigned welcome screen: single path input with suggestion cycling via Up/Down arrows.
+- **add** Suggestion sources: current directory, saved default, last visited, and recent snapshot paths from the database.
+- **add** Suggestions are deduplicated; active suggestion highlighted in yellow with an arrow indicator.
+- **fix** "Save as default path" was not persisted when the chosen path matched the last-visited path.
+- **fix (qol)** "Save as default path" checkbox is now unchecked by default.
+- **fix (qol)** Improved welcome screen wording: TUI keys and CLI subcommands are clearly separated.
+
+**FS Overview**
+
 - **add** FS Overview screen (`f`): all real mounted filesystems with mount point, FS type, speed tier (Fast SSD / Medium HDD / Slow Network), size columns, and a visual usage bar.
 - **add** FS Overview detail popup: press Enter on any row to see device path, inode stats, block size, and full mount options.
 - **add** Proportional summary bar at the top of FS Overview, coloured by speed tier.
-- **add** Exit notification: pressing `q` shows "Finishing background tasks…" toast inside the TUI while background threads wind down; "fsmonitor-cli closed. Goodbye!" is printed to the terminal once fully exited.
-- **add** `show_cleanup` config flag (`[ui]`); toggle in Settings → Cleanup Settings.
-- **fix** `watch` and `cleanup` CLI commands were passing `/` to `ScanEngine` for FS-type detection instead of the actual scan path — worker count now adapts correctly per path (e.g. NFS cap applies).
-- **fix** Settings screen always showed storage/FS type for `/`; now uses the active scan path.
-- **fix (qol)** Pressing `q` now cancels any in-progress scan, reducing shutdown delay.
+
+**Cleanup**
+
+- **add** `show_cleanup` config flag (`[ui]`); toggle in Settings -> Cleanup Settings.
 - **fix (qol)** Cleanup mode is hidden by default; pressing `c` shows a notification instead of silently switching to a destructive screen.
-- **docs** User guide: added FS Overview section, Cleanup experimental note, updated key binding table, documented `show_cleanup` and per-path worker detection.
+
+**Quit / Shutdown**
+
+- **add** Exit notification: pressing `q` shows "Finishing background tasks..." toast inside the TUI while background threads wind down; "fsmonitor-cli closed. Goodbye!" is printed to the terminal once fully exited.
+- **fix (qol)** Pressing `q` now cancels any in-progress scan, reducing shutdown delay.
+
+**Fixes**
+
+- **fix** `watch` and `cleanup` CLI commands were passing `/` to `ScanEngine` for FS-type detection instead of the actual scan path -- worker count now adapts correctly per path (e.g. NFS cap applies).
+- **fix** Settings screen always showed storage/FS type for `/`; now uses the active scan path.
+
+**Docs**
+
+- **docs** User guide: updated welcome screen section, added FS Overview section, Cleanup experimental note, updated key binding table, documented `show_cleanup` and per-path worker detection.
 
 ## v0.1.1
 
