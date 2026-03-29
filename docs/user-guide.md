@@ -190,7 +190,7 @@ snapshot_retention = 30                  # days
 [ui]
 color_theme = "warm"                     # default, cold, warm, vivid, mono
 default_sort = "size"                    # size, name, mtime
-default_viz = "treemap"                  # treemap, sunburst, details
+default_viz = "sunburst"                 # treemap, sunburst, details
 show_hidden = false
 # show_cleanup = true                    # enable Cleanup mode (disabled by default)
 # default_scan_path = "/home/user/data" # pre-fill welcome screen

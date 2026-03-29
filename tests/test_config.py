@@ -16,7 +16,7 @@ class TestConfig:
         config = load_config("/nonexistent/path/config.toml")
         assert isinstance(config, AppConfig)
         assert config.ui.default_sort == "size"
-        assert config.ui.default_viz == "treemap"
+        assert config.ui.default_viz == "sunburst"
         assert config.ui.show_hidden is False
         assert config.scan.follow_symlinks is False
         assert config.scan.max_depth is None

@@ -60,7 +60,7 @@ class MonitorConfig:
 class UIConfig:
     color_theme: str = "warm"
     default_sort: str = "size"
-    default_viz: str = "treemap"
+    default_viz: str = "sunburst"
     show_hidden: bool = False
     show_cleanup: bool = False
     default_scan_path: str | None = None  # legacy flat field
@@ -226,7 +226,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ui = data["ui"]
         config.ui.color_theme = ui.get("color_theme", "default")
         config.ui.default_sort = ui.get("default_sort", "size")
-        config.ui.default_viz = ui.get("default_viz", "treemap")
+        config.ui.default_viz = ui.get("default_viz", "sunburst")
         config.ui.show_hidden = ui.get("show_hidden", False)
         config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.default_scan_path = ui.get("default_scan_path")
