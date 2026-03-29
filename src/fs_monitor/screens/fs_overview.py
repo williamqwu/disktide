@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import subprocess
+from dataclasses import dataclass, field
 
 from textual import on, work
 from textual.app import ComposeResult
@@ -39,6 +40,20 @@ class FSEntry:
     inode_total: int
     inode_free: int
     block_size: int
+    # User quota (None = not available / not enforced)
+    quota_used_bytes: int | None = None
+    quota_soft_bytes: int | None = None
+    quota_hard_bytes: int | None = None
+
+    @property
+    def has_quota(self) -> bool:
+        return self.quota_hard_bytes is not None and self.quota_hard_bytes > 0
+
+    @property
+    def quota_pct(self) -> float:
+        if not self.has_quota or self.quota_used_bytes is None:
+            return 0.0
+        return self.quota_used_bytes / self.quota_hard_bytes * 100
 
     @property
     def usage_pct(self) -> float:
@@ -96,6 +111,62 @@ def _read_mounts() -> list[tuple[str, str, str, str]]:
     return entries
 
 
+def _parse_quota_size(value: str) -> int:
+    """Parse a quota size value (in KB by default, with optional K/M/G/T suffix)."""
+    value = value.strip().rstrip("*")  # asterisk means over-limit
+    if not value or value == "0":
+        return 0
+    multipliers = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    if value[-1].upper() in multipliers:
+        return int(float(value[:-1]) * multipliers[value[-1].upper()])
+    # Default unit from quota command is KB
+    return int(value) * 1024
+
+
+def _load_user_quotas() -> dict[str, tuple[int, int, int]]:
+    """Run `quota` and return {mountpoint: (used, soft_limit, hard_limit)} in bytes.
+
+    Returns an empty dict if the quota command is unavailable or fails.
+    """
+    result: dict[str, tuple[int, int, int]] = {}
+    try:
+        proc = subprocess.run(
+            ["quota", "--show-mntpoint", "-w", "-p"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode != 0 and not proc.stdout:
+            return result
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return result
+
+    # Output looks like:
+    #   Disk quotas for user foo (uid 1000):
+    #        Filesystem  blocks   quota   limit   grace   files   quota   limit   grace
+    #        /dev/sda1 /home  16457M  40960M  51200M            8039       0       0
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Disk quotas") or line.startswith("Filesystem"):
+            continue
+        parts = line.split()
+        # Need at least: device, mountpoint, blocks, quota, limit
+        if len(parts) < 5:
+            continue
+        # First token is device, second is mountpoint (starts with /)
+        if not parts[1].startswith("/"):
+            continue
+        mountpoint = parts[1]
+        try:
+            used = _parse_quota_size(parts[2])
+            soft = _parse_quota_size(parts[3])
+            hard = _parse_quota_size(parts[4])
+        except (ValueError, IndexError):
+            continue
+        if hard > 0 or soft > 0:
+            result[mountpoint] = (used, soft, hard)
+
+    return result
+
+
 def _load_fs_entries() -> list[FSEntry]:
     """Load filesystem info for all real mounted filesystems."""
     seen_mountpoints: set[str] = set()
@@ -138,6 +209,15 @@ def _load_fs_entries() -> list[FSEntry]:
             block_size=stat.f_bsize,
         ))
 
+    # Merge user quota data
+    quotas = _load_user_quotas()
+    for entry in entries:
+        if entry.mountpoint in quotas:
+            used, soft, hard = quotas[entry.mountpoint]
+            entry.quota_used_bytes = used
+            entry.quota_soft_bytes = soft
+            entry.quota_hard_bytes = hard
+
     entries.sort(key=lambda e: e.mountpoint)
     return entries
 
@@ -149,6 +229,19 @@ def _usage_bar(pct: float, width: int = 12) -> Text:
     t = Text()
     t.append(bar, style=style)
     t.append(f"  {pct:.1f}%")
+    return t
+
+
+def _quota_cell(entry: FSEntry) -> Text:
+    """Format the Quota column: 'used / limit' with a mini bar, or blank."""
+    if not entry.has_quota:
+        return Text("")
+    used = humanize.naturalsize(entry.quota_used_bytes, binary=True)
+    limit = humanize.naturalsize(entry.quota_hard_bytes, binary=True)
+    pct = entry.quota_pct
+    style = "red" if pct >= 90 else "yellow" if pct >= 70 else "green"
+    t = Text()
+    t.append(f"{used}/{limit}", style=style)
     return t
 
 
@@ -255,6 +348,26 @@ class FSDetailModal(ModalScreen):
             bar_text.append_text(bar)
             yield Static(bar_text, classes="detail-row")
 
+            if e.has_quota:
+                yield Static("  User Quota", classes="detail-section")
+                yield Static(
+                    f"  Used:          {humanize.naturalsize(e.quota_used_bytes, binary=True)}",
+                    classes="detail-row",
+                )
+                if e.quota_soft_bytes:
+                    yield Static(
+                        f"  Soft limit:    {humanize.naturalsize(e.quota_soft_bytes, binary=True)}",
+                        classes="detail-row",
+                    )
+                yield Static(
+                    f"  Hard limit:    {humanize.naturalsize(e.quota_hard_bytes, binary=True)}",
+                    classes="detail-row",
+                )
+                bar = _usage_bar(e.quota_pct, width=20)
+                bar_text = Text("  ")
+                bar_text.append_text(bar)
+                yield Static(bar_text, classes="detail-row")
+
             if e.inode_total > 0:
                 yield Static("  Inodes", classes="detail-section")
                 yield Static(f"  Total:         {e.inode_total:,}", classes="detail-row")
@@ -326,7 +439,7 @@ class FSOverviewScreen(Screen):
         yield Static("", id="fs-overview-summary")
         table = DataTable(id="fs-overview-table")
         table.cursor_type = "row"
-        table.add_columns("Mount", "FS Type", "Speed", "Total", "Used", "Free", "Usage")
+        table.add_columns("Mount", "FS Type", "Speed", "Total", "Used", "Free", "Usage", "Quota")
         yield table
         yield Footer()
 
@@ -375,6 +488,7 @@ class FSOverviewScreen(Screen):
                 humanize.naturalsize(e.used_bytes, binary=True),
                 humanize.naturalsize(e.free_bytes, binary=True),
                 _usage_bar(e.usage_pct),
+                _quota_cell(e),
                 key=e.mountpoint,
             )
 
