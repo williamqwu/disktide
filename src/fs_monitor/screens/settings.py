@@ -113,6 +113,13 @@ class SettingsScreen(Screen):
             yield Static("")
             yield Static("Cleanup Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
+                yield Label("Show Cleanup mode (experimental)", classes="setting-label")
+                yield Switch(value=self._config.ui.show_cleanup, id="show-cleanup")
+            yield Static(
+                "  Cleanup mode deletes files. Enable only when needed.",
+                classes="sysinfo-value",
+            )
+            with Horizontal(classes="setting-row"):
                 yield Label("Confirm dangerous deletions", classes="setting-label")
                 yield Switch(
                     value=self._config.cleanup.require_confirm_dangerous,
@@ -296,6 +303,8 @@ class SettingsScreen(Screen):
             self._config.ui.show_hidden = event.value
         elif event.switch.id == "follow-symlinks":
             self._config.scan.follow_symlinks = event.value
+        elif event.switch.id == "show-cleanup":
+            self._config.ui.show_cleanup = event.value
         elif event.switch.id == "confirm-dangerous":
             self._config.cleanup.require_confirm_dangerous = event.value
         elif event.switch.id == "strict-path":

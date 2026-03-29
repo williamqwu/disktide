@@ -62,6 +62,7 @@ class UIConfig:
     default_sort: str = "size"
     default_viz: str = "treemap"
     show_hidden: bool = False
+    show_cleanup: bool = False
     default_scan_path: str | None = None  # legacy flat field
     hostname_aware_paths: bool = True
 
@@ -164,6 +165,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     lines.append(f'default_sort = "{config.ui.default_sort}"')
     lines.append(f'default_viz = "{config.ui.default_viz}"')
     lines.append(f"show_hidden = {'true' if config.ui.show_hidden else 'false'}")
+    if config.ui.show_cleanup:
+        lines.append("show_cleanup = true")
     if config.ui.default_scan_path is not None:
         lines.append(f'default_scan_path = "{config.ui.default_scan_path}"')
     if not config.ui.hostname_aware_paths:
@@ -225,6 +228,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.default_sort = ui.get("default_sort", "size")
         config.ui.default_viz = ui.get("default_viz", "treemap")
         config.ui.show_hidden = ui.get("show_hidden", False)
+        config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.default_scan_path = ui.get("default_scan_path")
         config.ui.hostname_aware_paths = ui.get("hostname_aware_paths", True)
 

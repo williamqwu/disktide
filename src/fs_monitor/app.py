@@ -28,7 +28,7 @@ class FSMonitorApp(App):
     ENABLE_COMMAND_PALETTE = False
 
     BINDINGS = [
-        Binding("e", "switch_mode('explorer')", "[E]xplorer [C]leanup [M]onitor", show=True, key_display="Mode"),
+        Binding("e", "switch_mode('explorer')", "[E]xplorer [M]onitor", show=True, key_display="Mode"),
         Binding("c", "switch_mode('cleanup')", "Cleanup", show=False),
         Binding("m", "switch_mode('monitor')", "Monitor", show=False),
         Binding("question_mark", "push_screen('settings')", "Settings", show=True, key_display="?"),
@@ -113,6 +113,12 @@ class FSMonitorApp(App):
         if mode == "explorer":
             self.switch_screen("explorer")
         elif mode == "cleanup":
+            if not self._config.ui.show_cleanup:
+                self.notify(
+                    "Cleanup mode is disabled. Enable it in Settings (?).",
+                    severity="warning",
+                )
+                return
             # Pass current root from explorer to cleanup
             if self._explorer._root is not None:
                 self._cleanup.set_root(self._explorer._root)
