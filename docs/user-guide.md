@@ -197,4 +197,26 @@ show_hidden = false
 # hostname_aware_paths = false           # store paths per hostname (default: true)
 ```
 
-All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory — detected per scan path, so different directories on different filesystems (e.g., local SSD vs. NFS) automatically use an appropriate thread count.
+All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory -- detected per scan path, so different directories on different filesystems (e.g., local SSD vs. NFS) automatically use an appropriate thread count.
+
+## File-Type Categories
+
+The treemap and sunburst visualizations color files by category. Each file's extension determines its category, which maps to a hue in the active color scheme.
+
+| Category | Extensions | Typical use |
+|----------|-----------|-------------|
+| code | py, js, ts, tsx, jsx, vue, c, cpp, h, java, go, rs, rb, sh, css, html, kt, swift, lua, r, php, scala, ipynb | Source code and notebooks |
+| document | pdf, doc, docx, odt, tex, txt, md, rst, rtf, epub, ppt, pptx, xls, xlsx | Documents and presentations |
+| image | png, jpg, jpeg, gif, svg, bmp, webp, ico, tiff, tif, heic, avif, raw | Image files |
+| data | csv, sqlite, db, sql, parquet, npy, npz, h5, hdf5, pkl, pickle, jsonl, arrow, feather, tfrecord, lmdb | Datasets and serialized data |
+| model | pt, pth, ckpt, onnx, safetensors, pb, tflite, savedmodel | ML model checkpoints and weights |
+| config | json, yaml, yml, toml, xml, ini, cfg, env, conf, properties, lock | Configuration and lock files |
+| media | mp3, mp4, wav, avi, mkv, flac, ogg, aac, mov, webm, m4a, m4v | Audio and video |
+| archive | zip, tar, gz, bz2, xz, 7z, rar, zst, lz4, deb, rpm, iso | Compressed archives and packages |
+| build | o, so, pyc, class, whl, egg, dll, lib, a, obj, jar, war | Compiled artifacts |
+| log | log, out, err | Log and output files |
+| other | *(everything else)* | Unrecognized extensions |
+
+Files without an extension (e.g., `Makefile`, `Dockerfile`) are classified as "other".
+
+Each of the five built-in color schemes (`default`, `cold`, `warm`, `vivid`, `mono`) assigns a distinct hue to every category. Switch schemes with `color_theme` in config or the Settings screen (`?`). The `mono` scheme uses zero saturation, so all categories appear as shades of gray. The sunburst legend (bottom-left corner) shows which categories are present in the current view.

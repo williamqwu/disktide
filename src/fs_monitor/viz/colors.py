@@ -58,7 +58,8 @@ _DEFAULT = ColorScheme(
     depth_hues=[200, 140, 40, 20, 280, 320, 100, 180],
     category_hues={
         "document": 210, "image": 30, "code": 140, "config": 170,
-        "data": 270, "archive": 50, "media": 320, "build": 0, "other": 90,
+        "data": 270, "model": 240, "archive": 50, "media": 320,
+        "build": 0, "log": 105, "other": 90,
     },
 )
 
@@ -74,7 +75,8 @@ _COLD = ColorScheme(
     depth_hues=[210, 190, 230, 170, 250, 200, 160, 240],
     category_hues={
         "document": 220, "image": 195, "code": 170, "config": 240,
-        "data": 260, "archive": 200, "media": 180, "build": 250, "other": 210,
+        "data": 260, "model": 230, "archive": 200, "media": 180,
+        "build": 250, "log": 185, "other": 210,
     },
     gradient_hue_range=(240, 170),  # indigo -> teal
     category_saturation=55,
@@ -96,7 +98,8 @@ _WARM = ColorScheme(
     depth_hues=[30, 10, 50, 350, 40, 0, 20, 45],
     category_hues={
         "document": 35, "image": 15, "code": 50, "config": 40,
-        "data": 5, "archive": 25, "media": 345, "build": 0, "other": 55,
+        "data": 5, "model": 60, "archive": 25, "media": 345,
+        "build": 0, "log": 340, "other": 55,
     },
     gradient_hue_range=(50, 350),  # gold -> crimson
     category_saturation=65,
@@ -118,7 +121,8 @@ _VIVID = ColorScheme(
     depth_hues=[0, 60, 120, 180, 240, 300, 30, 270],
     category_hues={
         "document": 220, "image": 30, "code": 120, "config": 180,
-        "data": 280, "archive": 60, "media": 310, "build": 0, "other": 90,
+        "data": 280, "model": 250, "archive": 60, "media": 310,
+        "build": 0, "log": 150, "other": 90,
     },
     gradient_hue_range=(120, 0),  # green -> red
     category_saturation=80,
@@ -138,7 +142,8 @@ _MONO = ColorScheme(
     depth_hues=[0, 0, 0, 0, 0, 0, 0, 0],
     category_hues={
         "document": 0, "image": 0, "code": 0, "config": 0,
-        "data": 0, "archive": 0, "media": 0, "build": 0, "other": 0,
+        "data": 0, "model": 0, "archive": 0, "media": 0,
+        "build": 0, "log": 0, "other": 0,
     },
     gradient_hue_range=(0, 0),
     category_saturation=0,
@@ -242,14 +247,18 @@ def gradient_color(ratio: float, depth: int = 0) -> str:
 EXT_CATEGORIES: dict[str, str] = {}
 
 for _cat, _exts in [
-    ("document", "pdf doc docx odt tex txt md rst"),
-    ("image", "png jpg jpeg gif svg bmp webp"),
-    ("code", "py js ts c cpp h java go rs rb sh css html"),
-    ("config", "json yaml yml toml xml ini cfg"),
-    ("data", "csv sqlite db sql parquet npy"),
-    ("archive", "zip tar gz bz2 xz 7z"),
-    ("media", "mp3 mp4 wav avi mkv flac"),
-    ("build", "o so pyc class whl egg"),
+    ("document", "pdf doc docx odt tex txt md rst rtf epub ppt pptx xls xlsx"),
+    ("image", "png jpg jpeg gif svg bmp webp ico tiff tif heic avif raw"),
+    ("code", "py js ts c cpp h java go rs rb sh css html"
+             " tsx jsx vue kt swift lua r php scala ipynb"),
+    ("config", "json yaml yml toml xml ini cfg env conf properties lock"),
+    ("data", "csv sqlite db sql parquet npy"
+             " npz h5 hdf5 pkl pickle jsonl arrow feather tfrecord lmdb"),
+    ("archive", "zip tar gz bz2 xz 7z rar zst lz4 deb rpm iso"),
+    ("media", "mp3 mp4 wav avi mkv flac ogg aac mov webm m4a m4v"),
+    ("build", "o so pyc class whl egg dll lib a obj jar war"),
+    ("model", "pt pth ckpt onnx safetensors pb tflite savedmodel"),
+    ("log", "log out err"),
 ]:
     for _ext in _exts.split():
         EXT_CATEGORIES[_ext] = _cat

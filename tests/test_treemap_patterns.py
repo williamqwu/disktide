@@ -565,13 +565,31 @@ class TestFileCategoryMapping:
     @pytest.mark.parametrize("name,expected", [
         ("report.pdf", "document"),
         ("REPORT.PDF", "document"),
+        ("doc.epub", "document"),
+        ("slides.pptx", "document"),
         ("photo.jpeg", "image"),
+        ("icon.heic", "image"),
         ("style.css", "code"),
+        ("component.tsx", "code"),
+        ("notebook.ipynb", "code"),
         ("settings.toml", "config"),
+        ("app.conf", "config"),
         ("dump.sql", "data"),
+        ("data.h5", "data"),
+        ("dataset.hdf5", "data"),
+        ("features.npz", "data"),
+        ("model.pt", "model"),
+        ("weights.safetensors", "model"),
+        ("checkpoint.ckpt", "model"),
         ("archive.7z", "archive"),
+        ("pkg.deb", "archive"),
         ("video.mkv", "media"),
+        ("stream.ogg", "media"),
         ("module.whl", "build"),
+        ("library.dll", "build"),
+        ("training.log", "log"),
+        ("output.out", "log"),
+        ("errors.err", "log"),
         ("Makefile", "other"),
         ("no_extension", "other"),
         (".hidden", "other"),
@@ -579,6 +597,16 @@ class TestFileCategoryMapping:
     ])
     def test_category(self, name, expected):
         assert _file_category(name) == expected
+
+    def test_all_schemes_cover_all_categories(self):
+        """Every color scheme must have a hue for every known category."""
+        from fs_monitor.viz.colors import SCHEMES, EXT_CATEGORIES
+        all_cats = set(EXT_CATEGORIES.values()) | {"other"}
+        for name, scheme in SCHEMES.items():
+            for cat in all_cats:
+                assert cat in scheme.category_hues, (
+                    f"{name} scheme missing hue for '{cat}'"
+                )
 
 
 class TestNonUniformSiblings:

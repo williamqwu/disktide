@@ -282,8 +282,8 @@ def _compute_legend(layout: SunburstLayout) -> None:
         return
 
     cat_order = [
-        "code", "document", "image", "data",
-        "config", "media", "archive", "build", "other",
+        "code", "document", "image", "data", "model",
+        "config", "media", "archive", "build", "log", "other",
     ]
     present = [c for c in cat_order if c in categories]
     if not present:

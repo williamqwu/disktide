@@ -267,7 +267,7 @@ Five built-in schemes: `default`, `cold`, `warm`, `vivid`, `mono`. Each scheme d
 
 - Size category thresholds with Rich color names
 - Depth hue rotation cycle (8 levels)
-- File-type category hue mapping (code, document, image, data, archive, media, build, config, other)
+- File-type category hue mapping (code, document, image, data, model, config, media, archive, build, log, other)
 - Gradient hue range for ratio-based coloring
 - Directory and border colors
 

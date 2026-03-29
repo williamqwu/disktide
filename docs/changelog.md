@@ -34,9 +34,14 @@ Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
 - **fix** `watch` and `cleanup` CLI commands were passing `/` to `ScanEngine` for FS-type detection instead of the actual scan path -- worker count now adapts correctly per path (e.g. NFS cap applies).
 - **fix** Settings screen always showed storage/FS type for `/`; now uses the active scan path.
 
+**Visualization**
+
+- **add** Two new file-type categories: "model" (ML checkpoints: pt, pth, ckpt, onnx, safetensors, pb, tflite, savedmodel) and "log" (log, out, err).
+- **add** Expanded extension coverage across all existing categories (60+ new extensions including ML data formats, modern web frameworks, and additional media/archive types).
+
 **Docs**
 
-- **docs** User guide: updated welcome screen section, added FS Overview section, Cleanup experimental note, updated key binding table, documented `show_cleanup` and per-path worker detection.
+- **docs** User guide: updated welcome screen section, added FS Overview section, added File-Type Categories reference, Cleanup experimental note, updated key binding table, documented `show_cleanup` and per-path worker detection.
 
 ## v0.1.1
 
