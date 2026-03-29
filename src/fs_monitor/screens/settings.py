@@ -58,10 +58,12 @@ class SettingsScreen(Screen):
     }
     """
 
-    def __init__(self, config: AppConfig, db: Database | None = None, **kwargs):
+    def __init__(self, config: AppConfig, db: Database | None = None,
+                 scan_path: str = "/", **kwargs):
         super().__init__(**kwargs)
         self._config = config
         self._db = db
+        self._scan_path = scan_path
         self._system_info = None
 
     def compose(self) -> ComposeResult:
@@ -215,7 +217,7 @@ class SettingsScreen(Screen):
         """Detect system info and update display."""
         from fs_monitor.scanner.sysinfo import detect_system_info
 
-        info = detect_system_info("/")
+        info = detect_system_info(self._scan_path)
         self._system_info = info
 
         self.query_one("#sysinfo-cpus", Static).update(

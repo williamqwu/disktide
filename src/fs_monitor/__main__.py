@@ -149,7 +149,7 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
 
         while True:
             start = time.monotonic()
-            engine = ScanEngine(workers=workers)
+            engine = ScanEngine(workers=workers, scan_path=path)
             root = engine.scan(path)
             elapsed = time.monotonic() - start
 
@@ -200,7 +200,7 @@ def cleanup(path: str, workers: int | None):
     path = str(Path(path).resolve())
     click.echo(f"Scanning {path} for cleanup targets...")
 
-    engine = ScanEngine(workers=workers)
+    engine = ScanEngine(workers=workers, scan_path=path)
     root = engine.scan(path)
 
     targets = detect_targets(root)

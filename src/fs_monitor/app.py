@@ -102,7 +102,8 @@ class FSMonitorApp(App):
         self.install_screen(self._cleanup, name="cleanup")
         self.install_screen(self._monitor, name="monitor")
         self.install_screen(
-            SettingsScreen(self._config, db=self._db), name="settings"
+            SettingsScreen(self._config, db=self._db, scan_path=self._scan_path),
+            name="settings",
         )
 
         self.push_screen("explorer")
