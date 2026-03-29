@@ -148,16 +148,16 @@ class WelcomeScreen(Screen[str]):
                 id="welcome-title",
             )
             yield Static(
-                "[dim]Commands:[/dim]  "
-                "[bold]scan[/bold] <path>  "
-                "[bold]watch[/bold] <path>  "
-                "[bold]cleanup[/bold] <path>\n"
-                "[dim]Keys:[/dim]      "
-                "[bold]E[/bold]xplorer  "
-                "[bold]C[/bold]leanup  "
-                "[bold]M[/bold]onitor  "
+                "[dim]TUI keys:[/dim]  "
+                "[bold]E[/bold] Explorer  "
+                "[bold]M[/bold] Monitor  "
+                "[bold]F[/bold] FS Overview  "
                 "[bold]?[/bold] Settings  "
-                "[bold]Q[/bold]uit",
+                "[bold]Q[/bold] Quit\n"
+                "[dim]CLI:[/dim]       "
+                "fsmonitor-cli [bold]scan[/bold] | [bold]watch[/bold] | "
+                "[bold]cleanup[/bold] <path>  "
+                "[dim](outside TUI)[/dim]",
                 id="welcome-commands",
             )
             yield Static(
@@ -166,6 +166,8 @@ class WelcomeScreen(Screen[str]):
                 "[bold]\u2192[/bold] to accept suggestion[/dim]",
                 id="welcome-tab-hint",
             )
+
+            yield Static("")
 
             # Option 1: Current directory (always shown)
             with Vertical(classes="path-option"):
