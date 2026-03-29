@@ -44,19 +44,6 @@ Navigation:
 | `s` | Cycle sort order: size, name, modified |
 | `r` | Rescan the current directory |
 
-### Cleanup (C)
-
-Detects files and directories that can safely be removed: dependency caches (`node_modules`), build outputs, bytecode files, old logs, OS junk files, and IDE caches.
-
-Switch to cleanup mode after scanning in explorer. A table lists all targets grouped by category, with size and risk level (safe, moderate, dangerous).
-
-| Key | Action |
-|-----|--------|
-| Space | Toggle selection on the current row |
-| `a` | Select all targets |
-| `d` | Delete selected targets (with confirmation) |
-| `r` | Rescan for targets |
-
 ### Monitor (M)
 
 Shows historical snapshots and size trends. The monitor displays data from the `watch` command or any scans saved with `--snapshot`.
@@ -67,17 +54,51 @@ Press `r` to refresh data. The monitor also refreshes automatically each time yo
 
 By default, path matching is bidirectional: exploring `/data` surfaces watches at `/data/logs`, and exploring `/data/logs` surfaces watches at `/data`. Set `strict_path = true` under `[monitor]` in config to restrict to exact path matches only.
 
+### FS Overview (F)
+
+Shows all mounted real filesystems at a glance. Press `f` to open.
+
+The top bar summarises total mounted space and usage percentage, with a proportional coloured bar showing each filesystem's relative size. The table lists each filesystem with:
+
+| Column | Description |
+|--------|-------------|
+| Mount | Mountpoint path |
+| FS Type | Filesystem type (ext4, xfs, nfs4, etc.) |
+| Speed | Speed tier based on storage class |
+| Total / Used / Free | Disk space |
+| Usage | Visual bar + percentage |
+
+**Speed tiers:**
+
+| Tier | Colour | When |
+|------|--------|------|
+| Fast (SSD) | Green | Non-rotational local storage |
+| Medium (HDD) | Yellow | Rotational local storage |
+| Slow (Network) | Red | NFS, CIFS, SSHFS, etc. |
+| Unknown | Dim | Could not detect storage type |
+
+Pseudo-filesystems (`proc`, `sysfs`, `tmpfs` with no blocks, etc.) are automatically filtered out. Press `r` to refresh.
+
+### Cleanup (C) — experimental
+
+Detects files and directories that can safely be removed: dependency caches (`node_modules`), build outputs, bytecode files, old logs, OS junk files, and IDE caches.
+
+Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in the Settings screen (`?`). Once enabled, press `c` to switch to it.
+
 ### Key Binding Reference
 
 | Key | Scope | Action |
 |-----|-------|--------|
-| `e` / `c` / `m` | Global | Switch to Explorer / Cleanup / Monitor |
+| `e` | Global | Switch to Explorer |
+| `m` | Global | Switch to Monitor |
+| `f` | Global | Switch to FS Overview |
+| `c` | Global | Switch to Cleanup (must be enabled in Settings) |
 | `?` | Global | Open settings |
 | `q` | Global | Quit |
 | `1` / `2` / `3` | Explorer | Treemap / Sunburst / Details |
 | `u` / `i` | Explorer | Navigate up / drill into directory |
 | `s` | Explorer | Cycle sort order |
-| `r` | Explorer, Cleanup, Monitor | Rescan / refresh |
+| `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
 | `d` | Cleanup | Delete selected |
 | `a` | Cleanup | Select all |
 | Space | Cleanup | Toggle row selection |
@@ -170,8 +191,9 @@ color_theme = "warm"                     # default, cold, warm, vivid, mono
 default_sort = "size"                    # size, name, mtime
 default_viz = "treemap"                  # treemap, sunburst, details
 show_hidden = false
+# show_cleanup = true                    # enable Cleanup mode (disabled by default)
 # default_scan_path = "/home/user/data" # pre-fill welcome screen
 # hostname_aware_paths = false           # store paths per hostname (default: true)
 ```
 
-All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory.
+All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory — detected per scan path, so different directories on different filesystems (e.g., local SSD vs. NFS) automatically use an appropriate thread count.

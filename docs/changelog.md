@@ -1,43 +1,42 @@
 # Changelog
 
+## v0.1.2
+
+Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
+
+- **add** FS Overview screen (`f`): all real mounted filesystems with mount point, FS type, speed tier (Fast SSD / Medium HDD / Slow Network), size columns, and a visual usage bar.
+- **add** FS Overview detail popup: press Enter on any row to see device path, inode stats, block size, and full mount options.
+- **add** Proportional summary bar at the top of FS Overview, coloured by speed tier.
+- **add** Exit notification: pressing `q` shows "Finishing background tasks…" toast inside the TUI while background threads wind down; "fsmonitor-cli closed. Goodbye!" is printed to the terminal once fully exited.
+- **add** `show_cleanup` config flag (`[ui]`); toggle in Settings → Cleanup Settings.
+- **fix** `watch` and `cleanup` CLI commands were passing `/` to `ScanEngine` for FS-type detection instead of the actual scan path — worker count now adapts correctly per path (e.g. NFS cap applies).
+- **fix** Settings screen always showed storage/FS type for `/`; now uses the active scan path.
+- **fix (qol)** Pressing `q` now cancels any in-progress scan, reducing shutdown delay.
+- **fix (qol)** Cleanup mode is hidden by default; pressing `c` shows a notification instead of silently switching to a destructive screen.
+- **docs** User guide: added FS Overview section, Cleanup experimental note, updated key binding table, documented `show_cleanup` and per-path worker detection.
+
 ## v0.1.1
 
 Since `29b6eaf` (Add file locations section to user guide).
 
-**Storage**
-
-- Redesigned database schema: path interning (each unique path stored once) and delta storage (only changed directories between snapshots). ~97% size reduction for typical workloads.
-- Full baselines every 50 snapshots; deltas in between.
-- `VACUUM` after destructive migration to reclaim disk space.
-- Breaking: migration v3 clears existing snapshot history. Delete the old database before launching: `rm ~/.local/share/fsmonitor-cli/data.db`
-
-**Monitor**
-
-- Fixed empty Changes table (`min_delta` was 1 MB, now 0).
-- Changes title shows compared snapshot timestamps.
-- Fixed trend chart: adaptive time axis (HH:MM intraday, MM-DD HH:MM multi-day, YYYY-MM-DD weeks+).
-- Snapshot path matching is now bidirectional (parent finds child watches and vice versa).
-- `strict_path` config option to restrict to exact path matches only.
-- Data loading moved to background thread with loading indicator.
-- Snapshot table capped at 200 most recent entries.
-
-**Welcome Screen**
-
-- Three path options: current directory, saved default, and last visited. Use Tab to switch.
-- Hostname-aware path storage: paths are stored per hostname by default (`hostname_aware_paths` config).
-- Path completion capped at 200 entries to avoid blocking on large directories (e.g. `/home`).
-
-**Settings**
-
-- Shows database file size and path under System Information.
-- Added "Strict path matching" toggle under Monitor Settings.
-- Added "Hostname-aware paths" toggle under UI Settings.
-
-**Documentation**
-
-- Restructured README: install/uninstall, stored data table, TUI/CLI split, screenshot gallery.
-- Restructured user guide into TUI and CLI sections; added `enabled_rules`/`disabled_rules` config fields.
-- Added `monitor/` module to architecture.md and contributing.md.
+- **add** Database schema v3: path interning (each unique path stored once) and delta storage (only changed directories between snapshots). ~97% size reduction for typical workloads.
+- **add** Full baselines every 50 snapshots; deltas in between.
+- **add** `strict_path` config option (`[monitor]`) to restrict snapshot matching to exact paths only; toggle in Settings.
+- **add** Welcome screen with three path options: current directory, saved default, and last visited. Tab to switch.
+- **add** Hostname-aware path storage: paths stored per hostname by default (`hostname_aware_paths` config); toggle in Settings.
+- **add** Settings shows database file size and path under System Information.
+- **fix** Empty Changes table — `min_delta` threshold was 1 MB, now 0.
+- **fix** Trend chart time axis — adaptive format: HH:MM intraday, MM-DD HH:MM multi-day, YYYY-MM-DD for weeks+.
+- **fix** Snapshot path matching is now bidirectional: exploring `/data` surfaces watches at `/data/logs` and vice versa.
+- **fix** Monitor data loading moved to background thread; added loading indicator to prevent UI freeze.
+- **fix (qol)** Snapshot table capped at 200 most recent entries.
+- **fix (qol)** Changes title shows the timestamps of the two compared snapshots.
+- **fix (qol)** Path completion capped at 200 entries to avoid blocking on large directories (e.g. `/home`).
+- **fix (breaking)** Migration v3 clears existing snapshot history. Delete the old database before launching: `rm ~/.local/share/fsmonitor-cli/data.db`
+- **fix (breaking)** `VACUUM` run after destructive migration to reclaim disk space.
+- **docs** Restructured README: install/uninstall, stored data table, TUI/CLI split, screenshot gallery.
+- **docs** Restructured user guide into TUI and CLI sections; added `enabled_rules`/`disabled_rules` config fields.
+- **docs** Added `monitor/` module to architecture.md and contributing.md.
 
 ## v0.1.0
 
