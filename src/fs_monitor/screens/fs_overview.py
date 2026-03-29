@@ -448,8 +448,11 @@ class FSOverviewScreen(Screen):
         self._load_data()
 
     def on_screen_resume(self) -> None:
-        self._show_loading(True)
-        self._load_data()
+        # Only reload when switching back from another screen,
+        # not when returning from the detail modal.
+        if not self._entries:
+            self._show_loading(True)
+            self._load_data()
 
     @work(thread=True)
     def _load_data(self) -> None:
