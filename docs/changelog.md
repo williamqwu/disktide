@@ -18,6 +18,8 @@ Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
 - **add** FS Overview screen (`f`): all real mounted filesystems with mount point, FS type, speed tier (Fast SSD / Medium HDD / Slow Network), size columns, and a visual usage bar.
 - **add** FS Overview detail popup: press Enter on any row to see device path, inode stats, block size, and full mount options.
 - **add** Proportional summary bar at the top of FS Overview, coloured by speed tier.
+- **add** User quota column: displays personal quota usage and limit when the `quota` command is available (supports local and NFS quotas). Detail popup shows soft/hard limits with usage bar.
+- **fix** Detail popup no longer resets the table cursor to the first row on close.
 
 **Cleanup**
 
@@ -28,6 +30,7 @@ Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
 
 - **add** Exit notification: pressing `q` shows "Finishing background tasks..." toast inside the TUI while background threads wind down; "fsmonitor-cli closed. Goodbye!" is printed to the terminal once fully exited.
 - **fix (qol)** Pressing `q` now cancels any in-progress scan, reducing shutdown delay.
+- **fix** Config changes (e.g. default visualization) were not persisted when quitting with `q`; config is now saved on quit.
 
 **Fixes**
 
@@ -38,6 +41,8 @@ Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
 
 - **add** Two new file-type categories: "model" (ML checkpoints: pt, pth, ckpt, onnx, safetensors, pb, tflite, savedmodel) and "log" (log, out, err).
 - **add** Expanded extension coverage across all existing categories (60+ new extensions including ML data formats, modern web frameworks, and additional media/archive types).
+- **add** Sunburst is now the default visualization and first tab (`1`); treemap moved to `2`.
+- **add** `default_viz` config is now applied on explorer mount.
 
 **Docs**
 
