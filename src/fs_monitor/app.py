@@ -59,22 +59,40 @@ class FSMonitorApp(App):
             paths = get_effective_paths(self._config)
             cwd = os.getcwd()
 
+            self._db.connect()
+            recent = self._db.recent_paths(limit=5)
+
             self.push_screen(
                 WelcomeScreen(
                     cwd_path=cwd,
                     saved_path=paths.default_scan_path,
                     last_visited_path=paths.last_visited_path,
+                    recent_paths=recent,
                 ),
                 callback=self._on_welcome_result,
             )
         else:
             self._launch_explorer(self._scan_path or str(Path(".").resolve()))
 
-    def _on_welcome_result(self, path: str | None) -> None:
-        """Callback from WelcomeScreen with the chosen path."""
-        if path is None or self._exit:
+    def _on_welcome_result(self, result: tuple[str, bool] | None) -> None:
+        """Callback from WelcomeScreen with the chosen path and save flag."""
+        if result is None or self._exit:
             return
-        self._save_last_visited(path)
+        path, save_default = result
+        paths = get_effective_paths(self._config)
+        changed = False
+        if save_default and paths.default_scan_path != path:
+            paths.default_scan_path = path
+            changed = True
+        if paths.last_visited_path != path:
+            paths.last_visited_path = path
+            changed = True
+        if changed:
+            set_effective_paths(self._config, paths)
+            try:
+                save_config(self._config)
+            except OSError:
+                pass
         self._launch_explorer(path)
 
     def _save_last_visited(self, path: str) -> None:

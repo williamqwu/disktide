@@ -358,6 +358,21 @@ class Database:
         ).fetchone()
         return self._row_to_snapshot(row) if row else None
 
+    def recent_paths(self, limit: int = 10) -> list[str]:
+        """Return distinct root_paths from snapshots, most-recent first."""
+        if not self.conn:
+            return []
+        try:
+            rows = self.conn.execute(
+                "SELECT root_path, MAX(timestamp) AS ts"
+                " FROM snapshots GROUP BY root_path"
+                " ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [r[0] for r in rows]
+        except Exception:
+            return []
+
     def delete_snapshot(self, snapshot_id: int) -> None:
         """Delete a snapshot, promoting dependents if it's a baseline."""
         snap = self.get_snapshot(snapshot_id)
