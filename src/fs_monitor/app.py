@@ -131,8 +131,11 @@ class FSMonitorApp(App):
         self.push_screen("explorer")
 
     def action_quit(self) -> None:
-        """Cancel active background tasks, notify the user, then exit."""
-        # Cancel any in-progress scan so the thread finishes quickly
+        """Save config, cancel active background tasks, then exit."""
+        try:
+            save_config(self._config)
+        except OSError:
+            pass
         try:
             engine = self._explorer._engine
             if engine is not None:
@@ -140,7 +143,7 @@ class FSMonitorApp(App):
         except AttributeError:
             pass
         self.notify(
-            "Finishing background tasks — this may take a few seconds…",
+            "Finishing background tasks...",
             title="Closing",
             timeout=30,
         )
