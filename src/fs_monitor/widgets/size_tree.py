@@ -106,9 +106,14 @@ class SizeTree(Tree[FSNode]):
             pct = ratio * 100
             text.append(f"  {bar} {pct:.1f}%", style="green")
 
-        # Error indicator
+        # Accessibility indicators (full denial vs partial)
         if node.error:
             text.append(" ⚠", style="bold red")
+        elif node.inaccessible_count > 0:
+            text.append(f" ◐ {node.inaccessible_count} hidden", style="bold yellow")
+        elif node.is_dir and node.inaccessible_subtree_count > 0:
+            # Some descendant somewhere below has hidden state — dim hint
+            text.append(" ◐", style="dim yellow")
 
         return text
 

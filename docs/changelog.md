@@ -44,6 +44,14 @@ Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
 - **add** Sunburst is now the default visualization and first tab (`1`); treemap moved to `2`.
 - **add** `default_viz` config is now applied on explorer mount.
 
+**Partial Inaccessibility (#14)**
+
+- **add** Walker/engine now track per-node `inaccessible_count` (direct unreadable entries) and `inaccessible_subtree_count` (bottom-up aggregate); previously, per-entry `OSError`s were silently dropped, hiding the fact that reported sizes under-counted.
+- **add** Size tree marks affected directories with a yellow `◐ N hidden` glyph (full denial keeps its red `⚠`); ancestors with hidden state below get a dim `◐`.
+- **add** Info panel gains an **Access** row (Full / Partial / Denied) and prefixes the size with `≥` when the subtree is partially scanned.
+- **add** Sunburst arc labels and treemap rect labels append `◐` (partial) or `⚠` (denied) when there is room.
+- **add** Explorer header subtitle summarises subtree counts: `⚠ N denied, ◐ M partial`.
+
 **Docs**
 
 - **docs** User guide: updated welcome screen section, added FS Overview section, added File-Type Categories reference, Cleanup experimental note, updated key binding table, documented `show_cleanup` and per-path worker detection.

@@ -174,12 +174,33 @@ class ExplorerScreen(Screen):
         if self._root is None:
             return
         size = humanize.naturalsize(self._root.size, binary=True)
+        denied, partial = self._count_inaccessible(self._root)
+        suffix = ""
+        if denied or partial:
+            parts = []
+            if denied:
+                parts.append(f"⚠ {denied} denied")
+            if partial:
+                parts.append(f"◐ {partial} partial")
+            suffix = "  |  " + ", ".join(parts)
         self.app.sub_title = (
             f"{self._root.file_count:,} files, "
             f"{self._root.dir_count:,} dirs  |  "
-            f"Total: {size}"
+            f"Total: {size}{suffix}"
         )
         self._update_sort_indicator()
+
+    @staticmethod
+    def _count_inaccessible(root: FSNode) -> tuple[int, int]:
+        """Return (denied_dirs, partial_dirs) anywhere in the subtree."""
+        denied = 0
+        partial = 0
+        for n in root.walk_dirs():
+            if n.error is not None:
+                denied += 1
+            elif n.inaccessible_count > 0:
+                partial += 1
+        return denied, partial
 
     def _update_sort_indicator(self) -> None:
         """Update the sort indicator label."""

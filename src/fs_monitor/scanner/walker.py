@@ -41,6 +41,7 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
     own_size = 0
     file_count = 0
     dir_count = 0
+    inaccessible = 0
 
     try:
         for entry in scandir_it:
@@ -62,7 +63,7 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
                         own_size += st.st_size
                         file_count += 1
                     except OSError:
-                        pass
+                        inaccessible += 1
                     continue
 
                 if entry.is_dir(follow_symlinks=False):
@@ -70,6 +71,8 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
                     node.children.append(child)
                     dir_count += 1 + child.dir_count
                     file_count += child.file_count
+                    if child.error is not None:
+                        inaccessible += 1
                 elif entry.is_file(follow_symlinks=False):
                     try:
                         st = entry.stat(follow_symlinks=False)
@@ -87,8 +90,9 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
                         own_size += st.st_size
                         file_count += 1
                     except OSError:
-                        pass
+                        inaccessible += 1
             except OSError:
+                inaccessible += 1
                 continue
     finally:
         scandir_it.close()
@@ -99,5 +103,9 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
     node.own_size = own_size
     node.file_count = file_count
     node.dir_count = dir_count
+    node.inaccessible_count = inaccessible
+    node.inaccessible_subtree_count = inaccessible + sum(
+        c.inaccessible_subtree_count for c in node.children if c.is_dir
+    )
 
     return node

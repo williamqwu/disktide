@@ -22,7 +22,12 @@ class FSNode:
         mtime: Last modification time (epoch).
         depth: Depth from scan root (root=0).
         children: Child nodes (empty for files).
-        error: Error message if scan failed for this node.
+        error: Error message if scan failed for this node (full denial / unreadable).
+        inaccessible_count: Direct children we could not read (failed scandir/stat,
+            or a recursed child whose own `error` is set). Distinct from `error`,
+            which marks this node itself as wholly unreadable.
+        inaccessible_subtree_count: Bottom-up aggregate of `inaccessible_count`
+            across this subtree, so an ancestor knows hidden state exists below.
     """
 
     name: str
@@ -36,6 +41,8 @@ class FSNode:
     depth: int = 0
     children: list[FSNode] = field(default_factory=list)
     error: str | None = None
+    inaccessible_count: int = 0
+    inaccessible_subtree_count: int = 0
 
     _sorted_cache: list[FSNode] | None = field(
         default=None, repr=False, compare=False
@@ -84,6 +91,16 @@ class FSNode:
     def parent_path(self) -> str:
         """Parent directory path."""
         return str(Path(self.path).parent)
+
+    @property
+    def is_partial(self) -> bool:
+        """Readable but with hidden direct children (≠ wholly denied)."""
+        return self.error is None and self.inaccessible_count > 0
+
+    @property
+    def has_hidden_descendants(self) -> bool:
+        """Some descendant somewhere below is partial or denied."""
+        return self.inaccessible_subtree_count > 0
 
     def size_percent(self, parent_size: int | None = None) -> float:
         """Size as percentage of parent (or given reference size)."""

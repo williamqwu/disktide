@@ -32,6 +32,15 @@ def _rect_bg(node: FSNode, depth: int, is_leaf: bool) -> str:
     return f"rgb({hsl_to_rgb(hue, sat, lum)})"
 
 
+def _access_glyph(node: FSNode) -> str:
+    """Return '⚠' / '◐' / '' marking inaccessibility on a treemap rect."""
+    if node.error is not None:
+        return "⚠"
+    if node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0:
+        return "◐"
+    return ""
+
+
 def _label_fg(depth: int) -> str:
     """Foreground color for labels: white on dark, dark on light."""
     if depth <= 2:
@@ -154,6 +163,9 @@ def _layout_node(
     if not children or depth >= max_depth:
         # Leaf rectangle
         label = node.name if w >= 4 else ""
+        glyph = _access_glyph(node)
+        if label and glyph and w >= len(label) + 2:
+            label = f"{label} {glyph}"
         size_label = humanize.naturalsize(node.size, binary=True) if h >= 3 and w >= 6 else ""
         rects.append(TreemapRect(
             x=x, y=y, w=w, h=h, node=node,
@@ -173,6 +185,9 @@ def _layout_node(
     # Add parent rect first (for background / border)
     # Only show dir label when there is actually a visible border row.
     dir_label = node.name if depth <= 1 and pad > 0 and w >= len(node.name) + 2 else ""
+    glyph = _access_glyph(node)
+    if dir_label and glyph and w >= len(dir_label) + 4:
+        dir_label = f"{dir_label} {glyph}"
     rects.append(TreemapRect(
         x=x, y=y, w=w, h=h, node=node,
         depth=depth, label=dir_label, is_leaf=False,

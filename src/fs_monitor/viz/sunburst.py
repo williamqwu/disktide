@@ -247,6 +247,11 @@ def _compute_labels(
         char_y = int(py / 4)
 
         name = arc.node.name
+        # Suffix glyph marking inaccessibility: ⚠ denied, ◐ partial / below
+        if arc.node.error is not None:
+            name = f"{name} ⚠"
+        elif arc.node.inaccessible_count > 0 or arc.node.inaccessible_subtree_count > 0:
+            name = f"{name} ◐"
         arc_col = _arc_color(arc)
         bg = darken_rgb(arc_col, 0.4)
         _place_label(labels, occupied, char_x, char_y, name, "white", bg)

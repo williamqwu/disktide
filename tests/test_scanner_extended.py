@@ -113,3 +113,69 @@ class TestEngineEdgeCases:
         root = engine.scan(str(tmp_path))
         # Should have scanned but limited depth
         assert root is not None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permission checks")
+class TestPartialInaccessibility:
+    """Issue #14: parent readable, some children unreadable."""
+
+    def _make_partial(self, tmp_path):
+        (tmp_path / "readable.txt").write_text("ok")
+        denied_dir = tmp_path / "denied_dir"
+        denied_dir.mkdir()
+        (denied_dir / "inside.txt").write_text("hidden")
+        os.chmod(denied_dir, 0o000)
+        return denied_dir
+
+    def test_walker_marks_partial(self, tmp_path):
+        denied = self._make_partial(tmp_path)
+        try:
+            root = scan_directory(str(tmp_path))
+            assert root.error is None
+            assert root.is_partial
+            assert root.inaccessible_count == 1
+            assert root.inaccessible_subtree_count >= 1
+            denied_child = next(c for c in root.children if c.name == "denied_dir")
+            assert denied_child.error is not None
+        finally:
+            os.chmod(denied, 0o700)
+
+    def test_engine_marks_partial(self, tmp_path):
+        denied = self._make_partial(tmp_path)
+        try:
+            engine = ScanEngine(workers=2)
+            root = engine.scan(str(tmp_path))
+            assert root.error is None
+            assert root.is_partial
+            assert root.inaccessible_count == 1
+            assert root.has_hidden_descendants
+        finally:
+            os.chmod(denied, 0o700)
+
+    def test_clean_tree_is_not_partial(self, tmp_path):
+        (tmp_path / "file.txt").write_text("ok")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "nested.txt").write_text("ok")
+        root = scan_directory(str(tmp_path))
+        assert not root.is_partial
+        assert root.inaccessible_count == 0
+        assert root.inaccessible_subtree_count == 0
+
+    def test_partial_propagates_up_subtree(self, tmp_path):
+        outer = tmp_path / "outer"
+        inner = outer / "inner"
+        inner.mkdir(parents=True)
+        denied = inner / "denied"
+        denied.mkdir()
+        (denied / "x").write_text("x")
+        os.chmod(denied, 0o000)
+        try:
+            root = scan_directory(str(tmp_path))
+            # root itself has no direct issue
+            assert root.inaccessible_count == 0
+            assert not root.is_partial
+            # but somewhere below there is a hidden node
+            assert root.has_hidden_descendants
+        finally:
+            os.chmod(denied, 0o700)
