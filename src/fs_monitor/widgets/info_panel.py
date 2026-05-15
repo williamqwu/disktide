@@ -66,7 +66,9 @@ class InfoPanel(Widget):
 
             # Access row — full denial / partial / hidden descendants only / ok
             if node.error is not None:
-                table.add_row("Access", Text(f"{DENIED} Denied", style="bold red"))
+                # "Unreadable" rather than "Denied": node.error captures any
+                # OSError from scandir, not only PermissionError.
+                table.add_row("Access", Text(f"{DENIED} Unreadable", style="bold red"))
             elif node.inaccessible_count > 0:
                 table.add_row(
                     "Access",

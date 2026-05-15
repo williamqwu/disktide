@@ -152,6 +152,10 @@ class ExplorerScreen(Screen):
         tree = self.query_one("#size-tree", SizeTree)
         tree.reload(root)
 
+        # Reflect access state on the breadcrumb (scan root may be partial)
+        breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
+        breadcrumb.update_path(root.path, access=self._access_state(root))
+
         # Update only the active viz tab
         self._update_active_viz(root)
         self._update_status()
@@ -180,7 +184,9 @@ class ExplorerScreen(Screen):
         if denied or partial:
             parts = []
             if denied:
-                parts.append(f"{DENIED} {denied} denied")
+                # "unreadable" not "denied": walker.error catches any OSError
+                # (EACCES, EIO, ESTALE, ENOENT-during-recurse, ...).
+                parts.append(f"{DENIED} {denied} unreadable")
             if partial:
                 parts.append(f"{PARTIAL} {partial} partial")
             suffix = "  |  " + ", ".join(parts)
@@ -236,8 +242,16 @@ class ExplorerScreen(Screen):
         """Drill into a directory node."""
         self._current = node
         breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
-        breadcrumb.update_path(node.path)
+        breadcrumb.update_path(node.path, access=self._access_state(node))
         self._update_active_viz(node)
+
+    @staticmethod
+    def _access_state(node: FSNode) -> str:
+        if node.error is not None:
+            return "denied"
+        if node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0:
+            return "partial"
+        return "full"
 
     def action_go_up(self) -> None:
         """Navigate up one directory level, rescanning from parent if at scan root."""

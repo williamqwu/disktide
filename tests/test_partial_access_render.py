@@ -13,6 +13,7 @@ from fs_monitor.glyphs import DENIED, PARTIAL, VS15, visible_width
 from fs_monitor.models.tree import FSNode
 from fs_monitor.viz.sunburst import compute_sunburst
 from fs_monitor.viz.treemap import _access_glyph, compute_layout
+from fs_monitor.widgets.breadcrumb import Breadcrumb
 from fs_monitor.widgets.info_panel import InfoPanel
 from fs_monitor.widgets.size_tree import SizeTree
 
@@ -88,9 +89,9 @@ class TestInfoPanelAccessRow:
         assert "Full" in out
         assert DENIED not in out and PARTIAL not in out
 
-    def test_denied_dir_shows_denied(self):
+    def test_denied_dir_shows_unreadable(self):
         out = self._render(_node("d", error="Permission denied: /d"))
-        assert "Denied" in out
+        assert "Unreadable" in out
         assert DENIED in out
 
     def test_partial_dir_shows_partial_and_geq_size(self):
@@ -111,6 +112,26 @@ class TestInfoPanelAccessRow:
         out = self._render(n)
         assert "4 hidden below" in out
         assert PARTIAL in out
+
+
+class TestBreadcrumbAccess:
+    def _render(self, path: str, access: str = "full") -> str:
+        bc = Breadcrumb(path)
+        bc.update_path(path, access=access)
+        return bc.render().plain
+
+    def test_full_has_no_glyph(self):
+        out = self._render("/etc", access="full")
+        assert DENIED not in out and PARTIAL not in out
+
+    def test_partial_shows_partial_glyph(self):
+        out = self._render("/etc", access="partial")
+        assert PARTIAL in out
+        assert DENIED not in out
+
+    def test_denied_shows_denied_glyph(self):
+        out = self._render("/root", access="denied")
+        assert DENIED in out
 
 
 class TestVizGlyphs:

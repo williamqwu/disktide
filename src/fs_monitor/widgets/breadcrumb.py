@@ -10,6 +10,8 @@ from textual.widget import Widget
 from textual.widgets import Static
 from rich.text import Text
 
+from fs_monitor.glyphs import DENIED, PARTIAL
+
 
 class Breadcrumb(Widget):
     """A breadcrumb navigation bar showing the current path."""
@@ -24,6 +26,7 @@ class Breadcrumb(Widget):
     """
 
     current_path: reactive[str] = reactive("")
+    access: reactive[str] = reactive("full")  # "full" | "partial" | "denied"
 
     def __init__(self, path: str = "", **kwargs):
         super().__init__(**kwargs)
@@ -55,8 +58,17 @@ class Breadcrumb(Widget):
             else:
                 text.append(part, style="blue underline")
 
+        # Access state of the current (last) node — surfaced here so
+        # visualizations (sunburst especially) don't have to fight for
+        # space to show it.
+        if self.access == "denied":
+            text.append(f"  {DENIED}", style="bold red")
+        elif self.access == "partial":
+            text.append(f"  {PARTIAL}", style="bold yellow")
+
         return text
 
-    def update_path(self, path: str) -> None:
-        """Update the displayed path."""
+    def update_path(self, path: str, access: str = "full") -> None:
+        """Update the displayed path and the access state of the current node."""
         self.current_path = path
+        self.access = access
