@@ -7,7 +7,7 @@ from pathlib import Path
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 import humanize
@@ -42,6 +42,7 @@ class ExplorerScreen(Screen):
     DEFAULT_CSS = """
     ExplorerScreen {
         layout: vertical;
+        layers: base overlay;
     }
 
     #explorer-main {
@@ -64,11 +65,19 @@ class ExplorerScreen(Screen):
         width: 60%;
     }
 
-    ScanProgressOverlay {
+    /* Full-screen invisible container in the overlay layer; centres
+       the ScanProgressOverlay floating above the explorer panels so
+       its top border isn't clipped by the TabbedContent below it. */
+    #overlay-container {
+        layer: overlay;
+        width: 100%;
+        height: 100%;
+        align: center middle;
+        background: transparent;
         display: none;
     }
 
-    ScanProgressOverlay.scanning {
+    #overlay-container.scanning {
         display: block;
     }
     """
@@ -96,7 +105,10 @@ class ExplorerScreen(Screen):
                         yield TreemapView(id="treemap-view")
                     with TabPane("Details", id="tab-details"):
                         yield InfoPanel(id="info-panel")
-        yield ScanProgressOverlay(id="scan-progress")
+        yield Container(
+            ScanProgressOverlay(id="scan-progress"),
+            id="overlay-container",
+        )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -111,7 +123,7 @@ class ExplorerScreen(Screen):
         """Kick off a filesystem scan."""
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.start()
-        overlay.add_class("scanning")
+        self.query_one("#overlay-container").add_class("scanning")
         self._run_scan()
 
     @work(thread=True)
@@ -146,7 +158,7 @@ class ExplorerScreen(Screen):
         # Update overlay
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_complete()
-        overlay.remove_class("scanning")
+        self.query_one("#overlay-container").remove_class("scanning")
 
         # Load tree
         tree = self.query_one("#size-tree", SizeTree)

@@ -23,7 +23,6 @@ class ScanProgressOverlay(Widget):
         background: $surface;
         border: thick $primary;
         padding: 1 2;
-        layer: overlay;
     }
     """
 
