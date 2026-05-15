@@ -124,5 +124,23 @@ def scan_directory(
     node.inaccessible_subtree_count = inaccessible + sum(
         c.inaccessible_subtree_count for c in node.children if c.is_dir
     )
+    # Roll up subtree-wide counts of denied/partial *directories* so the
+    # UI can show totals in O(1) without re-walking. Self counts: this
+    # node itself contributes 0 (it didn't fail to open — it descended).
+    # Children contribute their own subtree totals plus themselves when
+    # they're a denied or partial dir.
+    denied_sub = 0
+    partial_sub = 0
+    for c in node.children:
+        if not c.is_dir:
+            continue
+        denied_sub += c.denied_dir_subtree_count
+        partial_sub += c.partial_dir_subtree_count
+        if c.error is not None:
+            denied_sub += 1
+        elif c.inaccessible_count > 0:
+            partial_sub += 1
+    node.denied_dir_subtree_count = denied_sub
+    node.partial_dir_subtree_count = partial_sub
 
     return node

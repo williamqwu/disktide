@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.1.3
+
+Since `1163b24` (Update changelog for quota, viz reorder, and config save fixes).
+
+**Partial Inaccessibility (#14)**
+
+- **add** Walker/engine now track per-node `inaccessible_count` (direct unreadable entries) and `inaccessible_subtree_count` (bottom-up aggregate); previously, per-entry `OSError`s in `os.scandir` and `entry.stat()` were silently dropped, hiding the fact that reported sizes under-counted.
+- **add** Bottom-up aggregates `denied_dir_subtree_count` / `partial_dir_subtree_count` on `FSNode` so subtree-wide UI summaries are O(1) instead of re-walking on every status update.
+- **add** Size tree marks affected directories with a yellow `◐ N hidden` glyph (full denial keeps its red `⚠`); ancestors with hidden state below get a dim `◐`.
+- **add** Info panel gains an **Access** row (Full / Partial / Unreadable) and prefixes the size with `≥` when the subtree is partially scanned.
+- **add** Sunburst arc labels and treemap rect labels append `◐` (partial) or `⚠` (unreadable) when there is room.
+- **add** Breadcrumb shows the access state of the current directory (`◐` partial, `⚠` unreadable) so it's visible in every viz tab without crowding the sunburst.
+- **add** Explorer header subtitle summarises subtree counts: `⚠ N unreadable, ◐ M partial`.
+
+**Web-shell Compatibility**
+
+- **add** UI setting **Safe rendering (web shells)** — when enabled, swaps the block-drawing proportional bar (`█`/`░`) for ASCII (`#`/space) and `⚠`/`◐` accessibility glyphs for `[!]`/`[~]`. Default off; web-based shells (OSC OnDemand, JupyterHub terminals) often lack the Unicode glyphs and render them as runaway horizontal lines.
+- **add** All accessibility glyphs (`⚠`, `◐`) now carry a U+FE0E (variation selector-15) suffix forcing *text* presentation, so terminals that would otherwise render them as 2-cell emoji keep them at width 1.
+
+**Navigation / Safety**
+
+- **add** Rescan (`r`) and quit (`q`) now prompt y/n via a confirmation modal to prevent accidental keystrokes from kicking off a long scan or exiting the app. Pressing the originating key (`r` or `q`) twice also confirms — muscle-memory friendly.
+- **add** Quarter-screen jumps in the explorer tree: Ctrl+U / Ctrl+D move the cursor by `max(1, height // 4)` rows.
+- **add** Settings: Up/Down arrows now move focus between fields (mirrors Tab / Shift+Tab); guarded so an open `Select` dropdown still gets its own arrow-key handling.
+
+**Quit / Shutdown**
+
+- **fix** Pressing `q` on a large scan no longer hangs the shell for many seconds. The walker now propagates the engine's cancel event through every recursive call, so worker threads bail out within ~10 ms instead of running the in-flight subtree to completion. Measured on a 2500-file synthetic tree: cancel-to-finish dropped from "until done" to ~11 ms.
+- **fix** Shutdown ordering: cancel active scan → join non-daemon threads (8s cap, warning on expiry) → close the SQLite handle → drop refs → `gc.collect()` → print final goodbye. Previously "Goodbye!" printed before interpreter teardown, so the shell hung on a silent pause; now the goodbye genuinely lands last.
+- **fix** Removed the in-TUI "Finishing background tasks..." toast — the screen tore down within the same tick, so the toast was never visible. The terminal-side `Exiting...` / `Goodbye!` messages do the job.
+
+**UI Fixes**
+
+- **fix** Scan progress overlay top border was clipped by the `TabbedContent` panel above it. `ExplorerScreen` now declares an `overlay` layer and centers the overlay in a full-screen invisible container so it floats cleanly above the panels.
+- **fix** Explorer subtitle text "denied" replaced with "unreadable" — `node.error` catches any `OSError` (EACCES, EIO, ESTALE, …), not only permission denials.
+
+**Code Quality**
+
+- **add** `ConfirmModal(ModalScreen[bool])` in `widgets/confirm_modal.py` — generic y/n dialog with optional `confirm_keys` for caller-supplied muscle-memory keys. Reusable for any future "are you sure?" gate.
+- **add** `Database.path` public property; `ExplorerScreen.cancel_active_scan()` public method. Replaces several `self._db._path` / `self._explorer._engine` private-attr reaches.
+- **add** New `fs_monitor.glyphs` (`DENIED`, `PARTIAL`, `VS15`, `visible_width()`) and `fs_monitor.rendering` (runtime safe-rendering toggle + glyph/bar getters) modules; every render site consults the helpers so the safe-rendering switch takes effect on the next paint.
+- **add** Test pytest-asyncio-free pattern: `asyncio.run(go())` wrapping `app.run_test()`, avoiding the missing-plugin issue that breaks `test_welcome.py`.
+
+**Docs**
+
+- **docs** User guide: documented `q` y/n prompt, `r` y/n prompt, Ctrl+U / Ctrl+D quarter-screen jumps, Settings Up/Down field nav.
+
 ## v0.1.2
 
 Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
@@ -43,15 +90,6 @@ Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
 - **add** Expanded extension coverage across all existing categories (60+ new extensions including ML data formats, modern web frameworks, and additional media/archive types).
 - **add** Sunburst is now the default visualization and first tab (`1`); treemap moved to `2`.
 - **add** `default_viz` config is now applied on explorer mount.
-- **add** UI setting **Safe rendering (web shells)** — when enabled, swaps the block-drawing proportional bar (`█`/`░`) for ASCII (`#`/space) and `⚠`/`◐` accessibility glyphs for `[!]`/`[~]`. Default off; web-based shells (OSC OnDemand, JupyterHub terminals) often lack the Unicode glyphs and render them as runaway horizontal lines.
-
-**Partial Inaccessibility (#14)**
-
-- **add** Walker/engine now track per-node `inaccessible_count` (direct unreadable entries) and `inaccessible_subtree_count` (bottom-up aggregate); previously, per-entry `OSError`s were silently dropped, hiding the fact that reported sizes under-counted.
-- **add** Size tree marks affected directories with a yellow `◐ N hidden` glyph (full denial keeps its red `⚠`); ancestors with hidden state below get a dim `◐`.
-- **add** Info panel gains an **Access** row (Full / Partial / Denied) and prefixes the size with `≥` when the subtree is partially scanned.
-- **add** Sunburst arc labels and treemap rect labels append `◐` (partial) or `⚠` (denied) when there is room.
-- **add** Explorer header subtitle summarises subtree counts: `⚠ N denied, ◐ M partial`.
 
 **Docs**
 

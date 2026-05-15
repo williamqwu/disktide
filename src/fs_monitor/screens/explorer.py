@@ -195,7 +195,10 @@ class ExplorerScreen(Screen):
         if self._root is None:
             return
         size = humanize.naturalsize(self._root.size, binary=True)
-        denied, partial = self._count_inaccessible(self._root)
+        # Both totals are aggregated bottom-up during the scan, so
+        # reading them is O(1) — no subtree walk per status update.
+        denied = self._root.denied_dir_subtree_count
+        partial = self._root.partial_dir_subtree_count
         suffix = ""
         if denied or partial:
             parts = []
@@ -212,18 +215,6 @@ class ExplorerScreen(Screen):
             f"Total: {size}{suffix}"
         )
         self._update_sort_indicator()
-
-    @staticmethod
-    def _count_inaccessible(root: FSNode) -> tuple[int, int]:
-        """Return (denied_dirs, partial_dirs) anywhere in the subtree."""
-        denied = 0
-        partial = 0
-        for n in root.walk_dirs():
-            if n.error is not None:
-                denied += 1
-            elif n.inaccessible_count > 0:
-                partial += 1
-        return denied, partial
 
     def _update_sort_indicator(self) -> None:
         """Update the sort indicator label."""
@@ -323,6 +314,16 @@ class ExplorerScreen(Screen):
         move = tree.action_cursor_down if direction == "down" else tree.action_cursor_up
         for _ in range(quarter):
             move()
+
+    def cancel_active_scan(self) -> None:
+        """Public hook to abort the in-flight scan, if any.
+
+        Used by app-level shutdown so we don't have to reach into the
+        screen's private `_engine` from outside.
+        """
+        engine = self._engine
+        if engine is not None:
+            engine.cancel()
 
     def action_rescan(self) -> None:
         """Confirm with the user, then rescan the current path.

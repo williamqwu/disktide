@@ -255,3 +255,37 @@ class TestPartialInaccessibility:
             assert root.has_hidden_descendants
         finally:
             os.chmod(denied, 0o700)
+
+    def test_subtree_aggregates_count_dirs(self, tmp_path):
+        """denied_dir_subtree_count / partial_dir_subtree_count roll up."""
+        # Layout: root -> a (denied), b (partial: contains a denied child)
+        a = tmp_path / "a"
+        a.mkdir()
+        (a / "f").write_text("x")
+        os.chmod(a, 0o000)
+
+        b = tmp_path / "b"
+        b.mkdir()
+        (b / "ok.txt").write_text("ok")
+        b_denied = b / "denied_inside_b"
+        b_denied.mkdir()
+        (b_denied / "x").write_text("x")
+        os.chmod(b_denied, 0o000)
+
+        try:
+            root = scan_directory(str(tmp_path))
+            # `a` is fully denied → 1 denied subtree.
+            # `b` is partial (one denied child); `denied_inside_b` is denied.
+            # Subtree-wide: 2 denied, 1 partial (b).
+            assert root.denied_dir_subtree_count == 2
+            assert root.partial_dir_subtree_count == 1
+        finally:
+            os.chmod(a, 0o700)
+            os.chmod(b_denied, 0o700)
+
+    def test_clean_tree_aggregates_are_zero(self, tmp_path):
+        (tmp_path / "x").write_text("ok")
+        (tmp_path / "sub").mkdir()
+        root = scan_directory(str(tmp_path))
+        assert root.denied_dir_subtree_count == 0
+        assert root.partial_dir_subtree_count == 0

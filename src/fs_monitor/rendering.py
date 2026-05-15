@@ -11,6 +11,10 @@ without a restart.
 
 from __future__ import annotations
 
+from fs_monitor.glyphs import DENIED, PARTIAL
+
+# Toggled from the main thread only (App.on_mount, Settings switch);
+# read on every render. Single-thread invariant means no lock needed.
 _safe = False
 
 
@@ -38,15 +42,9 @@ def bar_chars() -> tuple[str, str]:
 
 def denied_glyph() -> str:
     """Glyph for fully-denied access. ASCII fallback in safe mode."""
-    if _safe:
-        return "[!]"
-    from fs_monitor.glyphs import DENIED
-    return DENIED
+    return "[!]" if _safe else DENIED
 
 
 def partial_glyph() -> str:
     """Glyph for partial / hidden-below access. ASCII fallback in safe mode."""
-    if _safe:
-        return "[~]"
-    from fs_monitor.glyphs import PARTIAL
-    return PARTIAL
+    return "[~]" if _safe else PARTIAL

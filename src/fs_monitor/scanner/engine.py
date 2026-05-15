@@ -172,6 +172,21 @@ class ScanEngine:
         root.inaccessible_subtree_count = top_inaccessible + sum(
             c.inaccessible_subtree_count for c in root.children if c.is_dir
         )
+        # Mirror the walker's bottom-up rollup for subtree-wide
+        # denied/partial directory counts.
+        denied_sub = 0
+        partial_sub = 0
+        for c in root.children:
+            if not c.is_dir:
+                continue
+            denied_sub += c.denied_dir_subtree_count
+            partial_sub += c.partial_dir_subtree_count
+            if c.error is not None:
+                denied_sub += 1
+            elif c.inaccessible_count > 0:
+                partial_sub += 1
+        root.denied_dir_subtree_count = denied_sub
+        root.partial_dir_subtree_count = partial_sub
 
         self._progress.update(
             dirs_scanned=root.dir_count,

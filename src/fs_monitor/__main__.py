@@ -40,52 +40,77 @@ def cli(ctx, max_depth: int | None, workers: int | None):
         app = FSMonitorApp(show_welcome=True, config=config)
         app.run(mouse=False)
 
-        # Print "Exiting..." first so the user sees feedback. Then force
-        # the heavy teardown (Textual internals, SQLite handles, module
-        # state) to run *now* — otherwise it gets deferred to Python
-        # interpreter shutdown after "Goodbye!" prints, leaving the user
-        # staring at a goodbye line while the shell hangs.
+        # Print "Exiting..." first so the user sees feedback. Then run
+        # post-TUI cleanup synchronously — otherwise it gets deferred
+        # to Python interpreter shutdown after "Goodbye!" prints,
+        # leaving the user staring at the goodbye line while the shell
+        # hangs.
         click.echo("Exiting...", nl=True)
         sys.stdout.flush()
         _force_teardown(app)
+        # Drop the app reference here in the caller so gc.collect() has
+        # a chance to actually free Textual subobjects (a `del app`
+        # inside _force_teardown would only delete one of two refs).
+        del app
+        import gc
+        gc.collect()
         click.echo("fsmonitor-cli closed. Goodbye!")
 
 
 def _force_teardown(app) -> None:
-    """Run post-TUI cleanup synchronously so it doesn't leak past Goodbye.
+    """Run post-TUI cleanup in dependency order: cancel → join → close.
 
-    Otherwise the user sees Goodbye and then a beat of interpreter
-    shutdown work (SQLite close, GC of Textual subobjects, module
-    unload) before the shell prompt returns.
+    Order matters:
+      1. cancel — signal the engine so workers can bail out
+      2. join — wait for them, with a tight timeout
+      3. close — free the SQLite handle once nothing's using it
+    Doing close-before-join risks freeing state out from under a still-
+    running worker; doing gc-before-join risks finalising objects whose
+    threads haven't observed cancel yet. The caller runs gc.collect()
+    after we return.
     """
-    import gc
+    import logging
     import threading
 
-    # Close the SQLite connection deterministically rather than waiting
-    # for __del__ at interpreter shutdown.
+    # 1. Cancel any active scan engine.
+    try:
+        if getattr(app, "_explorer", None) is not None:
+            app._explorer.cancel_active_scan()
+    except Exception:
+        pass
+
+    # 2. Join straggling non-daemon, non-main threads. Walker cancel
+    #    propagation makes this fast in practice — keep the cap tight
+    #    so a wedged worker doesn't make the shell appear hung.
+    timeout = 8.0
+    deadline = time.monotonic() + timeout
+    main = threading.main_thread()
+    stragglers: list[threading.Thread] = []
+    for t in threading.enumerate():
+        if t is main or t.daemon:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            stragglers.append(t)
+            continue
+        t.join(timeout=remaining)
+        if t.is_alive():
+            stragglers.append(t)
+    if stragglers:
+        names = ", ".join(t.name for t in stragglers)
+        logging.getLogger(__name__).warning(
+            "shutdown: %d worker thread(s) still alive after %.0fs (%s); "
+            "exiting anyway",
+            len(stragglers), timeout, names,
+        )
+
+    # 3. Close DB after threads are joined.
     db = getattr(app, "_db", None)
     if db is not None:
         try:
             db.close()
         except Exception:
             pass
-
-    # Drop the app reference and force GC so Textual's subobjects are
-    # finalised here, not during interpreter teardown.
-    del app
-    gc.collect()
-
-    # Straggling non-daemon threads (cancel propagation usually makes
-    # this a no-op).
-    deadline = time.monotonic() + 30.0
-    main = threading.main_thread()
-    for t in threading.enumerate():
-        if t is main or t.daemon:
-            continue
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        t.join(timeout=remaining)
 
 
 @cli.command()

@@ -168,9 +168,7 @@ class FSMonitorApp(App):
         except OSError:
             pass
         try:
-            engine = self._explorer._engine
-            if engine is not None:
-                engine.cancel()
+            self._explorer.cancel_active_scan()
         except AttributeError:
             pass
         self.exit()

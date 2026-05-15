@@ -81,7 +81,7 @@ class ConfirmModal(ModalScreen[bool]):
         confirm_hint = "y"
         if self._extra_confirm_keys:
             confirm_hint = "/".join(("y",) + self._extra_confirm_keys)
-        hint = f"Press {confirm_hint} to confirm, n to cancel"
+        hint = f"Press {confirm_hint} to confirm, n/Esc to cancel"
         with Vertical(id="confirm-dialog"):
             yield Static(Text(self._title, style="bold"))
             yield Static(self._message, id="confirm-message")

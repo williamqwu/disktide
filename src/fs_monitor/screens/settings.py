@@ -291,9 +291,9 @@ class SettingsScreen(Screen):
         if self._db is None:
             return
         try:
-            size = os.path.getsize(self._db._path)
+            size = os.path.getsize(self._db.path)
             self.query_one("#sysinfo-dbsize", Static).update(
-                f"  Database: {humanize.naturalsize(size, binary=True)} ({self._db._path})"
+                f"  Database: {humanize.naturalsize(size, binary=True)} ({self._db.path})"
             )
         except OSError:
             self.query_one("#sysinfo-dbsize", Static).update(

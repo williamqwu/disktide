@@ -28,6 +28,12 @@ class FSNode:
             which marks this node itself as wholly unreadable.
         inaccessible_subtree_count: Bottom-up aggregate of `inaccessible_count`
             across this subtree, so an ancestor knows hidden state exists below.
+        denied_dir_subtree_count: Directories at or below this node that are
+            fully unreadable (have `error` set). Aggregated bottom-up so the
+            UI can show subtree-wide totals in O(1) without re-walking.
+        partial_dir_subtree_count: Directories at or below this node that
+            are *partial* (readable but with at least one unreadable direct
+            child). Also bottom-up aggregate.
     """
 
     name: str
@@ -43,6 +49,8 @@ class FSNode:
     error: str | None = None
     inaccessible_count: int = 0
     inaccessible_subtree_count: int = 0
+    denied_dir_subtree_count: int = 0
+    partial_dir_subtree_count: int = 0
 
     _sorted_cache: list[FSNode] | None = field(
         default=None, repr=False, compare=False
