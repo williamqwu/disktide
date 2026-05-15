@@ -40,25 +40,44 @@ def cli(ctx, max_depth: int | None, workers: int | None):
         app = FSMonitorApp(show_welcome=True, config=config)
         app.run(mouse=False)
 
-        # Order matters: app.run() returns once the TUI tears down, but any
-        # in-flight scan worker is non-daemon and will block process exit.
-        # Print "Exiting..." first so the user sees feedback during that
-        # wait, then join the workers, then print the final goodbye.
+        # Print "Exiting..." first so the user sees feedback. Then force
+        # the heavy teardown (Textual internals, SQLite handles, module
+        # state) to run *now* — otherwise it gets deferred to Python
+        # interpreter shutdown after "Goodbye!" prints, leaving the user
+        # staring at a goodbye line while the shell hangs.
         click.echo("Exiting...", nl=True)
         sys.stdout.flush()
-        _wait_for_background_threads(timeout=30.0)
+        _force_teardown(app)
         click.echo("fsmonitor-cli closed. Goodbye!")
 
 
-def _wait_for_background_threads(timeout: float) -> None:
-    """Join any non-daemon, non-main threads still running after TUI exit.
+def _force_teardown(app) -> None:
+    """Run post-TUI cleanup synchronously so it doesn't leak past Goodbye.
 
-    The walker's cancel propagation makes this fast in practice, but a
-    timeout caps the wait so we never hang the user forever.
+    Otherwise the user sees Goodbye and then a beat of interpreter
+    shutdown work (SQLite close, GC of Textual subobjects, module
+    unload) before the shell prompt returns.
     """
+    import gc
     import threading
 
-    deadline = time.monotonic() + timeout
+    # Close the SQLite connection deterministically rather than waiting
+    # for __del__ at interpreter shutdown.
+    db = getattr(app, "_db", None)
+    if db is not None:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    # Drop the app reference and force GC so Textual's subobjects are
+    # finalised here, not during interpreter teardown.
+    del app
+    gc.collect()
+
+    # Straggling non-daemon threads (cancel propagation usually makes
+    # this a no-op).
+    deadline = time.monotonic() + 30.0
     main = threading.main_thread()
     for t in threading.enumerate():
         if t is main or t.daemon:
