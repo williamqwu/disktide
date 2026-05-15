@@ -43,7 +43,7 @@ Navigation:
 | `u` | Go up to the parent directory |
 | `i` | Drill into the selected directory (rescans from there) |
 | `s` | Cycle sort order: size, name, modified |
-| `r` | Rescan the current directory |
+| `r` | Rescan the current directory (prompts y/n first) |
 
 ### Monitor (M)
 

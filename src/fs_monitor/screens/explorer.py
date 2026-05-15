@@ -19,6 +19,7 @@ from fs_monitor.scanner.engine import ScanEngine
 from fs_monitor.scanner.progress import ScanProgress
 from fs_monitor.widgets.size_tree import SizeTree
 from fs_monitor.widgets.breadcrumb import Breadcrumb
+from fs_monitor.widgets.confirm_modal import ConfirmModal
 from fs_monitor.widgets.info_panel import InfoPanel
 from fs_monitor.widgets.treemap_view import TreemapView
 from fs_monitor.widgets.sunburst_view import SunburstView
@@ -309,8 +310,25 @@ class ExplorerScreen(Screen):
         self._update_sort_indicator()
 
     def action_rescan(self) -> None:
-        """Rescan the current path."""
-        self._start_scan(force=True)
+        """Confirm with the user, then rescan the current path.
+
+        Rescanning a large tree is slow, so press-r is gated behind a
+        y/n prompt to prevent an accidental keystroke from kicking off
+        a long scan.
+        """
+        path = self._scan_path
+
+        def _on_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self._start_scan(force=True)
+
+        self.app.push_screen(
+            ConfirmModal(
+                message=f"Rescan {path}?",
+                title="Rescan",
+            ),
+            callback=_on_confirm,
+        )
 
     def action_search(self) -> None:
         """Open search (placeholder)."""
