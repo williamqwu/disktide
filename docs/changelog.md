@@ -43,6 +43,7 @@ Since `42fb096` (Update docs for welcome screen and hostname-aware paths).
 - **add** Expanded extension coverage across all existing categories (60+ new extensions including ML data formats, modern web frameworks, and additional media/archive types).
 - **add** Sunburst is now the default visualization and first tab (`1`); treemap moved to `2`.
 - **add** `default_viz` config is now applied on explorer mount.
+- **add** UI setting **Safe rendering (web shells)** — when enabled, swaps the block-drawing proportional bar (`█`/`░`) for ASCII (`#`/space) and `⚠`/`◐` accessibility glyphs for `[!]`/`[~]`. Default off; web-based shells (OSC OnDemand, JupyterHub terminals) often lack the Unicode glyphs and render them as runaway horizontal lines.
 
 **Partial Inaccessibility (#14)**
 

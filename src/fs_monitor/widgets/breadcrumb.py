@@ -10,7 +10,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 from rich.text import Text
 
-from fs_monitor.glyphs import DENIED, PARTIAL
+from fs_monitor.rendering import denied_glyph, partial_glyph
 
 
 class Breadcrumb(Widget):
@@ -62,9 +62,9 @@ class Breadcrumb(Widget):
         # visualizations (sunburst especially) don't have to fight for
         # space to show it.
         if self.access == "denied":
-            text.append(f"  {DENIED}", style="bold red")
+            text.append(f"  {denied_glyph()}", style="bold red")
         elif self.access == "partial":
-            text.append(f"  {PARTIAL}", style="bold yellow")
+            text.append(f"  {partial_glyph()}", style="bold yellow")
 
         return text
 

@@ -205,6 +205,17 @@ class SettingsScreen(Screen):
                     classes="input-hint",
                 )
 
+            with Horizontal(classes="setting-row"):
+                yield Label("Safe rendering (web shells)", classes="setting-label")
+                yield Switch(
+                    value=self._config.ui.safe_rendering,
+                    id="safe-rendering",
+                )
+                yield Label(
+                    "(ASCII bars and glyphs)",
+                    classes="input-hint",
+                )
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -311,6 +322,13 @@ class SettingsScreen(Screen):
             self._config.monitor.strict_path = event.value
         elif event.switch.id == "hostname-aware-paths":
             self._config.ui.hostname_aware_paths = event.value
+        elif event.switch.id == "safe-rendering":
+            self._config.ui.safe_rendering = event.value
+            # Apply immediately so any new renders pick up the choice
+            # without requiring a restart.
+            from fs_monitor.rendering import set_safe_rendering
+            set_safe_rendering(event.value)
+            self.app.refresh()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "default-viz":

@@ -12,6 +12,7 @@ from fs_monitor.config import (
     AppConfig, load_config, save_config,
     get_effective_paths, set_effective_paths,
 )
+from fs_monitor.rendering import set_safe_rendering
 from fs_monitor.viz.colors import set_color_scheme
 from fs_monitor.storage.database import Database
 from fs_monitor.screens.explorer import ExplorerScreen
@@ -53,6 +54,7 @@ class FSMonitorApp(App):
 
     def on_mount(self) -> None:
         set_color_scheme(self._config.ui.color_theme)
+        set_safe_rendering(self._config.ui.safe_rendering)
 
         if self._show_welcome:
             from fs_monitor.screens.welcome import WelcomeScreen

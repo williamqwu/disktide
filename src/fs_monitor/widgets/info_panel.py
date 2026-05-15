@@ -11,8 +11,8 @@ from rich.table import Table
 from rich.text import Text
 import humanize
 
-from fs_monitor.glyphs import DENIED, PARTIAL
 from fs_monitor.models.tree import FSNode
+from fs_monitor.rendering import denied_glyph, partial_glyph
 
 
 class InfoPanel(Widget):
@@ -68,12 +68,12 @@ class InfoPanel(Widget):
             if node.error is not None:
                 # "Unreadable" rather than "Denied": node.error captures any
                 # OSError from scandir, not only PermissionError.
-                table.add_row("Access", Text(f"{DENIED} Unreadable", style="bold red"))
+                table.add_row("Access", Text(f"{denied_glyph()} Unreadable", style="bold red"))
             elif node.inaccessible_count > 0:
                 table.add_row(
                     "Access",
                     Text(
-                        f"{PARTIAL} Partial — {node.inaccessible_count} direct "
+                        f"{partial_glyph()} Partial — {node.inaccessible_count} direct "
                         f"{'entry' if node.inaccessible_count == 1 else 'entries'} unreadable",
                         style="bold yellow",
                     ),
@@ -82,7 +82,7 @@ class InfoPanel(Widget):
                 table.add_row(
                     "Access",
                     Text(
-                        f"{PARTIAL} {node.inaccessible_subtree_count} hidden below (no direct issue)",
+                        f"{partial_glyph()} {node.inaccessible_subtree_count} hidden below (no direct issue)",
                         style="dim yellow",
                     ),
                 )

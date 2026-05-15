@@ -9,8 +9,9 @@ import humanize
 from rich.segment import Segment
 from rich.style import Style
 
-from fs_monitor.glyphs import DENIED, PARTIAL, visible_width
+from fs_monitor.glyphs import visible_width
 from fs_monitor.models.tree import FSNode
+from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.viz.braille import ColorBrailleCanvas
 from fs_monitor.viz.colors import (
     darken_rgb,
@@ -248,11 +249,11 @@ def _compute_labels(
         char_y = int(py / 4)
 
         name = arc.node.name
-        # Suffix glyph marking inaccessibility: DENIED / PARTIAL / none
+        # Suffix glyph marking inaccessibility: denied / partial / none
         if arc.node.error is not None:
-            name = f"{name} {DENIED}"
+            name = f"{name} {denied_glyph()}"
         elif arc.node.inaccessible_count > 0 or arc.node.inaccessible_subtree_count > 0:
-            name = f"{name} {PARTIAL}"
+            name = f"{name} {partial_glyph()}"
         arc_col = _arc_color(arc)
         bg = darken_rgb(arc_col, 0.4)
         _place_label(labels, occupied, char_x, char_y, name, "white", bg)

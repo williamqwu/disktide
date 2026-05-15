@@ -9,8 +9,9 @@ import squarify
 from rich.segment import Segment
 from rich.style import Style
 
-from fs_monitor.glyphs import DENIED, PARTIAL, visible_width
+from fs_monitor.glyphs import visible_width
 from fs_monitor.models.tree import FSNode
+from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.viz.colors import file_category, get_color_scheme, hsl_to_rgb
 
 
@@ -34,11 +35,11 @@ def _rect_bg(node: FSNode, depth: int, is_leaf: bool) -> str:
 
 
 def _access_glyph(node: FSNode) -> str:
-    """Return DENIED / PARTIAL / '' marking inaccessibility on a treemap rect."""
+    """Return denied / partial / '' glyph marking inaccessibility on a rect."""
     if node.error is not None:
-        return DENIED
+        return denied_glyph()
     if node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0:
-        return PARTIAL
+        return partial_glyph()
     return ""
 
 
