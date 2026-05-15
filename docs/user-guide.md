@@ -95,7 +95,7 @@ Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in t
 | `f` | Global | Switch to FS Overview |
 | `c` | Global | Switch to Cleanup (must be enabled in Settings) |
 | `?` | Global | Open settings |
-| `q` | Global | Quit |
+| `q` | Global | Quit (prompts y/n first) |
 | `1` / `2` / `3` | Explorer | Sunburst / Treemap / Details |
 | `u` / `i` | Explorer | Navigate up / drill into directory |
 | `s` | Explorer | Cycle sort order |

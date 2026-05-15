@@ -19,6 +19,7 @@ from fs_monitor.screens.cleanup import CleanupScreen
 from fs_monitor.screens.monitor import MonitorScreen
 from fs_monitor.screens.settings import SettingsScreen
 from fs_monitor.screens.fs_overview import FSOverviewScreen
+from fs_monitor.widgets.confirm_modal import ConfirmModal
 
 
 class FSMonitorApp(App):
@@ -131,14 +132,35 @@ class FSMonitorApp(App):
         self.push_screen("explorer")
 
     def action_quit(self) -> None:
-        """Save config, cancel active background tasks, then exit.
+        """Gate quit behind a y/n prompt to avoid accidental exits.
 
-        The walker checks the engine's cancel event at every directory
+        On confirm, the real teardown runs in `_perform_quit`. The
+        walker checks the engine's cancel event at every directory
         boundary, so the worker thread bails out quickly. The terminal
         side prints "Exiting..." after TUI teardown and joins the
         scanner thread before printing the final goodbye — see
         fs_monitor.__main__.
         """
+        # If a modal (e.g. the quit prompt itself) is already on top,
+        # ignore repeated `q` presses so we don't stack prompts.
+        if isinstance(self.screen, ConfirmModal):
+            return
+
+        def _on_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self._perform_quit()
+
+        self.push_screen(
+            ConfirmModal(
+                message="Quit fsmonitor-cli?",
+                title="Quit",
+                confirm_keys=("q",),
+            ),
+            callback=_on_confirm,
+        )
+
+    def _perform_quit(self) -> None:
+        """Save config, cancel active scans, then exit the app."""
         try:
             save_config(self._config)
         except OSError:

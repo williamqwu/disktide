@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -46,6 +47,9 @@ class ConfirmModal(ModalScreen[bool]):
     }
     """
 
+    # Built-in bindings; callers can pass extra keys via confirm_keys
+    # (e.g. the originating key "r" or "q") so the user can press the
+    # same key twice to confirm — convenient muscle memory.
     BINDINGS = [
         Binding("y", "confirm", "Yes", show=True),
         Binding("n", "cancel", "No", show=True),
@@ -56,17 +60,32 @@ class ConfirmModal(ModalScreen[bool]):
         self,
         message: str,
         title: str = "Confirm",
+        confirm_keys: tuple[str, ...] = (),
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._message = message
         self._title = title
+        self._extra_confirm_keys = tuple(
+            k for k in confirm_keys if k not in ("y", "n", "escape")
+        )
+
+    def on_key(self, event: events.Key) -> None:
+        # Caller-supplied confirm keys (e.g. "r" / "q") also confirm —
+        # convenient muscle memory: press the same key twice to commit.
+        if event.key in self._extra_confirm_keys:
+            event.stop()
+            self.action_confirm()
 
     def compose(self) -> ComposeResult:
+        confirm_hint = "y"
+        if self._extra_confirm_keys:
+            confirm_hint = "/".join(("y",) + self._extra_confirm_keys)
+        hint = f"Press {confirm_hint} to confirm, n to cancel"
         with Vertical(id="confirm-dialog"):
             yield Static(Text(self._title, style="bold"))
             yield Static(self._message, id="confirm-message")
-            yield Static(Text("Press y to confirm, n to cancel", style="dim"), id="confirm-hint")
+            yield Static(Text(hint, style="dim"), id="confirm-hint")
             with Horizontal(classes="button-row"):
                 yield Button("Yes", variant="primary", id="btn-yes")
                 yield Button("No", variant="default", id="btn-no")

@@ -326,6 +326,7 @@ class ExplorerScreen(Screen):
             ConfirmModal(
                 message=f"Rescan {path}?",
                 title="Rescan",
+                confirm_keys=("r",),
             ),
             callback=_on_confirm,
         )
