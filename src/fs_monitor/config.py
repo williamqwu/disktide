@@ -230,7 +230,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     if "ui" in data:
         ui = data["ui"]
-        config.ui.color_theme = ui.get("color_theme", "default")
+        config.ui.color_theme = ui.get("color_theme", "warm")
         config.ui.default_sort = ui.get("default_sort", "size")
         config.ui.default_viz = ui.get("default_viz", "sunburst")
         config.ui.show_hidden = ui.get("show_hidden", False)
