@@ -39,6 +39,7 @@ Navigation:
 | Key | Action |
 |-----|--------|
 | Up/Down | Move through the tree |
+| Ctrl+U / Ctrl+D | Jump up / down by a quarter of the visible tree |
 | Left/Right | Collapse/expand tree nodes |
 | `u` | Go up to the parent directory |
 | `i` | Drill into the selected directory (rescans from there) |
@@ -99,6 +100,8 @@ Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in t
 | `1` / `2` / `3` | Explorer | Sunburst / Treemap / Details |
 | `u` / `i` | Explorer | Navigate up / drill into directory |
 | `s` | Explorer | Cycle sort order |
+| Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
+| Up / Down | Settings | Move focus between fields (also Tab/Shift+Tab) |
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
 | `d` | Cleanup | Delete selected |
 | `a` | Cleanup | Select all |

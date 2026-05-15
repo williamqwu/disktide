@@ -38,6 +38,9 @@ class ExplorerScreen(Screen):
         Binding("s", "cycle_sort", "[S]ort [R]escan", show=True, key_display="Action"),
         Binding("r", "rescan", "Rescan", show=False),
         Binding("slash", "search", "Search", show=False),
+        # Quarter-screen jumps in the tree — fast scanning of huge lists.
+        Binding("ctrl+d", "scroll_quarter('down')", "↓¼", show=True, key_display="^D/^U"),
+        Binding("ctrl+u", "scroll_quarter('up')", "↑¼", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -308,6 +311,18 @@ class ExplorerScreen(Screen):
         tree = self.query_one("#size-tree", SizeTree)
         tree.cycle_sort()
         self._update_sort_indicator()
+
+    def action_scroll_quarter(self, direction: str) -> None:
+        """Move the tree cursor by a quarter of the visible tree height.
+
+        Useful on flat directories with hundreds of entries where line-
+        by-line ↑/↓ is too slow.
+        """
+        tree = self.query_one("#size-tree", SizeTree)
+        quarter = max(1, tree.size.height // 4)
+        move = tree.action_cursor_down if direction == "down" else tree.action_cursor_up
+        for _ in range(quarter):
+            move()
 
     def action_rescan(self) -> None:
         """Confirm with the user, then rescan the current path.
