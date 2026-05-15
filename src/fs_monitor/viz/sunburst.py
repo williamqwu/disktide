@@ -9,6 +9,7 @@ import humanize
 from rich.segment import Segment
 from rich.style import Style
 
+from fs_monitor.glyphs import DENIED, PARTIAL, visible_width
 from fs_monitor.models.tree import FSNode
 from fs_monitor.viz.braille import ColorBrailleCanvas
 from fs_monitor.viz.colors import (
@@ -247,11 +248,11 @@ def _compute_labels(
         char_y = int(py / 4)
 
         name = arc.node.name
-        # Suffix glyph marking inaccessibility: ⚠ denied, ◐ partial / below
+        # Suffix glyph marking inaccessibility: DENIED / PARTIAL / none
         if arc.node.error is not None:
-            name = f"{name} ⚠"
+            name = f"{name} {DENIED}"
         elif arc.node.inaccessible_count > 0 or arc.node.inaccessible_subtree_count > 0:
-            name = f"{name} ◐"
+            name = f"{name} {PARTIAL}"
         arc_col = _arc_color(arc)
         bg = darken_rgb(arc_col, 0.4)
         _place_label(labels, occupied, char_x, char_y, name, "white", bg)
@@ -263,12 +264,18 @@ def _place_label(
     center_x: int, y: int,
     text: str, fg: str, bg: str | None = None,
 ) -> None:
-    """Place a label centered at (center_x, y), skipping on collision."""
-    start_x = center_x - len(text) // 2
-    for i in range(len(text)):
+    """Place a label centered at (center_x, y), skipping on collision.
+
+    Centering and collision use *visible* width so the trailing VS-15 on
+    accessibility glyphs (zero-width combining mark) does not claim a
+    grid cell of its own.
+    """
+    width = visible_width(text)
+    start_x = center_x - width // 2
+    for i in range(width):
         if (start_x + i, y) in occupied:
             return
-    for i in range(len(text)):
+    for i in range(width):
         occupied.add((start_x + i, y))
     labels.append(_Label(char_x=start_x, char_y=y, text=text, fg=fg, bg=bg))
 
@@ -319,14 +326,25 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
     if y >= len(rows):
         return []
 
-    # Build label lookup for this row: x -> (char, fg, bg)
+    # Build label lookup for this row: x -> (char_or_cluster, fg, bg).
+    # VS-15 (︎) is folded onto the previous cell so the rendered
+    # cluster stays within a single terminal cell.
     label_chars: dict[int, tuple[str, str, str | None]] = {}
     for label in layout.labels:
-        if label.char_y == y:
-            for i, ch in enumerate(label.text):
-                x = label.char_x + i
-                if 0 <= x < layout.char_width:
-                    label_chars[x] = (ch, label.fg, label.bg)
+        if label.char_y != y:
+            continue
+        cell = 0
+        prev_x: int | None = None
+        for ch in label.text:
+            if ch == "︎" and prev_x is not None:
+                prior_ch, fg, bg = label_chars[prev_x]
+                label_chars[prev_x] = (prior_ch + ch, fg, bg)
+                continue
+            x = label.char_x + cell
+            if 0 <= x < layout.char_width:
+                label_chars[x] = (ch, label.fg, label.bg)
+                prev_x = x
+            cell += 1
 
     # Build legend lookup for this row: x -> (char, color)
     legend_chars: dict[int, tuple[str, str]] = {}

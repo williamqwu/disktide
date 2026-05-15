@@ -13,6 +13,7 @@ from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 import humanize
 
 from fs_monitor.config import AppConfig
+from fs_monitor.glyphs import DENIED, PARTIAL
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.engine import ScanEngine
 from fs_monitor.scanner.progress import ScanProgress
@@ -179,9 +180,9 @@ class ExplorerScreen(Screen):
         if denied or partial:
             parts = []
             if denied:
-                parts.append(f"⚠ {denied} denied")
+                parts.append(f"{DENIED} {denied} denied")
             if partial:
-                parts.append(f"◐ {partial} partial")
+                parts.append(f"{PARTIAL} {partial} partial")
             suffix = "  |  " + ", ".join(parts)
         self.app.sub_title = (
             f"{self._root.file_count:,} files, "

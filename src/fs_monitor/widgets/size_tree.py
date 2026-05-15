@@ -7,6 +7,7 @@ from textual.widgets.tree import TreeNode
 from rich.text import Text
 import humanize
 
+from fs_monitor.glyphs import DENIED, PARTIAL
 from fs_monitor.models.tree import FSNode
 
 
@@ -108,12 +109,12 @@ class SizeTree(Tree[FSNode]):
 
         # Accessibility indicators (full denial vs partial)
         if node.error:
-            text.append(" ⚠", style="bold red")
+            text.append(f" {DENIED}", style="bold red")
         elif node.inaccessible_count > 0:
-            text.append(f" ◐ {node.inaccessible_count} hidden", style="bold yellow")
+            text.append(f" {PARTIAL} {node.inaccessible_count} hidden", style="bold yellow")
         elif node.is_dir and node.inaccessible_subtree_count > 0:
             # Some descendant somewhere below has hidden state — dim hint
-            text.append(" ◐", style="dim yellow")
+            text.append(f" {PARTIAL}", style="dim yellow")
 
         return text
 

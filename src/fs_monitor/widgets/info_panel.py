@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.text import Text
 import humanize
 
+from fs_monitor.glyphs import DENIED, PARTIAL
 from fs_monitor.models.tree import FSNode
 
 
@@ -65,12 +66,12 @@ class InfoPanel(Widget):
 
             # Access row — full denial / partial / hidden descendants only / ok
             if node.error is not None:
-                table.add_row("Access", Text("⚠ Denied", style="bold red"))
+                table.add_row("Access", Text(f"{DENIED} Denied", style="bold red"))
             elif node.inaccessible_count > 0:
                 table.add_row(
                     "Access",
                     Text(
-                        f"◐ Partial — {node.inaccessible_count} direct "
+                        f"{PARTIAL} Partial — {node.inaccessible_count} direct "
                         f"{'entry' if node.inaccessible_count == 1 else 'entries'} unreadable",
                         style="bold yellow",
                     ),
@@ -79,7 +80,7 @@ class InfoPanel(Widget):
                 table.add_row(
                     "Access",
                     Text(
-                        f"◐ {node.inaccessible_subtree_count} hidden below (no direct issue)",
+                        f"{PARTIAL} {node.inaccessible_subtree_count} hidden below (no direct issue)",
                         style="dim yellow",
                     ),
                 )
