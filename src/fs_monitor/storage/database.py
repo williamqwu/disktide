@@ -42,6 +42,11 @@ class Database:
         self._conn: sqlite3.Connection | None = None
         self._run_migrations = run_migrations
 
+    @property
+    def path(self) -> str:
+        """Filesystem path of the SQLite database file."""
+        return self._path
+
     def connect(self) -> None:
         self._conn = sqlite3.connect(self._path)
         self._conn.execute("PRAGMA journal_mode=WAL")

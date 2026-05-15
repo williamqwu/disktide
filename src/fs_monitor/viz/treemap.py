@@ -9,7 +9,9 @@ import squarify
 from rich.segment import Segment
 from rich.style import Style
 
+from fs_monitor.glyphs import visible_width
 from fs_monitor.models.tree import FSNode
+from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.viz.colors import file_category, get_color_scheme, hsl_to_rgb
 
 
@@ -30,6 +32,15 @@ def _rect_bg(node: FSNode, depth: int, is_leaf: bool) -> str:
     else:
         lum = 65
     return f"rgb({hsl_to_rgb(hue, sat, lum)})"
+
+
+def _access_glyph(node: FSNode) -> str:
+    """Return denied / partial / '' glyph marking inaccessibility on a rect."""
+    if node.error is not None:
+        return denied_glyph()
+    if node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0:
+        return partial_glyph()
+    return ""
 
 
 def _label_fg(depth: int) -> str:
@@ -154,6 +165,10 @@ def _layout_node(
     if not children or depth >= max_depth:
         # Leaf rectangle
         label = node.name if w >= 4 else ""
+        glyph = _access_glyph(node)
+        # Budget by visible width (glyph + VS-15 is 2 codepoints but 1 cell)
+        if label and glyph and w >= visible_width(label) + 2:
+            label = f"{label} {glyph}"
         size_label = humanize.naturalsize(node.size, binary=True) if h >= 3 and w >= 6 else ""
         rects.append(TreemapRect(
             x=x, y=y, w=w, h=h, node=node,
@@ -173,6 +188,9 @@ def _layout_node(
     # Add parent rect first (for background / border)
     # Only show dir label when there is actually a visible border row.
     dir_label = node.name if depth <= 1 and pad > 0 and w >= len(node.name) + 2 else ""
+    glyph = _access_glyph(node)
+    if dir_label and glyph and w >= visible_width(dir_label) + 4:
+        dir_label = f"{dir_label} {glyph}"
     rects.append(TreemapRect(
         x=x, y=y, w=w, h=h, node=node,
         depth=depth, label=dir_label, is_leaf=False,
@@ -234,8 +252,9 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
 
         if not rect.is_leaf and rect.label:
             # Directory border label: show on first row of the border rect
-            if rel_y == 0 and run >= len(rect.label) + 2:
-                text = " " + rect.label + " " * (run - len(rect.label) - 1)
+            lw = visible_width(rect.label)
+            if rel_y == 0 and run >= lw + 2:
+                text = " " + rect.label + " " * (run - lw - 1)
                 segments.append(Segment(text, Style(bgcolor=get_color_scheme().border_bg, color="white", bold=True)))
                 x += run
                 continue
@@ -245,9 +264,10 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
         size_label = rect.size_label
         label_y = rect_h // 2  # vertical center of rect
 
-        if label and rel_y == label_y and run >= len(label):
-            pad_left = (run - len(label)) // 2
-            pad_right = run - len(label) - pad_left
+        if label and rel_y == label_y and run >= visible_width(label):
+            lw = visible_width(label)
+            pad_left = (run - lw) // 2
+            pad_right = run - lw - pad_left
             text = " " * pad_left + label + " " * pad_right
         elif size_label and rel_y == label_y + 1 and run >= len(size_label):
             pad_left = (run - len(size_label)) // 2

@@ -12,6 +12,7 @@ from rich.text import Text
 import humanize
 
 from fs_monitor.models.tree import FSNode
+from fs_monitor.rendering import denied_glyph, partial_glyph
 
 
 class InfoPanel(Widget):
@@ -47,12 +48,46 @@ class InfoPanel(Widget):
         table.add_row("Name", node.name)
         table.add_row("Path", node.path)
         table.add_row("Type", "Directory" if node.is_dir else "File")
-        table.add_row("Size", humanize.naturalsize(node.size, binary=True))
+
+        # Size — qualify with ≥ when the subtree has hidden bytes
+        size_text = humanize.naturalsize(node.size, binary=True)
+        if node.is_dir and (
+            node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0
+        ):
+            size_text = f"≥ {size_text}  (partial — some entries unreadable)"
+            table.add_row("Size", Text(size_text, style="yellow"))
+        else:
+            table.add_row("Size", size_text)
 
         if node.is_dir:
             table.add_row("Own Size", humanize.naturalsize(node.own_size, binary=True))
             table.add_row("Files", f"{node.file_count:,}")
             table.add_row("Subdirs", f"{node.dir_count:,}")
+
+            # Access row — full denial / partial / hidden descendants only / ok
+            if node.error is not None:
+                # "Unreadable" rather than "Denied": node.error captures any
+                # OSError from scandir, not only PermissionError.
+                table.add_row("Access", Text(f"{denied_glyph()} Unreadable", style="bold red"))
+            elif node.inaccessible_count > 0:
+                table.add_row(
+                    "Access",
+                    Text(
+                        f"{partial_glyph()} Partial — {node.inaccessible_count} direct "
+                        f"{'entry' if node.inaccessible_count == 1 else 'entries'} unreadable",
+                        style="bold yellow",
+                    ),
+                )
+            elif node.inaccessible_subtree_count > 0:
+                table.add_row(
+                    "Access",
+                    Text(
+                        f"{partial_glyph()} {node.inaccessible_subtree_count} hidden below (no direct issue)",
+                        style="dim yellow",
+                    ),
+                )
+            else:
+                table.add_row("Access", Text("✓ Full", style="green"))
 
         if node.mtime > 0:
             dt = datetime.fromtimestamp(node.mtime)

@@ -7,17 +7,19 @@ from pathlib import Path
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 import humanize
 
 from fs_monitor.config import AppConfig
+from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.engine import ScanEngine
 from fs_monitor.scanner.progress import ScanProgress
 from fs_monitor.widgets.size_tree import SizeTree
 from fs_monitor.widgets.breadcrumb import Breadcrumb
+from fs_monitor.widgets.confirm_modal import ConfirmModal
 from fs_monitor.widgets.info_panel import InfoPanel
 from fs_monitor.widgets.treemap_view import TreemapView
 from fs_monitor.widgets.sunburst_view import SunburstView
@@ -36,11 +38,15 @@ class ExplorerScreen(Screen):
         Binding("s", "cycle_sort", "[S]ort [R]escan", show=True, key_display="Action"),
         Binding("r", "rescan", "Rescan", show=False),
         Binding("slash", "search", "Search", show=False),
+        # Quarter-screen jumps in the tree — fast scanning of huge lists.
+        Binding("ctrl+d", "scroll_quarter('down')", "↓¼", show=True, key_display="^D/^U"),
+        Binding("ctrl+u", "scroll_quarter('up')", "↑¼", show=False),
     ]
 
     DEFAULT_CSS = """
     ExplorerScreen {
         layout: vertical;
+        layers: base overlay;
     }
 
     #explorer-main {
@@ -63,11 +69,19 @@ class ExplorerScreen(Screen):
         width: 60%;
     }
 
-    ScanProgressOverlay {
+    /* Full-screen invisible container in the overlay layer; centres
+       the ScanProgressOverlay floating above the explorer panels so
+       its top border isn't clipped by the TabbedContent below it. */
+    #overlay-container {
+        layer: overlay;
+        width: 100%;
+        height: 100%;
+        align: center middle;
+        background: transparent;
         display: none;
     }
 
-    ScanProgressOverlay.scanning {
+    #overlay-container.scanning {
         display: block;
     }
     """
@@ -95,7 +109,10 @@ class ExplorerScreen(Screen):
                         yield TreemapView(id="treemap-view")
                     with TabPane("Details", id="tab-details"):
                         yield InfoPanel(id="info-panel")
-        yield ScanProgressOverlay(id="scan-progress")
+        yield Container(
+            ScanProgressOverlay(id="scan-progress"),
+            id="overlay-container",
+        )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -110,7 +127,7 @@ class ExplorerScreen(Screen):
         """Kick off a filesystem scan."""
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.start()
-        overlay.add_class("scanning")
+        self.query_one("#overlay-container").add_class("scanning")
         self._run_scan()
 
     @work(thread=True)
@@ -145,11 +162,15 @@ class ExplorerScreen(Screen):
         # Update overlay
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_complete()
-        overlay.remove_class("scanning")
+        self.query_one("#overlay-container").remove_class("scanning")
 
         # Load tree
         tree = self.query_one("#size-tree", SizeTree)
         tree.reload(root)
+
+        # Reflect access state on the breadcrumb (scan root may be partial)
+        breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
+        breadcrumb.update_path(root.path, access=self._access_state(root))
 
         # Update only the active viz tab
         self._update_active_viz(root)
@@ -174,10 +195,24 @@ class ExplorerScreen(Screen):
         if self._root is None:
             return
         size = humanize.naturalsize(self._root.size, binary=True)
+        # Both totals are aggregated bottom-up during the scan, so
+        # reading them is O(1) — no subtree walk per status update.
+        denied = self._root.denied_dir_subtree_count
+        partial = self._root.partial_dir_subtree_count
+        suffix = ""
+        if denied or partial:
+            parts = []
+            if denied:
+                # "unreadable" not "denied": walker.error catches any OSError
+                # (EACCES, EIO, ESTALE, ENOENT-during-recurse, ...).
+                parts.append(f"{denied_glyph()} {denied} unreadable")
+            if partial:
+                parts.append(f"{partial_glyph()} {partial} partial")
+            suffix = "  |  " + ", ".join(parts)
         self.app.sub_title = (
             f"{self._root.file_count:,} files, "
             f"{self._root.dir_count:,} dirs  |  "
-            f"Total: {size}"
+            f"Total: {size}{suffix}"
         )
         self._update_sort_indicator()
 
@@ -214,8 +249,16 @@ class ExplorerScreen(Screen):
         """Drill into a directory node."""
         self._current = node
         breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
-        breadcrumb.update_path(node.path)
+        breadcrumb.update_path(node.path, access=self._access_state(node))
         self._update_active_viz(node)
+
+    @staticmethod
+    def _access_state(node: FSNode) -> str:
+        if node.error is not None:
+            return "denied"
+        if node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0:
+            return "partial"
+        return "full"
 
     def action_go_up(self) -> None:
         """Navigate up one directory level, rescanning from parent if at scan root."""
@@ -260,9 +303,49 @@ class ExplorerScreen(Screen):
         tree.cycle_sort()
         self._update_sort_indicator()
 
+    def action_scroll_quarter(self, direction: str) -> None:
+        """Move the tree cursor by a quarter of the visible tree height.
+
+        Useful on flat directories with hundreds of entries where line-
+        by-line ↑/↓ is too slow.
+        """
+        tree = self.query_one("#size-tree", SizeTree)
+        quarter = max(1, tree.size.height // 4)
+        move = tree.action_cursor_down if direction == "down" else tree.action_cursor_up
+        for _ in range(quarter):
+            move()
+
+    def cancel_active_scan(self) -> None:
+        """Public hook to abort the in-flight scan, if any.
+
+        Used by app-level shutdown so we don't have to reach into the
+        screen's private `_engine` from outside.
+        """
+        engine = self._engine
+        if engine is not None:
+            engine.cancel()
+
     def action_rescan(self) -> None:
-        """Rescan the current path."""
-        self._start_scan(force=True)
+        """Confirm with the user, then rescan the current path.
+
+        Rescanning a large tree is slow, so press-r is gated behind a
+        y/n prompt to prevent an accidental keystroke from kicking off
+        a long scan.
+        """
+        path = self._scan_path
+
+        def _on_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self._start_scan(force=True)
+
+        self.app.push_screen(
+            ConfirmModal(
+                message=f"Rescan {path}?",
+                title="Rescan",
+                confirm_keys=("r",),
+            ),
+            callback=_on_confirm,
+        )
 
     def action_search(self) -> None:
         """Open search (placeholder)."""

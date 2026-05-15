@@ -3,14 +3,24 @@
 from __future__ import annotations
 import os
 import stat
+import threading
 from fs_monitor.models.tree import FSNode
 
 
-def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> FSNode:
+def scan_directory(
+    path: str,
+    depth: int = 0,
+    max_depth: int | None = None,
+    cancel_event: threading.Event | None = None,
+) -> FSNode:
     """Scan a directory and return an FSNode tree.
 
     Uses os.scandir() with follow_symlinks=False.
     Per-entry try/except for resilience.
+
+    If `cancel_event` is provided and set during the scan, the walker
+    returns the partial node it has built so far without descending
+    further — this is what makes `q` responsive on large scans.
     """
     name = os.path.basename(path) or path
     node = FSNode(
@@ -19,6 +29,9 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
         is_dir=True,
         depth=depth,
     )
+
+    if cancel_event is not None and cancel_event.is_set():
+        return node
 
     if max_depth is not None and depth >= max_depth:
         return node
@@ -41,9 +54,12 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
     own_size = 0
     file_count = 0
     dir_count = 0
+    inaccessible = 0
 
     try:
         for entry in scandir_it:
+            if cancel_event is not None and cancel_event.is_set():
+                break
             try:
                 if entry.is_symlink():
                     # Don't follow symlinks — prevents loops, avoids double-counting
@@ -62,14 +78,18 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
                         own_size += st.st_size
                         file_count += 1
                     except OSError:
-                        pass
+                        inaccessible += 1
                     continue
 
                 if entry.is_dir(follow_symlinks=False):
-                    child = scan_directory(entry.path, depth + 1, max_depth)
+                    child = scan_directory(
+                        entry.path, depth + 1, max_depth, cancel_event,
+                    )
                     node.children.append(child)
                     dir_count += 1 + child.dir_count
                     file_count += child.file_count
+                    if child.error is not None:
+                        inaccessible += 1
                 elif entry.is_file(follow_symlinks=False):
                     try:
                         st = entry.stat(follow_symlinks=False)
@@ -87,8 +107,9 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
                         own_size += st.st_size
                         file_count += 1
                     except OSError:
-                        pass
+                        inaccessible += 1
             except OSError:
+                inaccessible += 1
                 continue
     finally:
         scandir_it.close()
@@ -99,5 +120,27 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
     node.own_size = own_size
     node.file_count = file_count
     node.dir_count = dir_count
+    node.inaccessible_count = inaccessible
+    node.inaccessible_subtree_count = inaccessible + sum(
+        c.inaccessible_subtree_count for c in node.children if c.is_dir
+    )
+    # Roll up subtree-wide counts of denied/partial *directories* so the
+    # UI can show totals in O(1) without re-walking. Self counts: this
+    # node itself contributes 0 (it didn't fail to open — it descended).
+    # Children contribute their own subtree totals plus themselves when
+    # they're a denied or partial dir.
+    denied_sub = 0
+    partial_sub = 0
+    for c in node.children:
+        if not c.is_dir:
+            continue
+        denied_sub += c.denied_dir_subtree_count
+        partial_sub += c.partial_dir_subtree_count
+        if c.error is not None:
+            denied_sub += 1
+        elif c.inaccessible_count > 0:
+            partial_sub += 1
+    node.denied_dir_subtree_count = denied_sub
+    node.partial_dir_subtree_count = partial_sub
 
     return node

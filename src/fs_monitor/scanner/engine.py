@@ -63,6 +63,7 @@ class ScanEngine:
         top_files: list[FSNode] = []
         top_dirs: list[str] = []
         own_size = 0
+        top_inaccessible = 0
 
         try:
             scandir_it = os.scandir(path)
@@ -91,7 +92,7 @@ class ScanEngine:
                             top_files.append(child)
                             own_size += st.st_size
                         except OSError:
-                            pass
+                            top_inaccessible += 1
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         top_dirs.append(entry.path)
@@ -107,8 +108,9 @@ class ScanEngine:
                             top_files.append(child)
                             own_size += st.st_size
                         except OSError:
-                            pass
+                            top_inaccessible += 1
                 except OSError:
+                    top_inaccessible += 1
                     continue
         finally:
             scandir_it.close()
@@ -144,6 +146,8 @@ class ScanEngine:
                             running_files += child_node.file_count
                             running_dirs += 1 + child_node.dir_count
                             running_size += child_node.size
+                            if child_node.error is not None:
+                                top_inaccessible += 1
                     except Exception:
                         pass
 
@@ -164,6 +168,25 @@ class ScanEngine:
                           sum(c.file_count for c in root.children if c.is_dir)
         root.dir_count = sum(1 + c.dir_count for c in root.children if c.is_dir)
         root.size = own_size + sum(c.size for c in root.children if c.is_dir)
+        root.inaccessible_count = top_inaccessible
+        root.inaccessible_subtree_count = top_inaccessible + sum(
+            c.inaccessible_subtree_count for c in root.children if c.is_dir
+        )
+        # Mirror the walker's bottom-up rollup for subtree-wide
+        # denied/partial directory counts.
+        denied_sub = 0
+        partial_sub = 0
+        for c in root.children:
+            if not c.is_dir:
+                continue
+            denied_sub += c.denied_dir_subtree_count
+            partial_sub += c.partial_dir_subtree_count
+            if c.error is not None:
+                denied_sub += 1
+            elif c.inaccessible_count > 0:
+                partial_sub += 1
+        root.denied_dir_subtree_count = denied_sub
+        root.partial_dir_subtree_count = partial_sub
 
         self._progress.update(
             dirs_scanned=root.dir_count,
@@ -190,4 +213,7 @@ class ScanEngine:
                 )
 
         self._progress.update(current_path=path)
-        return scan_directory(path, depth=1, max_depth=max_depth)
+        return scan_directory(
+            path, depth=1, max_depth=max_depth,
+            cancel_event=self._cancel_event,
+        )

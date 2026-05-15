@@ -18,6 +18,13 @@ class SettingsScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "dismiss_settings", "Back", show=True),
+        # Arrow keys move focus between fields, like Tab/Shift+Tab.
+        # `priority=True` so Select/Input widgets don't swallow them
+        # when they have no useful arrow-key behaviour of their own
+        # (Inputs use Home/End and ←/→ for caret movement; Selects
+        # only need ↑/↓ when the dropdown is open).
+        Binding("down", "focus_next_field", "Down", show=True, priority=True),
+        Binding("up", "focus_previous_field", "Up", show=True, priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -205,6 +212,17 @@ class SettingsScreen(Screen):
                     classes="input-hint",
                 )
 
+            with Horizontal(classes="setting-row"):
+                yield Label("Safe rendering (web shells)", classes="setting-label")
+                yield Switch(
+                    value=self._config.ui.safe_rendering,
+                    id="safe-rendering",
+                )
+                yield Label(
+                    "(ASCII bars and glyphs)",
+                    classes="input-hint",
+                )
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -273,9 +291,9 @@ class SettingsScreen(Screen):
         if self._db is None:
             return
         try:
-            size = os.path.getsize(self._db._path)
+            size = os.path.getsize(self._db.path)
             self.query_one("#sysinfo-dbsize", Static).update(
-                f"  Database: {humanize.naturalsize(size, binary=True)} ({self._db._path})"
+                f"  Database: {humanize.naturalsize(size, binary=True)} ({self._db.path})"
             )
         except OSError:
             self.query_one("#sysinfo-dbsize", Static).update(
@@ -298,6 +316,29 @@ class SettingsScreen(Screen):
             pass  # Best-effort save
         self.app.pop_screen()
 
+    def action_focus_next_field(self) -> None:
+        """Move focus to the next form field (arrow-down).
+
+        If a Select is currently open, defer to its own arrow handling
+        instead of stealing the keystroke.
+        """
+        if self._select_is_expanded():
+            return
+        self.focus_next()
+
+    def action_focus_previous_field(self) -> None:
+        """Move focus to the previous form field (arrow-up)."""
+        if self._select_is_expanded():
+            return
+        self.focus_previous()
+
+    def _select_is_expanded(self) -> bool:
+        focused = self.focused
+        if focused is None:
+            return False
+        # Textual's Select uses `expanded` to indicate an open dropdown.
+        return bool(getattr(focused, "expanded", False))
+
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "show-hidden":
             self._config.ui.show_hidden = event.value
@@ -311,6 +352,13 @@ class SettingsScreen(Screen):
             self._config.monitor.strict_path = event.value
         elif event.switch.id == "hostname-aware-paths":
             self._config.ui.hostname_aware_paths = event.value
+        elif event.switch.id == "safe-rendering":
+            self._config.ui.safe_rendering = event.value
+            # Apply immediately so any new renders pick up the choice
+            # without requiring a restart.
+            from fs_monitor.rendering import set_safe_rendering
+            set_safe_rendering(event.value)
+            self.app.refresh()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "default-viz":

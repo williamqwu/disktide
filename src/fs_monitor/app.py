@@ -12,6 +12,7 @@ from fs_monitor.config import (
     AppConfig, load_config, save_config,
     get_effective_paths, set_effective_paths,
 )
+from fs_monitor.rendering import set_safe_rendering
 from fs_monitor.viz.colors import set_color_scheme
 from fs_monitor.storage.database import Database
 from fs_monitor.screens.explorer import ExplorerScreen
@@ -19,6 +20,7 @@ from fs_monitor.screens.cleanup import CleanupScreen
 from fs_monitor.screens.monitor import MonitorScreen
 from fs_monitor.screens.settings import SettingsScreen
 from fs_monitor.screens.fs_overview import FSOverviewScreen
+from fs_monitor.widgets.confirm_modal import ConfirmModal
 
 
 class FSMonitorApp(App):
@@ -52,6 +54,7 @@ class FSMonitorApp(App):
 
     def on_mount(self) -> None:
         set_color_scheme(self._config.ui.color_theme)
+        set_safe_rendering(self._config.ui.safe_rendering)
 
         if self._show_welcome:
             from fs_monitor.screens.welcome import WelcomeScreen
@@ -131,22 +134,43 @@ class FSMonitorApp(App):
         self.push_screen("explorer")
 
     def action_quit(self) -> None:
-        """Save config, cancel active background tasks, then exit."""
+        """Gate quit behind a y/n prompt to avoid accidental exits.
+
+        On confirm, the real teardown runs in `_perform_quit`. The
+        walker checks the engine's cancel event at every directory
+        boundary, so the worker thread bails out quickly. The terminal
+        side prints "Exiting..." after TUI teardown and joins the
+        scanner thread before printing the final goodbye — see
+        fs_monitor.__main__.
+        """
+        # If a modal (e.g. the quit prompt itself) is already on top,
+        # ignore repeated `q` presses so we don't stack prompts.
+        if isinstance(self.screen, ConfirmModal):
+            return
+
+        def _on_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self._perform_quit()
+
+        self.push_screen(
+            ConfirmModal(
+                message="Quit fsmonitor-cli?",
+                title="Quit",
+                confirm_keys=("q",),
+            ),
+            callback=_on_confirm,
+        )
+
+    def _perform_quit(self) -> None:
+        """Save config, cancel active scans, then exit the app."""
         try:
             save_config(self._config)
         except OSError:
             pass
         try:
-            engine = self._explorer._engine
-            if engine is not None:
-                engine.cancel()
+            self._explorer.cancel_active_scan()
         except AttributeError:
             pass
-        self.notify(
-            "Finishing background tasks...",
-            title="Closing",
-            timeout=30,
-        )
         self.exit()
 
     def action_switch_mode(self, mode: str) -> None:

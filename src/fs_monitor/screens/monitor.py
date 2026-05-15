@@ -131,7 +131,7 @@ class MonitorScreen(Screen):
             # Open a dedicated read-only connection for this thread — SQLite
             # connections cannot be shared across threads.  Skip migrations
             # since the main-thread connection already handles those.
-            db = Database(path=self._db._path, run_migrations=False)
+            db = Database(path=self._db.path, run_migrations=False)
             db.connect()
             try:
                 snapshots = db.list_snapshots(

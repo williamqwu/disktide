@@ -8,6 +8,7 @@ from rich.text import Text
 import humanize
 
 from fs_monitor.models.tree import FSNode
+from fs_monitor.rendering import bar_chars, denied_glyph, partial_glyph
 
 
 class SizeTree(Tree[FSNode]):
@@ -102,13 +103,22 @@ class SizeTree(Tree[FSNode]):
             ratio = node.size / self._fs_root.size
             bar_width = 15
             filled = int(ratio * bar_width)
-            bar = "█" * filled + "░" * (bar_width - filled)
+            filled_ch, empty_ch = bar_chars()
+            bar = filled_ch * filled + empty_ch * (bar_width - filled)
             pct = ratio * 100
             text.append(f"  {bar} {pct:.1f}%", style="green")
 
-        # Error indicator
+        # Accessibility indicators (full denial vs partial)
         if node.error:
-            text.append(" ⚠", style="bold red")
+            text.append(f" {denied_glyph()}", style="bold red")
+        elif node.inaccessible_count > 0:
+            text.append(
+                f" {partial_glyph()} {node.inaccessible_count} hidden",
+                style="bold yellow",
+            )
+        elif node.is_dir and node.inaccessible_subtree_count > 0:
+            # Some descendant somewhere below has hidden state — dim hint
+            text.append(f" {partial_glyph()}", style="dim yellow")
 
         return text
 
