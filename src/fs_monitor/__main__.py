@@ -39,7 +39,34 @@ def cli(ctx, max_depth: int | None, workers: int | None):
 
         app = FSMonitorApp(show_welcome=True, config=config)
         app.run(mouse=False)
+
+        # Order matters: app.run() returns once the TUI tears down, but any
+        # in-flight scan worker is non-daemon and will block process exit.
+        # Print "Exiting..." first so the user sees feedback during that
+        # wait, then join the workers, then print the final goodbye.
+        click.echo("Exiting...", nl=True)
+        sys.stdout.flush()
+        _wait_for_background_threads(timeout=30.0)
         click.echo("fsmonitor-cli closed. Goodbye!")
+
+
+def _wait_for_background_threads(timeout: float) -> None:
+    """Join any non-daemon, non-main threads still running after TUI exit.
+
+    The walker's cancel propagation makes this fast in practice, but a
+    timeout caps the wait so we never hang the user forever.
+    """
+    import threading
+
+    deadline = time.monotonic() + timeout
+    main = threading.main_thread()
+    for t in threading.enumerate():
+        if t is main or t.daemon:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        t.join(timeout=remaining)
 
 
 @cli.command()

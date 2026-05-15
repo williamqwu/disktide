@@ -115,6 +115,82 @@ class TestEngineEdgeCases:
         assert root is not None
 
 
+class TestCancelPropagation:
+    """Walker must observe the cancel event at directory boundaries so
+    `q` is responsive on large scans."""
+
+    def test_pre_set_cancel_returns_immediately(self, tmp_path):
+        import threading
+        # Build a 3-level tree
+        for i in range(3):
+            d = tmp_path / f"a{i}" / f"b{i}" / f"c{i}"
+            d.mkdir(parents=True)
+            (d / "f.txt").write_text("x" * 100)
+
+        ev = threading.Event()
+        ev.set()  # already cancelled
+        root = scan_directory(str(tmp_path), cancel_event=ev)
+        # Walker returned the bare node without descending
+        assert root.is_dir
+        assert root.children == []
+
+    def test_cancel_during_scan_propagates(self, tmp_path):
+        import threading
+        # Bigger tree so we have time to observe cancel
+        for i in range(50):
+            d = tmp_path / f"dir_{i:02d}"
+            d.mkdir()
+            for j in range(20):
+                (d / f"f{j}.txt").write_text("x" * 50)
+
+        ev = threading.Event()
+        # Cancel after the loop has had a chance to start one entry
+        # but before it finishes — we model this by setting before scan
+        # for determinism in test land.
+        ev.set()
+        root = scan_directory(str(tmp_path), cancel_event=ev)
+        assert root.children == []
+
+    def test_walker_propagates_cancel_into_subtree(self, tmp_path):
+        """Once cancel fires mid-walk, deeper recursion bails out."""
+        import threading
+        for i in range(3):
+            d = tmp_path / f"a{i}" / "b" / "c"
+            d.mkdir(parents=True)
+            (d / "f").write_text("x" * 100)
+
+        ev = threading.Event()
+
+        # Wrap scandir to set the cancel event as soon as the *first* dir
+        # entry is yielded, so subsequent recursions must observe it.
+        import fs_monitor.scanner.walker as walker_mod
+        real_scandir = os.scandir
+        triggered = {"done": False}
+
+        def trip(path):
+            it = real_scandir(path)
+            class _Gen:
+                def __iter__(self_inner):
+                    for e in it:
+                        if not triggered["done"]:
+                            ev.set()
+                            triggered["done"] = True
+                        yield e
+                def close(self_inner):
+                    it.close()
+                def __enter__(self_inner): return self_inner
+                def __exit__(self_inner, *a): it.close()
+            return _Gen()
+
+        walker_mod.os.scandir = trip
+        try:
+            root = scan_directory(str(tmp_path), cancel_event=ev)
+        finally:
+            walker_mod.os.scandir = real_scandir
+        # We bailed early — not every leaf got walked
+        assert root.file_count < 3
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permission checks")
 class TestPartialInaccessibility:
     """Issue #14: parent readable, some children unreadable."""

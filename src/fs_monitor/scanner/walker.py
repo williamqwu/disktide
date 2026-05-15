@@ -3,14 +3,24 @@
 from __future__ import annotations
 import os
 import stat
+import threading
 from fs_monitor.models.tree import FSNode
 
 
-def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> FSNode:
+def scan_directory(
+    path: str,
+    depth: int = 0,
+    max_depth: int | None = None,
+    cancel_event: threading.Event | None = None,
+) -> FSNode:
     """Scan a directory and return an FSNode tree.
 
     Uses os.scandir() with follow_symlinks=False.
     Per-entry try/except for resilience.
+
+    If `cancel_event` is provided and set during the scan, the walker
+    returns the partial node it has built so far without descending
+    further — this is what makes `q` responsive on large scans.
     """
     name = os.path.basename(path) or path
     node = FSNode(
@@ -19,6 +29,9 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
         is_dir=True,
         depth=depth,
     )
+
+    if cancel_event is not None and cancel_event.is_set():
+        return node
 
     if max_depth is not None and depth >= max_depth:
         return node
@@ -45,6 +58,8 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
 
     try:
         for entry in scandir_it:
+            if cancel_event is not None and cancel_event.is_set():
+                break
             try:
                 if entry.is_symlink():
                     # Don't follow symlinks — prevents loops, avoids double-counting
@@ -67,7 +82,9 @@ def scan_directory(path: str, depth: int = 0, max_depth: int | None = None) -> F
                     continue
 
                 if entry.is_dir(follow_symlinks=False):
-                    child = scan_directory(entry.path, depth + 1, max_depth)
+                    child = scan_directory(
+                        entry.path, depth + 1, max_depth, cancel_event,
+                    )
                     node.children.append(child)
                     dir_count += 1 + child.dir_count
                     file_count += child.file_count

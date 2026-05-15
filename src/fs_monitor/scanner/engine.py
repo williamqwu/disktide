@@ -198,4 +198,7 @@ class ScanEngine:
                 )
 
         self._progress.update(current_path=path)
-        return scan_directory(path, depth=1, max_depth=max_depth)
+        return scan_directory(
+            path, depth=1, max_depth=max_depth,
+            cancel_event=self._cancel_event,
+        )

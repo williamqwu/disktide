@@ -131,7 +131,14 @@ class FSMonitorApp(App):
         self.push_screen("explorer")
 
     def action_quit(self) -> None:
-        """Save config, cancel active background tasks, then exit."""
+        """Save config, cancel active background tasks, then exit.
+
+        The walker checks the engine's cancel event at every directory
+        boundary, so the worker thread bails out quickly. The terminal
+        side prints "Exiting..." after TUI teardown and joins the
+        scanner thread before printing the final goodbye — see
+        fs_monitor.__main__.
+        """
         try:
             save_config(self._config)
         except OSError:
@@ -142,11 +149,6 @@ class FSMonitorApp(App):
                 engine.cancel()
         except AttributeError:
             pass
-        self.notify(
-            "Finishing background tasks...",
-            title="Closing",
-            timeout=30,
-        )
         self.exit()
 
     def action_switch_mode(self, mode: str) -> None:
