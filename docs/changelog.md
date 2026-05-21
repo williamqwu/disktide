@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.4
+
+Since `c45f0bc` (v0.1.3 release prep: audit fixes + version bump).
+
+**Explorer**
+
+- **add** `y` copies the highlighted item's absolute path to the system clipboard. It uses the terminal's OSC 52 escape, so it also works over SSH and in web-based shells that have no local clipboard tool.
+- **add** `t` toggles whether proportions are measured by total size (default) or file count. The size-tree bar, sunburst arc angles, treemap rectangle areas, and the Details panel "Top Items" list all follow the active metric. Both `size` and `file_count` are aggregated bottom-up during the scan, so toggling is a re-layout of in-memory data with no extra filesystem access.
+- **add** The indicator line above the tree now shows the active sort order and bar metric (e.g. `Sort: Size  Bar: Files`).
+- **add** New `fs_monitor/metrics.py` centralises the size/file-count metric vocabulary (`metric_value`, `metric_text`); `compute_layout` and `compute_sunburst` take a `metric` argument so the tree, visualizations, and Details panel stay in sync.
+
+**Docs**
+
+- **docs** User guide, README, and architecture document the `y` / `t` hotkeys and the size/file-count metric.
+- **docs** Corrected the stale clone directory (`util_fs_monitor`) in the contributing guide and the viz-tab order in the README key-binding table.
+
 ## v0.1.3
 
 Since `1163b24` (Update changelog for quota, viz reorder, and config save fixes).
