@@ -45,6 +45,10 @@ Navigation:
 | `i` | Drill into the selected directory (rescans from there) |
 | `s` | Cycle sort order: size, name, modified |
 | `r` | Rescan the current directory (prompts y/n first) |
+| `y` | Copy the highlighted item's absolute path to the clipboard |
+| `t` | Toggle size vs. file count (tree, sunburst, treemap, Details) |
+
+The indicator line above the tree shows the current sort order and metric. Press `t` to toggle the metric between total size (the default) and number of files. The tree bar, the sunburst, the treemap, and the Details panel all re-express their proportions accordingly, so every view stays consistent. Both totals are aggregated during the scan, so toggling does no extra filesystem work. Press `y` to copy the highlighted item's absolute path to the system clipboard; it uses the terminal's OSC 52 escape, so it works over SSH and in web-based shells where there is no local clipboard tool.
 
 ### Monitor (M)
 
@@ -100,6 +104,8 @@ Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in t
 | `1` / `2` / `3` | Explorer | Sunburst / Treemap / Details |
 | `u` / `i` | Explorer | Navigate up / drill into directory |
 | `s` | Explorer | Cycle sort order |
+| `y` | Explorer | Copy highlighted path to clipboard |
+| `t` | Explorer | Toggle size / file count across all views |
 | Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
 | Up / Down | Settings | Move focus between fields (also Tab/Shift+Tab) |
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |

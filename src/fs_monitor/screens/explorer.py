@@ -13,6 +13,7 @@ from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 import humanize
 
 from fs_monitor.config import AppConfig
+from fs_monitor.metrics import METRIC_NAMES
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.engine import ScanEngine
@@ -38,6 +39,9 @@ class ExplorerScreen(Screen):
         Binding("s", "cycle_sort", "[S]ort [R]escan", show=True, key_display="Action"),
         Binding("r", "rescan", "Rescan", show=False),
         Binding("slash", "search", "Search", show=False),
+        # QoL: yank the highlighted path, and toggle what the tree bar measures.
+        Binding("y", "copy_path", "[Y]ank path", show=True, key_display="Copy"),
+        Binding("t", "toggle_metric", "[T]oggle metric", show=True, key_display="Bar"),
         # Quarter-screen jumps in the tree — fast scanning of huge lists.
         Binding("ctrl+d", "scroll_quarter('down')", "↓¼", show=True, key_display="^D/^U"),
         Binding("ctrl+u", "scroll_quarter('up')", "↑¼", show=False),
@@ -99,7 +103,7 @@ class ExplorerScreen(Screen):
         yield Breadcrumb(self._scan_path, id="breadcrumb")
         with Horizontal(id="explorer-main"):
             with Vertical(id="tree-panel"):
-                yield Static("Sort: size", id="sort-indicator")
+                yield Static("Sort: Size  Bar: Size", id="sort-indicator")
                 yield SizeTree(id="size-tree")
             with Vertical(id="viz-panel"):
                 with TabbedContent(id="viz-tabs"):
@@ -191,7 +195,7 @@ class ExplorerScreen(Screen):
     _SORT_DISPLAY = {"size": "Size", "name": "Name", "mtime": "Modified"}
 
     def _update_status(self) -> None:
-        """Update the header subtitle and sort indicator."""
+        """Update the header subtitle and the tree indicator."""
         if self._root is None:
             return
         size = humanize.naturalsize(self._root.size, binary=True)
@@ -214,13 +218,16 @@ class ExplorerScreen(Screen):
             f"{self._root.dir_count:,} dirs  |  "
             f"Total: {size}{suffix}"
         )
-        self._update_sort_indicator()
+        self._update_tree_indicator()
 
-    def _update_sort_indicator(self) -> None:
-        """Update the sort indicator label."""
-        sort_key = self.query_one("#size-tree", SizeTree).sort_key
-        label = self._SORT_DISPLAY.get(sort_key, sort_key)
-        self.query_one("#sort-indicator", Static).update(f"Sort: {label}")
+    def _update_tree_indicator(self) -> None:
+        """Refresh the indicator above the tree (sort order and bar metric)."""
+        tree = self.query_one("#size-tree", SizeTree)
+        sort_label = self._SORT_DISPLAY.get(tree.sort_key, tree.sort_key)
+        metric_label = METRIC_NAMES.get(tree.metric, tree.metric)
+        self.query_one("#sort-indicator", Static).update(
+            f"Sort: {sort_label}  Bar: {metric_label}"
+        )
 
     @on(Tree.NodeHighlighted)
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[FSNode]) -> None:
@@ -301,7 +308,38 @@ class ExplorerScreen(Screen):
         """Cycle sort order."""
         tree = self.query_one("#size-tree", SizeTree)
         tree.cycle_sort()
-        self._update_sort_indicator()
+        self._update_tree_indicator()
+
+    def action_copy_path(self) -> None:
+        """Copy the highlighted node's absolute path to the system clipboard.
+
+        Uses Textual's OSC 52 clipboard write, so it also works over SSH
+        and in web-based shells where there is no local clipboard tool.
+        """
+        tree = self.query_one("#size-tree", SizeTree)
+        node = tree.cursor_node
+        if node is None or node.data is None:
+            return
+        path = node.data.path
+        self.app.copy_to_clipboard(path)
+        self.app.notify(path, title="Copied path", timeout=4)
+
+    def action_toggle_metric(self) -> None:
+        """Toggle size vs. file count across the tree and the visualizations.
+
+        `size` and `file_count` are both aggregated bottom-up during the
+        scan, so switching only relabels and re-lays out data already in
+        memory: no extra filesystem access, and no more work than the
+        layout recompute a tab switch already does.
+        """
+        tree = self.query_one("#size-tree", SizeTree)
+        metric = tree.toggle_metric()
+        self.query_one("#treemap-view", TreemapView).set_metric(metric)
+        self.query_one("#sunburst-view", SunburstView).set_metric(metric)
+        self.query_one("#info-panel", InfoPanel).set_metric(metric)
+        self._update_tree_indicator()
+        shown = "file count" if metric == "count" else "total size"
+        self.app.notify(f"Views now sized by {shown}", timeout=2)
 
     def action_scroll_quarter(self, direction: str) -> None:
         """Move the tree cursor by a quarter of the visible tree height.

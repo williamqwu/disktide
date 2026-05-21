@@ -9,6 +9,7 @@ src/fs_monitor/
   __main__.py            CLI entry point (Click)
   app.py                 Textual App, screen management
   config.py              TOML config load/save, dataclasses
+  metrics.py             Size vs. file-count view metric helpers
 
   scanner/
     engine.py            Multi-threaded scan orchestrator
@@ -232,6 +233,8 @@ Indexed on `(snapshot_id, path)` and `(snapshot_id, parent_path)`.
 `delete_targets()` removes directories with `shutil.rmtree()` and files with `os.unlink()`. Each deletion is logged to the `deletion_log` table. A `dry_run` mode is available. Failed deletions are collected and reported without aborting the batch.
 
 ## Visualization
+
+Both spatial charts size their areas by a selectable *metric*: total bytes (the default) or file count. `compute_layout` and `compute_sunburst` take a `metric` argument, and the size tree, treemap, sunburst, and Details panel all read it so a toggle (`t` in the explorer) keeps every view consistent. `fs_monitor/metrics.py` centralises the vocabulary: `metric_value()` selects the FSNode field and `metric_text()` formats it. Both fields are aggregated bottom-up during the scan, so switching is a re-layout of in-memory data with no extra filesystem work.
 
 ### Treemap
 

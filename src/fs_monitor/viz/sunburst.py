@@ -5,11 +5,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-import humanize
 from rich.segment import Segment
 from rich.style import Style
 
 from fs_monitor.glyphs import visible_width
+from fs_monitor.metrics import metric_text, metric_value
 from fs_monitor.models.tree import FSNode
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.viz.braille import ColorBrailleCanvas
@@ -78,16 +78,20 @@ def compute_sunburst(
     char_width: int,
     char_height: int,
     max_depth: int = 4,
+    metric: str = "size",
 ) -> SunburstLayout:
     """Compute and render a sunburst chart.
 
     Braille cells are 2px wide x 4px tall; terminal characters are ~2:1
     (height:width).  Each braille dot therefore maps to a roughly square
     area on screen, so no aspect-ratio correction is needed.
+
+    `metric` selects what arc angles encode: 'size' (bytes) or 'count'
+    (file count).
     """
     layout = SunburstLayout(char_width=char_width, char_height=char_height)
 
-    if char_width <= 0 or char_height <= 0 or node.size <= 0:
+    if char_width <= 0 or char_height <= 0 or metric_value(node, metric) <= 0:
         return layout
 
     canvas = ColorBrailleCanvas(char_width, char_height)
@@ -109,6 +113,7 @@ def compute_sunburst(
         depth=0, max_depth=max_depth,
         ring_width=ring_width,
         arcs=layout.arcs,
+        metric=metric,
     )
 
     # Render arcs to canvas with file-type coloring
@@ -123,7 +128,7 @@ def compute_sunburst(
         )
 
     # Compute labels
-    _compute_labels(layout, node, cx, cy)
+    _compute_labels(layout, node, cx, cy, metric)
 
     # Compute legend
     _compute_legend(layout)
@@ -172,6 +177,7 @@ def _build_arcs(
     depth: int, max_depth: int,
     ring_width: int,
     arcs: list[ArcSegment],
+    metric: str,
 ) -> None:
     """Recursively build arc segments."""
     if depth > max_depth:
@@ -193,22 +199,25 @@ def _build_arcs(
         r_outer=r_outer,
     ))
 
-    children = node.sorted_children
-    sized = [c for c in children if c.size > 0]
+    children = node.children
+    sized = sorted(
+        (c for c in children if metric_value(c, metric) > 0),
+        key=lambda c: (-metric_value(c, metric), c.name),
+    )
     if not sized:
         return
 
-    total = sum(c.size for c in sized)
+    total = sum(metric_value(c, metric) for c in sized)
     if total <= 0:
         return
 
     current_angle = angle_start
     for child in sized:
-        child_span = (child.size / total) * span
+        child_span = (metric_value(child, metric) / total) * span
         child_end = current_angle + child_span
         _build_arcs(
             child, current_angle, child_end,
-            depth + 1, max_depth, ring_width, arcs,
+            depth + 1, max_depth, ring_width, arcs, metric,
         )
         current_angle = child_end
 
@@ -217,6 +226,7 @@ def _compute_labels(
     layout: SunburstLayout,
     root: FSNode,
     cx: int, cy: int,
+    metric: str,
 ) -> None:
     """Compute text labels for center and large arcs."""
     labels = layout.labels
@@ -226,7 +236,7 @@ def _compute_labels(
     center_cx = layout.char_width // 2
     center_cy = layout.char_height // 2
     root_name = root.name
-    size_text = humanize.naturalsize(root.size, binary=True)
+    size_text = metric_text(root, metric)
 
     center_bg = "rgb(30,30,30)"
     _place_label(labels, occupied, center_cx, center_cy, root_name, "white", center_bg)

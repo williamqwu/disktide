@@ -47,9 +47,10 @@ fsmonitor-cli
 | Key | Action |
 |-----|--------|
 | `e` / `c` / `m` | Switch mode (Explorer / Cleanup / Monitor) |
-| `1` / `2` / `3` | Switch visualization (Treemap / Sunburst / Details) |
+| `1` / `2` / `3` | Switch visualization (Sunburst / Treemap / Details) |
 | `u` / `i` | Navigate up / drill into directory |
 | `s` | Cycle sort (Size / Name / Modified) |
+| `y` / `t` | Copy highlighted path / toggle size vs. file count |
 | `r` | Rescan / refresh |
 | `?` | Settings |
 | `q` | Quit |

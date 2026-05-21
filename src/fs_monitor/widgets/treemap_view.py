@@ -23,12 +23,21 @@ class TreemapView(Widget):
     def __init__(self, node: FSNode | None = None, **kwargs):
         super().__init__(**kwargs)
         self._node = node
+        self._metric = "size"
         self._layout: TreemapLayout | None = None
         self._stale = True
 
     def set_node(self, node: FSNode | None) -> None:
         """Set the root node. Layout recomputed on next render."""
         self._node = node
+        self._stale = True
+        self.refresh()
+
+    def set_metric(self, metric: str) -> None:
+        """Set the area metric ('size' or 'count'). Layout recomputed next render."""
+        if metric == self._metric:
+            return
+        self._metric = metric
         self._stale = True
         self.refresh()
 
@@ -49,6 +58,7 @@ class TreemapView(Widget):
             self.size.width,
             self.size.height,
             max_depth=3,
+            metric=self._metric,
         )
 
     def render_line(self, y: int) -> Strip:

@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.text import Text
 import humanize
 
+from fs_monitor.metrics import metric_text, metric_value
 from fs_monitor.models.tree import FSNode
 from fs_monitor.rendering import denied_glyph, partial_glyph
 
@@ -29,10 +30,18 @@ class InfoPanel(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._node: FSNode | None = None
+        self._metric = "size"
         self._display = Static("")
 
     def compose(self) -> ComposeResult:
         yield self._display
+
+    def set_metric(self, metric: str) -> None:
+        """Set the proportion metric for the Top Items list, then re-render."""
+        if metric == self._metric:
+            return
+        self._metric = metric
+        self.update_node(self._node)
 
     def update_node(self, node: FSNode | None) -> None:
         """Update the displayed node information."""
@@ -97,14 +106,20 @@ class InfoPanel(Widget):
         if node.error:
             table.add_row("Error", Text(node.error, style="bold red"))
 
-        # Top children by size
+        # Top children by the active metric (size by default, or file count)
         if node.is_dir and node.children:
             table.add_row("", "")
-            table.add_row("Top Items", "")
-            for child in node.sorted_children[:10]:
-                size_str = humanize.naturalsize(child.size, binary=True)
-                pct = child.size_percent(node.size)
+            heading = "Top Items (by files)" if self._metric == "count" else "Top Items"
+            table.add_row(heading, "")
+            total = metric_value(node, self._metric)
+            ranked = sorted(
+                node.children,
+                key=lambda c: (-metric_value(c, self._metric), c.name),
+            )
+            for child in ranked[:10]:
+                value_str = metric_text(child, self._metric)
+                pct = (metric_value(child, self._metric) / total * 100) if total else 0.0
                 name = f"{'📁 ' if child.is_dir else '📄 '}{child.name}"
-                table.add_row(f"  {name}", f"{size_str} ({pct:.1f}%)")
+                table.add_row(f"  {name}", f"{value_str} ({pct:.1f}%)")
 
         self._display.update(table)

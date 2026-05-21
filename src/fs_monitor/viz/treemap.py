@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import humanize
 import squarify
 from rich.segment import Segment
 from rich.style import Style
 
 from fs_monitor.glyphs import visible_width
+from fs_monitor.metrics import metric_text, metric_value
 from fs_monitor.models.tree import FSNode
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.viz.colors import file_category, get_color_scheme, hsl_to_rgb
@@ -97,15 +97,20 @@ def compute_layout(
     width: int,
     height: int,
     max_depth: int = 3,
+    metric: str = "size",
 ) -> TreemapLayout:
-    """Compute a squarified treemap layout for the given node."""
+    """Compute a squarified treemap layout for the given node.
+
+    `metric` selects what the rectangle areas encode: 'size' (bytes) or
+    'count' (file count).
+    """
     layout = TreemapLayout(width=width, height=height)
 
-    if width <= 0 or height <= 0 or node.size <= 0:
+    if width <= 0 or height <= 0 or metric_value(node, metric) <= 0:
         layout.build_grid()
         return layout
 
-    _layout_node(node, 0, 0, width, height, 0, max_depth, layout.rects)
+    _layout_node(node, 0, 0, width, height, 0, max_depth, layout.rects, metric)
     layout.build_grid()
     return layout
 
@@ -149,6 +154,7 @@ def _layout_node(
     x: int, y: int, w: int, h: int,
     depth: int, max_depth: int,
     rects: list[TreemapRect],
+    metric: str,
 ) -> None:
     """Recursively lay out a node and its children."""
     if w < 1 or h < 1:
@@ -161,7 +167,7 @@ def _layout_node(
         ))
         return
 
-    children = node.sorted_children
+    children = node.children
     if not children or depth >= max_depth:
         # Leaf rectangle
         label = node.name if w >= 4 else ""
@@ -169,7 +175,7 @@ def _layout_node(
         # Budget by visible width (glyph + VS-15 is 2 codepoints but 1 cell)
         if label and glyph and w >= visible_width(label) + 2:
             label = f"{label} {glyph}"
-        size_label = humanize.naturalsize(node.size, binary=True) if h >= 3 and w >= 6 else ""
+        size_label = metric_text(node, metric) if h >= 3 and w >= 6 else ""
         rects.append(TreemapRect(
             x=x, y=y, w=w, h=h, node=node,
             depth=depth, label=label, size_label=size_label,
@@ -196,13 +202,17 @@ def _layout_node(
         depth=depth, label=dir_label, is_leaf=False,
     ))
 
-    # Filter to children with size > 0
-    sized = [c for c in children if c.size > 0]
+    # Children with a positive metric value, largest first (squarify wants
+    # descending input, and "largest" depends on the active metric).
+    sized = sorted(
+        (c for c in children if metric_value(c, metric) > 0),
+        key=lambda c: (-metric_value(c, metric), c.name),
+    )
     if not sized:
         return
 
     # Compute sub-rectangles using squarify
-    sizes = [c.size for c in sized]
+    sizes = [metric_value(c, metric) for c in sized]
     total = sum(sizes)
     if total <= 0:
         return
@@ -219,7 +229,7 @@ def _layout_node(
         _layout_node(
             child,
             sr["x"], sr["y"], sw, sh,
-            depth + 1, max_depth, rects,
+            depth + 1, max_depth, rects, metric,
         )
 
 
