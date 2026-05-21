@@ -5,7 +5,7 @@ Guide for developers working on fsmonitor-cli.
 ## Setup
 
 ```bash
-git clone <repo-url> && cd util_fs_monitor
+git clone <repo-url> && cd fsmonitor-cli
 pip install -e ".[dev]"
 ```
 
