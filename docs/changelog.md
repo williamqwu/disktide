@@ -2,7 +2,7 @@
 
 ## v0.1.4
 
-Since `c45f0bc` (v0.1.3 release prep: audit fixes + version bump).
+Since `96dc76b` (v0.1.3 release).
 
 **Explorer**
 
@@ -58,6 +58,7 @@ Since `1163b24` (Update changelog for quota, viz reorder, and config save fixes)
 
 - **fix** Scan progress overlay top border was clipped by the `TabbedContent` panel above it. `ExplorerScreen` now declares an `overlay` layer and centers the overlay in a full-screen invisible container so it floats cleanly above the panels.
 - **fix** Explorer subtitle text "denied" replaced with "unreadable" — `node.error` catches any `OSError` (EACCES, EIO, ESTALE, …), not only permission denials.
+- **fix** The default `color_theme` is now unified at `warm`. The `UIConfig` dataclass default was already `warm`, but `load_config()` fell back to `default` when a config file omitted the key, so fresh installs and configs predating the `color_theme` setting diverged.
 
 **Code Quality**
 
