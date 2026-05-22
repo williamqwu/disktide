@@ -42,13 +42,15 @@ Navigation:
 | Ctrl+U / Ctrl+D | Jump up / down by a quarter of the visible tree |
 | Left/Right | Collapse/expand tree nodes |
 | `u` | Go up to the parent directory |
-| `i` | Drill into the selected directory (rescans from there) |
+| `i` | Drill into the selected directory, or a symlinked directory (rescans) |
 | `s` | Cycle sort order: size, name, modified |
 | `r` | Rescan the current directory (prompts y/n first) |
 | `y` | Copy the highlighted item's absolute path to the clipboard |
 | `t` | Toggle size vs. file count (tree, sunburst, treemap, Details) |
 
 The indicator line above the tree shows the current sort order and metric. Press `t` to toggle the metric between total size (the default) and number of files. The tree bar, the sunburst, the treemap, and the Details panel all re-express their proportions accordingly, so every view stays consistent. Both totals are aggregated during the scan, so toggling does no extra filesystem work. Press `y` to copy the highlighted item's absolute path to the system clipboard; it uses the terminal's OSC 52 escape, so it works over SSH and in web-based shells where there is no local clipboard tool.
+
+Symbolic links are shown as `name → target` and never counted toward folder sizes (only the link's own size). When a link points to a directory, `i` resolves it and rescans from the real location, so linked folders stay navigable without the scan ever traversing the link. Broken links and links to files are marked and cannot be entered.
 
 ### Monitor (M)
 
@@ -182,7 +184,6 @@ Settings are stored in `~/.config/fsmonitor-cli/config.toml` (respects `XDG_CONF
 [scan]
 max_depth = 10                           # omit for unlimited
 workers = 4                              # omit for auto-detect
-follow_symlinks = false
 exclude_patterns = [".git", "node_modules"]
 
 [cleanup]

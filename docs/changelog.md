@@ -11,6 +11,13 @@ Since `c45f0bc` (v0.1.3 release prep: audit fixes + version bump).
 - **add** The indicator line above the tree now shows the active sort order and bar metric (e.g. `Sort: Size  Bar: Files`).
 - **add** New `fs_monitor/metrics.py` centralises the size/file-count metric vocabulary (`metric_value`, `metric_text`); `compute_layout` and `compute_sunburst` take a `metric` argument so the tree, visualizations, and Details panel stay in sync.
 
+**Symlinks**
+
+- **add** Symbolic links are now first-class in the explorer: the tree shows them as `name → target`, the Details panel reports the target and its type, and broken or file targets are marked. They are never recursed into, so a symlinked directory's bytes never inflate the parent (only the link's own size counts).
+- **add** `i` on a symlink whose target is a directory resolves the real path and rescans from there, so linked folders are navigable without the scan traversing the link.
+- **fix** A symlink directly under the scan root is now counted as one file, consistent with symlinks deeper in the tree (the engine and walker had diverged).
+- **fix** Removed the `follow_symlinks` config option and its Settings toggle, which were never wired into the scanner.
+
 **Docs**
 
 - **docs** User guide, README, and architecture document the `y` / `t` hotkeys and the size/file-count metric.

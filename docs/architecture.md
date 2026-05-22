@@ -91,7 +91,9 @@ Each `os.scandir()` entry is wrapped in try/except. A permission error on one di
 
 ### Symlink Handling
 
-Symlinks are never followed. They are counted as files with their own size (the link itself, not the target). This prevents infinite loops and double-counting.
+Symlinks are never recursed into: a symlink is stored as a leaf `FSNode` sized by the link itself (`lstat`), never its target. This prevents infinite loops and double-counting, and keeps a symlinked directory's bytes from inflating the parent total.
+
+The walker does one extra `stat` per symlink to classify the target and an `os.readlink()` to record it, populating `FSNode.is_symlink`, `link_target`, `link_is_dir`, and `link_broken`. The size tree shows symlinks as `name → target`; the explorer's `i` action resolves a symlink-to-directory and rescans from the real path, so linked folders are navigable without the scan ever traversing the link.
 
 ### Caching
 

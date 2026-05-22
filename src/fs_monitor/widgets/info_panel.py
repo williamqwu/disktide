@@ -56,7 +56,20 @@ class InfoPanel(Widget):
 
         table.add_row("Name", node.name)
         table.add_row("Path", node.path)
-        table.add_row("Type", "Directory" if node.is_dir else "File")
+        if node.is_symlink:
+            table.add_row("Type", "Symlink")
+            if node.link_target:
+                table.add_row("Target", node.link_target)
+            if node.link_broken:
+                table.add_row(
+                    "Target type", Text("Broken (target missing)", style="bold red")
+                )
+            elif node.link_is_dir:
+                table.add_row("Target type", "Directory  (press i to enter)")
+            else:
+                table.add_row("Target type", "File")
+        else:
+            table.add_row("Type", "Directory" if node.is_dir else "File")
 
         # Size — qualify with ≥ when the subtree has hidden bytes
         size_text = humanize.naturalsize(node.size, binary=True)

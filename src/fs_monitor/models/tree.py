@@ -34,6 +34,13 @@ class FSNode:
         partial_dir_subtree_count: Directories at or below this node that
             are *partial* (readable but with at least one unreadable direct
             child). Also bottom-up aggregate.
+        is_symlink: Whether this entry is a symbolic link. Symlinks are
+            never recursed into; they are sized by the link itself.
+        link_target: Raw target of the symlink (os.readlink), for display.
+            None when not a symlink or the target is unreadable.
+        link_is_dir: Whether the symlink's target resolves to a directory.
+        link_broken: Whether the symlink's target could not be stat'd
+            (dangling link, or a resolution loop).
     """
 
     name: str
@@ -51,6 +58,10 @@ class FSNode:
     inaccessible_subtree_count: int = 0
     denied_dir_subtree_count: int = 0
     partial_dir_subtree_count: int = 0
+    is_symlink: bool = False
+    link_target: str | None = None
+    link_is_dir: bool = False
+    link_broken: bool = False
 
     _sorted_cache: list[FSNode] | None = field(
         default=None, repr=False, compare=False
@@ -109,6 +120,15 @@ class FSNode:
     def has_hidden_descendants(self) -> bool:
         """Some descendant somewhere below is partial or denied."""
         return self.inaccessible_subtree_count > 0
+
+    @property
+    def symlink_to_dir(self) -> bool:
+        """A symlink whose target is an existing directory.
+
+        Such nodes are leaves in the tree (never recursed into), but the
+        explorer lets the user step into the resolved target with `i`.
+        """
+        return self.is_symlink and self.link_is_dir
 
     def size_percent(self, parent_size: int | None = None) -> float:
         """Size as percentage of parent (or given reference size)."""

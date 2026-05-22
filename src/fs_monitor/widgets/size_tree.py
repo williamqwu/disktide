@@ -8,7 +8,7 @@ from rich.text import Text
 
 from fs_monitor.metrics import METRICS, metric_text, metric_value
 from fs_monitor.models.tree import FSNode
-from fs_monitor.rendering import bar_chars, denied_glyph, partial_glyph
+from fs_monitor.rendering import bar_chars, denied_glyph, link_arrow, partial_glyph
 
 
 class SizeTree(Tree[FSNode]):
@@ -111,9 +111,18 @@ class SizeTree(Tree[FSNode]):
         """
         text = Text()
 
-        # Name
+        # Name (directory, symlink, then plain file)
         if node.is_dir:
             text.append(f"{node.name}/", style="bold cyan")
+        elif node.is_symlink:
+            text.append(node.name, style="cyan")
+            if node.link_target:
+                target = node.link_target
+                if node.link_is_dir:
+                    target = target.rstrip("/") + "/"
+                text.append(f" {link_arrow()} {target}", style="dim")
+            if node.link_broken:
+                text.append(" (broken)", style="bold red")
         else:
             text.append(node.name, style="white")
 

@@ -286,12 +286,23 @@ class ExplorerScreen(Screen):
             self._start_scan()
 
     def action_go_into(self) -> None:
-        """Rescan from the currently highlighted directory."""
+        """Rescan from the highlighted directory, or from a symlink's target.
+
+        For a symlink whose target is a directory, the resolved real path
+        becomes the new scan root, so `i` reads as "enter the linked
+        folder" even though the scan never recurses through the link.
+        """
         tree = self.query_one("#size-tree", SizeTree)
         node = tree.cursor_node
-        if node is None or node.data is None or not node.data.is_dir:
+        if node is None or node.data is None:
             return
-        new_root = node.data.path
+        data = node.data
+        if data.is_dir:
+            new_root = data.path
+        elif data.symlink_to_dir:
+            new_root = str(Path(data.path).resolve())
+        else:
+            return
         if new_root == self._scan_path:
             return
         self._scan_path = new_root

@@ -11,7 +11,7 @@ without a restart.
 
 from __future__ import annotations
 
-from fs_monitor.glyphs import DENIED, PARTIAL
+from fs_monitor.glyphs import ARROW, DENIED, PARTIAL
 
 # Toggled from the main thread only (App.on_mount, Settings switch);
 # read on every render. Single-thread invariant means no lock needed.
@@ -48,3 +48,12 @@ def denied_glyph() -> str:
 def partial_glyph() -> str:
     """Glyph for partial / hidden-below access. ASCII fallback in safe mode."""
     return "[~]" if _safe else PARTIAL
+
+
+def link_arrow() -> str:
+    """Separator drawn between a symlink and its target.
+
+    Defaults to the Unicode arrow; safe mode falls back to ASCII so
+    web-shell fonts that lack U+2192 still render it cleanly.
+    """
+    return "->" if _safe else ARROW

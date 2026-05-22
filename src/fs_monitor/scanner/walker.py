@@ -7,6 +7,40 @@ import threading
 from fs_monitor.models.tree import FSNode
 
 
+def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
+    """Build an FSNode for a symlink directory entry.
+
+    Returns None if the link itself cannot be stat'd. The symlink is
+    sized by itself and never recursed into, but its target is probed
+    once (one extra stat) so the UI can mark it and let `i` navigate in.
+    """
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    node = FSNode(
+        name=entry.name,
+        path=entry.path,
+        size=st.st_size,
+        own_size=st.st_size,
+        is_dir=False,
+        mtime=st.st_mtime,
+        depth=depth,
+        file_count=1,
+        is_symlink=True,
+    )
+    try:
+        node.link_target = os.readlink(entry.path)
+    except OSError:
+        pass
+    try:
+        target = entry.stat(follow_symlinks=True)
+        node.link_is_dir = stat.S_ISDIR(target.st_mode)
+    except OSError:
+        node.link_broken = True
+    return node
+
+
 def scan_directory(
     path: str,
     depth: int = 0,
@@ -62,23 +96,15 @@ def scan_directory(
                 break
             try:
                 if entry.is_symlink():
-                    # Don't follow symlinks — prevents loops, avoids double-counting
-                    try:
-                        st = entry.stat(follow_symlinks=False)
-                        child = FSNode(
-                            name=entry.name,
-                            path=entry.path,
-                            size=st.st_size,
-                            own_size=st.st_size,
-                            is_dir=False,
-                            mtime=st.st_mtime,
-                            depth=depth + 1,
-                        )
-                        node.children.append(child)
-                        own_size += st.st_size
-                        file_count += 1
-                    except OSError:
+                    # Symlinks are never recursed into (avoids loops and
+                    # double-counting); sized by the link itself.
+                    child = make_symlink_node(entry, depth + 1)
+                    if child is None:
                         inaccessible += 1
+                    else:
+                        node.children.append(child)
+                        own_size += child.own_size
+                        file_count += 1
                     continue
 
                 if entry.is_dir(follow_symlinks=False):

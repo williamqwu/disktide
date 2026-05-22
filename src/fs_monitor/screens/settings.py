@@ -113,10 +113,6 @@ class SettingsScreen(Screen):
                 yield Label("Show hidden files", classes="setting-label")
                 yield Switch(value=self._config.ui.show_hidden, id="show-hidden")
 
-            with Horizontal(classes="setting-row"):
-                yield Label("Follow symlinks", classes="setting-label")
-                yield Switch(value=self._config.scan.follow_symlinks, id="follow-symlinks")
-
             yield Static("")
             yield Static("Cleanup Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
@@ -342,8 +338,6 @@ class SettingsScreen(Screen):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "show-hidden":
             self._config.ui.show_hidden = event.value
-        elif event.switch.id == "follow-symlinks":
-            self._config.scan.follow_symlinks = event.value
         elif event.switch.id == "show-cleanup":
             self._config.ui.show_cleanup = event.value
         elif event.switch.id == "confirm-dangerous":
