@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.5
+
+Since `6cb0459` (v0.1.4 release).
+
+**Scanner**
+
+- **fix** Directory scans no longer recurse forever on a filesystem cycle. A bind mount (or container rootfs) that makes a directory reappear inside itself sent the scan into an infinite loop, which is common under devcontainer and Docker data directories. The walker now tracks each directory's `(st_dev, st_ino)` identity along the path from the scan root and stops when a directory is its own ancestor, marking it `(loop)` in the tree and the Details panel. Symlink loops were already prevented; this closes the non-symlink case.
+
+**Progress**
+
+- **fix** Scan progress now updates continuously during a deep scan instead of freezing while a single big subtree is being walked. The walker calls a per-directory tick callback as each directory finishes; the engine folds those into shared live counters (using the existing engine lock) and forwards them through the existing `ProgressThrottle` (100 ms coalesce). The earlier behavior only updated when an entire top-level subtree completed, so a scan of a directory with one dominant child (typical under devcontainer or Docker data directories) sat with frozen `Dirs / Files / Size` counters for minutes.
+- **fix** The scanning overlay's progress bar is now indeterminate (a pulsing animation with no percentage). The earlier percentage was `completed_top_level_dirs / total_top_level_dirs`, unrelated to actual work, and routinely parked at 97% while one large subtree finished. Without a pre-count pass there is no honest progress fraction; an indeterminate bar plus the now-continuously-moving counters is the honest feedback.
+
 ## v0.1.4
 
 Since `96dc76b` (v0.1.3 release).
