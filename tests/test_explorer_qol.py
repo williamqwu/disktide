@@ -162,7 +162,7 @@ def test_press_y_copies_highlighted_path(tmp_path):
             expected = tree.cursor_node.data.path
             await pilot.press("y")
             await pilot.pause()
-            assert app._clipboard == expected
+            assert app.clipboard == expected
 
     asyncio.run(go())
 
