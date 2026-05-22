@@ -33,7 +33,12 @@ class ScanProgressOverlay(Widget):
         self._title = Static("Scanning...", id="scan-title")
         self._path_display = Static("", id="scan-path")
         self._stats = Static("", id="scan-stats")
-        self._bar = ProgressBar(total=100, show_eta=False, id="scan-bar")
+        # Indeterminate (total=None): the bar pulses to signal activity.
+        # We have no honest progress fraction without a pre-count pass,
+        # so a fake percentage that parks at 97% does more harm than good.
+        self._bar = ProgressBar(
+            total=None, show_eta=False, show_percentage=False, id="scan-bar",
+        )
 
     def compose(self) -> ComposeResult:
         yield self._title
@@ -49,7 +54,7 @@ class ScanProgressOverlay(Widget):
         self._title.update(Text("Scanning...", style="bold"))
         self._path_display.update("")
         self._stats.update("")
-        self._bar.update(progress=0)
+        self._bar.update(total=None)  # re-assert indeterminate
 
     def update_progress(self, progress: ScanProgress) -> None:
         """Update the display with current scan progress."""
@@ -74,8 +79,6 @@ class ScanProgressOverlay(Widget):
             stats_text.append(f"  ({speed:,.0f} items/s)", style="dim")
 
         self._stats.update(stats_text)
-
-        self._bar.update(progress=progress.percent)
 
     def scan_complete(self) -> None:
         """Mark scan as complete."""

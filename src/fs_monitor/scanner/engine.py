@@ -116,12 +116,21 @@ class ScanEngine:
         # Scan subdirectories in parallel
         dir_results: list[FSNode] = []
 
-        # Running accumulators for progress stats
-        running_files = len(top_files)
-        running_dirs = 0
-        running_size = own_size
-
-        self._progress.update(top_dir_total=len(top_dirs))
+        # Live progress: walker threads call self._tick per directory
+        # finished, so Dirs/Files/Size in the overlay climb continuously
+        # instead of freezing while one big subtree is being scanned.
+        self._live_dirs = 0
+        self._live_files = len(top_files)
+        self._live_size = own_size
+        # Push the top-level files/symlinks straight away so the overlay
+        # shows something before the first worker tick fires.
+        with self._lock:
+            self._progress.update(
+                dirs_scanned=self._live_dirs,
+                files_scanned=self._live_files,
+                total_size=self._live_size,
+                current_path=path,
+            )
 
         if top_dirs:
             with ThreadPoolExecutor(max_workers=self._workers) as pool:
@@ -132,7 +141,6 @@ class ScanEngine:
                     f = pool.submit(self._scan_subdir, d, root_ancestors)
                     futures[f] = d
 
-                completed = 0
                 for future in as_completed(futures):
                     if self._cancel_event.is_set():
                         break
@@ -140,24 +148,10 @@ class ScanEngine:
                         child_node = future.result()
                         if child_node is not None:
                             dir_results.append(child_node)
-                            # Update running accumulators
-                            running_files += child_node.file_count
-                            running_dirs += 1 + child_node.dir_count
-                            running_size += child_node.size
                             if child_node.error is not None:
                                 top_inaccessible += 1
                     except Exception:
                         pass
-
-                    # Update progress using accumulators
-                    completed += 1
-                    with self._lock:
-                        self._progress.update(
-                            dirs_scanned=running_dirs,
-                            files_scanned=running_files,
-                            total_size=running_size,
-                            top_dirs_done=completed,
-                        )
 
         # Assemble root
         root.children = top_files + dir_results
@@ -217,4 +211,29 @@ class ScanEngine:
             path, depth=1, max_depth=max_depth,
             cancel_event=self._cancel_event,
             ancestors=ancestors,
+            on_dir_done=self._tick,
         )
+
+    def _tick(
+        self,
+        dirs_delta: int,
+        files_delta: int,
+        size_delta: int,
+        current_path: str,
+    ) -> None:
+        """Called by the walker after each directory it finishes scanning.
+
+        Folds per-directory deltas into shared live counters and forwards
+        them through the throttled progress callback, so the overlay
+        updates continuously while a deep subtree is being walked.
+        """
+        with self._lock:
+            self._live_dirs += dirs_delta
+            self._live_files += files_delta
+            self._live_size += size_delta
+            self._progress.update(
+                dirs_scanned=self._live_dirs,
+                files_scanned=self._live_files,
+                total_size=self._live_size,
+                current_path=current_path,
+            )

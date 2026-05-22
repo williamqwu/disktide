@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import stat
 import threading
+from typing import Callable
 from fs_monitor.models.tree import FSNode
 
 
@@ -48,6 +49,7 @@ def scan_directory(
     max_depth: int | None = None,
     cancel_event: threading.Event | None = None,
     ancestors: frozenset[tuple[int, int]] = frozenset(),
+    on_dir_done: Callable[[int, int, int, str], None] | None = None,
 ) -> FSNode:
     """Scan a directory and return an FSNode tree.
 
@@ -103,6 +105,7 @@ def scan_directory(
     file_count = 0
     dir_count = 0
     inaccessible = 0
+    local_files = 0  # direct files + symlinks (for live progress ticks)
 
     try:
         for entry in scandir_it:
@@ -119,12 +122,13 @@ def scan_directory(
                         node.children.append(child)
                         own_size += child.own_size
                         file_count += 1
+                        local_files += 1
                     continue
 
                 if entry.is_dir(follow_symlinks=False):
                     child = scan_directory(
                         entry.path, depth + 1, max_depth, cancel_event,
-                        ancestors,
+                        ancestors, on_dir_done,
                     )
                     node.children.append(child)
                     dir_count += 1 + child.dir_count
@@ -147,6 +151,7 @@ def scan_directory(
                         node.children.append(child)
                         own_size += st.st_size
                         file_count += 1
+                        local_files += 1
                     except OSError:
                         inaccessible += 1
             except OSError:
@@ -183,5 +188,13 @@ def scan_directory(
             partial_sub += 1
     node.denied_dir_subtree_count = denied_sub
     node.partial_dir_subtree_count = partial_sub
+
+    if on_dir_done is not None:
+        # Tick at the end of this directory so live progress moves per
+        # directory finished. Without it the UI froze during big subtrees
+        # because the engine only updated when a whole top-level subdir
+        # finished. Counts are the local additions (direct files and
+        # symlinks); the +1 dir is this directory itself.
+        on_dir_done(1, local_files, own_size, path)
 
     return node
