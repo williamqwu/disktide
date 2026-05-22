@@ -37,6 +37,7 @@ def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
         target = entry.stat(follow_symlinks=True)
         node.link_is_dir = stat.S_ISDIR(target.st_mode)
     except OSError:
+        # Target unresolvable for any reason: missing, ELOOP, EACCES, ...
         node.link_broken = True
     return node
 

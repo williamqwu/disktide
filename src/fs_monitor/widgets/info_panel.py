@@ -62,7 +62,7 @@ class InfoPanel(Widget):
                 table.add_row("Target", node.link_target)
             if node.link_broken:
                 table.add_row(
-                    "Target type", Text("Broken (target missing)", style="bold red")
+                    "Target type", Text("Broken or unreachable", style="bold red")
                 )
             elif node.link_is_dir:
                 table.add_row("Target type", "Directory  (press i to enter)")

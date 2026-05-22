@@ -40,7 +40,8 @@ class FSNode:
             None when not a symlink or the target is unreadable.
         link_is_dir: Whether the symlink's target resolves to a directory.
         link_broken: Whether the symlink's target could not be stat'd
-            (dangling link, or a resolution loop).
+            for any reason (a dangling link, a resolution loop, or
+            another OS error such as a permission failure).
     """
 
     name: str
