@@ -47,6 +47,7 @@ def scan_directory(
     depth: int = 0,
     max_depth: int | None = None,
     cancel_event: threading.Event | None = None,
+    ancestors: frozenset[tuple[int, int]] = frozenset(),
 ) -> FSNode:
     """Scan a directory and return an FSNode tree.
 
@@ -72,10 +73,22 @@ def scan_directory(
         return node
 
     try:
-        mtime = os.stat(path).st_mtime
-        node.mtime = mtime
+        st = os.stat(path)
+        node.mtime = st.st_mtime
     except OSError:
-        pass
+        st = None
+
+    # Cycle guard: a bind mount (or container rootfs) can make a
+    # directory reappear inside itself. If this directory's identity is
+    # already on the path from the scan root, stop instead of recursing
+    # forever. Symlink loops are handled separately (symlinks are never
+    # followed); this covers the non-symlink case.
+    if st is not None:
+        here = (st.st_dev, st.st_ino)
+        if here in ancestors:
+            node.is_loop = True
+            return node
+        ancestors = ancestors | {here}
 
     try:
         scandir_it = os.scandir(path)
@@ -111,6 +124,7 @@ def scan_directory(
                 if entry.is_dir(follow_symlinks=False):
                     child = scan_directory(
                         entry.path, depth + 1, max_depth, cancel_event,
+                        ancestors,
                     )
                     node.children.append(child)
                     dir_count += 1 + child.dir_count

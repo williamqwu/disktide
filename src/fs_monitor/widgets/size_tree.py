@@ -114,6 +114,8 @@ class SizeTree(Tree[FSNode]):
         # Name (directory, symlink, then plain file)
         if node.is_dir:
             text.append(f"{node.name}/", style="bold cyan")
+            if node.is_loop:
+                text.append(" (loop)", style="bold yellow")
         elif node.is_symlink:
             text.append(node.name, style="cyan")
             if node.link_target:

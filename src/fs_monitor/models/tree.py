@@ -42,6 +42,9 @@ class FSNode:
         link_broken: Whether the symlink's target could not be stat'd
             for any reason (a dangling link, a resolution loop, or
             another OS error such as a permission failure).
+        is_loop: Whether this directory was skipped because it is its
+            own ancestor (a bind mount or similar filesystem cycle).
+            Not recursed into, so it contributes no size or counts.
     """
 
     name: str
@@ -63,6 +66,7 @@ class FSNode:
     link_target: str | None = None
     link_is_dir: bool = False
     link_broken: bool = False
+    is_loop: bool = False
 
     _sorted_cache: list[FSNode] | None = field(
         default=None, repr=False, compare=False

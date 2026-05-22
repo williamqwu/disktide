@@ -54,8 +54,11 @@ class ScanEngine:
         name = os.path.basename(path) or path
         root = FSNode(name=name, path=path, is_dir=True, depth=0)
 
+        root_ancestors: frozenset[tuple[int, int]] = frozenset()
         try:
-            root.mtime = os.stat(path).st_mtime
+            rst = os.stat(path)
+            root.mtime = rst.st_mtime
+            root_ancestors = frozenset({(rst.st_dev, rst.st_ino)})
         except OSError:
             pass
 
@@ -126,7 +129,7 @@ class ScanEngine:
                 for d in top_dirs:
                     if self._cancel_event.is_set():
                         break
-                    f = pool.submit(self._scan_subdir, d)
+                    f = pool.submit(self._scan_subdir, d, root_ancestors)
                     futures[f] = d
 
                 completed = 0
@@ -193,7 +196,9 @@ class ScanEngine:
 
         return root
 
-    def _scan_subdir(self, path: str) -> FSNode | None:
+    def _scan_subdir(
+        self, path: str, ancestors: frozenset[tuple[int, int]] = frozenset()
+    ) -> FSNode | None:
         """Scan a single subdirectory (runs in thread pool)."""
         if self._cancel_event.is_set():
             return None
@@ -211,4 +216,5 @@ class ScanEngine:
         return scan_directory(
             path, depth=1, max_depth=max_depth,
             cancel_event=self._cancel_event,
+            ancestors=ancestors,
         )

@@ -70,6 +70,11 @@ class InfoPanel(Widget):
                 table.add_row("Target type", "File")
         else:
             table.add_row("Type", "Directory" if node.is_dir else "File")
+            if node.is_loop:
+                table.add_row(
+                    "Note",
+                    Text("Filesystem loop (not scanned)", style="bold yellow"),
+                )
 
         # Size — qualify with ≥ when the subtree has hidden bytes
         size_text = humanize.naturalsize(node.size, binary=True)
