@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from fs_monitor.models.tree import FSNode
-from fs_monitor.scanner.walker import scan_directory
+from fs_monitor.scanner.walker import scan_directory, make_symlink_node
 from fs_monitor.scanner.progress import ScanProgress, ProgressThrottle
 
 
@@ -82,17 +82,12 @@ class ScanEngine:
                     break
                 try:
                     if entry.is_symlink():
-                        try:
-                            st = entry.stat(follow_symlinks=False)
-                            child = FSNode(
-                                name=entry.name, path=entry.path,
-                                size=st.st_size, own_size=st.st_size,
-                                is_dir=False, mtime=st.st_mtime, depth=1,
-                            )
-                            top_files.append(child)
-                            own_size += st.st_size
-                        except OSError:
+                        child = make_symlink_node(entry, depth=1)
+                        if child is None:
                             top_inaccessible += 1
+                        else:
+                            top_files.append(child)
+                            own_size += child.own_size
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         top_dirs.append(entry.path)

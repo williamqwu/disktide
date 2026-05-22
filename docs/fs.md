@@ -47,11 +47,13 @@ os.scandir(path)                 # iterate directory entries
   entry.is_dir(follow_symlinks=False)   # classify: directory?
   entry.is_file(follow_symlinks=False)  # classify: regular file?
   entry.stat(follow_symlinks=False)     # read st_size, st_mtime
+  entry.stat(follow_symlinks=True)      # symlinks only: classify the target
+  os.readlink(entry.path)               # symlinks only: record the target
   entry.name                     # basename (str)
   entry.path                     # full path (str)
 ```
 
-**Metadata captured per entry:** size (`st_size`), modification time (`st_mtime`), type (dir/file/symlink).
+**Metadata captured per entry:** size (`st_size`), modification time (`st_mtime`), type (dir/file/symlink), and for symlinks the target path and target type.
 
 **Metadata NOT captured:** permissions, ownership (uid/gid), inode number, extended attributes, ACLs, creation time, hard link count.
 
@@ -59,14 +61,14 @@ os.scandir(path)                 # iterate directory entries
 
 ### Symlink Handling
 
-Symlinks are **never followed**. Every `is_dir()`, `is_file()`, and `stat()` call passes `follow_symlinks=False`. Symlinks are treated as plain files with the size of the link itself (not the target).
+Symlinks are **never recursed into**. A symlink is stored as a leaf node sized by the link itself (`stat(follow_symlinks=False)`), never its target.
 
 This prevents:
 - Infinite loops from circular symlinks
 - Double-counting when multiple symlinks point to the same target
-- Crossing filesystem boundaries unexpectedly
+- A symlinked directory's bytes inflating the parent total
 
-The `follow_symlinks` config option exists in `ScanConfig` but is not wired into the walker -- it always defaults to `False`.
+The walker does one extra `stat(follow_symlinks=True)` per symlink to classify the target (directory / file / broken) and an `os.readlink()` to record the target string. These populate `FSNode.is_symlink`, `link_target`, `link_is_dir`, and `link_broken`. The scan still never traverses the link; the explorer's `i` action resolves a symlink-to-directory on demand and rescans from the real path.
 
 ### Error Handling
 

@@ -9,6 +9,7 @@ src/fs_monitor/
   __main__.py            CLI entry point (Click)
   app.py                 Textual App, screen management
   config.py              TOML config load/save, dataclasses
+  metrics.py             Size vs. file-count view metric helpers
 
   scanner/
     engine.py            Multi-threaded scan orchestrator
@@ -90,7 +91,9 @@ Each `os.scandir()` entry is wrapped in try/except. A permission error on one di
 
 ### Symlink Handling
 
-Symlinks are never followed. They are counted as files with their own size (the link itself, not the target). This prevents infinite loops and double-counting.
+Symlinks are never recursed into: a symlink is stored as a leaf `FSNode` sized by the link itself (`lstat`), never its target. This prevents infinite loops and double-counting, and keeps a symlinked directory's bytes from inflating the parent total.
+
+The walker does one extra `stat` per symlink to classify the target and an `os.readlink()` to record it, populating `FSNode.is_symlink`, `link_target`, `link_is_dir`, and `link_broken`. The size tree shows symlinks as `name → target`; the explorer's `i` action resolves a symlink-to-directory and rescans from the real path, so linked folders are navigable without the scan ever traversing the link.
 
 ### Caching
 
@@ -232,6 +235,8 @@ Indexed on `(snapshot_id, path)` and `(snapshot_id, parent_path)`.
 `delete_targets()` removes directories with `shutil.rmtree()` and files with `os.unlink()`. Each deletion is logged to the `deletion_log` table. A `dry_run` mode is available. Failed deletions are collected and reported without aborting the batch.
 
 ## Visualization
+
+Both spatial charts size their areas by a selectable *metric*: total bytes (the default) or file count. `compute_layout` and `compute_sunburst` take a `metric` argument, and the size tree, treemap, sunburst, and Details panel all read it so a toggle (`t` in the explorer) keeps every view consistent. `fs_monitor/metrics.py` centralises the vocabulary: `metric_value()` selects the FSNode field and `metric_text()` formats it. Both fields are aggregated bottom-up during the scan, so switching is a re-layout of in-memory data with no extra filesystem work.
 
 ### Treemap
 

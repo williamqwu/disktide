@@ -15,6 +15,10 @@ VS15 = "︎"
 DENIED = f"⚠{VS15}"
 PARTIAL = f"◐{VS15}"
 
+# Separator drawn between a symlink and its target. A plain arrow: text
+# presentation by default, width 1, so no VS-15 is needed.
+ARROW = "→"
+
 
 def visible_width(s: str) -> int:
     """Terminal cell width of `s`, treating VS-15 as zero-width."""

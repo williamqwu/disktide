@@ -37,7 +37,6 @@ def format_duration(seconds: int) -> str:
 class ScanConfig:
     max_depth: int | None = None
     workers: int | None = None
-    follow_symlinks: bool = False
     exclude_patterns: list[str] = field(default_factory=list)
 
 
@@ -139,7 +138,6 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append(f"max_depth = {config.scan.max_depth}")
     if config.scan.workers is not None:
         lines.append(f"workers = {config.scan.workers}")
-    lines.append(f"follow_symlinks = {'true' if config.scan.follow_symlinks else 'false'}")
     if config.scan.exclude_patterns:
         patterns = ", ".join(f'"{p}"' for p in config.scan.exclude_patterns)
         lines.append(f"exclude_patterns = [{patterns}]")
@@ -210,7 +208,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         scan = data["scan"]
         config.scan.max_depth = scan.get("max_depth")
         config.scan.workers = scan.get("workers")
-        config.scan.follow_symlinks = scan.get("follow_symlinks", False)
         config.scan.exclude_patterns = scan.get("exclude_patterns", [])
 
     if "cleanup" in data:
