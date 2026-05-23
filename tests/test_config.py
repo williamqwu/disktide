@@ -236,3 +236,92 @@ show_hidden = true
 
         loaded = load_config(config_file)
         assert loaded.ui.show_cleanup is False
+
+
+class TestLiveScanRender:
+    """Round-trip + auto-gate for `ui.live_scan_render`."""
+
+    def test_default_is_auto(self):
+        config = AppConfig()
+        assert config.ui.live_scan_render == "auto"
+
+    def test_auto_omitted_from_toml(self, tmp_path):
+        """The default value stays out of the file so older configs
+        keep round-tripping cleanly."""
+        config = AppConfig()
+        config_file = tmp_path / "config.toml"
+        save_config(config, config_file)
+        assert "live_scan_render" not in config_file.read_text()
+
+    def test_explicit_value_persists(self, tmp_path):
+        """on/off survives a save/load cycle."""
+        for value in ("on", "off"):
+            config = AppConfig()
+            config.ui.live_scan_render = value
+            config_file = tmp_path / f"cfg_{value}.toml"
+            save_config(config, config_file)
+            assert f'live_scan_render = "{value}"' in config_file.read_text()
+            loaded = load_config(config_file)
+            assert loaded.ui.live_scan_render == value
+
+    def test_invalid_value_in_toml_falls_back_to_auto(self, tmp_path):
+        """A garbage value never leaves the user unable to use the
+        feature, since the dropdown only writes auto/on/off."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[ui]
+live_scan_render = "always-and-forever"
+""")
+        loaded = load_config(config_file)
+        assert loaded.ui.live_scan_render == "auto"
+
+
+class TestResolveLiveScanRender:
+    """The auto-gate: terminal-size + cpu_count thresholds."""
+
+    def test_on_overrides_gate(self):
+        from fs_monitor.config import resolve_live_scan_render
+        assert resolve_live_scan_render(
+            "on", terminal_width=40, terminal_height=10, cpu_count=1
+        ) is True
+
+    def test_off_overrides_gate(self):
+        from fs_monitor.config import resolve_live_scan_render
+        assert resolve_live_scan_render(
+            "off", terminal_width=200, terminal_height=60, cpu_count=16
+        ) is False
+
+    def test_auto_enabled_on_roomy_terminal(self):
+        from fs_monitor.config import resolve_live_scan_render
+        assert resolve_live_scan_render(
+            "auto", terminal_width=100, terminal_height=40, cpu_count=8
+        ) is True
+
+    def test_auto_disabled_when_terminal_too_narrow(self):
+        from fs_monitor.config import resolve_live_scan_render
+        assert resolve_live_scan_render(
+            "auto", terminal_width=60, terminal_height=40, cpu_count=8
+        ) is False
+
+    def test_auto_disabled_when_terminal_too_short(self):
+        from fs_monitor.config import resolve_live_scan_render
+        assert resolve_live_scan_render(
+            "auto", terminal_width=120, terminal_height=15, cpu_count=8
+        ) is False
+
+    def test_auto_disabled_when_too_few_cpus(self):
+        from fs_monitor.config import resolve_live_scan_render
+        assert resolve_live_scan_render(
+            "auto", terminal_width=120, terminal_height=40, cpu_count=2
+        ) is False
+
+    def test_unknown_value_treated_as_auto(self):
+        """Any non-on/off value uses the gate, so a future bad config
+        value can't permanently disable the feature."""
+        from fs_monitor.config import resolve_live_scan_render
+        assert resolve_live_scan_render(
+            "yes-please", terminal_width=120, terminal_height=40, cpu_count=8
+        ) is True
+        assert resolve_live_scan_render(
+            "", terminal_width=40, terminal_height=10, cpu_count=1
+        ) is False

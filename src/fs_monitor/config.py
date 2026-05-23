@@ -68,6 +68,13 @@ class UIConfig:
     # accessibility glyphs) for ASCII fallbacks. Useful in web-based
     # shells whose fonts don't ship the full Unicode block range.
     safe_rendering: bool = False
+    # "auto" | "on" | "off". Controls whether the active viz tab (sunburst
+    # or treemap) redraws live with partial scan data, vs. waiting for the
+    # scan to finish and rendering once. `auto` enables it on a roomy
+    # terminal with enough cores; see `resolve_live_scan_render` for the
+    # exact gate. The opt-out matters on cramped terminals and small VMs
+    # where the per-frame redraw cost is noticeable against the scan.
+    live_scan_render: str = "auto"
 
 
 @dataclass
@@ -171,6 +178,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append("show_cleanup = true")
     if config.ui.safe_rendering:
         lines.append("safe_rendering = true")
+    if config.ui.live_scan_render != "auto":
+        lines.append(f'live_scan_render = "{config.ui.live_scan_render}"')
     if config.ui.default_scan_path is not None:
         lines.append(f'default_scan_path = "{config.ui.default_scan_path}"')
     if not config.ui.hostname_aware_paths:
@@ -233,6 +242,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.show_hidden = ui.get("show_hidden", False)
         config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.safe_rendering = ui.get("safe_rendering", False)
+        raw_live = ui.get("live_scan_render", "auto")
+        config.ui.live_scan_render = (
+            raw_live if raw_live in ("auto", "on", "off") else "auto"
+        )
         config.ui.default_scan_path = ui.get("default_scan_path")
         config.ui.hostname_aware_paths = ui.get("hostname_aware_paths", True)
 
@@ -244,3 +257,62 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             )
 
     return config
+
+
+# Auto-gate thresholds for the live-scan-render setting. A 60x12 progress
+# overlay sits in the middle of the explorer; below ~80 columns or ~24
+# rows there is no room for a meaningful sunburst behind it, so the live
+# redraw is purely cost with no payoff. Four cores is the rough line at
+# which a 50-200 ms braille fill per second stops competing with the
+# scan worker threads for CPU.
+_LIVE_RENDER_MIN_COLS = 80
+_LIVE_RENDER_MIN_ROWS = 24
+_LIVE_RENDER_MIN_CPUS = 4
+
+
+def resolve_live_scan_render(
+    value: str,
+    *,
+    terminal_width: int | None = None,
+    terminal_height: int | None = None,
+    cpu_count: int | None = None,
+) -> bool:
+    """Resolve a `live_scan_render` config value to a concrete on/off.
+
+    Explicit "on" / "off" honor the user; "auto" (the default) enables
+    live rendering only when both the terminal is roomy enough for the
+    sunburst to be visible around the progress overlay AND there are
+    enough cores that the per-frame redraw cost is not visible against
+    the scan. The keyword arguments are taken from the runtime by
+    default; tests inject them to assert the gate.
+    """
+    normalized = (value or "auto").strip().lower()
+    if normalized == "on":
+        return True
+    if normalized == "off":
+        return False
+    # Anything else (including the documented "auto") falls through to
+    # the heuristic so an unexpected value can't permanently disable a
+    # feature the user can no longer enable from the dropdown.
+    if terminal_width is None or terminal_height is None:
+        import shutil
+        try:
+            size = shutil.get_terminal_size((_LIVE_RENDER_MIN_COLS, _LIVE_RENDER_MIN_ROWS))
+        except OSError:
+            size = None
+        if size is not None:
+            if terminal_width is None:
+                terminal_width = size.columns
+            if terminal_height is None:
+                terminal_height = size.lines
+    if terminal_width is None:
+        terminal_width = _LIVE_RENDER_MIN_COLS
+    if terminal_height is None:
+        terminal_height = _LIVE_RENDER_MIN_ROWS
+    if cpu_count is None:
+        cpu_count = os.cpu_count() or 1
+    return (
+        terminal_width >= _LIVE_RENDER_MIN_COLS
+        and terminal_height >= _LIVE_RENDER_MIN_ROWS
+        and cpu_count >= _LIVE_RENDER_MIN_CPUS
+    )
