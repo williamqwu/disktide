@@ -176,6 +176,101 @@ def test_live_render_gate_uses_app_size_not_shutil(tmp_path, monkeypatch):
     asyncio.run(go())
 
 
+def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
+    """The scan-progress overlay must NOT cover the viz area outside
+    its own 60x12 footprint.
+
+    Earlier versions wrapped the overlay in a full-screen Container with
+    background:transparent. Textual treats a transparent-bg container
+    as still owning every cell it covers, so the live sunburst rendered
+    correctly but was invisible behind the wrapper. The fix positions
+    the overlay with `position:absolute`, claiming only its own cells.
+
+    Regression: hit-test points well outside the centered 60x12 panel
+    during a scan and assert the viz widget is what owns them.
+    """
+    # A small tree, then we slow each subdir scan by monkey-patching the
+    # walker so the test reliably catches the mid-scan window even on a
+    # fast tmpfs / fast CI box.
+    for i in range(40):
+        d = tmp_path / f"top_{i:02d}"
+        d.mkdir()
+        for j in range(5):
+            (d / f"f_{j}.txt").write_text("x")
+
+    async def go():
+        import time
+        from fs_monitor.config import AppConfig
+        from fs_monitor.scanner import walker as walker_mod
+        from fs_monitor.widgets.sunburst_view import SunburstView
+
+        # Slow each subdir scan by 30ms so a 40-top-dir tree takes ~1.2s
+        # with workers=1, leaving comfortable mid-scan windows.
+        orig_scan = walker_mod.scan_directory
+
+        def slow_scan(*args, **kwargs):
+            time.sleep(0.03)
+            return orig_scan(*args, **kwargs)
+
+        walker_mod.scan_directory = slow_scan
+        # Engine imported scan_directory from walker at module import, so
+        # also patch it on the engine module.
+        from fs_monitor.scanner import engine as engine_mod
+        engine_mod.scan_directory = slow_scan
+
+        try:
+            cfg = AppConfig()
+            cfg.ui.live_scan_render = "on"  # bypass auto-gate
+            cfg.scan.workers = 1  # one subdir at a time
+            app = FSMonitorApp(
+                scan_path=str(tmp_path), show_welcome=False, config=cfg
+            )
+            async with app.run_test(size=(160, 50)) as pilot:
+                for _ in range(50):
+                    await pilot.pause(delay=0.05)
+                    if isinstance(app.screen, ExplorerScreen):
+                        break
+                screen = app.screen
+                sv = screen.query_one("#sunburst-view", SunburstView)
+                # Wait until the live snapshot has actual children and
+                # the scan is still running.
+                saw_mid_scan = False
+                for _ in range(200):
+                    await pilot.pause(delay=0.02)
+                    if (
+                        sv._node is not None
+                        and len(sv._node.children) > 3
+                        and screen._scan_in_progress
+                    ):
+                        saw_mid_scan = True
+                        break
+                assert saw_mid_scan, (
+                    "scan finished before we could observe a mid-scan "
+                    "snapshot; the slow-scan monkey patch is not taking "
+                    "effect, or the tree is too small"
+                )
+
+                # The overlay panel is 60x12 centered on a 160x50 canvas:
+                # rows ~19-30, cols ~50-110. Probe points well outside.
+                outside_overlay = [
+                    (140, 10),   # upper-right of viz panel
+                    (130, 40),   # lower-right of viz panel
+                    (130, 5),    # right side, near top
+                ]
+                for x, y in outside_overlay:
+                    widget = screen.get_widget_at(x, y)[0]
+                    assert widget.__class__.__name__ == "SunburstView", (
+                        f"at ({x},{y}) during scan, expected SunburstView "
+                        f"to own the cell, got {widget.__class__.__name__} "
+                        f"id={widget.id}"
+                    )
+        finally:
+            walker_mod.scan_directory = orig_scan
+            engine_mod.scan_directory = orig_scan
+
+    asyncio.run(go())
+
+
 def test_settings_arrow_does_not_steal_focus_when_select_expanded(tmp_path):
     """When a Settings Select dropdown is open (e.g. user opens the
     'Live scan rendering' picker), pressing Down must NOT move focus to

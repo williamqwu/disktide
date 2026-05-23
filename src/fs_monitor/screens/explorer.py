@@ -7,7 +7,7 @@ from pathlib import Path
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 import humanize
@@ -74,19 +74,20 @@ class ExplorerScreen(Screen):
         width: 60%;
     }
 
-    /* Full-screen invisible container in the overlay layer; centres
-       the ScanProgressOverlay floating above the explorer panels so
-       its top border isn't clipped by the TabbedContent below it. */
-    #overlay-container {
+    /* The scan-progress overlay floats above the explorer using absolute
+       positioning so it claims only its own 60x12 cells (not the entire
+       screen). The earlier full-screen wrapper had background:transparent
+       but Textual's compositor still treats the wrapper's empty cells as
+       owned, occluding the live-scan viz behind. position:absolute keeps
+       the lower layer visible everywhere outside the panel itself. The
+       panel is centered at runtime in `_center_overlay`. */
+    #scan-progress {
+        position: absolute;
         layer: overlay;
-        width: 100%;
-        height: 100%;
-        align: center middle;
-        background: transparent;
         display: none;
     }
 
-    #overlay-container.scanning {
+    #scan-progress.scanning {
         display: block;
     }
     """
@@ -123,10 +124,10 @@ class ExplorerScreen(Screen):
                         yield TreemapView(id="treemap-view")
                     with TabPane("Details", id="tab-details"):
                         yield InfoPanel(id="info-panel")
-        yield Container(
-            ScanProgressOverlay(id="scan-progress"),
-            id="overlay-container",
-        )
+        # ScanProgressOverlay is yielded at root (no wrapping container);
+        # the screen-level CSS lifts it onto the overlay layer with
+        # position:absolute so it doesn't occlude the live-scan viz.
+        yield ScanProgressOverlay(id="scan-progress")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -136,6 +137,30 @@ class ExplorerScreen(Screen):
             if viz in tab_map:
                 self.query_one("#viz-tabs", TabbedContent).active = tab_map[viz]
         self._start_scan()
+
+    def on_resize(self, event) -> None:
+        """Re-center the floating progress overlay when the terminal resizes."""
+        self._center_overlay()
+
+    def _center_overlay(self) -> None:
+        """Place the scan-progress overlay in the middle of the screen.
+
+        The overlay uses `position: absolute` so it doesn't claim screen
+        cells outside its own footprint; that means we own positioning
+        and have to set offset by hand. Reads the overlay's declared
+        size from its styles so this stays correct if we ever resize it.
+        """
+        try:
+            overlay = self.query_one("#scan-progress", ScanProgressOverlay)
+        except Exception:
+            return
+        ow = int(overlay.styles.width.value) if overlay.styles.width else 60
+        oh = int(overlay.styles.height.value) if overlay.styles.height else 12
+        sw = self.size.width or 0
+        sh = self.size.height or 0
+        x = max(0, (sw - ow) // 2)
+        y = max(0, (sh - oh) // 2)
+        overlay.styles.offset = (x, y)
 
     def _start_scan(self, force: bool = False) -> None:
         """Kick off a filesystem scan."""
@@ -161,7 +186,11 @@ class ExplorerScreen(Screen):
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.start()
-        self.query_one("#overlay-container").add_class("scanning")
+        # position:absolute lifts it out of layout so it doesn't claim
+        # cells over the viz; we re-center on every scan start in case
+        # the terminal was resized between scans.
+        self._center_overlay()
+        overlay.add_class("scanning")
 
         # Reset the viz tabs so a previous scan's chart doesn't bleed
         # into the new scan, and put them into live mode so the first
@@ -231,7 +260,7 @@ class ExplorerScreen(Screen):
         # Update overlay
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_complete()
-        self.query_one("#overlay-container").remove_class("scanning")
+        overlay.remove_class("scanning")
 
         # Restore the viz tabs to their static (full-depth) render mode
         # whether or not live mode was active this scan, so a config flip
