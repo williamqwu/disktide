@@ -42,6 +42,18 @@ def classify_symlink(node):                        # called on demand by the UI
 
 The tree label degrades cleanly: a symlink the user has not selected yet shows just its name; the inline `-> /target` arrow appears once they look at it. The Details panel and the `i` action already called `classify_symlink` defensively, so the UI side needed no change.
 
+One small refinement keeps the typical-case UX intact. A user running `fsmon ~` reasonably expects to see what the handful of symlinks at home root point to without having to click each one. So the engine eagerly classifies the **first 100 symlinks at the scan root** (and only at the scan root: deeper levels stay fully lazy). 100 is small enough to be invisible (60 ms of NFS RTT in the worst case), large enough to cover any non-pathological home, and bounded so it cannot regress the case where the scan root itself contains 215,000 symlinks.
+
+## What it costs
+
+Three small, honest trade-offs versus the old eager scheme:
+
+1. **Inline `-> /target` arrow in the tree.** Visible for the first 100 symlinks at the scan root and for any symlink the user has already selected once (the result is cached on the node). Symlinks the user has not visited show just the name. The Details panel is still authoritative for any link the user looks at.
+2. **First-select latency.** Selecting an unvisited symlink runs one `readlink` + one `os.stat` before the Details panel renders. ~600 µs on the cluster NFS, microseconds on local SSD. Subsequent selects of the same link are free.
+3. **Sticky tree labels.** The tree widget computes a row's label when the row is first added; `classify_symlink` mutates the node but does not trigger a label re-render, so a row that was rendered before its link was visited keeps its name-only label until the next refresh (metric toggle, sort change, or re-expansion). Stale label, never stale data.
+
+The scan total, the file/dir counts, the per-link size, the cycle and access markers, and the `i` action all behave exactly as before.
+
 ## The numbers
 
 Isolated leaf, 215,339 symlinks, `--workers 1`, back-to-back in one session:
@@ -51,7 +63,7 @@ Isolated leaf, 215,339 symlinks, `--workers 1`, back-to-back in one session:
 | v0.1.5 pre-fix       | 89.5 s    |  2,406           | 215,341            |
 | v0.1.5 post-fix      |  8.4 s    | 25,706           | ~2                 |
 
-**10.7x faster on the same content, same machine, same NFS share.** The dominant per-symlink syscall is gone; what's left is `entry.stat` for the link's own size, exactly as in v0.1.3.
+**10.7x faster on the same content, same machine, same NFS share.** The dominant per-symlink syscall is gone; what's left is `entry.stat` for the link's own size, exactly as in v0.1.3. (The cap-100 refinement was added after this measurement; it adds at most 200 deterministic syscalls at the scan root, ~60 ms on this NFS, below the noise floor of the bench.)
 
 End-to-end on the full home directory (6.1M files, 100 GB, default worker pool):
 
