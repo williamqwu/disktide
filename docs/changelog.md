@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.6
+
+Since `407136d` (v0.1.5 release).
+
+**Explorer**
+
+- **feat** The active visualization tab (Sunburst or Treemap) now renders live as the scan runs, instead of waiting until the end and popping in at once. The engine builds a fresh shallow-copy `FSNode` snapshot after the top-level scandir and again after each top-level subdir worker finishes; the explorer applies that snapshot to whichever viz tab is currently visible. The progress overlay still floats above the viz, so the user sees the scan turning into the result with the counters ticking on top.
+- **fix** Live frames render at reduced depth (`max_depth=2` instead of 4 for the sunburst and 3 for the treemap), restored on completion. The outer rings of a sunburst are exactly the ones that re-tile every time a subtree's size lands, so dropping them mid-scan removes both the visual jitter and most of the per-frame braille-fill cost.
+- **fix** Drill-into is gated while a scan is in flight (`u` go-up, `i` go-into, `r` rescan, and click-to-drill on the tree all return early). The live snapshot's per-subtree aggregates are honest, but the root totals visible on a partial render are not, and we don't want the Details panel showing numbers that contradict themselves a second later.
+
+**Settings**
+
+- **feat** New **Live scan rendering** setting (`ui.live_scan_render`): `auto` (default), `on`, or `off`. `auto` enables live rendering on roomy terminals (>= 80x24) with enough cores (>= 4), and silently stays out of the way on cramped web shells or small VMs where the per-frame redraw cost would compete with the scan. Persisted to `~/.config/fsmonitor-cli/config.toml` only when the user picks `on` or `off`; the default does not pollute the file.
+
+**Scanner**
+
+- **feat** `ScanEngine` gains an optional `tree_callback: Callable[[FSNode], None]` and a `tree_callback_interval` (default 1.0 s). When set, the callback fires once with a top-level-only snapshot before workers start, then at most once per interval as top-level subdir futures resolve, and unconditionally one final time at the end. Aggregate math is factored into a single `_roll_up` helper used by both the live snapshot path and the final root assembly, so they cannot drift.
+
+**Docs**
+
+- **docs** Architecture guide gains a short subsection on live-scan rendering (the snapshot path, the depth damping, the auto-gate) under Visualization.
+
 ## v0.1.5
 
 Since `6cb0459` (v0.1.4 release).
