@@ -42,6 +42,11 @@ class FSNode:
         link_broken: Whether the symlink's target could not be stat'd
             for any reason (a dangling link, a resolution loop, or
             another OS error such as a permission failure).
+        link_classified: Whether link_is_dir / link_broken reflect a
+            real target stat (True) or are still defaults awaiting
+            lazy classification (False). The walker eagerly classifies
+            only at the scan-root level; the UI calls classify_symlink
+            on demand to fill in deeper links.
         is_loop: Whether this directory was skipped because it is its
             own ancestor (a bind mount or similar filesystem cycle).
             Not recursed into, so it contributes no size or counts.
@@ -66,6 +71,7 @@ class FSNode:
     link_target: str | None = None
     link_is_dir: bool = False
     link_broken: bool = False
+    link_classified: bool = False
     is_loop: bool = False
 
     _sorted_cache: list[FSNode] | None = field(

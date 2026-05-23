@@ -85,7 +85,12 @@ class ScanEngine:
                     break
                 try:
                     if entry.is_symlink():
-                        child = make_symlink_node(entry, depth=1)
+                        # Top-level: classify eagerly so the initial
+                        # view shows target types without paying the
+                        # per-symlink follow-stat across the whole tree.
+                        child = make_symlink_node(
+                            entry, depth=1, classify_target=True,
+                        )
                         if child is None:
                             top_inaccessible += 1
                         else:

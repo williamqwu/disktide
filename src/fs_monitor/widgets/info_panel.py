@@ -13,6 +13,7 @@ import humanize
 
 from fs_monitor.metrics import metric_text, metric_value
 from fs_monitor.models.tree import FSNode
+from fs_monitor.scanner.walker import classify_symlink
 from fs_monitor.rendering import denied_glyph, partial_glyph
 
 
@@ -57,6 +58,9 @@ class InfoPanel(Widget):
         table.add_row("Name", node.name)
         table.add_row("Path", node.path)
         if node.is_symlink:
+            # Deeper symlinks defer target classification; fill it in
+            # now so the rows below reflect reality.
+            classify_symlink(node)
             table.add_row("Type", "Symlink")
             if node.link_target:
                 table.add_row("Target", node.link_target)

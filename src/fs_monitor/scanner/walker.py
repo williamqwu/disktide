@@ -8,12 +8,20 @@ from typing import Callable
 from fs_monitor.models.tree import FSNode
 
 
-def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
+def make_symlink_node(
+    entry: os.DirEntry, depth: int, classify_target: bool = False
+) -> FSNode | None:
     """Build an FSNode for a symlink directory entry.
 
-    Returns None if the link itself cannot be stat'd. The symlink is
-    sized by itself and never recursed into, but its target is probed
-    once (one extra stat) so the UI can mark it and let `i` navigate in.
+    The symlink is sized by itself and never recursed into. Classifying
+    the target type (Directory / File / broken) requires a stat that
+    *follows* the link, which on slow storage with many symlinks (NFS
+    cluster home, miniconda3, node_modules, ...) is expensive enough to
+    dominate scan time. It is therefore deferred by default: only the
+    scan-root level passes classify_target=True; deeper symlinks are
+    classified on demand by classify_symlink() when the UI looks at one.
+
+    Returns None if the link itself cannot be stat'd.
     """
     try:
         st = entry.stat(follow_symlinks=False)
@@ -34,13 +42,27 @@ def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
         node.link_target = os.readlink(entry.path)
     except OSError:
         pass
+    if classify_target:
+        classify_symlink(node)
+    return node
+
+
+def classify_symlink(node: FSNode) -> None:
+    """Stat the symlink's target and record link_is_dir / link_broken.
+
+    Idempotent: a second call is a cheap no-op (checks link_classified).
+    The UI (Details panel render, the `i` action) calls this so deeper
+    symlinks that the scan deferred get filled in just in time.
+    """
+    if not node.is_symlink or node.link_classified:
+        return
     try:
-        target = entry.stat(follow_symlinks=True)
+        target = os.stat(node.path)
         node.link_is_dir = stat.S_ISDIR(target.st_mode)
     except OSError:
         # Target unresolvable for any reason: missing, ELOOP, EACCES, ...
         node.link_broken = True
-    return node
+    node.link_classified = True
 
 
 def scan_directory(
@@ -114,8 +136,13 @@ def scan_directory(
             try:
                 if entry.is_symlink():
                     # Symlinks are never recursed into (avoids loops and
-                    # double-counting); sized by the link itself.
-                    child = make_symlink_node(entry, depth + 1)
+                    # double-counting); sized by the link itself. Target
+                    # is classified eagerly only when we're at the scan
+                    # root (depth=0); deeper symlinks are lazy and get
+                    # filled in on demand via classify_symlink().
+                    child = make_symlink_node(
+                        entry, depth + 1, classify_target=(depth == 0),
+                    )
                     if child is None:
                         inaccessible += 1
                     else:
