@@ -16,7 +16,7 @@ Since `407136d` (v0.1.5 release).
 
 **Scanner**
 
-- **feat** `ScanEngine` gains an optional `tree_callback: Callable[[FSNode], None]` and a `tree_callback_interval` (default 1.0 s). When set, the callback fires once with a top-level-only snapshot before workers start, then at most once per interval as top-level subdir futures resolve, and unconditionally one final time at the end. Aggregate math is factored into a single `_roll_up` helper used by both the live snapshot path and the final root assembly, so they cannot drift.
+- **feat** `ScanEngine` gains an optional `tree_callback: Callable[[FSNode], None]` and a `tree_callback_interval` (default 0.25 s). When set, the callback fires once with a top-level-only snapshot before workers start, then at most once per interval as top-level subdir futures resolve, and unconditionally one final time at the end. The first non-forced emit after a force bypasses the throttle so the first ring slice appears the moment a top-level subdir lands, instead of after a full interval of blank viz. Aggregate math is factored into a single `_roll_up` helper used by both the live snapshot path and the final root assembly, so they cannot drift.
 
 **Docs**
 

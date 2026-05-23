@@ -34,7 +34,7 @@ class ScanEngine:
         max_depth: int | None = None,
         scan_path: str | None = None,
         tree_callback: Callable[[FSNode], None] | None = None,
-        tree_callback_interval: float = 1.0,
+        tree_callback_interval: float = 0.25,
     ):
         if workers is not None:
             self._workers = workers
@@ -58,6 +58,13 @@ class ScanEngine:
         self._tree_callback = tree_callback
         self._tree_callback_interval = tree_callback_interval
         self._tree_last_emit = 0.0
+        # The first non-forced emit after a force bypasses the throttle
+        # so the user sees the first subdir's data the moment a worker
+        # returns it, instead of waiting up to tree_callback_interval
+        # seconds for the next throttle window to open. Without this the
+        # typical home-dir scan (no top-level files) sits visually blank
+        # for the full interval before the first ring slice appears.
+        self._tree_first_after_force = True
 
     def cancel(self) -> None:
         self._cancel_event.set()
@@ -355,9 +362,18 @@ class ScanEngine:
         if self._tree_callback is None:
             return
         now = time.monotonic()
-        if not force and (now - self._tree_last_emit) < self._tree_callback_interval:
+        if force:
+            # Reset the bypass so the first emit after this force-emit
+            # is again ungated by the throttle.
+            self._tree_first_after_force = True
+        bypass_throttle = force or self._tree_first_after_force
+        if not bypass_throttle and (now - self._tree_last_emit) < self._tree_callback_interval:
             return
         self._tree_last_emit = now
+        if not force:
+            # The first non-forced emit consumed its bypass; subsequent
+            # emits go through the throttle as usual.
+            self._tree_first_after_force = False
 
         snap = FSNode(
             name=root.name,

@@ -161,9 +161,10 @@ def test_engine_tree_callback_optional(tmp_path):
 
 
 def test_engine_tree_callback_throttled(tmp_path):
-    """With a generous throttle interval, the engine still fires the
-    forced initial emit and the unconditional final emit, but coalesces
-    the per-future emits in between."""
+    """With a generous throttle interval, the engine fires the forced
+    initial emit, the first-after-force bypass emit, and the
+    unconditional final emit, but coalesces all other per-future emits
+    in between."""
     for i in range(20):
         d = tmp_path / f"d{i:02}"
         d.mkdir()
@@ -173,12 +174,53 @@ def test_engine_tree_callback_throttled(tmp_path):
     engine = ScanEngine(
         workers=2,
         tree_callback=lambda n: snaps.append(n),
-        tree_callback_interval=60.0,  # effectively no mid-scan emits
+        tree_callback_interval=60.0,  # effectively no throttled mid-emits
     )
     engine.scan(str(tmp_path))
 
-    # initial (forced) + final (unconditional) at minimum.
-    assert len(snaps) >= 2
+    # initial force + first-after-force bypass + final = 3 minimum.
+    assert len(snaps) >= 3
     # And the final one is fully aggregated.
     assert snaps[-1].file_count == 20
     assert snaps[-1].dir_count == 20
+
+
+def test_engine_tree_callback_first_mid_emit_bypasses_throttle(tmp_path):
+    """The first mid-scan emit fires immediately when a top-level subdir
+    future resolves, regardless of how generous the throttle interval is.
+
+    This is what makes the user see the first ring slice on a fast scan
+    instead of a 'blank for one interval then full chart' pop. Without
+    the bypass, scans that complete inside one throttle window would
+    only ever emit the initial (often empty) and the final snapshot.
+    """
+    for i in range(10):
+        d = tmp_path / f"d{i:02}"
+        d.mkdir()
+        (d / "f").write_text("x")
+
+    snaps = []
+    engine = ScanEngine(
+        workers=2,
+        tree_callback=lambda n: snaps.append(n),
+        tree_callback_interval=60.0,  # block all throttled mid-emits
+    )
+    engine.scan(str(tmp_path))
+
+    # Find the index of the first emit that actually has subtree data.
+    # Initial emit (snaps[0]) has only top-level files, so dir children = 0;
+    # the first-after-force bypass emit must include at least one
+    # finished top-level subdir.
+    first_with_dirs = next(
+        (i for i, s in enumerate(snaps) if any(c.is_dir for c in s.children)),
+        None,
+    )
+    assert first_with_dirs is not None, (
+        f"no snapshot ever contained a finished subdir; snaps={len(snaps)}"
+    )
+    # That snapshot must NOT be the final one (which is the last index).
+    # If it is, the throttle ate every mid-emit and the user saw nothing
+    # until completion.
+    assert first_with_dirs < len(snaps) - 1, (
+        f"first mid-emit was the final emit; throttle bypass not working"
+    )
