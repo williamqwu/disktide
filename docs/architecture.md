@@ -93,7 +93,7 @@ Each `os.scandir()` entry is wrapped in try/except. A permission error on one di
 
 Symlinks are never recursed into: a symlink is stored as a leaf `FSNode` sized by the link itself (`lstat`), never its target. This prevents infinite loops and double-counting, and keeps a symlinked directory's bytes from inflating the parent total.
 
-The walker does one extra `stat` per symlink to classify the target and an `os.readlink()` to record it, populating `FSNode.is_symlink`, `link_target`, `link_is_dir`, and `link_broken`. The size tree shows symlinks as `name → target`; the explorer's `i` action resolves a symlink-to-directory and rescans from the real path, so linked folders are navigable without the scan ever traversing the link.
+Target classification (the `os.readlink` for the target string and the `os.stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred**: `make_symlink_node` pays only the one `entry.stat(follow_symlinks=False)` needed for the link's own size, and the deferred work runs in `classify_symlink`, called on demand by the Details panel render and the `i` action. The result is cached on the node via `link_classified`, so a second look is free. The engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks at the scan root so the typical `fsmon ~` case shows target arrows in the tree from the start without re-introducing the per-symlink cost when the scan root itself contains hundreds of thousands of symlinks. Deeper symlinks remain fully lazy. This is what keeps the scan at one syscall per symlink on slow shared storage (cluster home, NFS, sshfs) where every extra round-trip is sub-millisecond but adds up.
 
 ### Caching
 
