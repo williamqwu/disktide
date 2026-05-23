@@ -32,6 +32,20 @@ Recommended invocation (capture the full transcript):
 
 Ctrl-C is honored: the engine is cancelled, and the hotspot table is
 still printed for whatever was collected before the cancel.
+
+Forward-compat contract (kept stable across releases; if you break any
+of these, also update tests/test_tools.py so the breakage is loud):
+
+    from fs_monitor.scanner.engine import ScanEngine
+    ScanEngine(workers=N, progress_callback=cb).scan(path) -> FSNode
+    FSNode.dir_count, .file_count, .size                 # public ints
+    ScanProgress.dirs_scanned, .files_scanned,
+                  .total_size, .current_path             # public fields
+
+The per-directory hotspot table additionally monkey-patches
+`fs_monitor.scanner.walker.scan_directory`; if that symbol or its
+return type changes, the patch is skipped automatically and the
+heartbeat + summary still work.
 """
 
 from __future__ import annotations
@@ -46,35 +60,63 @@ import threading
 import time
 from typing import Optional
 
-from fs_monitor.scanner import engine as engine_mod
-from fs_monitor.scanner import walker as walker_mod
 from fs_monitor.scanner.engine import ScanEngine
-from fs_monitor.scanner.progress import ScanProgress
 
+# --- per-directory timing via monkey-patch (optional) ------------------
+#
+# The hotspot table relies on wrapping scan_directory. If the symbol
+# moves or its signature changes, we want the script to still stream
+# progress instead of failing at import. So this whole block is best
+# effort: success populates _timings, failure leaves it empty.
 
-# --- per-directory timing via monkey-patch -----------------------------
-
-_orig_scan_directory = walker_mod.scan_directory
 _timings: list[tuple[float, str, int, int, int]] = []  # dt, path, files, dirs, bytes
 _timings_lock = threading.Lock()
+_hotspot_patch_installed = False
 
+try:
+    from fs_monitor.scanner import engine as engine_mod
+    from fs_monitor.scanner import walker as walker_mod
 
-def _timed_scan_directory(path, *args, **kwargs):
-    t0 = time.monotonic()
-    node = _orig_scan_directory(path, *args, **kwargs)
-    dt = time.monotonic() - t0
-    if node is not None and dt >= 0.05:
-        with _timings_lock:
-            _timings.append(
-                (dt, path, node.file_count, node.dir_count, node.size)
-            )
-    return node
+    _orig_scan_directory = walker_mod.scan_directory
 
+    def _timed_scan_directory(path, *args, **kwargs):
+        t0 = time.monotonic()
+        node = _orig_scan_directory(path, *args, **kwargs)
+        dt = time.monotonic() - t0
+        if node is not None and dt >= 0.05:
+            try:
+                row = (
+                    dt, path,
+                    int(getattr(node, "file_count", 0)),
+                    int(getattr(node, "dir_count", 0)),
+                    int(getattr(node, "size", 0)),
+                )
+            except Exception:
+                row = None
+            if row is not None:
+                with _timings_lock:
+                    _timings.append(row)
+        return node
 
-# Patch in BOTH modules: engine.py did `from walker import scan_directory`
-# at import time, so it holds its own reference to the unwrapped function.
-walker_mod.scan_directory = _timed_scan_directory
-engine_mod.scan_directory = _timed_scan_directory
+    # Patch in BOTH modules: engine.py did `from walker import scan_directory`
+    # at import time, so it holds its own reference to the unwrapped function.
+    walker_mod.scan_directory = _timed_scan_directory
+    if hasattr(engine_mod, "scan_directory"):
+        engine_mod.scan_directory = _timed_scan_directory
+    _hotspot_patch_installed = True
+except Exception as e:
+    print(
+        f"diag: per-directory hotspot table disabled "
+        f"(monkey-patch failed: {type(e).__name__}: {e})",
+        file=sys.stderr,
+    )
+
+# ScanProgress is imported defensively too: if it ever goes away we
+# still run, just with degraded heartbeat (None-safe getattr below).
+try:
+    from fs_monitor.scanner.progress import ScanProgress
+except Exception:
+    ScanProgress = object  # type: ignore[assignment,misc]
 
 
 # --- progress capture + heartbeat --------------------------------------
@@ -86,14 +128,16 @@ _last_files = -1
 _lock = threading.Lock()
 
 
-def _on_progress(p: ScanProgress) -> None:
+def _on_progress(p) -> None:
     global _last, _last_change_at, _last_dirs, _last_files
     with _lock:
         _last = p
-        if p.dirs_scanned != _last_dirs or p.files_scanned != _last_files:
+        dirs = getattr(p, "dirs_scanned", 0)
+        files = getattr(p, "files_scanned", 0)
+        if dirs != _last_dirs or files != _last_files:
             _last_change_at = time.monotonic()
-            _last_dirs = p.dirs_scanned
-            _last_files = p.files_scanned
+            _last_dirs = dirs
+            _last_files = files
 
 
 def _heartbeat(stop: threading.Event, start: float) -> None:
@@ -106,14 +150,14 @@ def _heartbeat(stop: threading.Event, start: float) -> None:
             print(f"[{elapsed:6.1f}s] (no progress yet)", flush=True)
             continue
         prefix = f"STALL {stall:4.0f}s" if stall >= 5.0 else "         "
-        path = p.current_path or "(idle)"
+        path = getattr(p, "current_path", "") or "(idle)"
         if len(path) > 80:
             path = "..." + path[-77:]
         print(
             f"[{elapsed:6.1f}s] {prefix}  "
-            f"dirs={p.dirs_scanned:>8,}  "
-            f"files={p.files_scanned:>10,}  "
-            f"size={p.total_size/1e9:>6.2f}GB  "
+            f"dirs={getattr(p, 'dirs_scanned', 0):>8,}  "
+            f"files={getattr(p, 'files_scanned', 0):>10,}  "
+            f"size={getattr(p, 'total_size', 0)/1e9:>6.2f}GB  "
             f"@ {path}",
             flush=True,
         )
@@ -162,7 +206,11 @@ def main() -> int:
     print(f"diag: pid={os.getpid()}  python={sys.version.split()[0]}", flush=True)
 
     engine = ScanEngine(workers=args.workers, progress_callback=_on_progress)
-    print(f"diag: workers={engine._workers}", flush=True)
+    workers = getattr(engine, "_workers", args.workers if args.workers else "auto")
+    print(f"diag: workers={workers}", flush=True)
+    if not _hotspot_patch_installed:
+        print("diag: hotspot table disabled this run (see warning above)",
+              flush=True)
     if args.profile:
         print(f"diag: cProfile active (NOTE: profiler overhead inflates wall time)",
               flush=True)

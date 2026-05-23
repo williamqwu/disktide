@@ -2,7 +2,7 @@
 """Time a single scan with whatever fs_monitor version is installed.
 
 Minimal, version-agnostic. Works against v0.1.3 and later because it
-uses only the long-stable ScanEngine().scan(path) entry point.
+uses only the long-stable `ScanEngine().scan(path)` entry point.
 
 Usage:
     python tool/bench_scan.py [PATH] [--workers N]
@@ -14,10 +14,20 @@ Output:
     one line at the end with elapsed time, dir/file counts, and total size.
 
 Recommended invocation:
-    python tool/bench_scan.py ~ 2>&1 | tee bench-v0.1.3.log
+    python tool/bench_scan.py ~ 2>&1 | tee bench.log
 
     # control test that removes thread/lock contention from the picture:
     python tool/bench_scan.py /some/subdir --workers 1
+
+Forward-compat contract (kept stable across releases; see also
+tests/test_tools.py):
+
+    from fs_monitor.scanner.engine import ScanEngine
+    ScanEngine(workers=N).scan(path) -> object with .dir_count,
+                                       .file_count, .size (all ints)
+
+Everything else (the engine's `_workers` attribute, the rate column)
+is best effort and degrades gracefully if it changes upstream.
 """
 
 from __future__ import annotations
@@ -42,18 +52,22 @@ def main() -> int:
     print(f"bench: pid={os.getpid()}", flush=True)
 
     engine = ScanEngine(workers=args.workers)
-    print(f"bench: workers={engine._workers}", flush=True)
+    workers = getattr(engine, "_workers", args.workers if args.workers else "auto")
+    print(f"bench: workers={workers}", flush=True)
 
     t0 = time.monotonic()
     root = engine.scan(path)
     dt = time.monotonic() - t0
 
-    gb = root.size / 1e9
-    rate = root.file_count / dt if dt > 0 else 0
+    dirs = int(getattr(root, "dir_count", 0))
+    files = int(getattr(root, "file_count", 0))
+    size = int(getattr(root, "size", 0))
+    gb = size / 1e9
+    rate = files / dt if dt > 0 else 0
     print(
         f"bench: done in {dt:.1f}s  "
-        f"dirs={root.dir_count:,}  files={root.file_count:,}  "
-        f"size={root.size:,}B ({gb:.2f}GB)  "
+        f"dirs={dirs:,}  files={files:,}  "
+        f"size={size:,}B ({gb:.2f}GB)  "
         f"rate={rate:,.0f} files/sec",
         flush=True,
     )
