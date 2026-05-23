@@ -116,10 +116,20 @@ def test_settings_up_moves_focus_back(tmp_path):
 
 def test_live_render_disabled_on_tiny_canvas(tmp_path):
     """At <80 cols, the auto-gate must resolve to False so live render
-    doesn't fight a cramped terminal for screen space."""
+    doesn't fight a cramped terminal for screen space.
+
+    Uses a freshly-constructed AppConfig (not load_config()) so the
+    developer's own ~/.config/fsmonitor-cli/config.toml — which may
+    have been flipped to "on" while testing — doesn't override the
+    auto path the test is supposed to exercise.
+    """
+    from fs_monitor.config import AppConfig
+
     async def go():
+        config = AppConfig()
+        assert config.ui.live_scan_render == "auto"  # sanity
         app = FSMonitorApp(
-            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+            scan_path=str(tmp_path), show_welcome=False, config=config
         )
         async with app.run_test(size=(70, 30)) as pilot:
             await _wait_for_explorer(pilot, app)
