@@ -271,6 +271,109 @@ def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
     asyncio.run(go())
 
 
+def test_viz_clears_at_scan_start_regardless_of_live_render(tmp_path):
+    """The previous scan's chart must not bleed into the new scan
+    behind the overlay, even when live_render is off.
+
+    With the position-absolute overlay fix, the viz panel is plainly
+    visible around the centered 60x12 box. A stale chart sitting
+    behind that box for the full duration of the new scan would
+    mislead the user. _start_scan must call set_node(None) on both
+    viz views every scan, not only when live_render is True.
+    """
+    (tmp_path / "a.txt").write_text("hello")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.txt").write_text("world")
+
+    async def go():
+        from fs_monitor.config import AppConfig
+        from fs_monitor.widgets.sunburst_view import SunburstView
+
+        cfg = AppConfig()
+        cfg.ui.live_scan_render = "off"  # the failure mode lived here
+        app = FSMonitorApp(
+            scan_path=str(tmp_path), show_welcome=False, config=cfg
+        )
+        async with app.run_test(size=(140, 50)) as pilot:
+            await _wait_for_explorer(pilot, app)
+            screen = app.screen
+            sv = screen.query_one("#sunburst-view", SunburstView)
+            # First scan completed; sunburst (default-active tab) holds
+            # the final root.
+            assert sv._node is not None
+            first_node = sv._node
+
+            # Kick off a rescan and check the viz BEFORE the scan
+            # completes; the sunburst must have been blanked.
+            screen._start_scan(force=True)
+            assert sv._node is None, (
+                "sunburst kept previous scan's data while a new scan is "
+                "in flight; the stale chart would show behind the overlay"
+            )
+            # And after the rescan finishes, the view repopulates with
+            # a fresh node (so the clear was a transient reset).
+            for _ in range(40):
+                await pilot.pause(delay=0.05)
+                if not screen._scan_in_progress and sv._node is not None:
+                    break
+            assert sv._node is not None
+            assert sv._node is not first_node
+
+    asyncio.run(go())
+
+
+def test_scan_failure_does_not_deadlock_in_progress_flag(tmp_path):
+    """If engine.scan() raises (scan dir disappears between welcome
+    validation and scan start, walker hits an unexpected exception, ...),
+    the explorer must NOT leave _scan_in_progress=True forever. That
+    flag silently gates every drill-into / rescan binding, so a single
+    bad scan would brick the UI until restart.
+
+    The fix wraps engine.scan in try/except and routes to
+    _on_scan_failed, which resets the same state _on_scan_complete
+    does (overlay down, live mode off, in-progress flag cleared).
+    """
+    async def go():
+        from fs_monitor.config import AppConfig
+        from fs_monitor.scanner import engine as engine_mod
+
+        # Make engine.scan raise. The exception type is realistic:
+        # ValueError is what engine.scan itself raises on a non-dir.
+        orig = engine_mod.ScanEngine.scan
+        def boom(self, path):
+            raise ValueError(f"simulated: {path}")
+        engine_mod.ScanEngine.scan = boom
+
+        try:
+            cfg = AppConfig()
+            app = FSMonitorApp(
+                scan_path=str(tmp_path), show_welcome=False, config=cfg
+            )
+            async with app.run_test(size=(120, 40)) as pilot:
+                # Wait for the explorer to mount and the failing scan
+                # worker to finish (and the failure handler to run).
+                await pilot.pause(delay=0.1)
+                for _ in range(40):
+                    await pilot.pause(delay=0.05)
+                    if (
+                        isinstance(app.screen, ExplorerScreen)
+                        and not app.screen._scan_in_progress
+                    ):
+                        break
+                screen = app.screen
+                assert isinstance(screen, ExplorerScreen)
+                # The critical assertion: the flag must be cleared even
+                # though the scan never reached _on_scan_complete.
+                assert screen._scan_in_progress is False, (
+                    "scan failure left _scan_in_progress=True; future "
+                    "rescans / drill-into would be silently gated"
+                )
+        finally:
+            engine_mod.ScanEngine.scan = orig
+
+    asyncio.run(go())
+
+
 def test_settings_arrow_does_not_steal_focus_when_select_expanded(tmp_path):
     """When a Settings Select dropdown is open (e.g. user opens the
     'Live scan rendering' picker), pressing Down must NOT move focus to

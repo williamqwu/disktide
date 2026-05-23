@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from textual import on, work
+from textual import events, on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -138,7 +138,7 @@ class ExplorerScreen(Screen):
                 self.query_one("#viz-tabs", TabbedContent).active = tab_map[viz]
         self._start_scan()
 
-    def on_resize(self, event) -> None:
+    def on_resize(self, event: events.Resize) -> None:
         """Re-center the floating progress overlay when the terminal resizes."""
         self._center_overlay()
 
@@ -192,17 +192,21 @@ class ExplorerScreen(Screen):
         self._center_overlay()
         overlay.add_class("scanning")
 
-        # Reset the viz tabs so a previous scan's chart doesn't bleed
-        # into the new scan, and put them into live mode so the first
-        # snapshot renders at the cheaper reduced depth.
-        if self._live_render:
-            for view_id, view_cls in (
-                ("#sunburst-view", SunburstView),
-                ("#treemap-view", TreemapView),
-            ):
-                view = self.query_one(view_id, view_cls)
-                view.set_node(None)
-                view.set_live_mode(True)
+        # Clear the viz tabs unconditionally so a previous scan's chart
+        # doesn't sit behind the overlay during the new scan. (Now that
+        # the overlay no longer occludes the screen, leftover data would
+        # be plainly visible around the centered panel.) Then put the
+        # viz into live mode only when we'll actually stream snapshots.
+        for view_id, view_cls in (
+            ("#sunburst-view", SunburstView),
+            ("#treemap-view", TreemapView),
+        ):
+            view = self.query_one(view_id, view_cls)
+            view.set_node(None)
+            view.set_live_mode(self._live_render)
+        # Reset the Details panel too: otherwise the previous scan's
+        # detail block stays visible until the user re-highlights.
+        self.query_one("#info-panel", InfoPanel).update_node(None)
         self._run_scan()
 
     @work(thread=True)
@@ -229,8 +233,16 @@ class ExplorerScreen(Screen):
             scan_path=self._scan_path,
             tree_callback=on_tree if self._live_render else None,
         )
-        root = self._engine.scan(self._scan_path)
-
+        # Wrap engine.scan in try/except so an unexpected failure (e.g.
+        # the scan dir got deleted between welcome-screen validation
+        # and the scan starting, or any uncaught exception inside the
+        # walker) cannot leave _scan_in_progress=True permanently, which
+        # would silently gate every subsequent rescan / drill-into.
+        try:
+            root = self._engine.scan(self._scan_path)
+        except Exception as exc:
+            self.app.call_from_thread(self._on_scan_failed, exc)
+            return
         self.app.call_from_thread(self._on_scan_complete, root)
 
     def _apply_progress(self, progress: ScanProgress) -> None:
@@ -246,6 +258,13 @@ class ExplorerScreen(Screen):
         is gated by `_scan_in_progress` to keep users away from those
         numbers until the final snapshot lands in `_on_scan_complete`.
         """
+        # Defensive: a snapshot may arrive via call_from_thread after the
+        # scan has already completed (in practice FIFO ordering prevents
+        # this, but only the runtime contract guarantees that). Dropping
+        # late snapshots avoids overwriting the final tree with stale
+        # partial data on any future ordering change.
+        if not self._scan_in_progress:
+            return
         # Track the latest snapshot so a tab switch mid-scan can render
         # the newly-active panel without waiting for the next emit.
         self._current = node
@@ -282,6 +301,34 @@ class ExplorerScreen(Screen):
         # Update only the active viz tab
         self._update_active_viz(root)
         self._update_status()
+
+    def _on_scan_failed(self, exc: BaseException) -> None:
+        """Handle a worker-thread exception so the UI doesn't deadlock.
+
+        Resets the same state `_on_scan_complete` clears (overlay
+        dismissed, live mode off, in-progress flag down) so the user can
+        rescan or quit cleanly, then surfaces the error via a notify.
+        Does not touch `_root` / `_current` / the size-tree: there is no
+        tree to render, and clobbering the previous scan's data would
+        wipe state the user might still want to see.
+        """
+        self._scan_in_progress = False
+
+        overlay = self.query_one("#scan-progress", ScanProgressOverlay)
+        overlay.scan_complete()
+        overlay.remove_class("scanning")
+
+        for view_id, view_cls in (
+            ("#sunburst-view", SunburstView),
+            ("#treemap-view", TreemapView),
+        ):
+            self.query_one(view_id, view_cls).set_live_mode(False)
+
+        self.app.notify(
+            f"Scan failed: {type(exc).__name__}: {exc}",
+            severity="error",
+            timeout=8,
+        )
 
     def _update_active_viz(self, node: FSNode) -> None:
         """Update only the currently visible visualization panel."""
