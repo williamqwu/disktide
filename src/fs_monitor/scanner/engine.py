@@ -8,8 +8,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from fs_monitor.models.tree import FSNode
-from fs_monitor.scanner.walker import scan_directory, make_symlink_node
+from fs_monitor.scanner.walker import (
+    scan_directory, make_symlink_node, classify_symlink,
+)
 from fs_monitor.scanner.progress import ScanProgress, ProgressThrottle
+
+
+# Maximum number of symlinks at the scan root that the engine classifies
+# eagerly (one extra readlink + follow-stat per link). Keeps the typical
+# `fsmon ~` case showing target arrows in the tree without classification
+# while bounding the cost when someone scans a directory whose contents
+# *are* a giant pile of symlinks (e.g. 215k image-cache symlinks at one
+# depth). 100 * ~600us NFS RTT = ~60ms, imperceptible.
+_TOP_LEVEL_CLASSIFY_CAP = 100
 
 
 class ScanEngine:
@@ -67,6 +78,7 @@ class ScanEngine:
         top_dirs: list[str] = []
         own_size = 0
         top_inaccessible = 0
+        top_classified = 0      # symlinks classified eagerly, capped below
 
         try:
             scandir_it = os.scandir(path)
@@ -85,19 +97,25 @@ class ScanEngine:
                     break
                 try:
                     if entry.is_symlink():
-                        # All symlinks (top-level too) are lazy now: the
-                        # walker pays one stat for the link itself; the
-                        # UI calls classify_symlink on demand for any
-                        # symlink the user actually looks at. The
-                        # alternative (eager at scan root) was a
-                        # performance trap when someone scans a directory
-                        # that *is* a giant pile of symlinks at depth 1.
+                        # Walker pays one stat per symlink; the UI calls
+                        # classify_symlink on demand for symlinks the
+                        # user looks at. We additionally classify the
+                        # first _TOP_LEVEL_CLASSIFY_CAP symlinks at the
+                        # scan root eagerly, which gets the typical
+                        # `fsmon ~` case (handful of links at home root)
+                        # rendered with target arrows from the start
+                        # without re-introducing the per-symlink cost
+                        # when the scan root *is* a giant symlink pile.
+                        # Deeper symlinks remain fully lazy.
                         child = make_symlink_node(entry, depth=1)
                         if child is None:
                             top_inaccessible += 1
                         else:
                             top_files.append(child)
                             own_size += child.own_size
+                            if top_classified < _TOP_LEVEL_CLASSIFY_CAP:
+                                classify_symlink(child)
+                                top_classified += 1
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         top_dirs.append(entry.path)

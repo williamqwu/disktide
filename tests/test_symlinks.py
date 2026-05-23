@@ -30,6 +30,9 @@ def _find(node: FSNode, name: str) -> FSNode | None:
 
 
 def test_symlink_to_dir_is_detected(tmp_path):
+    # Single symlink at the scan root falls under the eager-classify
+    # cap, so link_is_dir / link_target are populated by the scan
+    # itself, no explicit classify_symlink needed.
     real = tmp_path / "realdir"
     real.mkdir()
     (real / "f.txt").write_text("hello")
@@ -40,9 +43,6 @@ def test_symlink_to_dir_is_detected(tmp_path):
     assert link is not None
     assert link.is_symlink is True
     assert link.is_dir is False          # never a directory in the tree
-    # Classification is lazy now; the UI calls classify_symlink on
-    # demand. We call it explicitly here to verify the result.
-    classify_symlink(link)
     assert link.link_is_dir is True
     assert link.link_broken is False
     assert link.symlink_to_dir is True
@@ -57,7 +57,6 @@ def test_symlink_to_file_is_detected(tmp_path):
     root = ScanEngine(workers=1).scan(str(tmp_path))
     link = _find(root, "link")
     assert link.is_symlink is True
-    classify_symlink(link)
     assert link.link_is_dir is False
     assert link.link_broken is False
     assert link.symlink_to_dir is False
@@ -69,7 +68,6 @@ def test_broken_symlink_is_detected(tmp_path):
     root = ScanEngine(workers=1).scan(str(tmp_path))
     link = _find(root, "dangling")
     assert link.is_symlink is True
-    classify_symlink(link)
     assert link.link_broken is True
     assert link.link_is_dir is False
 
@@ -239,46 +237,68 @@ def test_press_i_does_nothing_on_file_symlink(tmp_path):
 # --- scanner: lazy symlink target classification --------------------------
 
 
-def test_symlinks_are_not_classified_during_scan(tmp_path):
-    """No symlink, top-level or deeper, is classified during the scan.
-
-    The walker pays exactly one syscall per symlink (entry.stat for the
-    link's own size); link_target / link_is_dir / link_broken stay at
-    defaults until something (the UI, a test, ...) calls classify_symlink.
-    This is what restores v0.1.3-equivalent scan speed on symlink-heavy
-    NFS trees where every saved syscall is a server round-trip.
+def test_deeper_symlinks_are_not_classified_during_scan(tmp_path):
+    """Symlinks below the scan root are NOT classified during the scan,
+    regardless of how many there are. This is the path that has to stay
+    cheap on slow storage with many symlinks.
     """
-    target = tmp_path / "real"
-    target.mkdir()
     sub = tmp_path / "sub"
     sub.mkdir()
-    os.symlink(target, tmp_path / "top_link")   # at scan root
-    os.symlink(target, sub / "deep_link")       # one level deeper
+    target = tmp_path / "real"
+    target.mkdir()
+    os.symlink(target, sub / "link")
 
     root = ScanEngine(workers=1).scan(str(tmp_path))
-    top = _find(root, "top_link")
-    deep = _find(_find(root, "sub"), "deep_link")
+    link = _find(_find(root, "sub"), "link")
+    assert link is not None and link.is_symlink is True
+    assert link.link_classified is False
+    # Defaults, not the truth yet, just the not-classified state.
+    assert link.link_target is None
+    assert link.link_is_dir is False
+    assert link.link_broken is False
 
-    for link in (top, deep):
-        assert link is not None and link.is_symlink is True
-        assert link.link_classified is False
-        # Defaults, not the truth yet, just the not-classified state.
-        assert link.link_target is None
-        assert link.link_is_dir is False
-        assert link.link_broken is False
+
+def test_top_level_symlinks_classified_up_to_cap(tmp_path):
+    """The first 100 symlinks at the scan root are classified eagerly
+    (so a typical `fsmon ~` shows target arrows in the tree from the
+    start); symlinks past the cap stay lazy. 100 * one extra stat is
+    bounded; classifying 215k symlinks at depth 1 is not."""
+    from fs_monitor.scanner.engine import _TOP_LEVEL_CLASSIFY_CAP
+
+    target = tmp_path / "real"
+    target.mkdir()
+    # Create cap + a few extras at the scan root.
+    extras = 5
+    total = _TOP_LEVEL_CLASSIFY_CAP + extras
+    for i in range(total):
+        os.symlink(target, tmp_path / f"link_{i:04d}")
+
+    root = ScanEngine(workers=1).scan(str(tmp_path))
+    links = sorted(
+        (c for c in root.children if c.is_symlink),
+        key=lambda n: n.name,
+    )
+    assert len(links) == total
+    classified = sum(1 for L in links if L.link_classified)
+    unclassified = sum(1 for L in links if not L.link_classified)
+    assert classified == _TOP_LEVEL_CLASSIFY_CAP
+    assert unclassified == extras
 
 
 def test_classify_symlink_fills_in_a_deferred_link(tmp_path):
     """An unclassified symlink becomes classified after classify_symlink,
     and that one call also captures the target text (readlink), so the
-    UI does not need a second pass.
+    UI does not need a second pass. Uses a deeper symlink so the scan's
+    eager-at-root path does not pre-classify it.
     """
+    sub = tmp_path / "sub"
+    sub.mkdir()
     target = tmp_path / "real"
     target.mkdir()
-    os.symlink(target, tmp_path / "link")
+    os.symlink(target, sub / "link")
 
     root = ScanEngine(workers=1).scan(str(tmp_path))
-    link = _find(root, "link")
+    link = _find(_find(root, "sub"), "link")
     assert link.link_classified is False
     assert link.link_target is None
 
@@ -293,12 +313,11 @@ def test_classify_symlink_is_idempotent(tmp_path):
     mutating link_is_dir after the first call and checking it stays)."""
     target = tmp_path / "real"
     target.mkdir()
-    os.symlink(target, tmp_path / "link")
+    os.symlink(target, tmp_path / "link")        # under the cap: pre-classified
 
     root = ScanEngine(workers=1).scan(str(tmp_path))
     link = _find(root, "link")
-    classify_symlink(link)               # first call: real classification
     assert link.link_classified is True
-    link.link_is_dir = False             # pretend we mutated state
-    classify_symlink(link)               # second call: no-op
-    assert link.link_is_dir is False     # unchanged — no re-stat
+    link.link_is_dir = False                     # pretend we mutated state
+    classify_symlink(link)                       # second call: no-op
+    assert link.link_is_dir is False             # unchanged, no re-stat
