@@ -144,7 +144,19 @@ class ExplorerScreen(Screen):
             if self._config is not None
             else "auto"
         )
-        self._live_render = resolve_live_scan_render(setting)
+        # Inside a Textual app, shutil.get_terminal_size() returns the
+        # (80, 24) fallback because the driver wraps stdout; only the
+        # app itself knows the real canvas size. Pass it explicitly so
+        # the auto-gate compares against the truth and not the fallback.
+        app = self.app
+        if app is not None and app.size.width > 0 and app.size.height > 0:
+            self._live_render = resolve_live_scan_render(
+                setting,
+                terminal_width=app.size.width,
+                terminal_height=app.size.height,
+            )
+        else:
+            self._live_render = resolve_live_scan_render(setting)
         self._scan_in_progress = True
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
