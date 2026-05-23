@@ -41,19 +41,23 @@ On Windows, `os.scandir` and `os.stat` work, but `os.getloadavg()` and `os.sched
 The scanner is the most filesystem-intensive component. Here is exactly what it calls for each directory:
 
 ```
-os.stat(path).st_mtime           # root directory mtime
+os.stat(path).st_mtime           # root directory mtime + cycle-guard identity
 os.scandir(path)                 # iterate directory entries
   entry.is_symlink()             # classify: symlink?
   entry.is_dir(follow_symlinks=False)   # classify: directory?
   entry.is_file(follow_symlinks=False)  # classify: regular file?
-  entry.stat(follow_symlinks=False)     # read st_size, st_mtime
-  entry.stat(follow_symlinks=True)      # symlinks only: classify the target
-  os.readlink(entry.path)               # symlinks only: record the target
+  entry.stat(follow_symlinks=False)     # read st_size, st_mtime (incl. symlinks)
   entry.name                     # basename (str)
   entry.path                     # full path (str)
+
+# Deferred work, runs on demand when the UI looks at a symlink
+# (Details panel render, or `i` to navigate into a symlinked dir),
+# plus eagerly for the first 100 symlinks at the scan root only:
+  os.readlink(node.path)         # symlinks only: target string
+  os.stat(node.path)             # symlinks only: classify target type
 ```
 
-**Metadata captured per entry:** size (`st_size`), modification time (`st_mtime`), type (dir/file/symlink), and for symlinks the target path and target type.
+**Metadata captured per entry:** size (`st_size`), modification time (`st_mtime`), type (dir/file/symlink). For symlinks the target path and target type are populated lazily (see Symlink Handling below).
 
 **Metadata NOT captured:** permissions, ownership (uid/gid), inode number, extended attributes, ACLs, creation time, hard link count.
 
@@ -68,7 +72,11 @@ This prevents:
 - Double-counting when multiple symlinks point to the same target
 - A symlinked directory's bytes inflating the parent total
 
-The walker does one extra `stat(follow_symlinks=True)` per symlink to classify the target (directory / file / broken) and an `os.readlink()` to record the target string. These populate `FSNode.is_symlink`, `link_target`, `link_is_dir`, and `link_broken`. The scan still never traverses the link; the explorer's `i` action resolves a symlink-to-directory on demand and rescans from the real path.
+Target classification (the `readlink` for the target string and the `stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred to first use**: `make_symlink_node` pays only the link's own `entry.stat(follow_symlinks=False)`, and `classify_symlink(node)` runs the deferred work when the Details panel renders the node or the `i` action navigates a symlinked directory. Result is cached on the node (`link_classified=True`), so a second look is free.
+
+To keep the typical `fsmon ~` case showing the inline `→ target` decoration in the tree from the start, the engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks it encounters at the scan root. Deeper symlinks remain fully lazy regardless of count. This costs at most ~60 ms of extra round-trips at scan start on slow shares; it cannot regress the case where the scan root itself is a directory containing hundreds of thousands of symlinks (a real shape: image-cache `.dataset/` trees on a cluster home), which used to add minutes to the scan.
+
+The scan still never traverses the link.
 
 ### Error Handling
 

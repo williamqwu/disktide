@@ -4,21 +4,30 @@ from __future__ import annotations
 import os
 import stat
 import threading
+from typing import Callable
 from fs_monitor.models.tree import FSNode
 
 
 def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
     """Build an FSNode for a symlink directory entry.
 
-    Returns None if the link itself cannot be stat'd. The symlink is
-    sized by itself and never recursed into, but its target is probed
-    once (one extra stat) so the UI can mark it and let `i` navigate in.
+    Lazy by design. The walker pays exactly one syscall per symlink
+    (entry.stat for the link's own size); the target text (readlink)
+    and target type (a stat that *follows* the link) are deferred to
+    classify_symlink, called on demand by the UI. On slow storage with
+    many symlinks (NFS cluster home, miniconda3, node_modules, ZTF
+    dataset shards with hundreds of thousands of image symlinks per
+    folder), this is the difference between a scan that finishes and
+    one that takes 10x longer because every entry pays two or three
+    server round-trips instead of one.
+
+    Returns None if the link itself cannot be stat'd.
     """
     try:
         st = entry.stat(follow_symlinks=False)
     except OSError:
         return None
-    node = FSNode(
+    return FSNode(
         name=entry.name,
         path=entry.path,
         size=st.st_size,
@@ -29,17 +38,32 @@ def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
         file_count=1,
         is_symlink=True,
     )
+
+
+def classify_symlink(node: FSNode) -> None:
+    """Fill in the deferred symlink target fields: link_target,
+    link_is_dir, link_broken. Two syscalls on first call (readlink +
+    stat-follow), zero on subsequent calls.
+
+    Idempotent: a second call is a cheap no-op (checks link_classified).
+    The UI (Details panel render, the `i` action) calls this so the
+    symlink rows the user actually looks at get their target info just
+    in time, without making the whole scan pay for symlinks the user
+    never visits.
+    """
+    if not node.is_symlink or node.link_classified:
+        return
     try:
-        node.link_target = os.readlink(entry.path)
+        node.link_target = os.readlink(node.path)
     except OSError:
         pass
     try:
-        target = entry.stat(follow_symlinks=True)
+        target = os.stat(node.path)
         node.link_is_dir = stat.S_ISDIR(target.st_mode)
     except OSError:
         # Target unresolvable for any reason: missing, ELOOP, EACCES, ...
         node.link_broken = True
-    return node
+    node.link_classified = True
 
 
 def scan_directory(
@@ -47,6 +71,8 @@ def scan_directory(
     depth: int = 0,
     max_depth: int | None = None,
     cancel_event: threading.Event | None = None,
+    ancestors: frozenset[tuple[int, int]] = frozenset(),
+    on_dir_done: Callable[[int, int, int, str], None] | None = None,
 ) -> FSNode:
     """Scan a directory and return an FSNode tree.
 
@@ -72,10 +98,22 @@ def scan_directory(
         return node
 
     try:
-        mtime = os.stat(path).st_mtime
-        node.mtime = mtime
+        st = os.stat(path)
+        node.mtime = st.st_mtime
     except OSError:
-        pass
+        st = None
+
+    # Cycle guard: a bind mount (or container rootfs) can make a
+    # directory reappear inside itself. If this directory's identity is
+    # already on the path from the scan root, stop instead of recursing
+    # forever. Symlink loops are handled separately (symlinks are never
+    # followed); this covers the non-symlink case.
+    if st is not None:
+        here = (st.st_dev, st.st_ino)
+        if here in ancestors:
+            node.is_loop = True
+            return node
+        ancestors = ancestors | {here}
 
     try:
         scandir_it = os.scandir(path)
@@ -90,6 +128,7 @@ def scan_directory(
     file_count = 0
     dir_count = 0
     inaccessible = 0
+    local_files = 0  # direct files + symlinks (for live progress ticks)
 
     try:
         for entry in scandir_it:
@@ -98,7 +137,10 @@ def scan_directory(
             try:
                 if entry.is_symlink():
                     # Symlinks are never recursed into (avoids loops and
-                    # double-counting); sized by the link itself.
+                    # double-counting); sized by the link itself. Target
+                    # info (readlink + follow-stat) is deferred to the
+                    # UI's classify_symlink call so the scan stays at one
+                    # syscall per entry instead of three.
                     child = make_symlink_node(entry, depth + 1)
                     if child is None:
                         inaccessible += 1
@@ -106,11 +148,13 @@ def scan_directory(
                         node.children.append(child)
                         own_size += child.own_size
                         file_count += 1
+                        local_files += 1
                     continue
 
                 if entry.is_dir(follow_symlinks=False):
                     child = scan_directory(
                         entry.path, depth + 1, max_depth, cancel_event,
+                        ancestors, on_dir_done,
                     )
                     node.children.append(child)
                     dir_count += 1 + child.dir_count
@@ -133,6 +177,7 @@ def scan_directory(
                         node.children.append(child)
                         own_size += st.st_size
                         file_count += 1
+                        local_files += 1
                     except OSError:
                         inaccessible += 1
             except OSError:
@@ -169,5 +214,13 @@ def scan_directory(
             partial_sub += 1
     node.denied_dir_subtree_count = denied_sub
     node.partial_dir_subtree_count = partial_sub
+
+    if on_dir_done is not None:
+        # Tick at the end of this directory so live progress moves per
+        # directory finished. Without it the UI froze during big subtrees
+        # because the engine only updated when a whole top-level subdir
+        # finished. Counts are the local additions (direct files and
+        # symlinks); the +1 dir is this directory itself.
+        on_dir_done(1, local_files, own_size, path)
 
     return node

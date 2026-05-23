@@ -124,6 +124,8 @@ CleanupRule(
 The `tool/` directory contains helper scripts:
 
 - `gen_activity` -- generates filesystem activity (creates/modifies/deletes files) for testing the watch/monitor features. Supports `--max-files` and `--max-size` caps.
+- `bench_scan` -- one-shot timing of a single scan. Prints `wall-time / dirs / files / size / rate`. Uses only `ScanEngine().scan()`, so it works against any prior release; copy-paste it into an old checkout to get a fair baseline number. Accepts `--workers N` to pin thread count.
+- `diag_scan` -- diagnostic scan with a 1-second heartbeat (current path + dirs/files/GB), a stall detector (`STALL <sec>` when no counter has moved for 5 s), and a per-directory hotspot table at the end ranked by wall-clock time. `--profile` wraps the scan in `cProfile` and dumps the top callees by cumulative time at the end. `--workers N` pins thread count. Designed for diagnosing remote/NFS slowness where the TUI's progress bar pulses but you can't see *what* is slow. The scripts degrade gracefully across internal API changes; see `tests/test_tools.py` for the contract they rely on.
 
 ## Running the TUI in Dev Mode
 

@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.1.5
+
+Since `6cb0459` (v0.1.4 release).
+
+**Scanner**
+
+- **fix** Symlink scanning is now one syscall per entry. The walker previously did three (`entry.stat` for the link, `os.readlink` for the target text, `os.stat` to follow the link); on slow shared storage with many symlinks each extra syscall is a server round-trip, blowing up scan times by an order of magnitude. `os.readlink` and the target-following `os.stat` are now deferred to `classify_symlink`, called on demand by the Details panel and the `i` action; the result is cached on the node. Measured on one cluster home (6.1M files, 100 GB on NFS): 2386 s on the pre-fix build, 195 s after, a ~12x recovery and ~20% under the v0.1.3 baseline.
+- **feat** On top of that, the engine eagerly classifies the first 100 symlinks it sees at the scan root so a typical `fsmon ~` still shows `→ /target` arrows for the handful of links at home root. The cap is hard, so it cannot regress the case where the scan root itself contains hundreds of thousands of symlinks.
+- **fix** Directory scans no longer recurse forever on a filesystem cycle. A bind mount or other setup that makes a directory reappear inside itself used to send the scan into an infinite loop; the walker now tracks each directory's `(st_dev, st_ino)` identity along the path from the scan root and stops when a directory is its own ancestor, marking it `(loop)` in the tree and the Details panel. Symlink loops were already prevented; this closes the non-symlink case.
+
+**Progress**
+
+- **fix** Scan progress now updates continuously during a deep scan instead of freezing while a single big subtree is being walked. The walker calls a per-directory tick callback as each directory finishes; the engine folds those into shared live counters and forwards them through the existing `ProgressThrottle` (100 ms coalesce). The earlier behavior only updated when an entire top-level subtree completed, so a scan with one dominant child sat with frozen `Dirs / Files / Size` counters for minutes.
+- **fix** The scanning overlay's progress bar is now indeterminate (a pulsing animation with no percentage). The earlier percentage was `completed_top_level_dirs / total_top_level_dirs`, unrelated to actual work, and routinely parked at 97% while one large subtree finished. Without a pre-count pass there is no honest progress fraction; an indeterminate bar plus the now-continuously-moving counters is the honest feedback.
+
+**Tooling**
+
+- **feat** Two diagnostic scripts under `tool/`. `tool/bench_scan.py` is a version-agnostic one-shot that prints `wall-time / dirs / files / size / rate` for any scan path and any prior release (uses only `ScanEngine().scan()`). `tool/diag_scan.py` adds a 1-second heartbeat (with stall detection), a per-directory hotspot table, and an optional `--profile` pass that wraps the scan in `cProfile` and dumps the top callees. Both accept `--workers N` to isolate threading from the picture. These are how the symlink regression above was diagnosed; see [docs/blogs/2026-05-23-symlink-scan-nfs-speedup.md](blogs/2026-05-23-symlink-scan-nfs-speedup.md).
+- **add** `tests/test_tools.py` smoke-tests both scripts as subprocesses against a real `tmp_path` and asserts the documented output shape. The scripts also degrade gracefully if the scanner's internal API changes (defensive `getattr` on every field, the diag's monkey-patch wrapped in `try/except` with a stderr notice on failure), so they keep working across releases.
+
+**Docs**
+
+- **docs** Architecture guide, filesystem-call reference, and contributing guide updated for the deferred-symlink-classification behavior and the two new diagnostic scripts.
+- **docs** New blog post under `docs/blogs/` walking through the symlink-scan regression hunt end to end: cProfile-driven diagnosis, the fix, measured 12x recovery, and the small UX trade-offs the lazy scheme accepts.
+
 ## v0.1.4
 
 Since `96dc76b` (v0.1.3 release).

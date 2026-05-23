@@ -17,6 +17,7 @@ from fs_monitor.metrics import METRIC_NAMES
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.engine import ScanEngine
+from fs_monitor.scanner.walker import classify_symlink
 from fs_monitor.scanner.progress import ScanProgress
 from fs_monitor.widgets.size_tree import SizeTree
 from fs_monitor.widgets.breadcrumb import Breadcrumb
@@ -299,7 +300,12 @@ class ExplorerScreen(Screen):
         data = node.data
         if data.is_dir:
             new_root = data.path
-        elif data.symlink_to_dir:
+        elif data.is_symlink:
+            # Deeper symlinks deferred classification; resolve now so we
+            # can decide whether `i` should navigate into the target.
+            classify_symlink(data)
+            if not data.symlink_to_dir:
+                return
             new_root = str(Path(data.path).resolve())
         else:
             return
