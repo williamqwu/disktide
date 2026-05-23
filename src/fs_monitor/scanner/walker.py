@@ -8,18 +8,18 @@ from typing import Callable
 from fs_monitor.models.tree import FSNode
 
 
-def make_symlink_node(
-    entry: os.DirEntry, depth: int, classify_target: bool = False
-) -> FSNode | None:
+def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
     """Build an FSNode for a symlink directory entry.
 
-    The symlink is sized by itself and never recursed into. Classifying
-    the target type (Directory / File / broken) requires a stat that
-    *follows* the link, which on slow storage with many symlinks (NFS
-    cluster home, miniconda3, node_modules, ...) is expensive enough to
-    dominate scan time. It is therefore deferred by default: only the
-    scan-root level passes classify_target=True; deeper symlinks are
-    classified on demand by classify_symlink() when the UI looks at one.
+    Lazy by design. The walker pays exactly one syscall per symlink
+    (entry.stat for the link's own size); the target text (readlink)
+    and target type (a stat that *follows* the link) are deferred to
+    classify_symlink, called on demand by the UI. On slow storage with
+    many symlinks (NFS cluster home, miniconda3, node_modules, ZTF
+    dataset shards with hundreds of thousands of image symlinks per
+    folder), this is the difference between a scan that finishes and
+    one that takes 10x longer because every entry pays two or three
+    server round-trips instead of one.
 
     Returns None if the link itself cannot be stat'd.
     """
@@ -27,7 +27,7 @@ def make_symlink_node(
         st = entry.stat(follow_symlinks=False)
     except OSError:
         return None
-    node = FSNode(
+    return FSNode(
         name=entry.name,
         path=entry.path,
         size=st.st_size,
@@ -38,24 +38,25 @@ def make_symlink_node(
         file_count=1,
         is_symlink=True,
     )
-    try:
-        node.link_target = os.readlink(entry.path)
-    except OSError:
-        pass
-    if classify_target:
-        classify_symlink(node)
-    return node
 
 
 def classify_symlink(node: FSNode) -> None:
-    """Stat the symlink's target and record link_is_dir / link_broken.
+    """Fill in the deferred symlink target fields: link_target,
+    link_is_dir, link_broken. Two syscalls on first call (readlink +
+    stat-follow), zero on subsequent calls.
 
     Idempotent: a second call is a cheap no-op (checks link_classified).
-    The UI (Details panel render, the `i` action) calls this so deeper
-    symlinks that the scan deferred get filled in just in time.
+    The UI (Details panel render, the `i` action) calls this so the
+    symlink rows the user actually looks at get their target info just
+    in time, without making the whole scan pay for symlinks the user
+    never visits.
     """
     if not node.is_symlink or node.link_classified:
         return
+    try:
+        node.link_target = os.readlink(node.path)
+    except OSError:
+        pass
     try:
         target = os.stat(node.path)
         node.link_is_dir = stat.S_ISDIR(target.st_mode)
@@ -137,12 +138,10 @@ def scan_directory(
                 if entry.is_symlink():
                     # Symlinks are never recursed into (avoids loops and
                     # double-counting); sized by the link itself. Target
-                    # is classified eagerly only when we're at the scan
-                    # root (depth=0); deeper symlinks are lazy and get
-                    # filled in on demand via classify_symlink().
-                    child = make_symlink_node(
-                        entry, depth + 1, classify_target=(depth == 0),
-                    )
+                    # info (readlink + follow-stat) is deferred to the
+                    # UI's classify_symlink call so the scan stays at one
+                    # syscall per entry instead of three.
+                    child = make_symlink_node(entry, depth + 1)
                     if child is None:
                         inaccessible += 1
                     else:

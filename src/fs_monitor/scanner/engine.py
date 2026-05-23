@@ -85,12 +85,14 @@ class ScanEngine:
                     break
                 try:
                     if entry.is_symlink():
-                        # Top-level: classify eagerly so the initial
-                        # view shows target types without paying the
-                        # per-symlink follow-stat across the whole tree.
-                        child = make_symlink_node(
-                            entry, depth=1, classify_target=True,
-                        )
+                        # All symlinks (top-level too) are lazy now: the
+                        # walker pays one stat for the link itself; the
+                        # UI calls classify_symlink on demand for any
+                        # symlink the user actually looks at. The
+                        # alternative (eager at scan root) was a
+                        # performance trap when someone scans a directory
+                        # that *is* a giant pile of symlinks at depth 1.
+                        child = make_symlink_node(entry, depth=1)
                         if child is None:
                             top_inaccessible += 1
                         else:

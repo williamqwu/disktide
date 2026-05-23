@@ -40,6 +40,9 @@ def test_symlink_to_dir_is_detected(tmp_path):
     assert link is not None
     assert link.is_symlink is True
     assert link.is_dir is False          # never a directory in the tree
+    # Classification is lazy now; the UI calls classify_symlink on
+    # demand. We call it explicitly here to verify the result.
+    classify_symlink(link)
     assert link.link_is_dir is True
     assert link.link_broken is False
     assert link.symlink_to_dir is True
@@ -54,6 +57,7 @@ def test_symlink_to_file_is_detected(tmp_path):
     root = ScanEngine(workers=1).scan(str(tmp_path))
     link = _find(root, "link")
     assert link.is_symlink is True
+    classify_symlink(link)
     assert link.link_is_dir is False
     assert link.link_broken is False
     assert link.symlink_to_dir is False
@@ -65,6 +69,7 @@ def test_broken_symlink_is_detected(tmp_path):
     root = ScanEngine(workers=1).scan(str(tmp_path))
     link = _find(root, "dangling")
     assert link.is_symlink is True
+    classify_symlink(link)
     assert link.link_broken is True
     assert link.link_is_dir is False
 
@@ -234,55 +239,53 @@ def test_press_i_does_nothing_on_file_symlink(tmp_path):
 # --- scanner: lazy symlink target classification --------------------------
 
 
-def test_top_level_symlinks_are_classified_during_scan(tmp_path):
-    """Symlinks at the scan root are classified eagerly so the initial
-    tree shows accurate target info without on-demand stats."""
+def test_symlinks_are_not_classified_during_scan(tmp_path):
+    """No symlink, top-level or deeper, is classified during the scan.
+
+    The walker pays exactly one syscall per symlink (entry.stat for the
+    link's own size); link_target / link_is_dir / link_broken stay at
+    defaults until something (the UI, a test, ...) calls classify_symlink.
+    This is what restores v0.1.3-equivalent scan speed on symlink-heavy
+    NFS trees where every saved syscall is a server round-trip.
+    """
+    target = tmp_path / "real"
+    target.mkdir()
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    os.symlink(target, tmp_path / "top_link")   # at scan root
+    os.symlink(target, sub / "deep_link")       # one level deeper
+
+    root = ScanEngine(workers=1).scan(str(tmp_path))
+    top = _find(root, "top_link")
+    deep = _find(_find(root, "sub"), "deep_link")
+
+    for link in (top, deep):
+        assert link is not None and link.is_symlink is True
+        assert link.link_classified is False
+        # Defaults, not the truth yet, just the not-classified state.
+        assert link.link_target is None
+        assert link.link_is_dir is False
+        assert link.link_broken is False
+
+
+def test_classify_symlink_fills_in_a_deferred_link(tmp_path):
+    """An unclassified symlink becomes classified after classify_symlink,
+    and that one call also captures the target text (readlink), so the
+    UI does not need a second pass.
+    """
     target = tmp_path / "real"
     target.mkdir()
     os.symlink(target, tmp_path / "link")
 
     root = ScanEngine(workers=1).scan(str(tmp_path))
     link = _find(root, "link")
-    assert link is not None
-    assert link.link_classified is True
-    assert link.link_is_dir is True
-
-
-def test_deeper_symlinks_are_not_classified_during_scan(tmp_path):
-    """Symlinks below the scan root are NOT classified eagerly. This is
-    what avoids the per-symlink follow-stat cost on slow storage with
-    many symlinks; the cost is paid only when the UI asks."""
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    target = tmp_path / "real"
-    target.mkdir()
-    os.symlink(target, sub / "link")
-
-    root = ScanEngine(workers=1).scan(str(tmp_path))
-    sub_node = _find(root, "sub")
-    link = _find(sub_node, "link")
-    assert link is not None and link.is_symlink is True
     assert link.link_classified is False
-    # Defaults — not the truth yet, just the not-classified state.
-    assert link.link_is_dir is False
-    assert link.link_broken is False
-
-
-def test_classify_symlink_fills_in_a_deferred_link(tmp_path):
-    """An unclassified symlink becomes classified after classify_symlink."""
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    target = tmp_path / "real"
-    target.mkdir()
-    os.symlink(target, sub / "link")
-
-    root = ScanEngine(workers=1).scan(str(tmp_path))
-    link = _find(_find(root, "sub"), "link")
-    assert link.link_classified is False
+    assert link.link_target is None
 
     classify_symlink(link)
     assert link.link_classified is True
     assert link.link_is_dir is True
+    assert link.link_target == str(target)
 
 
 def test_classify_symlink_is_idempotent(tmp_path):
@@ -294,7 +297,8 @@ def test_classify_symlink_is_idempotent(tmp_path):
 
     root = ScanEngine(workers=1).scan(str(tmp_path))
     link = _find(root, "link")
+    classify_symlink(link)               # first call: real classification
     assert link.link_classified is True
-    link.link_is_dir = False  # pretend we mutated state
-    classify_symlink(link)
-    assert link.link_is_dir is False  # unchanged — no re-stat
+    link.link_is_dir = False             # pretend we mutated state
+    classify_symlink(link)               # second call: no-op
+    assert link.link_is_dir is False     # unchanged — no re-stat
