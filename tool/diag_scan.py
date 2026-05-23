@@ -11,12 +11,24 @@ What it prints:
     prefixed STALL and shows for how long.
   * On completion (or Ctrl-C): the top 20 directories by wall-clock
     time spent inside scan_directory.
+  * With --profile, the top 30 hottest Python functions by cumulative
+    time (cProfile, dumped at the end).
 
 Usage:
-    python tool/diag_scan.py [PATH]       # defaults to current directory
+    python tool/diag_scan.py [PATH] [--workers N] [--profile]
+
+    PATH       directory to scan (default: current directory)
+    --workers  force a specific thread count (default: auto)
+    --profile  run the scan under cProfile and dump the top callees
 
 Recommended invocation (capture the full transcript):
     python tool/diag_scan.py ~ 2>&1 | tee diag-dev.log
+
+    # isolate a single subtree without thread contention:
+    python tool/diag_scan.py /some/slow/subdir --workers 1 2>&1 | tee diag-w1.log
+
+    # find where Python time actually goes in the slow part:
+    python tool/diag_scan.py /some/slow/subdir --workers 1 --profile 2>&1 | tee diag-prof.log
 
 Ctrl-C is honored: the engine is cancelled, and the hotspot table is
 still printed for whatever was collected before the cancel.
@@ -24,7 +36,11 @@ still printed for whatever was collected before the cancel.
 
 from __future__ import annotations
 
+import argparse
+import cProfile
+import io
 import os
+import pstats
 import sys
 import threading
 import time
@@ -122,25 +138,50 @@ def _print_hotspots(top: int = 20) -> None:
         print(f"  {dt:>7.2f}s  {files:>10,}  {dirs:>7,}  {sz:>8}  {path}")
 
 
+def _print_profile(profiler: cProfile.Profile, top: int = 30) -> None:
+    buf = io.StringIO()
+    stats = pstats.Stats(profiler, stream=buf).strip_dirs().sort_stats("cumulative")
+    stats.print_stats(top)
+    print("\n=== cProfile top callees by cumulative time ===")
+    print(buf.getvalue())
+
+
 # --- main --------------------------------------------------------------
 
 def main() -> int:
-    path = sys.argv[1] if len(sys.argv) > 1 else "."
-    path = os.path.abspath(os.path.expanduser(path))
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("path", nargs="?", default=".")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="force thread count (default: auto-detect)")
+    ap.add_argument("--profile", action="store_true",
+                    help="run the scan under cProfile and dump top callees")
+    args = ap.parse_args()
+
+    path = os.path.abspath(os.path.expanduser(args.path))
     print(f"diag: scanning {path}", flush=True)
     print(f"diag: pid={os.getpid()}  python={sys.version.split()[0]}", flush=True)
 
-    engine = ScanEngine(progress_callback=_on_progress)
+    engine = ScanEngine(workers=args.workers, progress_callback=_on_progress)
     print(f"diag: workers={engine._workers}", flush=True)
+    if args.profile:
+        print(f"diag: cProfile active (NOTE: profiler overhead inflates wall time)",
+              flush=True)
 
     stop = threading.Event()
     start = time.monotonic()
     hb = threading.Thread(target=_heartbeat, args=(stop, start), daemon=True)
     hb.start()
 
+    profiler = cProfile.Profile() if args.profile else None
     cancelled = False
     try:
-        root = engine.scan(path)
+        if profiler is not None:
+            profiler.enable()
+        try:
+            root = engine.scan(path)
+        finally:
+            if profiler is not None:
+                profiler.disable()
     except KeyboardInterrupt:
         engine.cancel()
         cancelled = True
@@ -158,12 +199,16 @@ def main() -> int:
         print(f"=== CANCELLED after {dt:.1f}s ===")
     else:
         gb = root.size / 1e9
+        rate = root.file_count / dt if dt > 0 else 0
         print(f"=== SCAN COMPLETE in {dt:.1f}s ===")
         print(f"  dirs:  {root.dir_count:,}")
         print(f"  files: {root.file_count:,}")
         print(f"  size:  {root.size:,}B ({gb:.2f}GB)")
+        print(f"  rate:  {rate:,.0f} files/sec")
 
     _print_hotspots()
+    if profiler is not None:
+        _print_profile(profiler)
     return 130 if cancelled else 0
 
 
