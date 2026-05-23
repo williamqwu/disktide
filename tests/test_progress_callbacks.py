@@ -87,3 +87,98 @@ def test_engine_progress_callback_fires_and_final_totals_match(tmp_path):
     assert root.dir_count == 20
     assert root.file_count == 20
     assert root.size == 80
+
+
+# --- live tree snapshots (the explorer's "render-as-we-scan" path) ----
+
+def test_engine_tree_callback_fires_initial_and_final(tmp_path):
+    """tree_callback fires at least twice: once with just the top-level
+    files/symlinks before workers run, and once at the very end with
+    the fully-aggregated root."""
+    # Two top-level files + two subdirs with their own file each.
+    (tmp_path / "a.txt").write_text("x")
+    (tmp_path / "b.txt").write_text("yy")
+    (tmp_path / "sub1").mkdir()
+    (tmp_path / "sub1" / "c.txt").write_text("zzz")
+    (tmp_path / "sub2").mkdir()
+    (tmp_path / "sub2" / "d.txt").write_text("wwww")
+
+    snaps = []
+    engine = ScanEngine(
+        workers=1,
+        tree_callback=lambda n: snaps.append(n),
+        tree_callback_interval=0.0,  # disable throttling for the test
+    )
+    root = engine.scan(str(tmp_path))
+
+    assert len(snaps) >= 2
+
+    # First snapshot: just the top-level files (subdir results have not
+    # come back yet), so own_size matches and the only children present
+    # are the two text files at the root.
+    first = snaps[0]
+    assert all(not c.is_dir for c in first.children)
+    assert first.own_size == 3
+    assert first.size == 3
+
+    # Last snapshot: matches the final root exactly.
+    last = snaps[-1]
+    assert last.size == root.size
+    assert last.file_count == root.file_count
+    assert last.dir_count == root.dir_count
+    assert root.size == 1 + 2 + 3 + 4   # = 10 bytes total
+
+
+def test_engine_tree_callback_snapshots_are_independent(tmp_path):
+    """Each snapshot has its own children list so mutating one cannot
+    leak into another (the UI may hold the previous snapshot while a
+    new one is forming on the engine thread)."""
+    for i in range(5):
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        (d / "f").write_text("a")
+
+    snaps = []
+    engine = ScanEngine(
+        workers=2,
+        tree_callback=lambda n: snaps.append(n),
+        tree_callback_interval=0.0,
+    )
+    engine.scan(str(tmp_path))
+
+    assert len(snaps) >= 2
+    # Distinct list objects, even if some contain the same FSNode children.
+    ids = {id(s.children) for s in snaps}
+    assert len(ids) == len(snaps)
+
+
+def test_engine_tree_callback_optional(tmp_path):
+    """Scans without a tree_callback behave exactly like v0.1.5."""
+    (tmp_path / "f.txt").write_text("hello")
+    root = ScanEngine(workers=1).scan(str(tmp_path))  # no tree_callback
+    assert root.file_count == 1
+    assert root.size == 5
+
+
+def test_engine_tree_callback_throttled(tmp_path):
+    """With a generous throttle interval, the engine still fires the
+    forced initial emit and the unconditional final emit, but coalesces
+    the per-future emits in between."""
+    for i in range(20):
+        d = tmp_path / f"d{i:02}"
+        d.mkdir()
+        (d / "f").write_text("x")
+
+    snaps = []
+    engine = ScanEngine(
+        workers=2,
+        tree_callback=lambda n: snaps.append(n),
+        tree_callback_interval=60.0,  # effectively no mid-scan emits
+    )
+    engine.scan(str(tmp_path))
+
+    # initial (forced) + final (unconditional) at minimum.
+    assert len(snaps) >= 2
+    # And the final one is fully aggregated.
+    assert snaps[-1].file_count == 20
+    assert snaps[-1].dir_count == 20
