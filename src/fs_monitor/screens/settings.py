@@ -219,6 +219,24 @@ class SettingsScreen(Screen):
                     classes="input-hint",
                 )
 
+            with Horizontal(classes="setting-row"):
+                yield Label("Live scan rendering", classes="setting-label")
+                yield Select(
+                    [
+                        ("Auto", "auto"),
+                        ("On", "on"),
+                        ("Off", "off"),
+                    ],
+                    value=self._config.ui.live_scan_render,
+                    id="live-scan-render",
+                    classes="viz-select",
+                    allow_blank=False,
+                )
+                yield Label(
+                    "(redraw viz during scan)",
+                    classes="input-hint",
+                )
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -360,6 +378,10 @@ class SettingsScreen(Screen):
         elif event.select.id == "color-theme":
             self._config.ui.color_theme = str(event.value)
             set_color_scheme(str(event.value))
+        elif event.select.id == "live-scan-render":
+            value = str(event.value)
+            if value in ("auto", "on", "off"):
+                self._config.ui.live_scan_render = value
 
     def on_input_changed(self, event: Input.Changed) -> None:
         value = event.value.strip()

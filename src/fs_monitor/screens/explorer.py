@@ -12,7 +12,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 import humanize
 
-from fs_monitor.config import AppConfig
+from fs_monitor.config import AppConfig, resolve_live_scan_render
 from fs_monitor.metrics import METRIC_NAMES
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.models.tree import FSNode
@@ -98,6 +98,15 @@ class ExplorerScreen(Screen):
         self._root: FSNode | None = None
         self._current: FSNode | None = None
         self._engine: ScanEngine | None = None
+        # True while a scan is in flight. Used to gate drill-into (which
+        # would otherwise read stale aggregates off the live snapshot)
+        # and to decide whether to forward tree snapshots to the viz.
+        self._scan_in_progress = False
+        # Resolved at scan start from config.ui.live_scan_render plus the
+        # current terminal / cpu_count. When False, the engine still gets
+        # a tree_callback but the explorer drops snapshots on the floor;
+        # final render path is unchanged.
+        self._live_render = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -130,9 +139,29 @@ class ExplorerScreen(Screen):
 
     def _start_scan(self, force: bool = False) -> None:
         """Kick off a filesystem scan."""
+        setting = (
+            self._config.ui.live_scan_render
+            if self._config is not None
+            else "auto"
+        )
+        self._live_render = resolve_live_scan_render(setting)
+        self._scan_in_progress = True
+
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.start()
         self.query_one("#overlay-container").add_class("scanning")
+
+        # Reset the viz tabs so a previous scan's chart doesn't bleed
+        # into the new scan, and put them into live mode so the first
+        # snapshot renders at the cheaper reduced depth.
+        if self._live_render:
+            for view_id, view_cls in (
+                ("#sunburst-view", SunburstView),
+                ("#treemap-view", TreemapView),
+            ):
+                view = self.query_one(view_id, view_cls)
+                view.set_node(None)
+                view.set_live_mode(True)
         self._run_scan()
 
     @work(thread=True)
@@ -142,6 +171,14 @@ class ExplorerScreen(Screen):
         def on_progress(progress: ScanProgress) -> None:
             self.app.call_from_thread(self._apply_progress, progress)
 
+        # The engine builds a fresh snapshot FSNode for every emit, so
+        # this callback runs on the engine thread and just marshals the
+        # already-immutable snapshot to the Textual main loop.
+        def on_tree(node: FSNode) -> None:
+            if not self._live_render:
+                return
+            self.app.call_from_thread(self._apply_tree_snapshot, node)
+
         workers = self._config.scan.workers if self._config else None
         max_depth = self._config.scan.max_depth if self._config else None
         self._engine = ScanEngine(
@@ -149,6 +186,7 @@ class ExplorerScreen(Screen):
             progress_callback=on_progress,
             max_depth=max_depth,
             scan_path=self._scan_path,
+            tree_callback=on_tree if self._live_render else None,
         )
         root = self._engine.scan(self._scan_path)
 
@@ -159,8 +197,22 @@ class ExplorerScreen(Screen):
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.update_progress(progress)
 
+    def _apply_tree_snapshot(self, node: FSNode) -> None:
+        """Push a partial-tree snapshot to the active viz tab.
+
+        Aggregates on this snapshot are honest for the parts that have
+        been scanned but undercount anything still in flight; drill-into
+        is gated by `_scan_in_progress` to keep users away from those
+        numbers until the final snapshot lands in `_on_scan_complete`.
+        """
+        # Track the latest snapshot so a tab switch mid-scan can render
+        # the newly-active panel without waiting for the next emit.
+        self._current = node
+        self._update_active_viz(node)
+
     def _on_scan_complete(self, root: FSNode) -> None:
         """Handle scan completion on the main thread."""
+        self._scan_in_progress = False
         self._root = root
         self._current = root
 
@@ -168,6 +220,15 @@ class ExplorerScreen(Screen):
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_complete()
         self.query_one("#overlay-container").remove_class("scanning")
+
+        # Restore the viz tabs to their static (full-depth) render mode
+        # whether or not live mode was active this scan, so a config flip
+        # mid-session doesn't strand a tab at reduced depth.
+        for view_id, view_cls in (
+            ("#sunburst-view", SunburstView),
+            ("#treemap-view", TreemapView),
+        ):
+            self.query_one(view_id, view_cls).set_live_mode(False)
 
         # Load tree
         tree = self.query_one("#size-tree", SizeTree)
@@ -244,6 +305,9 @@ class ExplorerScreen(Screen):
         """Drill into directory on select."""
         if event.node.data is None or not event.node.data.is_dir:
             return
+        if self._scan_in_progress:
+            # Sizes/counts on a live snapshot are still settling; defer.
+            return
         self._drill_into(event.node.data)
 
     @on(TabbedContent.TabActivated)
@@ -270,6 +334,8 @@ class ExplorerScreen(Screen):
 
     def action_go_up(self) -> None:
         """Navigate up one directory level, rescanning from parent if at scan root."""
+        if self._scan_in_progress:
+            return
         if (
             self._current is not None
             and self._root is not None
@@ -293,6 +359,8 @@ class ExplorerScreen(Screen):
         becomes the new scan root, so `i` reads as "enter the linked
         folder" even though the scan never recurses through the link.
         """
+        if self._scan_in_progress:
+            return
         tree = self.query_one("#size-tree", SizeTree)
         node = tree.cursor_node
         if node is None or node.data is None:
@@ -387,6 +455,8 @@ class ExplorerScreen(Screen):
         y/n prompt to prevent an accidental keystroke from kicking off
         a long scan.
         """
+        if self._scan_in_progress:
+            return
         path = self._scan_path
 
         def _on_confirm(confirmed: bool | None) -> None:
