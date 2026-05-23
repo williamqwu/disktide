@@ -112,3 +112,106 @@ def test_settings_up_moves_focus_back(tmp_path):
             assert after_down is not start
 
     asyncio.run(go())
+
+
+def test_live_render_disabled_on_tiny_canvas(tmp_path):
+    """At <80 cols, the auto-gate must resolve to False so live render
+    doesn't fight a cramped terminal for screen space."""
+    async def go():
+        app = FSMonitorApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(70, 30)) as pilot:
+            await _wait_for_explorer(pilot, app)
+            assert app.screen._live_render is False
+
+    asyncio.run(go())
+
+
+def test_live_render_gate_uses_app_size_not_shutil(tmp_path, monkeypatch):
+    """The explorer must pass Textual's app canvas size into the
+    auto-gate resolver explicitly. Inside Textual, shutil.get_terminal_size()
+    returns the (80, 24) fallback because the driver wraps stdout; the
+    only honest size source is `self.app.size`.
+
+    We intercept the resolver to capture its kwargs and assert the
+    explorer used the pilot canvas size, not the shutil fallback.
+    """
+    captured: dict = {}
+
+    from fs_monitor.screens import explorer as exp_mod
+    original = exp_mod.resolve_live_scan_render
+
+    def spy(setting, **kw):
+        captured.update(kw)
+        return original(setting, **kw)
+
+    monkeypatch.setattr(exp_mod, "resolve_live_scan_render", spy)
+
+    async def go():
+        app = FSMonitorApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(150, 60)) as pilot:
+            await _wait_for_explorer(pilot, app)
+            assert captured.get("terminal_width") == 150, (
+                f"expected explorer to pass terminal_width=150, "
+                f"got kwargs={captured}"
+            )
+            assert captured.get("terminal_height") == 60, (
+                f"expected explorer to pass terminal_height=60, "
+                f"got kwargs={captured}"
+            )
+
+    asyncio.run(go())
+
+
+def test_settings_arrow_does_not_steal_focus_when_select_expanded(tmp_path):
+    """When a Settings Select dropdown is open (e.g. user opens the
+    'Live scan rendering' picker), pressing Down must NOT move focus to
+    the next form field. It should fall through to the Select itself so
+    the dropdown can cycle options.
+
+    Regression for the bug where opening a Select and pressing Down
+    jumped to the next setting instead of changing the value.
+    """
+    async def go():
+        from textual.widgets import Select
+
+        app = FSMonitorApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(140, 50)) as pilot:
+            await _wait_for_explorer(pilot, app)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            screen = app.screen
+            assert screen.__class__.__name__ == "SettingsScreen"
+
+            # Focus an arbitrary Select on the page and open its dropdown.
+            select = screen.query_one("#live-scan-render", Select)
+            select.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert select.expanded, "Select dropdown should be open"
+
+            # Press Down: the Select must still be expanded after, and
+            # focus must still be on the Select (or a child of it),
+            # NOT on a sibling form field.
+            await pilot.press("down")
+            await pilot.pause()
+
+            assert select.expanded, (
+                "Down collapsed the Select instead of cycling options"
+            )
+            focused = screen.focused
+            # `focused` should be the Select itself or its SelectOverlay
+            # child; in either case the Select widget is in the focused
+            # widget's ancestor chain.
+            assert focused is select or (
+                focused is not None
+                and select in getattr(focused, "ancestors", [])
+            ), f"Down moved focus off the Select (now on {focused!r})"
+
+    asyncio.run(go())
