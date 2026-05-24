@@ -6,7 +6,7 @@
 
 Hierarchical disk usage has been a visualization problem since "my disk is full and I don't know why" became a daily question. The two designs that solved it both came out of academic infovis labs:
 
-- **Treemap** (Ben Shneiderman, University of Maryland, 1991). Invented to visualize a shared lab disk where "everyone's hard disks were full but no one wanted to spend the time to clean up." Nested rectangles, each sized by the file or subtree it represents. The seminal paper is [Shneiderman, "Tree visualization with tree-maps: 2-d space-filling approach," ACM TOG 11(1) 1992](https://www.cs.umd.edu/users/ben/papers/Shneiderman1992tree.pdf).
+- **Treemap** (Ben Shneiderman, University of Maryland, 1991). Invented to visualize a shared lab disk where "everyone's hard disks were full but no one wanted to spend the time to clean up." Nested rectangles, each sized by the file or subtree it represents. The seminal paper is [Shneiderman, "Tree visualization with tree-maps: 2-d space-filling approach," ACM TOG 11(1) 1992](https://www.cs.umd.edu/users/ben/papers/Shneiderman1992Tree.pdf).
 - **Sunburst** (John Stasko and Eugene Zhang, Georgia Tech, 2000). A radial reformulation of the same idea: rings instead of nested rectangles, with arc angle (not rectangle area) encoding share. Formalized in [Stasko and Zhang, "Focus+Context Display and Navigation Techniques for Enhancing Radial, Space-Filling Hierarchy Visualizations," IEEE InfoVis 2000](https://www.cc.gatech.edu/~john.stasko/papers/infovis00.pdf). Earlier precursors include Andrews and Heidegger's "Information Slices" (1998) and Chuah's circular treemaps (1998), but the Stasko and Zhang paper is the one most modern implementations cite.
 
 For disk usage specifically, the lineage runs through three desktop tools that brought the radial chart to a general audience: **Filelight** on KDE (2004), **DaisyDisk** on macOS (2010), and the rings view in GNOME's **Baobab**. Our `fsmonitor-cli` renders the same family of chart, but with two unusual constraints: it has to run in a terminal (no SVG, no canvas; we paint with braille subcells) and it has to update incrementally as the scan runs.
@@ -21,7 +21,15 @@ A Linux filesystem is a tree by definition. Every directory is a node, every fil
 
 That third property is what a flat sorted list of `du -sh` outputs cannot give you. You see the *structure* of where the bytes live, not just the leaderboard.
 
+![A small filesystem tree on the left and the same data rendered as a sunburst on the right, with three labelled leader lines connecting subtree nodes to their corresponding arcs.](../images/sunburst-mapping.jpg)
+
+*The same filesystem, two encodings. The root maps to the center disc; depth maps to ring number; each parent's bytes are distributed among its children clockwise around its arc; a descendant always stays inside its ancestor's wedge.*
+
 ## Reading our chart
+
+![An annotated reference sunburst chart with seven labelled callouts pointing to the center disc, the rings, an arc-angle indicator, the unreadable and partial accessibility glyphs, the color-by-file-type encoding, and the legend.](../images/sunburst-anatomy.jpg)
+
+*Anatomy of the chart. The same seven labels are unpacked below.*
 
 Open the explorer and press `1`. What you see, decoded:
 
