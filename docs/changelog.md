@@ -31,6 +31,7 @@ Since `407136d` (v0.1.5 release).
 **Docs**
 
 - **docs** Architecture guide gains a short subsection on live-scan rendering (the snapshot path, the depth damping, the auto-gate) under Visualization.
+- **docs** New blog post [docs/blogs/2026-05-24-reading-the-sunburst.md](blogs/2026-05-24-reading-the-sunburst.md): a short field guide to the chart in the right panel, with the academic lineage of sunburst / radial space-filling visualizations (Shneiderman 1991 treemap, Stasko and Zhang 2000 sunburst), the disk-usage tool lineage that brought it to desktops (Filelight, DaisyDisk, Baobab), how the radial form maps to a Linux filesystem, and a key-by-key reading guide for our implementation.
 
 ## v0.1.5
 
