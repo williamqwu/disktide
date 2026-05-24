@@ -24,6 +24,15 @@ class ScanProgressOverlay(Widget):
         border: thick $primary;
         padding: 1 2;
     }
+    /* Textual's ProgressBar defaults to width:auto and its inner Bar
+       defaults to width:32, so the bar ends up ~60% of the overlay's
+       content area. Stretch both to 1fr so the bar fills the panel. */
+    ScanProgressOverlay ProgressBar {
+        width: 1fr;
+    }
+    ScanProgressOverlay Bar {
+        width: 1fr;
+    }
     """
 
     is_scanning: reactive[bool] = reactive(False)

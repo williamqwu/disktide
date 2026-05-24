@@ -32,7 +32,10 @@ class ExplorerScreen(Screen):
     """Main filesystem explorer screen."""
 
     BINDINGS = [
-        Binding("1", "switch_viz('sunburst')", "[1]Sunburst [2]Treemap [3]Details", show=True, key_display="Viz"),
+        # Viz-switch keys are surfaced on the tab labels themselves
+        # ("Sunburst [1]" / "Treemap [2]" / "Details [3]") so they don't
+        # need to eat space in the footer too.
+        Binding("1", "switch_viz('sunburst')", "Sunburst", show=False),
         Binding("2", "switch_viz('treemap')", "Treemap", show=False),
         Binding("3", "switch_viz('details')", "Details", show=False),
         Binding("u", "go_up", "[U]p [I]nto", show=True, key_display="Nav"),
@@ -118,11 +121,15 @@ class ExplorerScreen(Screen):
                 yield SizeTree(id="size-tree")
             with Vertical(id="viz-panel"):
                 with TabbedContent(id="viz-tabs"):
-                    with TabPane("Sunburst", id="tab-sunburst"):
+                    # Key hints live on the tab labels themselves, not in
+                    # the footer. The opening bracket is markup-escaped
+                    # (\\[) so Textual's Content parser keeps it literal
+                    # instead of trying to open a style tag.
+                    with TabPane("Sunburst \\[1]", id="tab-sunburst"):
                         yield SunburstView(id="sunburst-view")
-                    with TabPane("Treemap", id="tab-treemap"):
+                    with TabPane("Treemap \\[2]", id="tab-treemap"):
                         yield TreemapView(id="treemap-view")
-                    with TabPane("Details", id="tab-details"):
+                    with TabPane("Details \\[3]", id="tab-details"):
                         yield InfoPanel(id="info-panel")
         # ScanProgressOverlay is yielded at root (no wrapping container);
         # the screen-level CSS lifts it onto the overlay layer with
