@@ -219,6 +219,24 @@ class SettingsScreen(Screen):
                     classes="input-hint",
                 )
 
+            with Horizontal(classes="setting-row"):
+                yield Label("Live scan rendering", classes="setting-label")
+                yield Select(
+                    [
+                        ("Auto", "auto"),
+                        ("On", "on"),
+                        ("Off", "off"),
+                    ],
+                    value=self._config.ui.live_scan_render,
+                    id="live-scan-render",
+                    classes="viz-select",
+                    allow_blank=False,
+                )
+                yield Label(
+                    "(redraw viz during scan)",
+                    classes="input-hint",
+                )
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -313,27 +331,41 @@ class SettingsScreen(Screen):
         self.app.pop_screen()
 
     def action_focus_next_field(self) -> None:
-        """Move focus to the next form field (arrow-down).
-
-        If a Select is currently open, defer to its own arrow handling
-        instead of stealing the keystroke.
-        """
-        if self._select_is_expanded():
-            return
+        """Move focus to the next form field (arrow-down)."""
         self.focus_next()
 
     def action_focus_previous_field(self) -> None:
         """Move focus to the previous form field (arrow-up)."""
-        if self._select_is_expanded():
-            return
         self.focus_previous()
 
-    def _select_is_expanded(self) -> bool:
-        focused = self.focused
-        if focused is None:
-            return False
-        # Textual's Select uses `expanded` to indicate an open dropdown.
-        return bool(getattr(focused, "expanded", False))
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Disable the focus-cycling bindings while any Select dropdown is
+        open, so its own arrow-key handling (cycle options) gets the
+        keystroke instead. Returning False from check_action removes the
+        binding for this keypress; just returning early from the action
+        handler is not enough because the priority binding still
+        *consumes* the key, so it never reaches the SelectOverlay.
+
+        We can't read `self.focused` to detect the open Select: opening
+        the dropdown moves focus to a SelectOverlay child, so the
+        Select widget itself is no longer focused. Querying all Selects
+        is robust to that.
+        """
+        if action in ("focus_next_field", "focus_previous_field"):
+            if self._any_select_expanded():
+                return False
+        return True
+
+    def _any_select_expanded(self) -> bool:
+        """True if any Select on this screen currently has its dropdown
+        open."""
+        try:
+            for select in self.query(Select):
+                if getattr(select, "expanded", False):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "show-hidden":
@@ -360,6 +392,10 @@ class SettingsScreen(Screen):
         elif event.select.id == "color-theme":
             self._config.ui.color_theme = str(event.value)
             set_color_scheme(str(event.value))
+        elif event.select.id == "live-scan-render":
+            value = str(event.value)
+            if value in ("auto", "on", "off"):
+                self._config.ui.live_scan_render = value
 
     def on_input_changed(self, event: Input.Changed) -> None:
         value = event.value.strip()

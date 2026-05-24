@@ -17,12 +17,25 @@ class ScanProgressOverlay(Widget):
     """Overlay widget showing scan progress."""
 
     DEFAULT_CSS = """
+    /* The overlay lives inside the tree-panel during a scan (replacing
+       the SizeTree while it's empty anyway), so it sizes to its parent.
+       Content stays compact at the top; the rest of the panel is the
+       overlay's own surface, with the panel-shaped border around it. */
     ScanProgressOverlay {
-        width: 60;
-        height: 12;
+        width: 1fr;
+        height: 1fr;
         background: $surface;
         border: thick $primary;
         padding: 1 2;
+    }
+    /* Textual's ProgressBar defaults to width:auto and its inner Bar
+       defaults to width:32, so the bar ends up ~60% of any container.
+       Stretch both to 1fr so the bar fills the panel. */
+    ScanProgressOverlay ProgressBar {
+        width: 1fr;
+    }
+    ScanProgressOverlay Bar {
+        width: 1fr;
     }
     """
 

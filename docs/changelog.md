@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.1.6
+
+Since `407136d` (v0.1.5 release).
+
+**Explorer**
+
+- **feat** The active visualization tab (Sunburst or Treemap) now renders live as the scan runs, instead of waiting until the end and popping in at once. The engine builds a fresh shallow-copy `FSNode` snapshot after the top-level scandir and again after each top-level subdir worker finishes; the explorer applies that snapshot to whichever viz tab is currently visible. The progress overlay sits in the left tree-panel (where the empty file tree would be) so the entire right side is free for the chart to form, with the dirs / files / size counters ticking next to it.
+- **fix** The progress overlay no longer floats in the middle of the screen during a scan; it now occupies the tree-panel (left 40%), which is empty until the scan finishes anyway. This gives the live viz the full right 60% with no occlusion AND gives the progress info a much roomier display area. On scan completion the panel swaps back to the file tree. (Earlier v0.1.6 iterations first wrapped the overlay in a full-screen Container with `background: transparent` — Textual treats transparent-bg widgets as owning their cells, so the live viz rendered correctly into its strip and was immediately painted over — then floated it with `position: absolute` to claim only its own 60x12 footprint, which fixed the occlusion but still ate the middle of the viz panel.)
+- **fix** Worker-thread exceptions no longer brick the UI. If `engine.scan()` raised for any reason (e.g. the scan dir was deleted between welcome-screen validation and the worker starting), `_run_scan` never reached `_on_scan_complete` and `_scan_in_progress` stayed True forever, silently gating every subsequent `r` / `u` / `i` / drill-into. The worker now wraps `engine.scan` in try/except and routes failures through a new `_on_scan_failed` handler that resets the same state and surfaces the error via `app.notify`.
+- **fix** Previous scan's chart no longer bleeds into a new scan. The viz tabs were only being cleared (`set_node(None)`) when `live_render` was active; with the position-absolute overlay fix above, leftover charts were plainly visible around the centered overlay for the full duration of any non-live rescan. Now every `_start_scan` clears both viz views and the Details panel regardless of mode.
+- **fix** `_apply_tree_snapshot` ignores snapshots that arrive when no scan is in progress. Textual's `call_from_thread` preserves FIFO ordering so this can't happen in practice today, but only the runtime contract guarantees it; the defensive guard prevents a stale partial snapshot from overwriting the final tree if that ordering ever changes.
+- **style** The viz-switch key hints (`1` / `2` / `3`) now live on the tab labels themselves (`Sunburst [1]` / `Treemap [2]` / `Details [3]`) instead of eating a wide cell in the footer. The bindings still work, they just aren't surfaced in the footer summary anymore.
+- **fix** The progress overlay's bar now fills the panel width instead of stopping at ~60%. Textual's `ProgressBar` defaults to `width: auto` and its inner `Bar` defaults to `width: 32`, so the bar was using 32 of the overlay's 54 content cells. Both are now `width: 1fr` inside the overlay.
+- **fix** Live frames render at reduced depth (`max_depth=2` instead of 4 for the sunburst and 3 for the treemap), restored on completion. The outer rings of a sunburst are exactly the ones that re-tile every time a subtree's size lands, so dropping them mid-scan removes both the visual jitter and most of the per-frame braille-fill cost.
+- **fix** Drill-into is gated while a scan is in flight (`u` go-up, `i` go-into, `r` rescan, and click-to-drill on the tree all return early). The live snapshot's per-subtree aggregates are honest, but the root totals visible on a partial render are not, and we don't want the Details panel showing numbers that contradict themselves a second later.
+
+**Settings**
+
+- **feat** New **Live scan rendering** setting (`ui.live_scan_render`): `auto` (default), `on`, or `off`. `auto` enables live rendering on roomy terminals (>= 80x24) with enough cores (>= 4), and silently stays out of the way on cramped web shells or small VMs where the per-frame redraw cost would compete with the scan. Persisted to `~/.config/fsmonitor-cli/config.toml` only when the user picks `on` or `off`; the default does not pollute the file.
+
+**Scanner**
+
+- **feat** `ScanEngine` gains an optional `tree_callback: Callable[[FSNode], None]` and a `tree_callback_interval` (default 0.25 s). When set, the callback fires once with a top-level-only snapshot before workers start, then at most once per interval as top-level subdir futures resolve, and unconditionally one final time at the end. The first non-forced emit after a force bypasses the throttle so the first ring slice appears the moment a top-level subdir lands, instead of after a full interval of blank viz. Aggregate math is factored into a single `_roll_up` helper used by both the live snapshot path and the final root assembly, so they cannot drift.
+
+**Shutdown**
+
+- **fix** Quit no longer hangs the shell for tens of seconds after a large scan. The previous `_force_teardown` joined worker threads (up to 8s), then `del app` and `gc.collect()` triggered a refcount cascade through the held FSNode tree (5-15s on a 4M-node tree), then `Goodbye!` printed, then Python's natural interpreter shutdown ran atexit handlers + module cleanup + a final cycle GC pass (another 20-30s on the same tree). On a 12 TB / 4M file scan that added up to ~40 seconds of nothing-visible-happening between pressing `q` and getting the shell prompt back. The teardown now does only what matters for correctness — cancel the scan and close the SQLite handle — then `os._exit(0)`. Worker threads are doing read-only FS scans, so killing them mid-syscall is safe; the kernel reclaims the entire FSNode tree's memory in microseconds vs the seconds Python takes to do it with refcounts and finalizers. Measured on a tiny tree: from second-`q` press to process exit is now 214 ms.
+
+**Docs**
+
+- **docs** Architecture guide gains a short subsection on live-scan rendering (the snapshot path, the depth damping, the auto-gate) under Visualization.
+
 ## v0.1.5
 
 Since `6cb0459` (v0.1.4 release).

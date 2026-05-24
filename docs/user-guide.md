@@ -203,9 +203,13 @@ default_sort = "size"                    # size, name, mtime
 default_viz = "sunburst"                 # treemap, sunburst, details
 show_hidden = false
 # show_cleanup = true                    # enable Cleanup mode (disabled by default)
+# safe_rendering = true                  # ASCII bars and glyphs for web shells
+# live_scan_render = "auto"              # auto | on | off — draw viz live during scan
 # default_scan_path = "/home/user/data" # pre-fill welcome screen
 # hostname_aware_paths = false           # store paths per hostname (default: true)
 ```
+
+The **Live scan rendering** setting (`live_scan_render`) controls whether the active visualization tab redraws as the scan progresses. `auto` (the default) enables it on terminals at least 80 columns by 24 rows with at least 4 CPUs, and stays off on smaller / lower-resource setups where the per-frame redraw cost would compete with the scan. Set to `on` to force it regardless of terminal size, or `off` to wait for the scan to finish and render once.
 
 All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory -- detected per scan path, so different directories on different filesystems (e.g., local SSD vs. NFS) automatically use an appropriate thread count.
 

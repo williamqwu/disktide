@@ -40,71 +40,54 @@ def cli(ctx, max_depth: int | None, workers: int | None):
         app = FSMonitorApp(show_welcome=True, config=config)
         app.run(mouse=False)
 
-        # Print "Exiting..." first so the user sees feedback. Then run
-        # post-TUI cleanup synchronously — otherwise it gets deferred
-        # to Python interpreter shutdown after "Goodbye!" prints,
-        # leaving the user staring at the goodbye line while the shell
-        # hangs.
+        # Print "Exiting..." first so the user sees feedback, then run
+        # the necessary cleanup (cancel scan + close SQLite), print the
+        # goodbye, and hard-exit. See `_force_teardown` for why we skip
+        # Python's natural shutdown sequence on the way out.
         click.echo("Exiting...", nl=True)
         sys.stdout.flush()
         _force_teardown(app)
-        # Drop the app reference here in the caller so gc.collect() has
-        # a chance to actually free Textual subobjects (a `del app`
-        # inside _force_teardown would only delete one of two refs).
-        del app
-        import gc
-        gc.collect()
         click.echo("fsmonitor-cli closed. Goodbye!")
+        sys.stdout.flush()
+        # Bypass Python's interpreter teardown: gc of the in-memory
+        # FSNode tree + atexit + module cleanup adds tens of seconds on
+        # a multi-million-file scan, all spent freeing memory the kernel
+        # is about to reclaim anyway. All cleanup that matters for
+        # correctness (cancel + DB close) has already run above, and
+        # the goodbye text was flushed via sys.stdout.flush() right
+        # before this block.
+        import os as _os
+        _os._exit(0)
 
 
 def _force_teardown(app) -> None:
-    """Run post-TUI cleanup in dependency order: cancel → join → close.
+    """Run the minimum cleanup that must happen before exit.
 
-    Order matters:
-      1. cancel — signal the engine so workers can bail out
-      2. join — wait for them, with a tight timeout
-      3. close — free the SQLite handle once nothing's using it
-    Doing close-before-join risks freeing state out from under a still-
-    running worker; doing gc-before-join risks finalising objects whose
-    threads haven't observed cancel yet. The caller runs gc.collect()
-    after we return.
+    Only two things matter for correctness:
+
+      1. Cancel any in-flight scan. The walker checks the engine's
+         cancel event at every entry boundary (~10ms bail in practice),
+         so a brief in-flight scan won't keep doing work between here
+         and the os._exit below. We do NOT wait for the worker thread
+         to actually return: it does read-only filesystem scans, so
+         killing it mid-syscall via os._exit is safe.
+
+      2. Close the SQLite handle. The TUI only ever writes to the DB
+         from the main thread, so closing here is race-free, and a
+         clean close keeps the WAL file from being left in a state
+         that costs the next session a recovery pass.
+
+    Everything else (joining worker threads, dropping the FSNode tree
+    so it can be gc'd, running gc.collect() to dissolve Textual's
+    screen/widget cycles) used to live here and was pure throwaway
+    work: it ran for tens of seconds on a multi-million-file scan and
+    accomplished nothing the kernel doesn't do for free on exit.
     """
-    import logging
-    import threading
-
-    # 1. Cancel any active scan engine.
     try:
         if getattr(app, "_explorer", None) is not None:
             app._explorer.cancel_active_scan()
     except Exception:
         pass
-
-    # 2. Join straggling non-daemon, non-main threads. Walker cancel
-    #    propagation makes this fast in practice — keep the cap tight
-    #    so a wedged worker doesn't make the shell appear hung.
-    timeout = 8.0
-    deadline = time.monotonic() + timeout
-    main = threading.main_thread()
-    stragglers: list[threading.Thread] = []
-    for t in threading.enumerate():
-        if t is main or t.daemon:
-            continue
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            stragglers.append(t)
-            continue
-        t.join(timeout=remaining)
-        if t.is_alive():
-            stragglers.append(t)
-    if stragglers:
-        names = ", ".join(t.name for t in stragglers)
-        logging.getLogger(__name__).warning(
-            "shutdown: %d worker thread(s) still alive after %.0fs (%s); "
-            "exiting anyway",
-            len(stragglers), timeout, names,
-        )
-
-    # 3. Close DB after threads are joined.
     db = getattr(app, "_db", None)
     if db is not None:
         try:
