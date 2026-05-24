@@ -53,9 +53,10 @@ def cli(ctx, max_depth: int | None, workers: int | None):
         # FSNode tree + atexit + module cleanup adds tens of seconds on
         # a multi-million-file scan, all spent freeing memory the kernel
         # is about to reclaim anyway. All cleanup that matters for
-        # correctness (cancel + DB close) has already run above.
+        # correctness (cancel + DB close) has already run above, and
+        # the goodbye text was flushed via sys.stdout.flush() right
+        # before this block.
         import os as _os
-        _os.write(1, b"")  # last-chance flush of stdout via the fd
         _os._exit(0)
 
 

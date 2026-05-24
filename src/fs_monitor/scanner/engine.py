@@ -205,9 +205,13 @@ class ScanEngine:
                                 top_inaccessible += 1
                     except Exception:
                         pass
-                    # Coalesce: fire at most once per interval, on data
-                    # change only, so a fast finisher doesn't trigger a
-                    # full sunburst redraw N times in a row.
+                    # Throttle: _emit_tree_snapshot drops calls that
+                    # land within tree_callback_interval of the last
+                    # one, so a burst of fast finishers doesn't trigger
+                    # a full sunburst redraw N times in a row. We call
+                    # on every iteration (including the future-raised
+                    # case where no new dir_results entry was added);
+                    # the throttle handles redundant-state coalescing.
                     self._emit_tree_snapshot(
                         root, top_files, dir_results,
                         own_size, top_inaccessible,
@@ -227,8 +231,15 @@ class ScanEngine:
         )
         self._progress.force_report()
 
-        # Final tree emit so the UI always sees a fully aggregated tree
-        # at the end of the scan, regardless of throttling timing above.
+        # Final tree emit. Unlike the throttled in-progress emits above
+        # which hand the UI a self-contained shallow-copy "snapshot"
+        # built from partial state, this passes the actual finalized
+        # root directly. By this point _finalize_root has set every
+        # aggregate and the engine will not mutate root again, so it
+        # is safe to share; consumers that want root-only fields
+        # (`error`, `is_loop`, the access-state counts) can read them
+        # from the final node without a separate handoff. The consumer
+        # must treat the final node as read-only.
         if self._tree_callback is not None:
             self._tree_callback(root)
 

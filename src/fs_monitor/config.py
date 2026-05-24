@@ -259,12 +259,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     return config
 
 
-# Auto-gate thresholds for the live-scan-render setting. A 60x12 progress
-# overlay sits in the middle of the explorer; below ~80 columns or ~24
-# rows there is no room for a meaningful sunburst behind it, so the live
-# redraw is purely cost with no payoff. Four cores is the rough line at
-# which a 50-200 ms braille fill per second stops competing with the
-# scan worker threads for CPU.
+# Auto-gate thresholds for the live-scan-render setting. The progress
+# overlay docks into the left tree panel during a scan and the viz fills
+# the right; below ~80 columns or ~24 rows the explorer's 40/60 split
+# leaves neither side roomy enough for the live render to be worth its
+# per-frame cost. Four cores is the rough line at which a 50-200 ms
+# braille fill per second stops competing with the scan worker threads
+# for CPU.
 _LIVE_RENDER_MIN_COLS = 80
 _LIVE_RENDER_MIN_ROWS = 24
 _LIVE_RENDER_MIN_CPUS = 4

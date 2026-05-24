@@ -107,10 +107,12 @@ class ExplorerScreen(Screen):
         # would otherwise read stale aggregates off the live snapshot)
         # and to decide whether to forward tree snapshots to the viz.
         self._scan_in_progress = False
-        # Resolved at scan start from config.ui.live_scan_render plus the
-        # current terminal / cpu_count. When False, the engine still gets
-        # a tree_callback but the explorer drops snapshots on the floor;
-        # final render path is unchanged.
+        # Resolved at scan start from config.ui.live_scan_render plus
+        # the current terminal / cpu_count. When False, the explorer
+        # passes `tree_callback=None` to the engine so no snapshots are
+        # produced (the on_tree closure also short-circuits on False as
+        # belt-and-suspenders, but the wire-level disable is the engine
+        # never being asked). Final render path is unchanged either way.
         self._live_render = False
 
     def compose(self) -> ComposeResult:
