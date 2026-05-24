@@ -24,6 +24,10 @@ Since `407136d` (v0.1.5 release).
 
 - **feat** `ScanEngine` gains an optional `tree_callback: Callable[[FSNode], None]` and a `tree_callback_interval` (default 0.25 s). When set, the callback fires once with a top-level-only snapshot before workers start, then at most once per interval as top-level subdir futures resolve, and unconditionally one final time at the end. The first non-forced emit after a force bypasses the throttle so the first ring slice appears the moment a top-level subdir lands, instead of after a full interval of blank viz. Aggregate math is factored into a single `_roll_up` helper used by both the live snapshot path and the final root assembly, so they cannot drift.
 
+**Shutdown**
+
+- **fix** Quit no longer hangs the shell for tens of seconds after a large scan. The previous `_force_teardown` joined worker threads (up to 8s), then `del app` and `gc.collect()` triggered a refcount cascade through the held FSNode tree (5-15s on a 4M-node tree), then `Goodbye!` printed, then Python's natural interpreter shutdown ran atexit handlers + module cleanup + a final cycle GC pass (another 20-30s on the same tree). On a 12 TB / 4M file scan that added up to ~40 seconds of nothing-visible-happening between pressing `q` and getting the shell prompt back. The teardown now does only what matters for correctness — cancel the scan and close the SQLite handle — then `os._exit(0)`. Worker threads are doing read-only FS scans, so killing them mid-syscall is safe; the kernel reclaims the entire FSNode tree's memory in microseconds vs the seconds Python takes to do it with refcounts and finalizers. Measured on a tiny tree: from second-`q` press to process exit is now 214 ms.
+
 **Docs**
 
 - **docs** Architecture guide gains a short subsection on live-scan rendering (the snapshot path, the depth damping, the auto-gate) under Visualization.
