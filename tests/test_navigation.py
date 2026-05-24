@@ -177,17 +177,19 @@ def test_live_render_gate_uses_app_size_not_shutil(tmp_path, monkeypatch):
 
 
 def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
-    """The scan-progress overlay must NOT cover the viz area outside
-    its own 60x12 footprint.
+    """During a scan the viz panel (right 60%) must be fully owned by
+    the active viz widget, with no progress overlay covering any of it.
 
-    Earlier versions wrapped the overlay in a full-screen Container with
-    background:transparent. Textual treats a transparent-bg container
-    as still owning every cell it covers, so the live sunburst rendered
-    correctly but was invisible behind the wrapper. The fix positions
-    the overlay with `position:absolute`, claiming only its own cells.
+    History: v0.1.6 first wrapped the overlay in a full-screen Container
+    with background:transparent (occluded the viz because Textual treats
+    transparent-bg widgets as still owning their cells), then floated
+    it via `position:absolute` (no occlusion, but the centered panel
+    still ate the middle of the viz). The current design moves the
+    overlay into the tree-panel (left 40%) which is empty during a
+    scan anyway, so the viz panel is entirely free.
 
-    Regression: hit-test points well outside the centered 60x12 panel
-    during a scan and assert the viz widget is what owns them.
+    Regression: hit-test points across the viz panel during a live
+    scan and assert the viz widget is what owns them.
     """
     # A small tree, then we slow each subdir scan by monkey-patching the
     # walker so the test reliably catches the mid-scan window even on a
@@ -318,6 +320,91 @@ def test_viz_clears_at_scan_start_regardless_of_live_render(tmp_path):
                     break
             assert sv._node is not None
             assert sv._node is not first_node
+
+    asyncio.run(go())
+
+
+def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
+    """During a scan, the scan-progress overlay must occupy the
+    tree-panel (the SizeTree is empty anyway). After the scan, the
+    tree comes back and the overlay is hidden.
+
+    Cross-checks: tree-panel hit-test returns the overlay mid-scan
+    and the SizeTree post-scan; the SizeTree.display flips False then
+    True; overlay.display does the inverse.
+    """
+    (tmp_path / "a.txt").write_text("hi")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.txt").write_text("ok")
+
+    async def go():
+        import time
+        from fs_monitor.config import AppConfig
+        from fs_monitor.scanner import walker as walker_mod
+        from fs_monitor.scanner import engine as engine_mod
+        from fs_monitor.widgets.scan_progress import ScanProgressOverlay
+        from fs_monitor.widgets.size_tree import SizeTree
+
+        orig_scan = walker_mod.scan_directory
+
+        def slow_scan(*args, **kwargs):
+            time.sleep(0.05)
+            return orig_scan(*args, **kwargs)
+
+        walker_mod.scan_directory = slow_scan
+        engine_mod.scan_directory = slow_scan
+
+        try:
+            cfg = AppConfig()
+            cfg.scan.workers = 1
+            app = FSMonitorApp(
+                scan_path=str(tmp_path), show_welcome=False, config=cfg
+            )
+            async with app.run_test(size=(140, 40)) as pilot:
+                for _ in range(60):
+                    await pilot.pause(delay=0.05)
+                    if (
+                        isinstance(app.screen, ExplorerScreen)
+                        and app.screen._scan_in_progress
+                    ):
+                        break
+                screen = app.screen
+                overlay = screen.query_one("#scan-progress", ScanProgressOverlay)
+                tree = screen.query_one("#size-tree", SizeTree)
+
+                # Mid-scan: overlay is visible inside the tree-panel,
+                # tree is hidden.
+                assert overlay.display is True, "overlay hidden mid-scan"
+                assert tree.display is False, "tree visible mid-scan"
+                # Hit-test the tree-panel region: should be the overlay.
+                w_at = screen.get_widget_at(10, 15)[0]
+                # `w_at` may be the overlay itself or one of its inner
+                # Static labels; either way the ScanProgressOverlay must
+                # be in its ancestor chain.
+                ancestors = [w_at] + list(getattr(w_at, "ancestors", []))
+                assert any(isinstance(a, ScanProgressOverlay) for a in ancestors), (
+                    f"tree-panel cell (10,15) during scan not owned by the "
+                    f"overlay; got {w_at.__class__.__name__} id={w_at.id}"
+                )
+
+                # Wait for completion.
+                for _ in range(100):
+                    await pilot.pause(delay=0.05)
+                    if not screen._scan_in_progress:
+                        break
+
+                # Post-scan: tree returns, overlay is hidden.
+                assert tree.display is True, "tree still hidden post-scan"
+                assert overlay.display is False, "overlay still visible post-scan"
+                w_at = screen.get_widget_at(10, 15)[0]
+                ancestors = [w_at] + list(getattr(w_at, "ancestors", []))
+                assert any(isinstance(a, SizeTree) for a in ancestors), (
+                    f"tree-panel cell (10,15) post-scan not owned by the "
+                    f"tree; got {w_at.__class__.__name__} id={w_at.id}"
+                )
+        finally:
+            walker_mod.scan_directory = orig_scan
+            engine_mod.scan_directory = orig_scan
 
     asyncio.run(go())
 

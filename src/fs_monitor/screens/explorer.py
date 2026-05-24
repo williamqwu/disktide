@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from textual import events, on, work
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -54,7 +54,6 @@ class ExplorerScreen(Screen):
     DEFAULT_CSS = """
     ExplorerScreen {
         layout: vertical;
-        layers: base overlay;
     }
 
     #explorer-main {
@@ -77,21 +76,23 @@ class ExplorerScreen(Screen):
         width: 60%;
     }
 
-    /* The scan-progress overlay floats above the explorer using absolute
-       positioning so it claims only its own 60x12 cells (not the entire
-       screen). The earlier full-screen wrapper had background:transparent
-       but Textual's compositor still treats the wrapper's empty cells as
-       owned, occluding the live-scan viz behind. position:absolute keeps
-       the lower layer visible everywhere outside the panel itself. The
-       panel is centered at runtime in `_center_overlay`. */
+    /* During a scan the SizeTree is empty anyway, so we use the
+       tree-panel real estate to show the progress overlay instead of
+       floating a panel in the middle of the screen and occluding the
+       live viz behind it. Adding `.scanning` to the tree-panel swaps
+       the tree (and its sort indicator) for the overlay; removing it
+       on completion swaps them back. */
     #scan-progress {
-        position: absolute;
-        layer: overlay;
         display: none;
     }
-
-    #scan-progress.scanning {
+    #tree-panel.scanning #scan-progress {
         display: block;
+    }
+    #tree-panel.scanning #size-tree {
+        display: none;
+    }
+    #tree-panel.scanning #sort-indicator {
+        display: none;
     }
     """
 
@@ -119,6 +120,9 @@ class ExplorerScreen(Screen):
             with Vertical(id="tree-panel"):
                 yield Static("Sort: Size  Bar: Size", id="sort-indicator")
                 yield SizeTree(id="size-tree")
+                # During a scan the tree is empty; the overlay takes its
+                # place in the same panel. CSS toggles which child shows.
+                yield ScanProgressOverlay(id="scan-progress")
             with Vertical(id="viz-panel"):
                 with TabbedContent(id="viz-tabs"):
                     # Key hints live on the tab labels themselves, not in
@@ -131,10 +135,6 @@ class ExplorerScreen(Screen):
                         yield TreemapView(id="treemap-view")
                     with TabPane("Details \\[3]", id="tab-details"):
                         yield InfoPanel(id="info-panel")
-        # ScanProgressOverlay is yielded at root (no wrapping container);
-        # the screen-level CSS lifts it onto the overlay layer with
-        # position:absolute so it doesn't occlude the live-scan viz.
-        yield ScanProgressOverlay(id="scan-progress")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -144,30 +144,6 @@ class ExplorerScreen(Screen):
             if viz in tab_map:
                 self.query_one("#viz-tabs", TabbedContent).active = tab_map[viz]
         self._start_scan()
-
-    def on_resize(self, event: events.Resize) -> None:
-        """Re-center the floating progress overlay when the terminal resizes."""
-        self._center_overlay()
-
-    def _center_overlay(self) -> None:
-        """Place the scan-progress overlay in the middle of the screen.
-
-        The overlay uses `position: absolute` so it doesn't claim screen
-        cells outside its own footprint; that means we own positioning
-        and have to set offset by hand. Reads the overlay's declared
-        size from its styles so this stays correct if we ever resize it.
-        """
-        try:
-            overlay = self.query_one("#scan-progress", ScanProgressOverlay)
-        except Exception:
-            return
-        ow = int(overlay.styles.width.value) if overlay.styles.width else 60
-        oh = int(overlay.styles.height.value) if overlay.styles.height else 12
-        sw = self.size.width or 0
-        sh = self.size.height or 0
-        x = max(0, (sw - ow) // 2)
-        y = max(0, (sh - oh) // 2)
-        overlay.styles.offset = (x, y)
 
     def _start_scan(self, force: bool = False) -> None:
         """Kick off a filesystem scan."""
@@ -193,11 +169,10 @@ class ExplorerScreen(Screen):
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.start()
-        # position:absolute lifts it out of layout so it doesn't claim
-        # cells over the viz; we re-center on every scan start in case
-        # the terminal was resized between scans.
-        self._center_overlay()
-        overlay.add_class("scanning")
+        # The overlay lives inside #tree-panel during a scan; adding the
+        # `scanning` class to the panel hides the (empty) tree and its
+        # sort indicator and unhides the overlay in their place.
+        self.query_one("#tree-panel").add_class("scanning")
 
         # Clear the viz tabs unconditionally so a previous scan's chart
         # doesn't sit behind the overlay during the new scan. (Now that
@@ -283,10 +258,10 @@ class ExplorerScreen(Screen):
         self._root = root
         self._current = root
 
-        # Update overlay
+        # Hide the overlay and restore the tree in the tree-panel.
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_complete()
-        overlay.remove_class("scanning")
+        self.query_one("#tree-panel").remove_class("scanning")
 
         # Restore the viz tabs to their static (full-depth) render mode
         # whether or not live mode was active this scan, so a config flip
@@ -323,7 +298,7 @@ class ExplorerScreen(Screen):
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_complete()
-        overlay.remove_class("scanning")
+        self.query_one("#tree-panel").remove_class("scanning")
 
         for view_id, view_cls in (
             ("#sunburst-view", SunburstView),
