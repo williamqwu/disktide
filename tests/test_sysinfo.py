@@ -13,9 +13,48 @@ from fs_monitor.scanner.sysinfo import (
     detect_fs_type,
     detect_storage_type,
     detect_system_info,
+    unescape_mount_path,
     _compute_recommended_workers,
     _find_block_device,
 )
+
+
+class TestUnescapeMountPath:
+    def test_plain_path_unchanged(self):
+        assert unescape_mount_path("/home/user") == "/home/user"
+
+    def test_octal_space(self):
+        assert unescape_mount_path(r"/mnt/my\040drive") == "/mnt/my drive"
+
+    def test_octal_tab_and_newline(self):
+        assert unescape_mount_path(r"/a\011b") == "/a\tb"
+
+    def test_preserves_non_ascii(self):
+        # The old encode/decode trick corrupted this to '/mnt/cafÃ©'.
+        assert unescape_mount_path(r"/mnt/café\040x") == "/mnt/café x"
+
+
+class TestFindBlockDevicePartitionStripping:
+    def _check(self, devnode, expected):
+        mounts = f"{devnode} / ext4 rw 0 0\n"
+        with patch("builtins.open", mock_open(read_data=mounts)):
+            with patch("os.path.realpath", side_effect=lambda p: p):
+                assert _find_block_device("/") == expected
+
+    def test_sata(self):
+        self._check("/dev/sda1", "sda")
+
+    def test_nvme(self):
+        self._check("/dev/nvme0n1p1", "nvme0n1")
+
+    def test_mmcblk(self):
+        self._check("/dev/mmcblk0p1", "mmcblk0")
+
+    def test_loop_kept_whole(self):
+        self._check("/dev/loop0", "loop0")
+
+    def test_device_mapper_kept_whole(self):
+        self._check("/dev/dm-0", "dm-0")
 
 
 class TestDetectCpuCount:

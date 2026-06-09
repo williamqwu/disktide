@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Since `e174a6a` (v0.1.6 release).
+
+**FS Overview**
+
+- **fix** "Used" and "Usage %" no longer over-report by the root-reserved block count. The screen computed `used = total - f_bavail`, which folds the unprivileged-user reservation (the default ~5% on ext4) into used space — on a typical root filesystem this nearly doubled the reported usage versus `df` (e.g. 11.4% shown vs 7% real, a 48 GB overstatement). It now follows `df` semantics exactly: `used = (f_blocks - f_bfree) * f_frsize`, `free = f_bavail * f_frsize`, and `usage_pct = used / (used + free)`. The reclaimed gap is exposed as a new **Reserved** row in the per-filesystem detail modal.
+- **fix** The aggregate summary (Total / Used / proportional bar) no longer double-counts capacity for devices mounted at more than one path. Bind mounts and btrfs subvolumes report the full pool size from each `statvfs`, so summing raw mount entries inflated the totals; the summary now de-duplicates by backing device first. The per-mount table still lists every mountpoint.
+- **fix** A stale NFS/CIFS mount can no longer wedge the loader on the spinner forever. `statvfs` on network filesystems now runs under a 3 s watchdog (local filesystems, which never block, are stat'd directly) and a timed-out mount is skipped.
+- **fix** Non-ASCII mountpoints are no longer mojibaked. `/proc/mounts` octal escapes (`\040` etc.) were decoded with `encode('utf-8').decode('unicode_escape')`, which reinterpreted UTF-8 bytes as Latin-1 (`/mnt/café` → `/mnt/cafÃ©`). A targeted octal-only unescape (`unescape_mount_path`) replaces it, shared across `sysinfo` and the overview screen.
+- **fix** The usage bar clamps over-100% values (the `*` over-quota case) instead of emitting an over-length bar with a negative empty count.
+- **fix** Refreshing (`r`) is now `exclusive`, so mashing the key can't stack overlapping loader threads.
+
+**Block Devices**
+
+- **feat** The FS Overview gains a second **Block Devices** panel that enumerates the whole block layer via `lsblk -J -b`, surfacing storage that `/proc/mounts` + `statvfs` fundamentally cannot see: unmounted-but-formatted filesystems, unformatted partitions, and raw disks with no partition table. Each disk is shown with its partition tree and a colour-coded status (`● mounted`, `○ not mounted`, `○ unformatted`, `○ raw — no partition table`); the panel header reports idle-disk count and unused capacity. Row-select opens a per-device detail modal (model, media type, partition list). The panel hides itself when `lsblk` is unavailable. New module: `scanner/blockdev.py`.
+
+**Scanner**
+
+- **fix** `sysinfo._find_block_device` now strips the partition suffix correctly for `mmcblk0p1` → `mmcblk0` (previously `mmcblk0p`) and keeps `loop0` / `dm-0` whole, so the Speed (HDD/SSD) column resolves on eMMC/SD and loop devices.
+
 ## v0.1.6
 
 Since `407136d` (v0.1.5 release).

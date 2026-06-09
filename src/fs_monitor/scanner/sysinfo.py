@@ -3,7 +3,23 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
+
+# /proc/mounts escapes space, tab, newline and backslash as octal \ooo.
+_OCTAL_ESCAPE = re.compile(r"\\([0-7]{3})")
+
+
+def unescape_mount_path(s: str) -> str:
+    """Decode the octal escapes the kernel writes into /proc/mounts.
+
+    Only space/tab/newline/backslash are ever escaped (as \\040 etc.), so a
+    targeted octal substitution is lossless. The previous
+    ``encode('utf-8').decode('unicode_escape')`` trick mangled any non-ASCII
+    mountpoint (e.g. ``/mnt/café`` -> ``/mnt/cafÃ©``) by reinterpreting UTF-8
+    bytes as Latin-1.
+    """
+    return _OCTAL_ESCAPE.sub(lambda m: chr(int(m.group(1), 8)), s)
 
 
 @dataclass
@@ -79,10 +95,8 @@ def detect_fs_type(path: str) -> tuple[str, bool]:
                 parts = line.split()
                 if len(parts) < 3:
                     continue
-                mountpoint = parts[1]
+                mountpoint = unescape_mount_path(parts[1])
                 fstype = parts[2]
-                # Unescape octal sequences in mountpoint (e.g. \040 for space)
-                mountpoint = mountpoint.encode("utf-8").decode("unicode_escape")
                 if path == mountpoint or path.startswith(mountpoint + "/") or mountpoint == "/":
                     if len(mountpoint) > len(best_mount):
                         best_mount = mountpoint
@@ -139,8 +153,7 @@ def _find_block_device(path: str) -> str | None:
                 if len(parts) < 3:
                     continue
                 device = parts[0]
-                mountpoint = parts[1]
-                mountpoint = mountpoint.encode("utf-8").decode("unicode_escape")
+                mountpoint = unescape_mount_path(parts[1])
                 if path == mountpoint or path.startswith(mountpoint + "/") or mountpoint == "/":
                     if len(mountpoint) > len(best_mount):
                         best_mount = mountpoint
@@ -153,11 +166,11 @@ def _find_block_device(path: str) -> str | None:
 
     # /dev/sda1 -> sda, /dev/dm-0 -> dm-0, /dev/nvme0n1p1 -> nvme0n1
     dev_name = os.path.basename(os.path.realpath(best_dev))
-    # Strip partition suffix: sda1 -> sda, nvme0n1p1 -> nvme0n1
-    if dev_name.startswith("dm-"):
+    # Device-mapper and loop devices have no partition suffix to strip.
+    if dev_name.startswith("dm-") or dev_name.startswith("loop"):
         return dev_name
-    # nvme: strip pN suffix
-    if "nvme" in dev_name:
+    # nvme/mmcblk: partitions are <disk>pN (nvme0n1p1, mmcblk0p1).
+    if "nvme" in dev_name or dev_name.startswith("mmcblk"):
         idx = dev_name.rfind("p")
         if idx > 0 and dev_name[idx + 1:].isdigit():
             return dev_name[:idx]

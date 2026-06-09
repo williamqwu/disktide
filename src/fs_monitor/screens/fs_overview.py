@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from dataclasses import dataclass
 
 from textual import on, work
 from textual.app import ComposeResult
@@ -15,7 +16,17 @@ from textual.widgets import Footer, Header, Static, DataTable, LoadingIndicator
 from rich.text import Text
 import humanize
 
-from fs_monitor.scanner.sysinfo import detect_fs_type, detect_storage_type
+from fs_monitor.scanner.sysinfo import (
+    detect_storage_type,
+    unescape_mount_path,
+    _NETWORK_FS_TYPES,
+)
+from fs_monitor.scanner.blockdev import (
+    BlockDevice,
+    DeviceStatus,
+    list_block_devices,
+    idle_summary,
+)
 
 # Filesystem types that carry no real disk space (pseudo-filesystems).
 _PSEUDO_FS_TYPES = {
@@ -37,6 +48,7 @@ class FSEntry:
     total_bytes: int
     used_bytes: int
     free_bytes: int
+    reserved_bytes: int
     inode_total: int
     inode_free: int
     block_size: int
@@ -57,9 +69,14 @@ class FSEntry:
 
     @property
     def usage_pct(self) -> float:
-        if self.total_bytes == 0:
+        # Match df: used / (used + available), which excludes the
+        # root-reserved blocks from the denominator. Using total here would
+        # understate usage on a near-full disk whose only remaining space is
+        # the reservation an unprivileged user can never touch.
+        denom = self.used_bytes + self.free_bytes
+        if denom == 0:
             return 0.0
-        return self.used_bytes / self.total_bytes * 100
+        return self.used_bytes / denom * 100
 
     @property
     def inode_used(self) -> int:
@@ -102,13 +119,36 @@ def _read_mounts() -> list[tuple[str, str, str, str]]:
                 if len(parts) < 4:
                     continue
                 device, mountpoint, fstype, options = (
-                    parts[0], parts[1], parts[2], parts[3]
+                    parts[0], unescape_mount_path(parts[1]), parts[2], parts[3]
                 )
-                mountpoint = mountpoint.encode("utf-8").decode("unicode_escape")
                 entries.append((device, mountpoint, fstype, options))
     except OSError:
         pass
     return entries
+
+
+def _statvfs_safe(mountpoint: str, is_network: bool) -> os.statvfs_result | None:
+    """statvfs that won't wedge the loader on a stale network mount.
+
+    A stale NFS/CIFS handle makes os.statvfs() block indefinitely. Local
+    filesystems never do, so we only pay for a watchdog thread on network
+    mounts. The orphaned thread (if it ever returns) is harmless and the app
+    exits via os._exit, so we don't try to join it.
+    """
+    if not is_network:
+        try:
+            return os.statvfs(mountpoint)
+        except OSError:
+            return None
+    # Don't use the executor as a context manager: its __exit__ joins the
+    # worker, which would re-block us on the very hang we're guarding against.
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(os.statvfs, mountpoint).result(timeout=3)
+    except (FuturesTimeout, OSError):
+        return None
+    finally:
+        pool.shutdown(wait=False)
 
 
 def _parse_quota_size(value: str) -> int:
@@ -179,19 +219,25 @@ def _load_fs_entries() -> list[FSEntry]:
             continue
         seen_mountpoints.add(mountpoint)
 
-        try:
-            stat = os.statvfs(mountpoint)
-        except OSError:
+        is_network = fstype in _NETWORK_FS_TYPES
+        stat = _statvfs_safe(mountpoint, is_network)
+        if stat is None:
             continue
 
-        total = stat.f_frsize * stat.f_blocks
-        free = stat.f_frsize * stat.f_bavail
-        used = total - free
+        frsize = stat.f_frsize
+        total = frsize * stat.f_blocks
+        # df semantics: "used" is everything the kernel marks allocated
+        # (f_blocks - f_bfree), "free" is what an unprivileged user may still
+        # claim (f_bavail). The gap between them is the root reservation. The
+        # old code folded that reservation into "used", over-reporting usage by
+        # the reserved amount (~5% on a default ext4).
+        free = frsize * stat.f_bavail
+        used = frsize * (stat.f_blocks - stat.f_bfree)
+        reserved = frsize * (stat.f_bfree - stat.f_bavail)
 
         if total == 0:
             continue
 
-        _, is_network = detect_fs_type(mountpoint)
         is_rotational = detect_storage_type(mountpoint)
 
         entries.append(FSEntry(
@@ -204,6 +250,7 @@ def _load_fs_entries() -> list[FSEntry]:
             total_bytes=total,
             used_bytes=used,
             free_bytes=free,
+            reserved_bytes=reserved,
             inode_total=stat.f_files,
             inode_free=stat.f_ffree,
             block_size=stat.f_bsize,
@@ -223,7 +270,9 @@ def _load_fs_entries() -> list[FSEntry]:
 
 
 def _usage_bar(pct: float, width: int = 12) -> Text:
-    filled = int(pct / 100 * width)
+    # Clamp: an over-quota pct (>100, shown with a '*' by the quota tool) would
+    # otherwise produce a bar longer than `width` and a negative empty count.
+    filled = max(0, min(width, int(pct / 100 * width)))
     bar = "█" * filled + "░" * (width - filled)
     style = "red" if pct >= 90 else "yellow" if pct >= 70 else "green"
     t = Text()
@@ -245,9 +294,29 @@ def _quota_cell(entry: FSEntry) -> Text:
     return t
 
 
+def _dedup_by_device(entries: list[FSEntry]) -> list[FSEntry]:
+    """Keep one entry per backing device for aggregate stats.
+
+    Bind mounts and btrfs subvolumes expose the same device at several
+    mountpoints; statvfs reports the full pool size for each, so summing raw
+    entries double-counts capacity. The device string is shared across all of
+    them, so it's the right key. Real distinct filesystems have distinct
+    device nodes.
+    """
+    seen: set[str] = set()
+    unique: list[FSEntry] = []
+    for e in entries:
+        if e.device in seen:
+            continue
+        seen.add(e.device)
+        unique.append(e)
+    return unique
+
+
 def _build_summary(entries: list[FSEntry]) -> Text:
-    total_space = sum(e.total_bytes for e in entries)
-    total_used = sum(e.used_bytes for e in entries)
+    unique = _dedup_by_device(entries)
+    total_space = sum(e.total_bytes for e in unique)
+    total_used = sum(e.used_bytes for e in unique)
     used_pct = total_used / total_space * 100 if total_space > 0 else 0.0
 
     t = Text()
@@ -257,16 +326,64 @@ def _build_summary(entries: list[FSEntry]) -> Text:
 
     # Proportional bar — each FS contributes width proportional to its total size
     bar_width = 50
-    for e in entries:
+    for e in unique:
         w = max(1, int(e.total_bytes / total_space * bar_width)) if total_space > 0 else 1
         t.append("█" * w, style=e.speed_style)
 
     t.append("\n  ")
-    for e in entries:
+    for e in unique:
         label = os.path.basename(e.mountpoint) or "/"
         size_str = humanize.naturalsize(e.total_bytes, binary=True, gnu=True)
         t.append(f"■ {label}({size_str}) ", style=e.speed_style)
 
+    return t
+
+
+_STATUS_DISPLAY: dict[DeviceStatus, tuple[str, str]] = {
+    DeviceStatus.MOUNTED: ("● mounted", "green"),
+    DeviceStatus.UNMOUNTED: ("○ not mounted", "cyan"),
+    DeviceStatus.UNFORMATTED: ("○ unformatted", "yellow"),
+    DeviceStatus.RAW: ("○ raw — no partition table", "yellow"),
+    DeviceStatus.CONTAINER: ("partitioned", "dim"),
+}
+
+
+def _block_status_cell(dev: BlockDevice) -> Text:
+    status = dev.status
+    label, style = _STATUS_DISPLAY[status]
+    if status == DeviceStatus.MOUNTED and dev.mountpoint:
+        label = f"● {dev.mountpoint}"
+    return Text(label, style=style)
+
+
+def _block_tree_rows(devices: list[BlockDevice]) -> list[tuple[BlockDevice, str]]:
+    """Flatten to (device, display_name) with ├─/└─ tree connectors."""
+    rows: list[tuple[BlockDevice, str]] = []
+
+    def _walk(dev: BlockDevice, prefix: str, is_last: bool, top: bool) -> None:
+        if top:
+            name = dev.name
+        else:
+            name = f"{prefix}{'└─' if is_last else '├─'} {dev.name}"
+        rows.append((dev, name))
+        child_prefix = "" if top else prefix + ("   " if is_last else "│  ")
+        for i, child in enumerate(dev.children):
+            _walk(child, child_prefix, i == len(dev.children) - 1, top=False)
+
+    for dev in devices:
+        _walk(dev, "", True, top=True)
+    return rows
+
+
+def _build_block_summary(devices: list[BlockDevice]) -> Text:
+    idle_count, idle_bytes = idle_summary(devices)
+    t = Text("  Block Devices", style="bold")
+    if idle_count:
+        t.append("   ")
+        t.append(
+            f"{idle_count} idle disk(s) · {humanize.naturalsize(idle_bytes, binary=True)} unused",
+            style="yellow",
+        )
     return t
 
 
@@ -342,6 +459,11 @@ class FSDetailModal(ModalScreen):
                 f"  Free:          {humanize.naturalsize(e.free_bytes, binary=True)}",
                 classes="detail-row",
             )
+            if e.reserved_bytes > 0:
+                yield Static(
+                    f"  Reserved:      {humanize.naturalsize(e.reserved_bytes, binary=True)} (root-only)",
+                    classes="detail-row",
+                )
             # Inline usage bar
             bar = _usage_bar(e.usage_pct, width=20)
             bar_text = Text("  ")
@@ -395,6 +517,70 @@ class FSDetailModal(ModalScreen):
             yield Static("  Press Esc or Enter to close", classes="detail-hint")
 
 
+class BlockDeviceModal(ModalScreen):
+    """Detail popup for a single block device — press Esc or Enter to close."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=True),
+        Binding("enter", "dismiss", "Close", show=False),
+        Binding("q", "dismiss", "Close", show=False),
+    ]
+
+    DEFAULT_CSS = FSDetailModal.DEFAULT_CSS.replace(
+        "#fs-detail-dialog", "#block-detail-dialog"
+    )
+
+    def __init__(self, dev: BlockDevice, **kwargs):
+        super().__init__(**kwargs)
+        self._dev = dev
+
+    def compose(self) -> ComposeResult:
+        d = self._dev
+        with VerticalScroll(id="block-detail-dialog"):
+            yield Static(f"  {d.name}", classes="detail-title")
+
+            yield Static("  Overview", classes="detail-section")
+            yield Static(f"  Type:          {d.dev_type}", classes="detail-row")
+            yield Static(f"  Size:          {humanize.naturalsize(d.size_bytes, binary=True)}", classes="detail-row")
+            if d.model:
+                yield Static(f"  Model:         {d.model}", classes="detail-row")
+            spin = {True: "HDD (rotational)", False: "SSD / flash"}.get(
+                d.is_rotational, "Unknown"
+            )
+            yield Static(f"  Media:         {spin}", classes="detail-row")
+
+            yield Static("  Status", classes="detail-section")
+            label, style = _STATUS_DISPLAY[d.status]
+            yield Static(Text(f"  {label}", style=style), classes="detail-row")
+            yield Static(f"  Filesystem:    {d.fstype or '(none)'}", classes="detail-row")
+            yield Static(f"  Mountpoint:    {d.mountpoint or '(not mounted)'}", classes="detail-row")
+
+            if d.status == DeviceStatus.RAW:
+                yield Static(
+                    Text("  This disk has no partition table and is not in use.",
+                         style="yellow"),
+                    classes="detail-row",
+                )
+            elif d.status == DeviceStatus.UNFORMATTED:
+                yield Static(
+                    Text("  This partition has no filesystem and is not in use.",
+                         style="yellow"),
+                    classes="detail-row",
+                )
+
+            if d.children:
+                yield Static("  Partitions", classes="detail-section")
+                for c in d.children:
+                    mnt = c.mountpoint or "unmounted"
+                    yield Static(
+                        f"  {c.name}: {humanize.naturalsize(c.size_bytes, binary=True)}"
+                        f"  {c.fstype or '(no fs)'}  {mnt}",
+                        classes="detail-row",
+                    )
+
+            yield Static("  Press Esc or Enter to close", classes="detail-hint")
+
+
 class FSOverviewScreen(Screen):
     """Overview of all mounted real filesystems."""
 
@@ -426,11 +612,23 @@ class FSOverviewScreen(Screen):
     #fs-overview-table {
         height: 1fr;
     }
+
+    #fs-overview-block-label {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    #fs-overview-block-table {
+        height: 1fr;
+    }
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._entries: list[FSEntry] = []
+        self._block_devices: list[BlockDevice] = []
+        self._block_rows: list[BlockDevice] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -441,6 +639,11 @@ class FSOverviewScreen(Screen):
         table.cursor_type = "row"
         table.add_columns("Mount", "FS Type", "Speed", "Total", "Used", "Free", "Usage", "Quota")
         yield table
+        yield Static("", id="fs-overview-block-label")
+        block_table = DataTable(id="fs-overview-block-table")
+        block_table.cursor_type = "row"
+        block_table.add_columns("Device", "Type", "Size", "FS", "Status")
+        yield block_table
         yield Footer()
 
     def on_mount(self) -> None:
@@ -454,24 +657,38 @@ class FSOverviewScreen(Screen):
             self._show_loading(True)
             self._load_data()
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True)
     def _load_data(self) -> None:
         try:
             entries = _load_fs_entries()
         except Exception:
             entries = []
-        self.app.call_from_thread(self._populate_ui, entries)
+        try:
+            block_devices = list_block_devices()
+        except Exception:
+            block_devices = []
+        self.app.call_from_thread(self._populate_ui, entries, block_devices)
 
     def _show_loading(self, show: bool) -> None:
         container = self.query_one("#fs-overview-loading-container", Vertical)
-        summary = self.query_one("#fs-overview-summary", Static)
-        table = self.query_one("#fs-overview-table", DataTable)
         container.display = show
-        summary.display = not show
-        table.display = not show
+        for wid in (
+            "#fs-overview-summary",
+            "#fs-overview-table",
+            "#fs-overview-block-label",
+            "#fs-overview-block-table",
+        ):
+            self.query_one(wid).display = not show
+        # Hide the block panel entirely when lsblk gave us nothing.
+        if not show and not self._block_devices:
+            self.query_one("#fs-overview-block-label").display = False
+            self.query_one("#fs-overview-block-table").display = False
 
-    def _populate_ui(self, entries: list[FSEntry]) -> None:
+    def _populate_ui(
+        self, entries: list[FSEntry], block_devices: list[BlockDevice]
+    ) -> None:
         self._entries = entries
+        self._block_devices = block_devices
         self._show_loading(False)
 
         summary = self.query_one("#fs-overview-summary", Static)
@@ -495,10 +712,36 @@ class FSOverviewScreen(Screen):
                 key=e.mountpoint,
             )
 
+        self._populate_block_table()
+
+    def _populate_block_table(self) -> None:
+        label = self.query_one("#fs-overview-block-label", Static)
+        table = self.query_one("#fs-overview-block-table", DataTable)
+        table.clear()
+        self._block_rows = []
+        if not self._block_devices:
+            return
+
+        label.update(_build_block_summary(self._block_devices))
+        for dev, display_name in _block_tree_rows(self._block_devices):
+            self._block_rows.append(dev)
+            table.add_row(
+                display_name,
+                dev.dev_type,
+                humanize.naturalsize(dev.size_bytes, binary=True, gnu=True),
+                dev.fstype or "—",
+                _block_status_cell(dev),
+            )
+
     @on(DataTable.RowSelected, "#fs-overview-table")
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         if 0 <= event.cursor_row < len(self._entries):
             self.app.push_screen(FSDetailModal(self._entries[event.cursor_row]))
+
+    @on(DataTable.RowSelected, "#fs-overview-block-table")
+    def on_block_row_selected(self, event: DataTable.RowSelected) -> None:
+        if 0 <= event.cursor_row < len(self._block_rows):
+            self.app.push_screen(BlockDeviceModal(self._block_rows[event.cursor_row]))
 
     def action_refresh(self) -> None:
         self._show_loading(True)
