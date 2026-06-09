@@ -40,6 +40,125 @@ class SystemInfo:
 
 _NETWORK_FS_TYPES = {"nfs", "nfs4", "cifs", "fuse.sshfs", "lustre", "gpfs", "afs"}
 
+# RAM-backed filesystems: fastest of all, but have no rotational flag, so the
+# bare sysfs lookup leaves them as "Unknown" unless we key off the fs type.
+_RAM_FS_TYPES = {"tmpfs", "ramfs"}
+
+
+def storage_class(
+    fs_type: str, is_network_fs: bool, is_rotational: bool | None
+) -> tuple[str, str]:
+    """Classify a mount's storage speed as (label, rich_style).
+
+    Single source of truth for the speed heuristic so every view agrees.
+    Order matters: locality and RAM-backing dominate the rotational flag
+    (a network mount has no meaningful rotational bit; a tmpfs reports none).
+    """
+    if is_network_fs:
+        return ("Slow (Network)", "red")
+    if fs_type in _RAM_FS_TYPES:
+        return ("Fast (RAM)", "green")
+    if is_rotational is True:
+        return ("Medium (HDD)", "yellow")
+    if is_rotational is False:
+        return ("Fast (SSD)", "green")
+    return ("Unknown", "dim")
+
+
+# --- Orthogonal storage facets --------------------------------------------
+# "Speed" conflates several independent physical properties. These helpers
+# break it into facets that can be reported side by side as badges, and that
+# downstream consumers (e.g. worker tuning) can read individually.
+
+_COW_FS_TYPES = {"btrfs", "zfs"}
+
+# medium key -> (badge label, rich style)
+_MEDIUM_BADGE = {
+    "flash": ("Flash", "green"),
+    "hdd": ("HDD", "yellow"),
+    "ram": ("RAM", "green"),
+    "network": ("Network", "red"),
+    "unknown": ("?", "dim"),
+}
+_TRANSFORM_STYLE = "cyan"
+
+
+def classify_medium(
+    fs_type: str, is_network_fs: bool, is_rotational: bool | None
+) -> str:
+    """The kind of storage backing a mount: flash/hdd/ram/network/unknown.
+
+    This is the 'medium' facet — orthogonal to any stacked transforms. Network
+    is treated as its own medium because a remote mount's local rotational bit
+    is meaningless.
+    """
+    if is_network_fs:
+        return "network"
+    if fs_type in _RAM_FS_TYPES:
+        return "ram"
+    if is_rotational is True:
+        return "hdd"
+    if is_rotational is False:
+        return "flash"
+    return "unknown"
+
+
+def _is_encrypted(devname: str) -> bool:
+    """True if a dm device is dm-crypt (LUKS/plain), via its sysfs uuid."""
+    if not devname.startswith("dm-"):
+        return False
+    try:
+        with open(f"/sys/block/{devname}/dm/uuid") as f:
+            return f.read().strip().startswith("CRYPT-")
+    except OSError:
+        return False
+
+
+def detect_transforms(
+    device: str, fs_type: str, mount_options: str = ""
+) -> list[str]:
+    """Cheap, no-I/O detection of stacked transforms on a mount.
+
+    Detects software RAID, dm-crypt encryption, copy-on-write filesystems, and
+    transparent compression — each materially changes the performance profile
+    yet is invisible to the flash/HDD axis.
+    """
+    transforms: list[str] = []
+    devname = ""
+    if device.startswith("/dev/"):
+        try:
+            devname = os.path.basename(os.path.realpath(device))
+        except OSError:
+            devname = os.path.basename(device)
+
+    if re.match(r"md\d|md_d\d", devname):
+        transforms.append("RAID")
+    if _is_encrypted(devname):
+        transforms.append("Encrypted")
+    if fs_type in _COW_FS_TYPES:
+        transforms.append("CoW")
+    opts = mount_options.split(",")
+    if any(o.startswith("compress=") and o != "compress=no" for o in opts):
+        transforms.append("Compressed")
+    return transforms
+
+
+def facet_labels(
+    fs_type: str,
+    is_network_fs: bool,
+    is_rotational: bool | None,
+    transforms: list[str],
+) -> list[tuple[str, str]]:
+    """Return ordered (label, style) badge pairs: medium first, then transforms.
+
+    The medium badge already encodes locality (a network mount shows
+    "Network"), so there is no separate "Local" badge cluttering local rows.
+    """
+    medium = classify_medium(fs_type, is_network_fs, is_rotational)
+    badges = [_MEDIUM_BADGE[medium]]
+    badges.extend((t, _TRANSFORM_STYLE) for t in transforms)
+    return badges
+
 
 def detect_cpu_count() -> tuple[int, int]:
     """Return (total_cpus, available_cpus).
@@ -171,6 +290,14 @@ def _find_block_device(path: str) -> str | None:
         return dev_name
     # nvme/mmcblk: partitions are <disk>pN (nvme0n1p1, mmcblk0p1).
     if "nvme" in dev_name or dev_name.startswith("mmcblk"):
+        idx = dev_name.rfind("p")
+        if idx > 0 and dev_name[idx + 1:].isdigit():
+            return dev_name[:idx]
+        return dev_name
+    # md (software RAID): the number is part of the device identity (md0, md127,
+    # partitionable md_d0), so it must NOT be stripped. Partitions, if any, use
+    # the <disk>pN convention (md0p1) like nvme.
+    if re.match(r"md\d|md_d\d", dev_name):
         idx = dev_name.rfind("p")
         if idx > 0 and dev_name[idx + 1:].isdigit():
             return dev_name[:idx]

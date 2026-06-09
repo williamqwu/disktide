@@ -11,6 +11,8 @@ Since `e174a6a` (v0.1.6 release).
 
 **FS Overview**
 
+- **feat** The single **Speed** column is replaced by a **Storage** column of facet badges that break the conflated speed heuristic into orthogonal physical properties. The first badge is the *medium* (`Flash` / `HDD` / `RAM` / `Network` / `?`); it is followed by any detected *transforms* — `RAID` (md device), `Encrypted` (dm-crypt, via a `CRYPT-*` sysfs uuid), `CoW` (btrfs/zfs), and `Compressed` (a `compress=` mount option) — each materially shifting the performance profile yet invisible to the flash-vs-HDD axis. Transforms are detected once at load with no extra I/O. The detail modal gains a matching **Attributes** row. The medium badge already encodes locality, so a network mount shows `Network` with no redundant `Local` badge. The classifier (`sysinfo.storage_class`) is now the single source of truth shared by every view, and newly recognises RAM-backed filesystems (`tmpfs`/`ramfs`), which previously fell through to "Unknown".
+- **feat** New opt-in **Benchmark mount** action (`b`): an on-demand throughput probe of the highlighted mount, since the storage-class badges are only heuristics. Because it writes a temporary file, it is gated behind a confirm prompt (press `b` again, muscle-memory friendly) so a stray keystroke never starts disk I/O. The probe writes ≤256 MiB (capped at 25% of free space, time-bounded), `fsync`s, drops the page cache via `posix_fadvise(DONTNEED)`, and reads back cold — reporting buffered-write and approximate cold-read bandwidth without root. The result is recorded per mount for the life of the screen and shown as a **Measured** row when that row is reopened. New module: `scanner/benchmark.py`.
 - **fix** "Used" and "Usage %" no longer over-report by the root-reserved block count. The screen computed `used = total - f_bavail`, which folds the unprivileged-user reservation (the default ~5% on ext4) into used space — on a typical root filesystem this nearly doubled the reported usage versus `df` (e.g. 11.4% shown vs 7% real, a 48 GB overstatement). It now follows `df` semantics exactly: `used = (f_blocks - f_bfree) * f_frsize`, `free = f_bavail * f_frsize`, and `usage_pct = used / (used + free)`. The reclaimed gap is exposed as a new **Reserved** row in the per-filesystem detail modal.
 - **fix** The aggregate summary (Total / Used / proportional bar) no longer double-counts capacity for devices mounted at more than one path. Bind mounts and btrfs subvolumes report the full pool size from each `statvfs`, so summing raw mount entries inflated the totals; the summary now de-duplicates by backing device first. The per-mount table still lists every mountpoint.
 - **fix** A stale NFS/CIFS mount can no longer wedge the loader on the spinner forever. `statvfs` on network filesystems now runs under a 3 s watchdog (local filesystems, which never block, are stat'd directly) and a timed-out mount is skipped.
@@ -25,6 +27,12 @@ Since `e174a6a` (v0.1.6 release).
 **Scanner**
 
 - **fix** `sysinfo._find_block_device` now strips the partition suffix correctly for `mmcblk0p1` → `mmcblk0` (previously `mmcblk0p`) and keeps `loop0` / `dm-0` whole, so the Speed (HDD/SSD) column resolves on eMMC/SD and loop devices.
+- **fix** `_find_block_device` no longer mangles software-RAID devices. The trailing-digit strip turned `md0` into `md`, so the sysfs rotational lookup missed and the medium showed "Unknown"; the md number is part of the device identity and is now kept (`md0`, `md127`, partitionable `md_d0`), while md partitions (`md0p1`) strip to the parent like nvme.
+- **feat** New facet helpers in `sysinfo`: `classify_medium` (flash/hdd/ram/network/unknown), `detect_transforms` (cheap, no-I/O detection of RAID / dm-crypt / CoW / compression), and `facet_labels` (ordered medium-then-transform badge pairs). These back the FS-Overview Storage column and are consumable individually by downstream tuning.
+
+**Settings**
+
+- **fix** The System Information **Storage** line now uses the shared `storage_class` classifier, so it agrees with the FS-Overview screen. It previously appended only `(HDD)`/`(SSD)` from the rotational bit, ignoring network and RAM-backed mounts entirely.
 
 ## v0.1.6
 

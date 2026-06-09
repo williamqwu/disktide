@@ -9,6 +9,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 
 from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration, current_hostname
+from fs_monitor.scanner.sysinfo import storage_class
 from fs_monitor.storage.database import Database
 from fs_monitor.viz.colors import SCHEMES, set_color_scheme
 
@@ -279,13 +280,13 @@ class SettingsScreen(Screen):
             f"  Load: {load[0]:.2f} (1min) / {load[1]:.2f} (5min) / {load[2]:.2f} (15min)"
         )
 
-        storage_desc = info.fs_type
-        if info.is_rotational is True:
-            storage_desc += " (HDD)"
-        elif info.is_rotational is False:
-            storage_desc += " (SSD)"
+        # Use the shared classifier so this line agrees with the FS-Overview
+        # screen — it previously ignored network mounts and RAM-backed FSes.
+        label, _ = storage_class(
+            info.fs_type, info.is_network_fs, info.is_rotational
+        )
         self.query_one("#sysinfo-storage", Static).update(
-            f"  Storage: {storage_desc}"
+            f"  Storage: {info.fs_type} — {label}"
         )
 
         self.query_one("#sysinfo-recommendation", Static).update(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from textual import on, work
 from textual.app import ComposeResult
@@ -18,6 +18,9 @@ import humanize
 
 from fs_monitor.scanner.sysinfo import (
     detect_storage_type,
+    detect_transforms,
+    facet_labels,
+    storage_class,
     unescape_mount_path,
     _NETWORK_FS_TYPES,
 )
@@ -27,6 +30,8 @@ from fs_monitor.scanner.blockdev import (
     list_block_devices,
     idle_summary,
 )
+from fs_monitor.scanner.benchmark import benchmark_mount, BenchmarkResult
+from fs_monitor.widgets.confirm_modal import ConfirmModal
 
 # Filesystem types that carry no real disk space (pseudo-filesystems).
 _PSEUDO_FS_TYPES = {
@@ -52,6 +57,9 @@ class FSEntry:
     inode_total: int
     inode_free: int
     block_size: int
+    # Stacked transforms (RAID / Encrypted / CoW / Compressed); cheap to detect
+    # at load, so computed once rather than re-derived on every render.
+    transforms: list[str] = field(default_factory=list)
     # User quota (None = not available / not enforced)
     quota_used_bytes: int | None = None
     quota_soft_bytes: int | None = None
@@ -90,23 +98,28 @@ class FSEntry:
 
     @property
     def speed_tier(self) -> str:
-        if self.is_network_fs:
-            return "Slow (Network)"
-        if self.is_rotational is True:
-            return "Medium (HDD)"
-        if self.is_rotational is False:
-            return "Fast (SSD)"
-        return "Unknown"
+        return storage_class(
+            self.fs_type, self.is_network_fs, self.is_rotational
+        )[0]
 
     @property
     def speed_style(self) -> str:
-        if self.is_network_fs:
-            return "red"
-        if self.is_rotational is True:
-            return "yellow"
-        if self.is_rotational is False:
-            return "green"
-        return "dim"
+        return storage_class(
+            self.fs_type, self.is_network_fs, self.is_rotational
+        )[1]
+
+    @property
+    def badges(self) -> Text:
+        """Storage facets as colored chips: medium first, then transforms."""
+        pairs = facet_labels(
+            self.fs_type, self.is_network_fs, self.is_rotational, self.transforms
+        )
+        t = Text()
+        for i, (label, style) in enumerate(pairs):
+            if i:
+                t.append(" · ", style="dim")
+            t.append(label, style=style)
+        return t
 
 
 def _read_mounts() -> list[tuple[str, str, str, str]]:
@@ -239,6 +252,7 @@ def _load_fs_entries() -> list[FSEntry]:
             continue
 
         is_rotational = detect_storage_type(mountpoint)
+        transforms = detect_transforms(device, fstype, options)
 
         entries.append(FSEntry(
             mountpoint=mountpoint,
@@ -254,6 +268,7 @@ def _load_fs_entries() -> list[FSEntry]:
             inode_total=stat.f_files,
             inode_free=stat.f_ffree,
             block_size=stat.f_bsize,
+            transforms=transforms,
         ))
 
     # Merge user quota data
@@ -292,6 +307,15 @@ def _quota_cell(entry: FSEntry) -> Text:
     t = Text()
     t.append(f"{used}/{limit}", style=style)
     return t
+
+
+def _format_benchmark(res: BenchmarkResult) -> str:
+    """One-line summary of a throughput probe, shared by toast and detail view."""
+    return (
+        f"write {humanize.naturalsize(res.write_bps)}/s · "
+        f"read ~{humanize.naturalsize(res.read_bps)}/s "
+        f"({humanize.naturalsize(res.bytes_io, binary=True)} probed)"
+    )
 
 
 def _dedup_by_device(entries: list[FSEntry]) -> list[FSEntry]:
@@ -431,9 +455,12 @@ class FSDetailModal(ModalScreen):
     }
     """
 
-    def __init__(self, entry: FSEntry, **kwargs):
+    def __init__(
+        self, entry: FSEntry, benchmark: BenchmarkResult | None = None, **kwargs
+    ):
         super().__init__(**kwargs)
         self._entry = entry
+        self._benchmark = benchmark
 
     def compose(self) -> ComposeResult:
         e = self._entry
@@ -445,6 +472,17 @@ class FSDetailModal(ModalScreen):
             yield Static(f"  FS Type:       {e.fs_type}", classes="detail-row")
             speed_text = Text(f"  Speed:         {e.speed_tier}", style=e.speed_style)
             yield Static(speed_text, classes="detail-row")
+            attrs = Text("  Attributes:    ")
+            attrs.append_text(e.badges)
+            yield Static(attrs, classes="detail-row")
+            # Measured throughput, if this mount has been benchmarked this
+            # session (press 'b' in the overview). Latest run wins.
+            if self._benchmark is not None:
+                measured = Text(
+                    f"  Measured:      {_format_benchmark(self._benchmark)}",
+                    style="cyan",
+                )
+                yield Static(measured, classes="detail-row")
 
             yield Static("  Disk Space", classes="detail-section")
             yield Static(
@@ -586,6 +624,7 @@ class FSOverviewScreen(Screen):
 
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=True),
+        Binding("b", "benchmark", "Benchmark mount", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -629,6 +668,9 @@ class FSOverviewScreen(Screen):
         self._entries: list[FSEntry] = []
         self._block_devices: list[BlockDevice] = []
         self._block_rows: list[BlockDevice] = []
+        # Measured throughput per mountpoint, kept for the life of the screen so
+        # reopening a row shows its last result. Later runs overwrite earlier.
+        self._benchmarks: dict[str, BenchmarkResult] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -637,7 +679,7 @@ class FSOverviewScreen(Screen):
         yield Static("", id="fs-overview-summary")
         table = DataTable(id="fs-overview-table")
         table.cursor_type = "row"
-        table.add_columns("Mount", "FS Type", "Speed", "Total", "Used", "Free", "Usage", "Quota")
+        table.add_columns("Mount", "FS Type", "Storage", "Total", "Used", "Free", "Usage", "Quota")
         yield table
         yield Static("", id="fs-overview-block-label")
         block_table = DataTable(id="fs-overview-block-table")
@@ -703,7 +745,7 @@ class FSOverviewScreen(Screen):
             table.add_row(
                 e.mountpoint,
                 e.fs_type,
-                Text(e.speed_tier, style=e.speed_style),
+                e.badges,
                 humanize.naturalsize(e.total_bytes, binary=True),
                 humanize.naturalsize(e.used_bytes, binary=True),
                 humanize.naturalsize(e.free_bytes, binary=True),
@@ -736,7 +778,10 @@ class FSOverviewScreen(Screen):
     @on(DataTable.RowSelected, "#fs-overview-table")
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         if 0 <= event.cursor_row < len(self._entries):
-            self.app.push_screen(FSDetailModal(self._entries[event.cursor_row]))
+            entry = self._entries[event.cursor_row]
+            self.app.push_screen(
+                FSDetailModal(entry, benchmark=self._benchmarks.get(entry.mountpoint))
+            )
 
     @on(DataTable.RowSelected, "#fs-overview-block-table")
     def on_block_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -746,3 +791,62 @@ class FSOverviewScreen(Screen):
     def action_refresh(self) -> None:
         self._show_loading(True)
         self._load_data()
+
+    def action_benchmark(self) -> None:
+        """Opt-in throughput probe of the highlighted mount.
+
+        Storage-class badges are heuristics; this is the explicit, on-demand
+        way to get a measured number. Because it writes a temp file, it is
+        gated behind a confirm prompt (press 'b' again to commit) so a stray
+        keystroke never kicks off disk I/O. The result is recorded per mount
+        and shown when that row is reopened.
+        """
+        table = self.query_one("#fs-overview-table", DataTable)
+        row = table.cursor_row
+        if not (0 <= row < len(self._entries)):
+            return
+        mountpoint = self._entries[row].mountpoint
+
+        def _on_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self.notify(
+                    f"Benchmarking {mountpoint} (writing a temp file)…",
+                    timeout=4,
+                )
+                self._run_benchmark(mountpoint)
+
+        self.app.push_screen(
+            ConfirmModal(
+                message=(
+                    f"Benchmark {mountpoint}?\n"
+                    "This writes a temporary file to measure throughput."
+                ),
+                title="Benchmark mount",
+                confirm_keys=("b",),
+            ),
+            callback=_on_confirm,
+        )
+
+    @work(thread=True, exclusive=True)
+    def _run_benchmark(self, mountpoint: str) -> None:
+        try:
+            res = benchmark_mount(mountpoint)
+        except Exception as e:
+            self.app.call_from_thread(
+                self.notify,
+                f"{mountpoint}: benchmark failed — {e}",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        self.app.call_from_thread(self._on_benchmark_done, mountpoint, res)
+
+    def _on_benchmark_done(self, mountpoint: str, res: BenchmarkResult) -> None:
+        # Record so reopening the row shows the measured number; a later run on
+        # the same mount overwrites this one.
+        self._benchmarks[mountpoint] = res
+        self.notify(
+            f"{mountpoint}  {_format_benchmark(res)}",
+            severity="information",
+            timeout=10,
+        )
