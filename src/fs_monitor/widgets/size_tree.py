@@ -57,10 +57,14 @@ class SizeTree(Tree[FSNode]):
         if value not in METRICS or value == self._metric:
             return
         self._metric = value
-        # Only the labels change, not the ordering, so refresh them in
-        # place: a full reload() would collapse the tree back to the root
-        # and reset the cursor.
-        self._refresh_labels()
+        # When the quantitative sort is active the ordering depends on the
+        # metric, so the tree has to be re-sorted (a reload) for the new
+        # order to take effect. For name/mtime sorts only the labels change,
+        # so refresh them in place to keep the cursor where it was.
+        if self._sort_key not in ("name", "mtime") and self._fs_root is not None:
+            self.reload(self._fs_root)
+        else:
+            self._refresh_labels()
 
     def reload(self, root_node: FSNode) -> None:
         """Reload the tree with a new root node."""
@@ -70,6 +74,12 @@ class SizeTree(Tree[FSNode]):
         self.root.set_label(self._make_label(root_node))
         self._populate_children(self.root, root_node)
         self.root.expand()
+        # Tree.clear() leaves cursor_line at its previous value; the renderer
+        # only clamps a now-out-of-range line to -1 ("no cursor"). Pin it to
+        # the root so a rescan/sort/metric reload always shows a live cursor
+        # instead of a frozen or invisible one. (Focus is restored by the
+        # screen after a scan completes; see ExplorerScreen._on_scan_complete.)
+        self.cursor_line = 0
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded[FSNode]) -> None:
         """Lazily load children when a node is expanded."""
@@ -93,13 +103,22 @@ class SizeTree(Tree[FSNode]):
                 tree_node.add_leaf(label, data=child)
 
     def _sorted(self, children: list[FSNode]) -> list[FSNode]:
-        """Sort children based on current sort key."""
+        """Sort children based on current sort key.
+
+        The quantitative ("size") sort follows the active metric: with the
+        bar set to file count, directories are ordered by file count, not
+        bytes — matching what the treemap and sunburst already do. Name and
+        modified-time sorts are independent of the metric.
+        """
         if self._sort_key == "name":
             return sorted(children, key=lambda n: n.name.lower())
         elif self._sort_key == "mtime":
             return sorted(children, key=lambda n: n.mtime, reverse=True)
-        else:  # size (default)
-            return sorted(children, key=lambda n: n.size, reverse=True)
+        else:  # quantitative (default): largest of the active metric first
+            return sorted(
+                children,
+                key=lambda n: (-metric_value(n, self._metric), n.name.lower()),
+            )
 
     def _make_label(self, node: FSNode) -> Text:
         """Create a rich label with name, a metric value, and a proportional bar.

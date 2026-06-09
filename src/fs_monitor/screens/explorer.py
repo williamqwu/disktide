@@ -277,6 +277,11 @@ class ExplorerScreen(Screen):
         # Load tree
         tree = self.query_one("#size-tree", SizeTree)
         tree.reload(root)
+        # The tree is `display: none` during the scan, so it lost focus when
+        # the scan started; restore it (after the show/refresh settles) or
+        # the cursor stays frozen — arrow keys would otherwise go to whatever
+        # grabbed focus while the tree was hidden.
+        self.call_after_refresh(tree.focus)
 
         # Reflect access state on the breadcrumb (scan root may be partial)
         breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
@@ -357,8 +362,13 @@ class ExplorerScreen(Screen):
     def _update_tree_indicator(self) -> None:
         """Refresh the indicator above the tree (sort order and bar metric)."""
         tree = self.query_one("#size-tree", SizeTree)
-        sort_label = self._SORT_DISPLAY.get(tree.sort_key, tree.sort_key)
         metric_label = METRIC_NAMES.get(tree.metric, tree.metric)
+        # The quantitative sort follows the active metric, so label it with
+        # the metric name ("Size"/"Files") rather than a static "Size".
+        if tree.sort_key == "size":
+            sort_label = metric_label
+        else:
+            sort_label = self._SORT_DISPLAY.get(tree.sort_key, tree.sort_key)
         self.query_one("#sort-indicator", Static).update(
             f"Sort: {sort_label}  Bar: {metric_label}"
         )

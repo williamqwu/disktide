@@ -4,6 +4,11 @@
 
 Since `e174a6a` (v0.1.6 release).
 
+**Explorer**
+
+- **fix** The tree's quantitative sort now follows the active bar metric. With the bar toggled to file count (`t`), directories were still ordered by bytes; the default sort now orders by the active metric (count or size), matching what the treemap and sunburst already do, and toggling the metric re-sorts the tree. Name and modified-time sorts remain metric-independent. The sort indicator reflects this (`Sort: Files` when sorting by the count metric).
+- **fix** The tree cursor is no longer frozen after a rescan. The tree is `display: none` during a scan, so it loses focus; nothing restored it afterward, leaving arrow keys controlling whatever grabbed focus while it was hidden. The explorer now refocuses the tree once the scan completes, and a reload pins the cursor to the root so it's always live and visible.
+
 **FS Overview**
 
 - **fix** "Used" and "Usage %" no longer over-report by the root-reserved block count. The screen computed `used = total - f_bavail`, which folds the unprivileged-user reservation (the default ~5% on ext4) into used space — on a typical root filesystem this nearly doubled the reported usage versus `df` (e.g. 11.4% shown vs 7% real, a 48 GB overstatement). It now follows `df` semantics exactly: `used = (f_blocks - f_bfree) * f_frsize`, `free = f_bavail * f_frsize`, and `usage_pct = used / (used + free)`. The reclaimed gap is exposed as a new **Reserved** row in the per-filesystem detail modal.
