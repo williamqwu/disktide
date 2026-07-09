@@ -149,17 +149,25 @@ def scan(path: str, snapshot: bool, force_rescan: bool, max_depth: int | None, w
 
         db = Database()
         db.connect()
-        snap = Snapshot(
-            root_path=path,
-            timestamp=datetime.now(),
-            total_size=root.size,
-            file_count=root.file_count,
-            dir_count=root.dir_count,
-            scan_duration=elapsed,
-        )
-        snap_id = db.save_snapshot(snap, root)
-        db.close()
-        click.echo(f"\nSnapshot saved (id={snap_id})")
+        if db.degraded:
+            db.close()
+            click.echo(
+                "\nCould not save snapshot: the database is not writable "
+                "(disk full?).",
+                err=True,
+            )
+        else:
+            snap = Snapshot(
+                root_path=path,
+                timestamp=datetime.now(),
+                total_size=root.size,
+                file_count=root.file_count,
+                dir_count=root.dir_count,
+                scan_duration=elapsed,
+            )
+            snap_id = db.save_snapshot(snap, root)
+            db.close()
+            click.echo(f"\nSnapshot saved (id={snap_id})")
 
 
 @cli.command()
@@ -200,6 +208,12 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
 
         db = Database()
         db.connect()
+        if db.degraded:
+            click.echo(
+                "Warning: database is not writable (disk full?); snapshots "
+                "will not be persisted.",
+                err=True,
+            )
         watch_start = time.monotonic()
 
         while True:

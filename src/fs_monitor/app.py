@@ -51,18 +51,25 @@ class FSMonitorApp(App):
         self._config = config or load_config()
         self._db = Database()
         self._show_welcome = show_welcome
+        # Ensures the "running without persistence" warning is only shown
+        # once per session, no matter how many times we check.
+        self._warned_degraded = False
 
     def on_mount(self) -> None:
         set_color_scheme(self._config.ui.color_theme)
         set_safe_rendering(self._config.ui.safe_rendering)
+
+        # Connect the DB up front so a disk-full fallback to an in-memory
+        # database is detected before the session starts. The warning is
+        # emitted after the first screen is pushed (below), so the toast
+        # lands on a visible screen rather than the pre-mount default one.
+        self._db.connect()
 
         if self._show_welcome:
             from fs_monitor.screens.welcome import WelcomeScreen
 
             paths = get_effective_paths(self._config)
             cwd = os.getcwd()
-
-            self._db.connect()
             recent = self._db.recent_paths(limit=5)
 
             self.push_screen(
@@ -76,6 +83,27 @@ class FSMonitorApp(App):
             )
         else:
             self._launch_explorer(self._scan_path or str(Path(".").resolve()))
+
+        self._warn_if_degraded()
+
+    def _warn_if_degraded(self) -> None:
+        """Warn once if the database fell back to memory (disk full).
+
+        Surfaced on every launch path so the user always learns that
+        snapshots/history won't be persisted this session, regardless of
+        whether they came in through the welcome screen or straight into
+        the explorer.
+        """
+        if not self._db.degraded or self._warned_degraded:
+            return
+        self._warned_degraded = True
+        self.notify(
+            "Disk appears full — snapshots and history won't be saved this "
+            "session. You can still explore and free up space.",
+            title="Running without persistence",
+            severity="warning",
+            timeout=10,
+        )
 
     def _on_welcome_result(self, result: tuple[str, bool] | None) -> None:
         """Callback from WelcomeScreen with the chosen path and save flag."""

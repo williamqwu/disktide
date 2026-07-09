@@ -328,7 +328,15 @@ class SettingsScreen(Screen):
         try:
             save_config(self._config)
         except OSError:
-            pass  # Best-effort save
+            # Most likely a full disk — tell the user their settings
+            # didn't persist rather than failing silently.
+            self.app.notify(
+                "Couldn't save settings — disk may be full. Changes apply "
+                "for this session only.",
+                title="Settings not saved",
+                severity="warning",
+                timeout=8,
+            )
         self.app.pop_screen()
 
     def action_focus_next_field(self) -> None:

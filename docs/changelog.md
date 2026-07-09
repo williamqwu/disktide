@@ -34,6 +34,11 @@ Since `e174a6a` (v0.1.6 release).
 
 - **fix** The System Information **Storage** line now uses the shared `storage_class` classifier, so it agrees with the FS-Overview screen. It previously appended only `(HDD)`/`(SSD)` from the rotational bit, ignoring network and RAM-backed mounts entirely.
 
+**Storage**
+
+- **fix** A full disk no longer crashes launch. The SQLite database is set up eagerly at startup, and its setup requires writes — `os.makedirs` for the data dir (first launch), then `PRAGMA journal_mode=WAL` (the `-wal`/`-shm` sidecars) and the schema migrations. On a full disk any of these raised `OSError`/`sqlite3.OperationalError`, killing the TUI at the exact moment a user needs it to find what's filling the disk. `Database.connect()` now degrades to an in-memory database when the on-disk location is unwritable: the app launches and the explorer/cleanup stay fully usable, only snapshots and history aren't persisted for that session. The post-migration `VACUUM` is now non-fatal for the same reason (it needs temporary space the migration itself already committed without).
+- **fix** The degraded (full-disk) state is now surfaced to the user rather than failing silently. The TUI shows a one-time `Running without persistence` warning on any launch path (welcome screen or straight into the explorer), the Settings screen warns when it can't save (`Settings not saved`), and `scan --snapshot` / `watch` report that snapshots can't be persisted instead of silently writing to a throwaway in-memory database.
+
 ## v0.1.6
 
 Since `407136d` (v0.1.5 release).
