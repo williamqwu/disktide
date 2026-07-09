@@ -403,3 +403,61 @@ class TestDatabase:
         """Returns empty list when database is not connected."""
         database = Database(path="/tmp/nonexistent.db")
         assert database.recent_paths() == []
+
+
+class TestDiskFull:
+    """The app must still launch when the DB location is unwritable.
+
+    A full disk is exactly when a user reaches for a disk-usage explorer,
+    so an unopenable database must degrade to an in-memory fallback rather
+    than crash startup. An unwritable location is simulated by putting a
+    regular file where the parent directory should be, which makes SQLite
+    raise on open — the same failure mode as ENOSPC.
+    """
+
+    def _unwritable_path(self, tmp_path) -> str:
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        # Parent of the db file is a regular file → cannot be opened.
+        return str(blocker / "data.db")
+
+    def test_connect_does_not_raise_and_marks_degraded(self, tmp_path):
+        db = Database(path=self._unwritable_path(tmp_path))
+        db.connect()  # must not raise
+        assert db.degraded is True
+        assert db.degraded_reason
+        db.close()
+
+    def test_degraded_database_is_still_usable(self, tmp_path):
+        """Snapshots work against the in-memory fallback within a session."""
+        db = Database(path=self._unwritable_path(tmp_path))
+        db.connect()
+
+        root = make_tree()
+        snap = Snapshot(root_path="/test/root", total_size=1000)
+        snap_id = db.save_snapshot(snap, root)
+        assert snap_id is not None
+
+        snapshots = db.list_snapshots()
+        assert len(snapshots) == 1
+        assert snapshots[0].root_path == "/test/root"
+        db.close()
+
+    def test_healthy_path_is_not_degraded(self, tmp_path):
+        db = Database(path=str(tmp_path / "data.db"))
+        db.connect()
+        assert db.degraded is False
+        assert db.degraded_reason is None
+        db.close()
+
+    def test_default_path_makedirs_failure_does_not_raise(self, tmp_path, monkeypatch):
+        """A full disk can't create the data dir; construction must survive."""
+        import fs_monitor.storage.database as dbmod
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(dbmod.os, "makedirs", boom)
+        # _default_db_path() is invoked by the no-arg constructor.
+        db = Database()  # must not raise
+        assert db.path.endswith("data.db")
