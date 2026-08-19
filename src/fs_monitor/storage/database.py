@@ -12,6 +12,8 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from fs_monitor import LEGACY_STORAGE_NAMESPACE
+
 log = logging.getLogger(__name__)
 
 from fs_monitor.models.tree import FSNode
@@ -29,7 +31,7 @@ def _default_db_path() -> str:
     data_dir = os.environ.get(
         "XDG_DATA_HOME", os.path.expanduser("~/.local/share")
     )
-    db_dir = os.path.join(data_dir, "fsmonitor-cli")
+    db_dir = os.path.join(data_dir, LEGACY_STORAGE_NAMESPACE)
     try:
         os.makedirs(db_dir, exist_ok=True)
     except OSError:
@@ -43,7 +45,7 @@ def _default_db_path() -> str:
 
 
 class Database:
-    """SQLite-backed storage for fsmonitor-cli data."""
+    """SQLite-backed storage for fsmonitor data."""
 
     def __init__(self, path: str | None = None, run_migrations: bool = True):
         self._path = path or _default_db_path()
@@ -77,21 +79,22 @@ class Database:
         return conn
 
     def connect(self) -> None:
-        """Open the database, degrading to memory if the disk is unwritable.
+        """Open the database, degrading to memory if persistence is unavailable.
 
         On a healthy system this opens the on-disk SQLite file. If opening
-        or migrating it fails — the common cause is a full disk, where
-        SQLite can neither create its WAL sidecars nor write the schema —
-        fall back to an in-memory database so the app still launches and
-        the explorer stays usable. The session's snapshots/history simply
-        aren't persisted; `degraded` records that for callers to surface.
+        or migrating it fails, fall back to an in-memory database so the app
+        still launches and the explorer stays usable. The session's
+        snapshots/history simply aren't persisted; `degraded` records that
+        for callers to surface.
         """
+        failure_reason = "unknown database error"
         try:
             self._conn = self._open(self._path)
             self.degraded = False
             self.degraded_reason = None
             return
         except (sqlite3.Error, OSError) as exc:
+            failure_reason = f"{type(exc).__name__}: {exc}"
             log.warning(
                 "Could not open database at %s (%s); falling back to an "
                 "in-memory database. Snapshots and history will not be "
@@ -104,9 +107,7 @@ class Database:
         # it succeeds even when the volume is full.
         self._conn = self._open(":memory:")
         self.degraded = True
-        self.degraded_reason = (
-            f"cannot write to {self._path} (disk full or read-only)"
-        )
+        self.degraded_reason = f"cannot use {self._path}: {failure_reason}"
 
     def _close_quietly(self) -> None:
         """Close and drop the connection, swallowing any error."""
@@ -464,7 +465,7 @@ class Database:
             log.warning(
                 "Snapshot row %s uses pre-v3 schema; run the migration "
                 "to upgrade (delete and recreate the database, or launch "
-                "fsmonitor-cli once with migrations enabled).",
+                "fsmonitor once with migrations enabled).",
                 row[0],
             )
         return Snapshot(

@@ -24,7 +24,7 @@ class DeviceStatus(Enum):
     MOUNTED = "mounted"            # has a filesystem and it is mounted
     UNMOUNTED = "unmounted"        # has a filesystem but it is not mounted
     UNFORMATTED = "unformatted"    # a partition with no filesystem on it
-    RAW = "raw"                    # a whole disk with no partition table
+    RAW = "raw"                    # a whole disk with no filesystem/children
     CONTAINER = "container"        # a disk/partition holding child devices
 
 
@@ -54,9 +54,8 @@ class BlockDevice:
             return DeviceStatus.MOUNTED
         if self.fstype:
             return DeviceStatus.UNMOUNTED
-        # A leaf with no children and no filesystem. For a whole disk that
-        # means no partition table at all; for a partition it means it was
-        # never formatted.
+        # A leaf with no children and no filesystem. For a whole disk this is
+        # raw capacity; for a partition it means no filesystem was detected.
         if self.dev_type == "disk":
             return DeviceStatus.RAW
         return DeviceStatus.UNFORMATTED
@@ -143,8 +142,9 @@ def flatten(devices: list[BlockDevice]) -> list[BlockDevice]:
 def idle_summary(devices: list[BlockDevice]) -> tuple[int, int]:
     """Return (idle_disk_count, idle_bytes) for top-level disks.
 
-    A disk is "idle" when nothing on it (itself or any partition) is mounted —
-    i.e. capacity that is present but unused by the running system.
+    A disk is "idle" when nothing on it (itself or any partition) is mounted.
+    It may still contain data or serve a non-filesystem role, so callers must
+    not present this as safe-to-reclaim capacity.
     """
     count = 0
     total = 0

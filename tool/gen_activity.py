@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate random filesystem activity for testing fsmonitor-cli.
+"""Generate random filesystem activity for testing fsmonitor.
 
 Creates, modifies, and deletes small files continuously under a target
 directory so you can observe the monitor/watch features in action.
@@ -173,7 +173,7 @@ def confirm_existing(target: Path) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate random filesystem activity for testing fsmonitor-cli."
+        description="Generate random filesystem activity for testing fsmonitor."
     )
     parser.add_argument(
         "path", nargs="?", default=DEFAULT_TARGET,

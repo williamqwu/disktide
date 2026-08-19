@@ -1,3 +1,5 @@
-"""fsmonitor-cli: Interactive terminal disk usage explorer."""
+"""fsmonitor: Interactive terminal disk usage explorer."""
 
-__version__ = "0.1.6"
+APP_NAME = "fsmonitor"
+LEGACY_STORAGE_NAMESPACE = "fsmonitor-cli"
+__version__ = "0.1.7"

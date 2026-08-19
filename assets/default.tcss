@@ -1,4 +1,4 @@
-/* fsmonitor-cli default stylesheet */
+/* fsmonitor default stylesheet */
 
 Screen {
     background: $background;

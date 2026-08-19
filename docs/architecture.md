@@ -1,6 +1,6 @@
 # Architecture
 
-Technical overview of fsmonitor-cli's internals for anyone reading or extending the codebase.
+Technical overview of fsmonitor's internals for anyone reading or extending the codebase.
 
 ## Project Layout
 
@@ -9,9 +9,13 @@ src/fs_monitor/
   __main__.py            CLI entry point (Click)
   app.py                 Textual App, screen management
   config.py              TOML config load/save, dataclasses
+  glyphs.py              Unicode/ASCII glyph selection
   metrics.py             Size vs. file-count view metric helpers
+  rendering.py           Process-wide safe-rendering state
 
   scanner/
+    benchmark.py         Opt-in mount throughput probe
+    blockdev.py          lsblk-backed block-device inventory
     engine.py            Multi-threaded scan orchestrator
     walker.py            os.scandir()-based recursive walker
     progress.py          Throttled progress reporting
@@ -24,13 +28,12 @@ src/fs_monitor/
 
   storage/
     database.py          SQLite backend (WAL mode)
-    cache.py             mtime-based JSON scan cache
     migrations.py        Schema versioning
 
   cleanup/
     detector.py          Walk tree and match against rules
     rules.py             8 built-in cleanup rules
-    actions.py           Deletion with dry-run + audit logging
+    actions.py           Permanent deletion with dry-run support
 
   monitor/
     alerts.py            Threshold alert rules and event checking
@@ -48,6 +51,7 @@ src/fs_monitor/
     explorer.py          Tree + visualization (treemap/sunburst/details)
     cleanup.py           Target table + deletion workflow
     monitor.py           Snapshot history + trend chart
+    fs_overview.py       Mounted filesystems, block devices, benchmark
     settings.py          Configuration editing
 
   widgets/
@@ -59,6 +63,7 @@ src/fs_monitor/
     trend_chart.py       Historical size line chart
     scan_progress.py     Scan progress overlay
     cleanup_modal.py     Deletion confirmation dialog
+    confirm_modal.py     Reusable y/n confirmation dialog
 ```
 
 ## Scanner
@@ -76,7 +81,7 @@ The main Textual event loop stays on the main thread. Long-running scans use the
 - Network filesystems (NFS, CIFS, FUSE): capped at 4 workers
 - HDD (rotational): capped at 4
 - High system load: worker count reduced proportionally
-- Low memory (<1 GB free): capped at 2
+- Low memory (<512 MB free): capped at 2
 - Final range: 1--16 workers
 
 When `workers` is set in config or CLI, the auto-detection is skipped.
@@ -93,11 +98,7 @@ Each `os.scandir()` entry is wrapped in try/except. A permission error on one di
 
 Symlinks are never recursed into: a symlink is stored as a leaf `FSNode` sized by the link itself (`lstat`), never its target. This prevents infinite loops and double-counting, and keeps a symlinked directory's bytes from inflating the parent total.
 
-Target classification (the `os.readlink` for the target string and the `os.stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred**: `make_symlink_node` pays only the one `entry.stat(follow_symlinks=False)` needed for the link's own size, and the deferred work runs in `classify_symlink`, called on demand by the Details panel render and the `i` action. The result is cached on the node via `link_classified`, so a second look is free. The engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks at the scan root so the typical `fsmon ~` case shows target arrows in the tree from the start without re-introducing the per-symlink cost when the scan root itself contains hundreds of thousands of symlinks. Deeper symlinks remain fully lazy. This is what keeps the scan at one syscall per symlink on slow shared storage (cluster home, NFS, sshfs) where every extra round-trip is sub-millisecond but adds up.
-
-### Caching
-
-`ScanCache` stores scan results as JSON in `~/.cache/fsmonitor-cli/`. Cache keys are derived from the scanned path. Invalidation is conservative: the root directory's mtime is compared against the cached mtime, and any mismatch invalidates the entire cache.
+Target classification (the `os.readlink` for the target string and the `os.stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred**: `make_symlink_node` pays only the one `entry.stat(follow_symlinks=False)` needed for the link's own size, and the deferred work runs in `classify_symlink`, called on demand by the Details panel render and the `i` action. The result is cached on the node via `link_classified`, so a second look is free. The engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks at the scan root so the typical `fsmonitor ~` case shows target arrows in the tree from the start without re-introducing the per-symlink cost when the scan root itself contains hundreds of thousands of symlinks. Deeper symlinks remain fully lazy. This is what keeps the scan at one syscall per symlink on slow shared storage (cluster home, NFS, sshfs) where every extra round-trip is sub-millisecond but adds up.
 
 ## Data Model
 
@@ -111,7 +112,7 @@ class FSNode:
     name: str              # basename
     path: str              # absolute path
     size: int              # subtree total (files + children)
-    own_size: int          # direct file sizes only
+    own_size: int          # own bytes, or direct file/link bytes for a dir
     file_count: int
     dir_count: int
     is_dir: bool
@@ -124,8 +125,11 @@ class FSNode:
 Key behaviors:
 - `sorted_children` -- lazy-cached sort by size descending
 - `walk()` -- depth-first iteration over the entire subtree
+- `walk_dirs()` -- depth-first iteration over directories only
 - `find(path)` -- recursive path lookup
 - `size_percent(parent_size)` -- percentage of parent
+
+The model also carries partial-access aggregates, lazy symlink classification fields, and a bind-mount/cycle marker. Those fields let the UI surface incomplete scans without re-walking the tree.
 
 ### Snapshot
 
@@ -142,6 +146,8 @@ class Snapshot:
     dir_count: int
     scan_duration: float
     label: str
+    is_baseline: bool
+    baseline_id: int | None
 ```
 
 ### SizeDelta
@@ -162,50 +168,31 @@ Properties `delta`, `growth_percent`, `is_growth`, `is_shrink` are derived.
 
 ## Database
 
-SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects `XDG_DATA_HOME`).
+SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects `XDG_DATA_HOME`; the legacy directory name is retained for upgrade compatibility).
 
 ### Schema
 
-**snapshots** -- One row per scan:
+The current schema (v3) interns directory paths and stores periodic full baselines plus per-snapshot deltas. Files are represented in directory aggregates; snapshot persistence does not store one row per file.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| id | INTEGER PK | auto-increment |
-| root_path | TEXT NOT NULL | resolved path that was scanned |
-| timestamp | TEXT NOT NULL | ISO 8601 |
-| total_size | INTEGER | bytes |
-| file_count | INTEGER | |
-| dir_count | INTEGER | |
-| scan_duration | REAL | seconds |
-| label | TEXT | optional user label |
+**snapshots** -- One metadata row per scan. In addition to root path, timestamp, totals, duration, and label, `is_baseline` marks full snapshots and `baseline_id` links delta snapshots to their baseline.
 
-**nodes** -- Full tree for each snapshot:
+**paths** -- One row per unique directory path, with `parent_id`, basename, and depth. Reusing path IDs prevents identical path strings from being duplicated across snapshots.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| id | INTEGER PK | |
-| snapshot_id | INTEGER FK | references snapshots(id) |
-| path | TEXT | absolute path |
-| parent_path | TEXT | parent directory |
-| name | TEXT | basename |
-| size, own_size | INTEGER | bytes |
-| file_count, dir_count | INTEGER | |
-| is_dir | INTEGER | boolean |
-| mtime | REAL | epoch |
-| depth | INTEGER | |
-| error | TEXT | nullable |
+**nodes** -- Full directory state for baseline snapshots only: `snapshot_id`, `path_id`, size, own size, file/dir counts, mtime, and error.
 
-Indexed on `(snapshot_id, path)` and `(snapshot_id, parent_path)`.
+**deltas** -- Changed, added, or removed directory state for non-baseline snapshots. It mirrors the node metrics and adds `is_removed`.
 
-**Other tables:** `alert_rules`, `alert_events`, `deletion_log`, `schema_version`.
+**Other tables:** `alert_rules`, `alert_events`, the legacy `deletion_log` API table, and `schema_version`.
+
+The first snapshot for a root is a baseline; another full baseline is stored every 50 snapshots. Intermediate snapshots compare against the previously resolved state and persist only changed directory rows. When retention deletes a baseline, the earliest surviving dependent is materialized and promoted before the old baseline is removed.
 
 ### Snapshot Queries
 
-`list_snapshots(root_path)` uses ancestor matching: given path `/a/b`, it finds snapshots where `root_path` is `/a/b` or any ancestor (e.g., `/a`). This means exploring a subdirectory in the TUI still surfaces snapshots from a parent `watch`.
+`list_snapshots(root_path)` uses bidirectional matching by default: given `/a/b`, it finds exact, ancestor, and descendant watch roots. `strict_path=True` restricts this to exact matches.
 
-`compare_snapshots(old_id, new_id)` does a full outer join on the `nodes` tables of two snapshots, returning `SizeDelta` objects for paths that changed, appeared, or disappeared. A `min_delta` threshold filters out noise.
+`load_tree()` and `compare_snapshots()` reconstruct each requested state by loading its baseline and applying ordered deltas. Comparison then operates on the two resolved path-ID maps and returns `SizeDelta` objects for changed, added, or removed directories. A `min_delta` threshold filters out noise.
 
-`get_size_history(path)` joins `nodes` with `snapshots` to return `(timestamp, size)` pairs for a specific path across all snapshots.
+`get_size_history(path)` combines baseline rows and deltas, then forward-fills unchanged snapshots to return `(timestamp, size)` pairs.
 
 ## Cleanup System
 
@@ -232,7 +219,7 @@ Indexed on `(snapshot_id, path)` and `(snapshot_id, parent_path)`.
 
 ### Deletion
 
-`delete_targets()` removes directories with `shutil.rmtree()` and files with `os.unlink()`. Each deletion is logged to the `deletion_log` table. A `dry_run` mode is available. Failed deletions are collected and reported without aborting the batch.
+`delete_targets()` is a direct, permanent filesystem action: directory symlinks are unlinked as links, real directories use `shutil.rmtree()`, and files use `os.unlink()`. A `dry_run` mode reports the result without changing the filesystem, and failed deletions are collected without aborting the batch. The current cleanup flow does not revalidate stale targets, use trash/quarantine, provide undo, or write the legacy `deletion_log` table.
 
 ## Visualization
 
@@ -294,21 +281,21 @@ Helper functions: `file_category(name)` maps extensions to categories, `depth_co
 ### App Startup Flow
 
 ```
-fsmonitor-cli (no subcommand)
+fsmonitor (no subcommand)
   -> FSMonitorApp(show_welcome=True)
   -> on_mount: push WelcomeScreen
   -> user picks path -> dismiss(path)
   -> _on_welcome_result callback
-  -> _launch_explorer: install explorer/cleanup/monitor/settings screens
+  -> _launch_explorer: install explorer/cleanup/monitor/fs_overview/settings screens
   -> push explorer screen, scan begins
 
-fsmonitor-cli scan <path>
+fsmonitor scan <path>
   -> CLI-only, no TUI
 ```
 
 ### Screen Management
 
-`FSMonitorApp` installs all four screens (explorer, cleanup, monitor, settings) after the welcome screen completes. Screens are installed (not pushed) so they persist when switching between modes with `E`/`C`/`M`.
+`FSMonitorApp` installs four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings after the welcome screen completes. Screens are installed (not pushed) so they persist when switching modes with `E`/`C`/`M`/`F`.
 
 - `switch_screen()` swaps the current screen at the same stack level
 - `push_screen()` adds a screen on top (used for settings overlay)
@@ -317,6 +304,10 @@ fsmonitor-cli scan <path>
 ### Monitor Refresh
 
 The monitor screen loads data both on first mount (`on_mount`) and every time it becomes the active screen (`on_screen_resume`). This ensures fresh data from an ongoing `watch` process is always visible.
+
+### FS Overview Loading
+
+FS Overview reads `/proc/mounts`, uses `statvfs` for capacity, optionally reads user quota output, and queries `lsblk` for the block-device tree. Network `statvfs` calls run behind a 3-second watchdog so a stale NFS/CIFS mount cannot freeze the screen. The `b` action is the only write path: after confirmation it creates and removes a bounded temporary benchmark file on the selected mount.
 
 ## Dependencies
 

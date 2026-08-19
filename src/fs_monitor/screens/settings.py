@@ -109,26 +109,14 @@ class SettingsScreen(Screen):
                 yield Label("(blank = unlimited)", classes="input-hint")
 
             yield Static("")
-            yield Static("Scan Settings", classes="section-title")
-            with Horizontal(classes="setting-row"):
-                yield Label("Show hidden files", classes="setting-label")
-                yield Switch(value=self._config.ui.show_hidden, id="show-hidden")
-
-            yield Static("")
             yield Static("Cleanup Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
                 yield Label("Show Cleanup mode (experimental)", classes="setting-label")
                 yield Switch(value=self._config.ui.show_cleanup, id="show-cleanup")
             yield Static(
-                "  Cleanup mode deletes files. Enable only when needed.",
+                "  Cleanup permanently deletes selected paths. Enable only when needed.",
                 classes="sysinfo-value",
             )
-            with Horizontal(classes="setting-row"):
-                yield Label("Confirm dangerous deletions", classes="setting-label")
-                yield Switch(
-                    value=self._config.cleanup.require_confirm_dangerous,
-                    id="confirm-dangerous",
-                )
 
             yield Static("")
             yield Static("Monitor Settings", classes="section-title")
@@ -377,12 +365,8 @@ class SettingsScreen(Screen):
         return False
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        if event.switch.id == "show-hidden":
-            self._config.ui.show_hidden = event.value
-        elif event.switch.id == "show-cleanup":
+        if event.switch.id == "show-cleanup":
             self._config.ui.show_cleanup = event.value
-        elif event.switch.id == "confirm-dangerous":
-            self._config.cleanup.require_confirm_dangerous = event.value
         elif event.switch.id == "strict-path":
             self._config.monitor.strict_path = event.value
         elif event.switch.id == "hostname-aware-paths":

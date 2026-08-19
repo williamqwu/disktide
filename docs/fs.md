@@ -1,6 +1,6 @@
 # Filesystem Interactions & Compatibility
 
-How fsmonitor-cli interacts with the filesystem, and what works (or breaks) on different filesystem types.
+How fsmonitor interacts with the filesystem, and what works (or breaks) on different filesystem types.
 
 ## Compatibility Summary
 
@@ -31,6 +31,8 @@ The core scanner (`os.scandir`, `os.stat`, `os.path`) is cross-platform Python. 
 | `os.getloadavg()` | System load | `(0, 0, 0)` (no load-based reduction) |
 
 On macOS, `/proc` and `/sys` don't exist. All sysinfo functions catch `OSError`/`AttributeError` and return safe defaults, so scanning works -- but worker count won't adapt to storage type or filesystem. Set `workers` in config explicitly on non-Linux systems.
+
+FS Overview is currently Linux-oriented: mount discovery reads `/proc/mounts`, and the block-device panel uses `lsblk`. On platforms without those interfaces, scanning still works but FS Overview may be empty or omit the block-device panel.
 
 On Windows, `os.scandir` and `os.stat` work, but `os.getloadavg()` and `os.sched_getaffinity()` don't exist (`AttributeError` caught). The deeper issue is that the project hasn't been tested on Windows and the TUI depends on terminal capabilities that may not work under cmd.exe (Textual has partial Windows support via Windows Terminal).
 
@@ -74,7 +76,7 @@ This prevents:
 
 Target classification (the `readlink` for the target string and the `stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred to first use**: `make_symlink_node` pays only the link's own `entry.stat(follow_symlinks=False)`, and `classify_symlink(node)` runs the deferred work when the Details panel renders the node or the `i` action navigates a symlinked directory. Result is cached on the node (`link_classified=True`), so a second look is free.
 
-To keep the typical `fsmon ~` case showing the inline `→ target` decoration in the tree from the start, the engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks it encounters at the scan root. Deeper symlinks remain fully lazy regardless of count. This costs at most ~60 ms of extra round-trips at scan start on slow shares; it cannot regress the case where the scan root itself is a directory containing hundreds of thousands of symlinks (a real shape: image-cache `.dataset/` trees on a cluster home), which used to add minutes to the scan.
+To keep the typical `fsmonitor ~` case showing the inline `→ target` decoration in the tree from the start, the engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks it encounters at the scan root. Deeper symlinks remain fully lazy regardless of count. This costs at most ~60 ms of extra round-trips at scan start on slow shares; it cannot regress the case where the scan root itself is a directory containing hundreds of thousands of symlinks (a real shape: image-cache `.dataset/` trees on a cluster home), which used to add minutes to the scan.
 
 The scan still never traverses the link.
 
@@ -94,26 +96,9 @@ A `PermissionError` on the directory itself (`os.scandir()` fails) records the e
 
 Errors are stored in `FSNode.error` and displayed in the TUI details panel.
 
-### Cache -- `storage/cache.py`
-
-Scan results are cached as JSON files in `~/.cache/fsmonitor-cli/` (XDG-compliant).
-
-| Operation | System call |
-|-----------|------------|
-| Check cache exists | `os.path.exists(cache_path)` |
-| Read cache | `open(cache_path)` + `json.load()` |
-| Check freshness | `os.stat(scan_path).st_mtime` compared to cached mtime |
-| Write cache | `open(cache_path, "w")` + `json.dump()` |
-| Invalidate | `os.unlink(cache_path)` |
-| Clear all | `os.listdir(cache_dir)` + `os.unlink()` per file |
-
-Cache key generation sanitizes paths: `path.replace("/", "_").replace("\\", "_")`. This handles both Unix and Windows separators but means `/home/user` and `\home\user` map to the same key.
-
-**Cache invalidation** compares the root directory's `st_mtime` against the cached value. This is conservative -- any change under the root (that updates the root's mtime) invalidates the entire cache. On filesystems where `mtime` propagation works differently (e.g., some network filesystems don't update parent mtime on child changes), the cache may serve stale data. Use `--force-rescan` or press `r` in the TUI to bypass.
-
 ### Database -- `storage/database.py`
 
-SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant).
+SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant; the legacy directory name is retained for upgrade compatibility).
 
 | Operation | System call |
 |-----------|------------|
@@ -121,7 +106,7 @@ SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant)
 | Create dir | `os.makedirs(db_dir, exist_ok=True)` |
 | Open/create DB | `sqlite3.connect(path)` |
 
-Paths are stored as absolute strings in the `root_path` and `path` columns. They are used as query keys with string comparison (`WHERE root_path = ?` and `LIKE root_path || '/%'`). No path normalization is applied at the database level -- paths are stored exactly as resolved by `Path.resolve()`.
+Snapshot roots are stored as absolute strings in `snapshots.root_path`; directory paths are interned in `paths.path` and referenced by integer IDs from baseline and delta rows. Query filtering uses exact or ancestor/descendant string comparison. No additional normalization is applied at the database layer -- CLI roots are stored after `Path.resolve()`.
 
 SQLite pragmas: `journal_mode=WAL` (allows concurrent readers with one writer), `foreign_keys=ON`.
 
@@ -139,23 +124,24 @@ On network filesystems, placing the database on the network share would be slow.
 
 ### Cleanup -- `cleanup/actions.py`, `cleanup/detector.py`, `models/patterns.py`
 
-Detection operates on the in-memory `FSNode` tree (no filesystem calls). The only filesystem calls happen during:
+Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator rules perform live existence checks, and deletion performs direct filesystem operations:
 
 **Parent indicator checks** (`patterns.py`):
 ```python
-Path(parent_path) / indicator_name).exists()
+(Path(parent_path) / indicator_name).exists()
 ```
 This checks whether files like `package.json` or `Cargo.toml` exist next to a candidate target.
 
 **Deletion** (`actions.py`):
 ```python
 os.path.isdir(target.path)      # directory or file?
+os.path.islink(target.path)     # unlink a symlink itself, never its target
 shutil.rmtree(target.path)      # recursive directory delete
 os.path.exists(target.path)     # existence check
 os.unlink(target.path)          # single file delete
 ```
 
-`shutil.rmtree` follows symlinks within the deleted tree by default in Python < 3.12. On Python >= 3.12, `shutil.rmtree` uses `os.walk(follow_symlinks=False)` by default. This is a potential concern on older Python versions if a target directory contains symlinks pointing outside it.
+Deletion is permanent and does not use trash/quarantine, undo, persistent audit logging, or stale-target revalidation. The action checks whether the current path is a symlink before directory detection, so a directory symlink is unlinked without touching its target. A dry-run path exercises result reporting without making these calls.
 
 ### Welcome Screen -- `screens/welcome.py`
 
@@ -189,6 +175,21 @@ os.listdir("/sys/block/.../slaves") # device-mapper slave devices
 os.path.basename(os.path.realpath(dev)) # resolve /dev symlinks
 ```
 
+### FS Overview -- `screens/fs_overview.py`, `scanner/blockdev.py`, `scanner/benchmark.py`
+
+Mounted-filesystem discovery and capacity reporting use:
+
+```python
+open("/proc/mounts")            # device, mountpoint, fs type, options
+os.statvfs(mountpoint)          # blocks, available space, inode counts
+subprocess.run(["quota", ...]) # optional current-user quota data
+subprocess.run(["lsblk", ...]) # optional JSON block-device tree
+```
+
+`statvfs` for network mounts runs in a worker with a 3-second timeout so a stale NFS/CIFS mount cannot block the screen indefinitely. Local mounts are queried directly. Pseudo-filesystems and zero-capacity mounts are filtered from the table.
+
+The `b` action is explicitly opt-in and confirmed before writing. It uses `tempfile.mkstemp()` on the selected mount (mode 0600), writes at most 256 MiB and at most 25% of currently available space, calls `os.fsync()`, makes a best-effort `posix_fadvise(..., DONTNEED)` cache drop, reads the file back, and always unlinks it. The read rate is approximate because the cache-drop request is advisory.
+
 ## Filesystem-Specific Considerations
 
 ### Case Sensitivity
@@ -207,8 +208,8 @@ Each hard link is counted independently. If the same inode is linked from two pa
 
 - Worker count is automatically capped at 4 when a network filesystem is detected (via `/proc/mounts`)
 - Latency per `os.scandir()` call is higher, so scans take longer
-- `st_mtime` may have lower resolution or be subject to clock skew between client and server, affecting cache invalidation reliability
-- The database and cache are stored locally (XDG paths), not on the network share
+- `st_mtime` may have lower resolution or be subject to clock skew between client and server
+- The snapshot database is stored locally by default (`XDG_DATA_HOME`), not on the scanned network share
 
 ### FUSE Filesystems
 
@@ -224,7 +225,7 @@ Works correctly. Note that scanning a tmpfs reports RAM-backed file sizes. This 
 
 ### FAT32 / exFAT
 
-No symlink support (symlinks don't exist on FAT). Modification time resolution is 2 seconds on FAT32, which may cause cache invalidation to miss rapid changes. File sizes are accurate.
+No symlink support (symlinks don't exist on FAT). Modification time resolution is 2 seconds on FAT32. File sizes are accurate.
 
 ### Btrfs Considerations
 
@@ -236,4 +237,4 @@ Similar to Btrfs -- deduplication and compression mean apparent sizes may differ
 
 ### procfs / sysfs / devfs
 
-These virtual filesystems can be scanned but the results are meaningless for disk usage purposes. The scanner will report whatever `st_size` the kernel returns (often 0 for procfs entries). Exclude them with `exclude_patterns` if they appear in your scan path.
+These virtual filesystems can be scanned but the results are meaningless for disk usage purposes. The scanner reports whatever `st_size` the kernel returns (often 0 for procfs entries), so choose a narrower scan root instead of scanning a tree that crosses into them. FS Overview filters pseudo-filesystems automatically.

@@ -8,6 +8,7 @@ from pathlib import Path
 from textual.app import App
 from textual.binding import Binding
 
+from fs_monitor import APP_NAME
 from fs_monitor.config import (
     AppConfig, load_config, save_config,
     get_effective_paths, set_effective_paths,
@@ -26,7 +27,7 @@ from fs_monitor.widgets.confirm_modal import ConfirmModal
 class FSMonitorApp(App):
     """Interactive terminal disk usage explorer."""
 
-    TITLE = "fsmonitor-cli"
+    TITLE = APP_NAME
     SUB_TITLE = "Disk Usage Explorer"
     ENABLE_COMMAND_PALETTE = False
 
@@ -46,6 +47,8 @@ class FSMonitorApp(App):
         show_welcome: bool = False,
         **kwargs,
     ):
+        if "NO_COLOR" in os.environ:
+            kwargs["ansi_color"] = True
         super().__init__(**kwargs)
         self._scan_path = str(Path(scan_path).resolve()) if scan_path else None
         self._config = config or load_config()
@@ -59,8 +62,8 @@ class FSMonitorApp(App):
         set_color_scheme(self._config.ui.color_theme)
         set_safe_rendering(self._config.ui.safe_rendering)
 
-        # Connect the DB up front so a disk-full fallback to an in-memory
-        # database is detected before the session starts. The warning is
+        # Connect the DB up front so a fallback to an in-memory database is
+        # detected before the session starts. The warning is
         # emitted after the first screen is pushed (below), so the toast
         # lands on a visible screen rather than the pre-mount default one.
         self._db.connect()
@@ -87,7 +90,7 @@ class FSMonitorApp(App):
         self._warn_if_degraded()
 
     def _warn_if_degraded(self) -> None:
-        """Warn once if the database fell back to memory (disk full).
+        """Warn once if the database fell back to memory.
 
         Surfaced on every launch path so the user always learns that
         snapshots/history won't be persisted this session, regardless of
@@ -98,8 +101,8 @@ class FSMonitorApp(App):
             return
         self._warned_degraded = True
         self.notify(
-            "Disk appears full — snapshots and history won't be saved this "
-            "session. You can still explore and free up space.",
+            "The storage database is unavailable — snapshots and history "
+            "won't be saved this session. You can still explore files.",
             title="Running without persistence",
             severity="warning",
             timeout=10,
@@ -182,7 +185,7 @@ class FSMonitorApp(App):
 
         self.push_screen(
             ConfirmModal(
-                message="Quit fsmonitor-cli?",
+                message=f"Quit {APP_NAME}?",
                 title="Quit",
                 confirm_keys=("q",),
             ),

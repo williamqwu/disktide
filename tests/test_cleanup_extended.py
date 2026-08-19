@@ -71,6 +71,27 @@ class TestDeleteRealFS:
         assert len(result.successful) == 1
         assert not target_dir.exists()
 
+    def test_delete_directory_symlink_only_unlinks_symlink(self, tmp_path):
+        target_dir = tmp_path / "real_data"
+        target_dir.mkdir()
+        (target_dir / "keep.txt").write_text("keep")
+        target_link = tmp_path / "linked_cache"
+        target_link.symlink_to(target_dir, target_is_directory=True)
+
+        targets = [
+            CleanupTarget(
+                path=str(target_link), size=4,
+                rule=CleanupRule(name="t", description="", patterns=[]),
+            )
+        ]
+
+        result = delete_targets(targets)
+
+        assert len(result.successful) == 1
+        assert not target_link.exists()
+        assert target_dir.exists()
+        assert (target_dir / "keep.txt").exists()
+
     def test_delete_with_progress(self, tmp_path):
         f = tmp_path / "file.txt"
         f.write_text("test")

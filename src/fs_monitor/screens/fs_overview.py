@@ -341,7 +341,8 @@ def _build_summary(entries: list[FSEntry]) -> Text:
     unique = _dedup_by_device(entries)
     total_space = sum(e.total_bytes for e in unique)
     total_used = sum(e.used_bytes for e in unique)
-    used_pct = total_used / total_space * 100 if total_space > 0 else 0.0
+    usable_space = sum(e.used_bytes + e.free_bytes for e in unique)
+    used_pct = total_used / usable_space * 100 if usable_space > 0 else 0.0
 
     t = Text()
     t.append(f"  {len(entries)} filesystem(s) mounted  |  ")
@@ -367,7 +368,7 @@ _STATUS_DISPLAY: dict[DeviceStatus, tuple[str, str]] = {
     DeviceStatus.MOUNTED: ("● mounted", "green"),
     DeviceStatus.UNMOUNTED: ("○ not mounted", "cyan"),
     DeviceStatus.UNFORMATTED: ("○ unformatted", "yellow"),
-    DeviceStatus.RAW: ("○ raw — no partition table", "yellow"),
+    DeviceStatus.RAW: ("○ raw / no filesystem", "yellow"),
     DeviceStatus.CONTAINER: ("partitioned", "dim"),
 }
 
@@ -405,7 +406,8 @@ def _build_block_summary(devices: list[BlockDevice]) -> Text:
     if idle_count:
         t.append("   ")
         t.append(
-            f"{idle_count} idle disk(s) · {humanize.naturalsize(idle_bytes, binary=True)} unused",
+            f"{idle_count} disk(s) with no mounted filesystem · "
+            f"{humanize.naturalsize(idle_bytes, binary=True)} total capacity",
             style="yellow",
         )
     return t
@@ -595,13 +597,13 @@ class BlockDeviceModal(ModalScreen):
 
             if d.status == DeviceStatus.RAW:
                 yield Static(
-                    Text("  This disk has no partition table and is not in use.",
+                    Text("  No filesystem or child block devices were detected.",
                          style="yellow"),
                     classes="detail-row",
                 )
             elif d.status == DeviceStatus.UNFORMATTED:
                 yield Static(
-                    Text("  This partition has no filesystem and is not in use.",
+                    Text("  No filesystem was detected on this partition.",
                          style="yellow"),
                     classes="detail-row",
                 )

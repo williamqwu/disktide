@@ -14,7 +14,7 @@ from textual.screen import Screen
 from textual.suggester import Suggester
 from textual.widgets import Static, Input, Button, Checkbox
 
-from fs_monitor import __version__
+from fs_monitor import APP_NAME, __version__
 
 # Limit scandir iterations to avoid blocking on huge directories (e.g. /home).
 _MAX_SCANDIR_ENTRIES = 200
@@ -224,7 +224,7 @@ class WelcomeScreen(Screen[tuple[str, bool]]):
 
         with Vertical(id="welcome-dialog"):
             yield Static(
-                f"[bold]fsmonitor-cli[/bold] v{__version__}\n"
+                f"[bold]{APP_NAME}[/bold] v{__version__}\n"
                 "Interactive terminal disk usage explorer",
                 id="welcome-title",
             )
@@ -236,7 +236,7 @@ class WelcomeScreen(Screen[tuple[str, bool]]):
                 "[bold]?[/bold] Settings  "
                 "[bold]Q[/bold] Quit\n"
                 "[dim]CLI:[/dim]       "
-                "fsmonitor-cli [bold]scan[/bold] | [bold]watch[/bold] | "
+                f"{APP_NAME} [bold]scan[/bold] | [bold]watch[/bold] | "
                 "[bold]cleanup[/bold] <path>  "
                 "[dim](outside TUI)[/dim]",
                 id="welcome-commands",

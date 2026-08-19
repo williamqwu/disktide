@@ -1,10 +1,7 @@
 """Tests for configuration loading."""
 
-import os
-import tempfile
 from unittest.mock import patch
 
-import pytest
 from fs_monitor.config import (
     load_config, save_config, AppConfig, HostPaths,
     get_effective_paths, set_effective_paths,
@@ -15,11 +12,8 @@ class TestConfig:
     def test_default_config(self):
         config = load_config("/nonexistent/path/config.toml")
         assert isinstance(config, AppConfig)
-        assert config.ui.default_sort == "size"
         assert config.ui.default_viz == "sunburst"
-        assert config.ui.show_hidden is False
         assert config.scan.max_depth is None
-        assert config.cleanup.require_confirm_dangerous is True
         assert config.monitor.default_interval == 21600
 
     def test_load_from_toml(self, tmp_path):
@@ -28,55 +22,79 @@ class TestConfig:
 [scan]
 max_depth = 10
 workers = 2
-exclude_patterns = [".git", ".svn"]
-
-[cleanup]
-require_confirm_dangerous = false
 
 [monitor]
 default_interval = 3600
 
 [ui]
 color_theme = "dark"
-default_sort = "name"
 default_viz = "sunburst"
-show_hidden = true
+safe_rendering = true
 """)
         config = load_config(str(config_file))
         assert config.scan.max_depth == 10
         assert config.scan.workers == 2
-        assert config.scan.exclude_patterns == [".git", ".svn"]
-        assert config.cleanup.require_confirm_dangerous is False
         assert config.monitor.default_interval == 3600
         assert config.ui.color_theme == "dark"
-        assert config.ui.default_sort == "name"
         assert config.ui.default_viz == "sunburst"
-        assert config.ui.show_hidden is True
+        assert config.ui.safe_rendering is True
 
     def test_partial_config(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [ui]
-show_hidden = true
+show_cleanup = true
 """)
         config = load_config(str(config_file))
         # Specified value
-        assert config.ui.show_hidden is True
+        assert config.ui.show_cleanup is True
         # Defaults preserved
         assert config.scan.max_depth is None
-        assert config.ui.default_sort == "size"
+        assert config.ui.default_viz == "sunburst"
+
+    def test_retired_noop_keys_are_ignored(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[scan]
+exclude_patterns = [".git"]
+
+[cleanup]
+enabled_rules = ["old_logs"]
+disabled_rules = ["ide_caches"]
+require_confirm_dangerous = false
+
+[ui]
+default_sort = "name"
+show_hidden = true
+""")
+
+        config = load_config(config_file)
+
+        assert not hasattr(config.scan, "exclude_patterns")
+        assert not hasattr(config, "cleanup")
+        assert not hasattr(config.ui, "default_sort")
+        assert not hasattr(config.ui, "show_hidden")
+
+        save_config(config, config_file)
+        saved = config_file.read_text()
+        for retired_key in (
+            "exclude_patterns",
+            "enabled_rules",
+            "disabled_rules",
+            "require_confirm_dangerous",
+            "default_sort",
+            "show_hidden",
+        ):
+            assert retired_key not in saved
 
     def test_save_and_reload(self, tmp_path):
         config = AppConfig()
         config.scan.workers = 4
         config.scan.max_depth = 5
-        config.scan.exclude_patterns = [".git", "node_modules"]
-        config.cleanup.require_confirm_dangerous = False
         config.monitor.default_interval = 7200
         config.ui.color_theme = "dark"
-        config.ui.default_sort = "name"
         config.ui.default_viz = "sunburst"
-        config.ui.show_hidden = True
+        config.ui.safe_rendering = True
 
         config_file = tmp_path / "saved.toml"
         save_config(config, config_file)
@@ -84,13 +102,10 @@ show_hidden = true
         loaded = load_config(config_file)
         assert loaded.scan.workers == 4
         assert loaded.scan.max_depth == 5
-        assert loaded.scan.exclude_patterns == [".git", "node_modules"]
-        assert loaded.cleanup.require_confirm_dangerous is False
         assert loaded.monitor.default_interval == 7200
         assert loaded.ui.color_theme == "dark"
-        assert loaded.ui.default_sort == "name"
         assert loaded.ui.default_viz == "sunburst"
-        assert loaded.ui.show_hidden is True
+        assert loaded.ui.safe_rendering is True
 
     def test_save_creates_parent_dirs(self, tmp_path):
         config = AppConfig()

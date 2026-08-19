@@ -82,6 +82,12 @@ class TestDedup:
         # ...but the count still reports both mount lines.
         assert "2 filesystem(s)" in text
 
+    def test_summary_usage_pct_matches_df_denominator(self):
+        text = _build_summary([
+            _entry(total=1000, used=500, free=400, reserved=100),
+        ]).plain
+        assert "Used: 500 Bytes (56%)" in text
+
 
 class TestStatvfsSafe:
     def test_local_path(self):
@@ -149,4 +155,5 @@ class TestBlockTreeRendering:
 
     def test_block_summary_reports_idle(self):
         text = _build_block_summary(self._tree()).plain
-        assert "1 idle disk" in text
+        assert "1 disk(s) with no mounted filesystem" in text
+        assert "total capacity" in text

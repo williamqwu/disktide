@@ -8,6 +8,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from fs_monitor import LEGACY_STORAGE_NAMESPACE
+
 _DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
@@ -37,14 +39,6 @@ def format_duration(seconds: int) -> str:
 class ScanConfig:
     max_depth: int | None = None
     workers: int | None = None
-    exclude_patterns: list[str] = field(default_factory=list)
-
-
-@dataclass
-class CleanupConfig:
-    enabled_rules: list[str] = field(default_factory=list)
-    disabled_rules: list[str] = field(default_factory=list)
-    require_confirm_dangerous: bool = True
 
 
 @dataclass
@@ -58,9 +52,7 @@ class MonitorConfig:
 @dataclass
 class UIConfig:
     color_theme: str = "warm"
-    default_sort: str = "size"
     default_viz: str = "sunburst"
-    show_hidden: bool = False
     show_cleanup: bool = False
     default_scan_path: str | None = None  # legacy flat field
     hostname_aware_paths: bool = True
@@ -87,7 +79,6 @@ class HostPaths:
 @dataclass
 class AppConfig:
     scan: ScanConfig = field(default_factory=ScanConfig)
-    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     host_paths: dict[str, HostPaths] = field(default_factory=dict)
@@ -130,7 +121,7 @@ def _config_path() -> Path:
     config_dir = os.environ.get(
         "XDG_CONFIG_HOME", os.path.expanduser("~/.config")
     )
-    return Path(config_dir) / "fsmonitor-cli" / "config.toml"
+    return Path(config_dir) / LEGACY_STORAGE_NAMESPACE / "config.toml"
 
 
 def save_config(config: AppConfig, path: str | Path | None = None) -> None:
@@ -145,19 +136,6 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append(f"max_depth = {config.scan.max_depth}")
     if config.scan.workers is not None:
         lines.append(f"workers = {config.scan.workers}")
-    if config.scan.exclude_patterns:
-        patterns = ", ".join(f'"{p}"' for p in config.scan.exclude_patterns)
-        lines.append(f"exclude_patterns = [{patterns}]")
-    lines.append("")
-
-    lines.append("[cleanup]")
-    if config.cleanup.enabled_rules:
-        rules = ", ".join(f'"{r}"' for r in config.cleanup.enabled_rules)
-        lines.append(f"enabled_rules = [{rules}]")
-    if config.cleanup.disabled_rules:
-        rules = ", ".join(f'"{r}"' for r in config.cleanup.disabled_rules)
-        lines.append(f"disabled_rules = [{rules}]")
-    lines.append(f"require_confirm_dangerous = {'true' if config.cleanup.require_confirm_dangerous else 'false'}")
     lines.append("")
 
     lines.append("[monitor]")
@@ -171,9 +149,7 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
 
     lines.append("[ui]")
     lines.append(f'color_theme = "{config.ui.color_theme}"')
-    lines.append(f'default_sort = "{config.ui.default_sort}"')
     lines.append(f'default_viz = "{config.ui.default_viz}"')
-    lines.append(f"show_hidden = {'true' if config.ui.show_hidden else 'false'}")
     if config.ui.show_cleanup:
         lines.append("show_cleanup = true")
     if config.ui.safe_rendering:
@@ -217,15 +193,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         scan = data["scan"]
         config.scan.max_depth = scan.get("max_depth")
         config.scan.workers = scan.get("workers")
-        config.scan.exclude_patterns = scan.get("exclude_patterns", [])
-
-    if "cleanup" in data:
-        cleanup = data["cleanup"]
-        config.cleanup.enabled_rules = cleanup.get("enabled_rules", [])
-        config.cleanup.disabled_rules = cleanup.get("disabled_rules", [])
-        config.cleanup.require_confirm_dangerous = cleanup.get(
-            "require_confirm_dangerous", True
-        )
 
     if "monitor" in data:
         monitor = data["monitor"]
@@ -237,9 +204,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     if "ui" in data:
         ui = data["ui"]
         config.ui.color_theme = ui.get("color_theme", "warm")
-        config.ui.default_sort = ui.get("default_sort", "size")
         config.ui.default_viz = ui.get("default_viz", "sunburst")
-        config.ui.show_hidden = ui.get("show_hidden", False)
         config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.safe_rendering = ui.get("safe_rendering", False)
         raw_live = ui.get("live_scan_render", "auto")

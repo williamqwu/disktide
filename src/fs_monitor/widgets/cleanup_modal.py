@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, Horizontal, Center
-from textual.message import Message
+from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Static, Button, DataTable, Input
 from rich.text import Text
@@ -14,8 +13,11 @@ from fs_monitor.models.patterns import CleanupTarget, RiskLevel
 from fs_monitor.cleanup.detector import group_by_category, total_savings
 
 
-class CleanupModal(ModalScreen[bool]):
+class CleanupModal(ModalScreen[str | None]):
     """Modal for reviewing and confirming cleanup targets."""
+
+    DELETE = "delete"
+    DRY_RUN = "dry_run"
 
     DEFAULT_CSS = """
     CleanupModal {
@@ -49,13 +51,6 @@ class CleanupModal(ModalScreen[bool]):
         align: center middle;
     }
     """
-
-    class Confirmed(Message):
-        """Posted when deletion is confirmed."""
-
-        def __init__(self, targets: list[CleanupTarget]) -> None:
-            super().__init__()
-            self.targets = targets
 
     def __init__(self, targets: list[CleanupTarget], **kwargs):
         super().__init__(**kwargs)
@@ -126,15 +121,13 @@ class CleanupModal(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-cancel":
-            self.dismiss(False)
+            self.dismiss(None)
         elif event.button.id == "btn-dry-run":
-            self.dismiss(False)
-            self.post_message(self.Confirmed(self._targets))
+            self.dismiss(self.DRY_RUN)
         elif event.button.id == "btn-delete":
             if self._has_dangerous:
                 inp = self.query_one("#confirm-input", Input)
                 if inp.value != "DELETE":
                     inp.focus()
                     return
-            self.dismiss(True)
-            self.post_message(self.Confirmed(self._targets))
+            self.dismiss(self.DELETE)

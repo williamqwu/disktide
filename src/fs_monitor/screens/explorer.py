@@ -42,7 +42,6 @@ class ExplorerScreen(Screen):
         Binding("i", "go_into", "Into", show=False),
         Binding("s", "cycle_sort", "[S]ort [R]escan", show=True, key_display="Action"),
         Binding("r", "rescan", "Rescan", show=False),
-        Binding("slash", "search", "Search", show=False),
         # QoL: yank the highlighted path, and toggle what the tree bar measures.
         Binding("y", "copy_path", "[Y]ank path", show=True, key_display="Copy"),
         Binding("t", "toggle_metric", "[T]oggle metric", show=True, key_display="Bar"),
@@ -553,7 +552,3 @@ class ExplorerScreen(Screen):
             ),
             callback=_on_confirm,
         )
-
-    def action_search(self) -> None:
-        """Open search (placeholder)."""
-        pass

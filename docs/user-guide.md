@@ -1,19 +1,19 @@
 # User Guide
 
-fsmonitor-cli is an interactive terminal tool for exploring disk usage, detecting cleanup opportunities, and tracking how directory sizes change over time.
+fsmonitor is an interactive terminal tool for exploring disk usage, detecting cleanup opportunities, and tracking how directory sizes change over time.
 
 ## Getting Started
 
 Install and launch:
 
 ```bash
-pip install -e .
-fsmonitor-cli
+uv tool install .
+fsmonitor
 ```
 
 The welcome screen shows a single path input with a list of suggested starting directories:
 
-- **Current directory** -- the directory you launched `fsmonitor-cli` from
+- **Current directory** -- the directory you launched `fsmonitor` from
 - **Saved default** -- your previously saved default path (if any)
 - **Last visited** -- the most recently explored path (if different from the above)
 - **Recent** -- paths from previous `watch` or `scan --snapshot` runs
@@ -24,7 +24,7 @@ Check "Save as default path" to remember the current path as your default for ne
 
 ## TUI
 
-The interactive TUI has three modes, switched with the `E`, `M`, and `F` keys.
+The interactive TUI has four modes, switched with the `E`, `C`, `M`, and `F` keys. Cleanup is experimental and disabled by default, so `C` becomes available only after enabling it in Settings.
 
 ### Explorer (E)
 
@@ -66,32 +66,30 @@ By default, path matching is bidirectional: exploring `/data` surfaces watches a
 
 Shows all mounted real filesystems at a glance. Press `f` to open.
 
-The top bar summarises total mounted space and usage percentage, with a proportional coloured bar showing each filesystem's relative size. The table lists each filesystem with:
+The top bar summarises total mounted space and usage percentage. Aggregate capacity is de-duplicated by backing device so bind mounts and btrfs subvolumes do not inflate the total. The table still lists every mountpoint:
 
 | Column | Description |
 |--------|-------------|
 | Mount | Mountpoint path |
 | FS Type | Filesystem type (ext4, xfs, nfs4, etc.) |
-| Speed | Speed tier based on storage class |
+| Storage | Medium badge (`Flash`, `HDD`, `RAM`, `Network`, or `?`) plus detected transforms such as `RAID`, `Encrypted`, `CoW`, and `Compressed` |
 | Total / Used / Free | Disk space |
-| Usage | Visual bar + percentage |
+| Usage | `df`-style visual bar + percentage |
+| Quota | Current user's used/hard-limit values when the platform reports them |
 
-**Speed tiers:**
+When `lsblk` is available, a second panel shows block devices and partitions, including mounted, unmounted, unformatted, and raw devices. An unmounted or raw device is **not** presented as safe-to-reclaim space; select a row to inspect details.
 
-| Tier | Colour | When |
-|------|--------|------|
-| Fast (SSD) | Green | Non-rotational local storage |
-| Medium (HDD) | Yellow | Rotational local storage |
-| Slow (Network) | Red | NFS, CIFS, SSHFS, etc. |
-| Unknown | Dim | Could not detect storage type |
+Press `Enter` on a filesystem or block-device row to open its details. Press `b` on a filesystem row to run an opt-in throughput probe after a second confirmation. The probe creates a mode-0600 temporary file, writes at most 256 MiB and never more than 25% of currently available space, then removes the file. The displayed read result is approximate because cache eviction is advisory.
 
-Pseudo-filesystems (`proc`, `sysfs`, `tmpfs` with no blocks, etc.) are automatically filtered out. Press `r` to refresh.
+Pseudo-filesystems (`proc`, `sysfs`, `tmpfs`, etc.) are automatically filtered out. Press `r` to refresh.
 
 ### Cleanup (C) — experimental
 
-Detects files and directories that can safely be removed: dependency caches (`node_modules`), build outputs, bytecode files, old logs, OS junk files, and IDE caches.
+Detects pattern-matched candidates such as dependency directories (`node_modules`), build outputs, bytecode files, old logs, OS junk files, and IDE directories. These rules are heuristics, not a guarantee that a path is safe to remove.
 
 Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in the Settings screen (`?`). Once enabled, press `c` to switch to it.
+
+Review every selected path before acting. **Delete is permanent**: the current implementation uses direct filesystem deletion and has no trash/quarantine, undo, stale-target revalidation, or persistent audit trail. The confirmation dialog also offers **Dry Run**, which reports what would be deleted without changing the filesystem.
 
 ### Key Binding Reference
 
@@ -111,6 +109,8 @@ Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in t
 | Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
 | Up / Down | Settings | Move focus between fields (also Tab/Shift+Tab) |
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
+| `b` | FS Overview | Confirm and benchmark the highlighted mount |
+| Enter | FS Overview | Open filesystem or block-device details |
 | `d` | Cleanup | Delete selected |
 | `a` | Cleanup | Select all |
 | Space | Cleanup | Toggle row selection |
@@ -124,9 +124,9 @@ These commands run outside the TUI and print results to stdout.
 One-shot scan with a text summary:
 
 ```bash
-fsmonitor-cli scan /path
-fsmonitor-cli scan /path --snapshot      # save results to the database
-fsmonitor-cli scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
+fsmonitor scan /path
+fsmonitor scan /path --snapshot      # save results to the database
+fsmonitor scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
 ```
 
 ### watch
@@ -134,9 +134,9 @@ fsmonitor-cli scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
 Periodic scanning with automatic snapshots. Runs until interrupted or `--max-time` is reached:
 
 ```bash
-fsmonitor-cli watch /path                   # default interval from config (6h)
-fsmonitor-cli watch /path --interval 1h     # scan every hour
-fsmonitor-cli watch /path -i 30m -t 12h    # every 30 min, stop after 12 hours
+fsmonitor watch /path                   # default interval from config (6h)
+fsmonitor watch /path --interval 1h     # scan every hour
+fsmonitor watch /path -i 30m -t 12h    # every 30 min, stop after 12 hours
 ```
 
 Snapshots are saved to the database and visible in the Monitor tab. Old snapshots are pruned automatically based on the `snapshot_retention` setting (default: 30 days).
@@ -146,10 +146,10 @@ Since `watch` runs in the foreground, use tmux or nohup for persistent monitorin
 ```bash
 # tmux (recommended -- reattach later with `tmux attach -t fsmon`)
 tmux new -s fsmon
-fsmonitor-cli watch /path --interval 6h
+fsmonitor watch /path --interval 6h
 
 # nohup (background, no reattach)
-nohup fsmonitor-cli watch /path --interval 6h > /dev/null 2>&1 &
+nohup fsmonitor watch /path --interval 6h > /dev/null 2>&1 &
 ```
 
 For a systemd user service that survives reboots:
@@ -157,7 +157,7 @@ For a systemd user service that survives reboots:
 ```ini
 # ~/.config/systemd/user/fsmonitor.service
 [Service]
-ExecStart=%h/.local/bin/fsmonitor-cli watch /path --interval 6h
+ExecStart=%h/.local/bin/fsmonitor watch /path --interval 6h
 
 [Install]
 WantedBy=default.target
@@ -170,26 +170,22 @@ loginctl enable-linger $USER
 
 ### cleanup
 
-Non-interactive cleanup with confirmation prompt:
+Interactive CLI cleanup with a confirmation prompt:
 
 ```bash
-fsmonitor-cli cleanup /path
+fsmonitor cleanup /path
 ```
+
+The command summarizes all detected candidates (showing up to five paths per category), then offers to **permanently delete all of them**, including candidates hidden behind an “and more” summary. It does not move items to trash and does not provide undo or revalidation; cancel the prompt unless every detected candidate may be removed.
 
 ## Configuration
 
-Settings are stored in `~/.config/fsmonitor-cli/config.toml` (respects `XDG_CONFIG_HOME`). Edit the file directly or use the settings screen (`?` in the TUI).
+Settings are stored in `~/.config/fsmonitor-cli/config.toml` (respects `XDG_CONFIG_HOME`). The legacy directory name is retained so existing installations keep their settings. Edit the file directly or use the settings screen (`?` in the TUI).
 
 ```toml
 [scan]
 max_depth = 10                           # omit for unlimited
 workers = 4                              # omit for auto-detect
-exclude_patterns = [".git", "node_modules"]
-
-[cleanup]
-require_confirm_dangerous = true
-# enabled_rules = ["node_modules", "old_logs"]   # only run these rules
-# disabled_rules = ["ide_caches"]                # skip these rules
 
 [monitor]
 default_interval = 21600                 # 6 hours, in seconds
@@ -199,9 +195,7 @@ snapshot_retention = 30                  # days
 
 [ui]
 color_theme = "warm"                     # default, cold, warm, vivid, mono
-default_sort = "size"                    # size, name, mtime
 default_viz = "sunburst"                 # treemap, sunburst, details
-show_hidden = false
 # show_cleanup = true                    # enable Cleanup mode (disabled by default)
 # safe_rendering = true                  # ASCII bars and glyphs for web shells
 # live_scan_render = "auto"              # auto | on | off — draw viz live during scan

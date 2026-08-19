@@ -47,6 +47,24 @@ def test_quarter_screen_jump_moves_cursor_down(tmp_path):
     asyncio.run(go())
 
 
+def test_no_color_environment_does_not_crash(tmp_path, monkeypatch):
+    from fs_monitor.config import AppConfig
+
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    async def go():
+        app = FSMonitorApp(
+            scan_path=str(tmp_path), show_welcome=False, config=AppConfig()
+        )
+        assert app.no_color is True
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _wait_for_explorer(pilot, app)
+            assert isinstance(app.screen, ExplorerScreen)
+            assert app.screen._root is not None
+
+    asyncio.run(go())
+
+
 def test_quarter_screen_jump_up_after_down(tmp_path):
     _make_flat_tree(tmp_path, 200)
 
@@ -119,7 +137,7 @@ def test_live_render_disabled_on_tiny_canvas(tmp_path):
     doesn't fight a cramped terminal for screen space.
 
     Uses a freshly-constructed AppConfig (not load_config()) so the
-    developer's own ~/.config/fsmonitor-cli/config.toml — which may
+    developer's own legacy ~/.config/fsmonitor-cli/config.toml — which may
     have been flipped to "on" while testing — doesn't override the
     auto path the test is supposed to exercise.
     """

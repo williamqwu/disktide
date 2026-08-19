@@ -17,7 +17,7 @@ from fs_monitor.scanner.progress import ScanProgress, ProgressThrottle
 
 # Maximum number of symlinks at the scan root that the engine classifies
 # eagerly (one extra readlink + follow-stat per link). Keeps the typical
-# `fsmon ~` case showing target arrows in the tree without classification
+# `fsmonitor ~` case showing target arrows in the tree without classification
 # while bounding the cost when someone scans a directory whose contents
 # *are* a giant pile of symlinks (e.g. 215k image-cache symlinks at one
 # depth). 100 * ~600us NFS RTT = ~60ms, imperceptible.
@@ -121,7 +121,7 @@ class ScanEngine:
                         # user looks at. We additionally classify the
                         # first _TOP_LEVEL_CLASSIFY_CAP symlinks at the
                         # scan root eagerly, which gets the typical
-                        # `fsmon ~` case (handful of links at home root)
+                        # `fsmonitor ~` case (handful of links at home root)
                         # rendered with target arrows from the start
                         # without re-introducing the per-symlink cost
                         # when the scan root *is* a giant symlink pile.

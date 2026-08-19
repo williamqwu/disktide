@@ -9,7 +9,7 @@ from pathlib import Path
 
 import click
 
-from fs_monitor import __version__
+from fs_monitor import APP_NAME, __version__
 
 
 @click.group(invoke_without_command=True)
@@ -20,7 +20,7 @@ from fs_monitor import __version__
 def cli(ctx, max_depth: int | None, workers: int | None):
     """Interactive terminal disk usage explorer.
 
-    Launch TUI: fsmonitor-cli
+    Launch TUI: fsmonitor
     Subcommands: scan, watch, cleanup
     """
     ctx.ensure_object(dict)
@@ -47,7 +47,7 @@ def cli(ctx, max_depth: int | None, workers: int | None):
         click.echo("Exiting...", nl=True)
         sys.stdout.flush()
         _force_teardown(app)
-        click.echo("fsmonitor-cli closed. Goodbye!")
+        click.echo(f"{APP_NAME} closed. Goodbye!")
         sys.stdout.flush()
         # Bypass Python's interpreter teardown: gc of the in-memory
         # FSNode tree + atexit + module cleanup adds tens of seconds on
@@ -99,10 +99,9 @@ def _force_teardown(app) -> None:
 @cli.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
 @click.option("--snapshot", "-s", is_flag=True, help="Save snapshot to database")
-@click.option("--force-rescan", is_flag=True, help="Ignore cache")
 @click.option("--max-depth", "-d", type=int, default=None, help="Maximum scan depth")
 @click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
-def scan(path: str, snapshot: bool, force_rescan: bool, max_depth: int | None, workers: int | None):
+def scan(path: str, snapshot: bool, max_depth: int | None, workers: int | None):
     """Scan a directory and display results."""
     from fs_monitor.scanner.engine import ScanEngine
     from fs_monitor.scanner.progress import ScanProgress
@@ -152,8 +151,8 @@ def scan(path: str, snapshot: bool, force_rescan: bool, max_depth: int | None, w
         if db.degraded:
             db.close()
             click.echo(
-                "\nCould not save snapshot: the database is not writable "
-                "(disk full?).",
+                "\nCould not save snapshot: the storage database is "
+                "unavailable or not writable.",
                 err=True,
             )
         else:
@@ -210,45 +209,56 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
         db.connect()
         if db.degraded:
             click.echo(
-                "Warning: database is not writable (disk full?); snapshots "
-                "will not be persisted.",
+                "Warning: the storage database is unavailable or not "
+                "writable; snapshots will not be persisted.",
                 err=True,
             )
         watch_start = time.monotonic()
 
-        while True:
-            start = time.monotonic()
-            engine = ScanEngine(workers=workers, scan_path=path)
-            root = engine.scan(path)
-            elapsed = time.monotonic() - start
+        try:
+            while True:
+                start = time.monotonic()
+                engine = ScanEngine(workers=workers, scan_path=path)
+                root = engine.scan(path)
+                elapsed = time.monotonic() - start
 
-            snap = Snapshot(
-                root_path=path,
-                timestamp=datetime.now(),
-                total_size=root.size,
-                file_count=root.file_count,
-                dir_count=root.dir_count,
-                scan_duration=elapsed,
-            )
-            snap_id = db.save_snapshot(snap, root)
-            pruned = db.prune_snapshots(path, config.monitor.snapshot_retention)
+                if db.degraded:
+                    snapshot_status = "not persisted"
+                    pruned = 0
+                else:
+                    snap = Snapshot(
+                        root_path=path,
+                        timestamp=datetime.now(),
+                        total_size=root.size,
+                        file_count=root.file_count,
+                        dir_count=root.dir_count,
+                        scan_duration=elapsed,
+                    )
+                    snap_id = db.save_snapshot(snap, root)
+                    snapshot_status = f"snapshot #{snap_id}"
+                    pruned = db.prune_snapshots(
+                        path, config.monitor.snapshot_retention
+                    )
 
-            status = (
-                f"[{datetime.now():%H:%M:%S}] Scan complete: "
-                f"{humanize.naturalsize(root.size, binary=True)}, "
-                f"{root.file_count:,} files (snapshot #{snap_id}, {elapsed:.1f}s)"
-            )
-            if pruned:
-                status += f", pruned {pruned} old snapshot(s)"
-            click.echo(status)
+                status = (
+                    f"[{datetime.now():%H:%M:%S}] Scan complete: "
+                    f"{humanize.naturalsize(root.size, binary=True)}, "
+                    f"{root.file_count:,} files "
+                    f"({snapshot_status}, {elapsed:.1f}s)"
+                )
+                if pruned:
+                    status += f", pruned {pruned} old snapshot(s)"
+                click.echo(status)
 
-            if max_seconds is not None:
-                total_elapsed = time.monotonic() - watch_start
-                if total_elapsed + seconds >= max_seconds:
-                    click.echo("Max watch time reached. Stopping.")
-                    return
+                if max_seconds is not None:
+                    total_elapsed = time.monotonic() - watch_start
+                    if total_elapsed + seconds >= max_seconds:
+                        click.echo("Max watch time reached. Stopping.")
+                        return
 
-            await asyncio.sleep(seconds)
+                await asyncio.sleep(seconds)
+        finally:
+            db.close()
 
     try:
         asyncio.run(run())
@@ -260,7 +270,7 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
 @click.argument("path", default=".", type=click.Path(exists=True))
 @click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
 def cleanup(path: str, workers: int | None):
-    """Detect and clean up unnecessary files."""
+    """Detect candidates and permanently delete them after confirmation."""
     from fs_monitor.scanner.engine import ScanEngine
     from fs_monitor.cleanup.detector import detect_targets, group_by_category, total_savings
     from fs_monitor.cleanup.actions import delete_targets
@@ -291,7 +301,7 @@ def cleanup(path: str, workers: int | None):
             click.echo(f"    ... and {len(items) - 5} more")
         click.echo()
 
-    if click.confirm("Delete all targets?"):
+    if click.confirm("Permanently delete all targets?"):
         result = delete_targets(targets)
         click.echo(
             f"\nDeleted {len(result.successful)} items, "

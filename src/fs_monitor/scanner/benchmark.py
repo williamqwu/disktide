@@ -13,6 +13,7 @@ read number optimistic. Callers should present it as approximate.
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 
@@ -22,6 +23,8 @@ _CHUNK = 8 * 1024 * 1024
 
 # Never consume more than this fraction of a mount's free space.
 _MAX_FREE_FRACTION = 0.25
+
+_MIN_PROBE_BYTES = 1024 * 1024
 
 
 @dataclass
@@ -44,59 +47,61 @@ def benchmark_mount(
 ) -> BenchmarkResult:
     """Probe write/read bandwidth of ``mountpoint``.
 
-    Raises PermissionError if the mount is not writable, or RuntimeError if the
-    I/O completes too fast to time. Always removes its temp file.
+    Raises PermissionError if the mount is not writable, or RuntimeError if
+    there is insufficient safe headroom or the I/O completes too fast to time.
+    Always removes its temp file.
     """
     if not os.path.isdir(mountpoint):
         raise RuntimeError(f"{mountpoint} is not a directory")
     if not os.access(mountpoint, os.W_OK):
         raise PermissionError(f"{mountpoint} is not writable")
+    if size_mb <= 0:
+        raise ValueError("size_mb must be positive")
+    if max_seconds <= 0:
+        raise ValueError("max_seconds must be positive")
 
-    # Cap the target so we never fill a small or nearly-full filesystem.
     target = size_mb * 1024 * 1024
     try:
         st = os.statvfs(mountpoint)
-        avail = st.f_frsize * st.f_bavail
-        if avail:
-            target = min(target, int(avail * _MAX_FREE_FRACTION))
+        available = max(0, st.f_frsize * st.f_bavail)
+        target = min(target, int(available * _MAX_FREE_FRACTION))
     except OSError:
         pass
-    target = max(target, _CHUNK)  # always at least one chunk
+    if target < _MIN_PROBE_BYTES:
+        raise RuntimeError("not enough free space for a safe benchmark")
 
-    path = os.path.join(mountpoint, f".fsmon_bench_{os.getpid()}")
-    buf = b"\0" * _CHUNK
+    fd, path = tempfile.mkstemp(prefix=".fsmonitor_bench_", dir=mountpoint)
+    buf = b"\0" * min(_CHUNK, target)
     try:
-        # --- write phase ---
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        try:
-            written = 0
-            t0 = time.monotonic()
-            while written < target:
-                written += os.write(fd, buf)
-                if time.monotonic() - t0 > max_seconds:
-                    break
-            os.fsync(fd)
-            write_dt = time.monotonic() - t0
-            _drop_cache(fd)
-        finally:
-            os.close(fd)
+        written = 0
+        t0 = time.monotonic()
+        while written < target:
+            remaining = min(len(buf), target - written)
+            view = memoryview(buf)[:remaining]
+            while view:
+                count = os.write(fd, view)
+                if count <= 0:
+                    raise OSError("benchmark write made no progress")
+                written += count
+                view = view[count:]
+            if time.monotonic() - t0 > max_seconds:
+                break
+        os.fsync(fd)
+        write_dt = time.monotonic() - t0
+        _drop_cache(fd)
         if write_dt <= 0 or written == 0:
             raise RuntimeError("write completed too fast to measure")
 
-        # --- read phase (cold) ---
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            _drop_cache(fd)
-            read = 0
-            t0 = time.monotonic()
-            while True:
-                chunk = os.read(fd, _CHUNK)
-                if not chunk:
-                    break
-                read += len(chunk)
-            read_dt = time.monotonic() - t0
-        finally:
-            os.close(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        _drop_cache(fd)
+        read = 0
+        t0 = time.monotonic()
+        while True:
+            chunk = os.read(fd, _CHUNK)
+            if not chunk:
+                break
+            read += len(chunk)
+        read_dt = time.monotonic() - t0
         if read_dt <= 0:
             raise RuntimeError("read completed too fast to measure")
 
@@ -106,6 +111,7 @@ def benchmark_mount(
             bytes_io=written,
         )
     finally:
+        os.close(fd)
         try:
             os.unlink(path)
         except OSError:

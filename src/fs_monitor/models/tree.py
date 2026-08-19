@@ -15,7 +15,8 @@ class FSNode:
         name: Basename of the file/directory.
         path: Absolute path.
         size: Inclusive subtree size in bytes.
-        own_size: Size of direct files only (0 for files).
+        own_size: The entry's bytes for files/symlinks; for directories,
+            the sum of direct file and symlink bytes.
         file_count: Number of files in subtree.
         dir_count: Number of directories in subtree.
         is_dir: Whether this node is a directory.
