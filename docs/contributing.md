@@ -1,11 +1,11 @@
 # Contributing
 
-Guide for developers working on fsmonitor-cli.
+Guide for developers working on fsmonitor.
 
 ## Setup
 
 ```bash
-git clone <repo-url> && cd fsmonitor-cli
+git clone <repo-url> fsmonitor && cd fsmonitor
 pip install -e ".[dev]"
 ```
 
@@ -24,9 +24,9 @@ python -m pytest tests/test_scanner.py -v
 python -m pytest tests/ --cov=fs_monitor
 ```
 
-The test suite covers: scanner engine, tree model, cache, config, storage/database, cleanup rules and detection, visualization, braille canvas, progress reporting, system info detection, snapshot comparison, welcome screen, and migrations.
+The test suite covers the scanner and tree model, configuration, snapshot/database storage, cleanup detection and actions, visualizations, TUI navigation and modals, FS Overview/block devices/benchmarking, progress reporting, system detection, welcome flow, and migrations.
 
-Async tests use `pytest-asyncio` with strict mode (configured in `pyproject.toml`).
+`PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app tests instead wrap an async helper with `asyncio.run(...)` and use `app.run_test()`; follow the style of the nearby tests.
 
 ## Project Structure
 
@@ -62,7 +62,7 @@ This layering means the scanner, storage, cleanup, and viz modules are testable 
 
 `config.py` uses plain dataclasses (not Pydantic). TOML serialization is manual (line-by-line string building in `save_config`). When adding a new config field:
 
-1. Add the field to the appropriate dataclass (`ScanConfig`, `CleanupConfig`, `MonitorConfig`, `UIConfig`)
+1. Add the field to the appropriate dataclass (`ScanConfig`, `MonitorConfig`, `UIConfig`, or `HostPaths`)
 2. Add serialization in `save_config()` -- skip `None` values for optional fields
 3. Add deserialization in `load_config()` with a sensible default
 4. Add a roundtrip test in `tests/test_config.py`
@@ -71,9 +71,9 @@ This layering means the scanner, storage, cleanup, and viz modules are testable 
 
 `storage/migrations.py` uses a `schema_version` table. To add a migration:
 
-1. Increment the version number
-2. Add a migration function that takes a `sqlite3.Connection`
-3. Register it in the migration list
+1. Increment `CURRENT_VERSION`
+2. Add the ordered SQL statements under the new integer key in `MIGRATIONS`
+3. Handle any required post-commit work explicitly in `migrate()`
 4. Add a test in `tests/test_migrations.py`
 
 ## Adding a New Cleanup Rule
@@ -116,7 +116,7 @@ CleanupRule(
 
 - **Scanner tests**: Use `tmp_path` fixtures to create real directory trees. The scanner operates on real filesystems, not mocks.
 - **Database tests**: Use in-memory SQLite (`:memory:`) or `tmp_path` for the db file. The `db` fixture in `tests/test_storage.py` provides a connected, migrated database.
-- **Async tests**: Mark with `@pytest.mark.asyncio`. The `PathSuggester` tests are good examples.
+- **Async tests**: Use `@pytest.mark.asyncio` for focused coroutine tests. For Textual app flows, use the established `asyncio.run(go())` + `app.run_test()` pattern.
 - **Visualization tests**: Test layout computation separately from rendering. Verify rectangle coordinates, arc angles, etc. numerically.
 
 ## Dev Utilities
@@ -131,8 +131,8 @@ The `tool/` directory contains helper scripts:
 
 ```bash
 # normal launch
-fsmonitor-cli
+fsmonitor
 
 # with Textual dev tools (live CSS reloading, DOM inspector)
-textual run --dev -c fsmonitor-cli
+textual run --dev -c fsmonitor
 ```

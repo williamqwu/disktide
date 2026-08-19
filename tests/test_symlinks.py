@@ -260,7 +260,7 @@ def test_deeper_symlinks_are_not_classified_during_scan(tmp_path):
 
 def test_top_level_symlinks_classified_up_to_cap(tmp_path):
     """The first 100 symlinks at the scan root are classified eagerly
-    (so a typical `fsmon ~` shows target arrows in the tree from the
+    (so a typical `fsmonitor ~` shows target arrows in the tree from the
     start); symlinks past the cap stay lazy. 100 * one extra stat is
     bounded; classifying 215k symlinks at depth 1 is not."""
     from fs_monitor.scanner.engine import _TOP_LEVEL_CLASSIFY_CAP

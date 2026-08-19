@@ -9,6 +9,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 
 from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration, current_hostname
+from fs_monitor.scanner.sysinfo import storage_class
 from fs_monitor.storage.database import Database
 from fs_monitor.viz.colors import SCHEMES, set_color_scheme
 
@@ -108,26 +109,14 @@ class SettingsScreen(Screen):
                 yield Label("(blank = unlimited)", classes="input-hint")
 
             yield Static("")
-            yield Static("Scan Settings", classes="section-title")
-            with Horizontal(classes="setting-row"):
-                yield Label("Show hidden files", classes="setting-label")
-                yield Switch(value=self._config.ui.show_hidden, id="show-hidden")
-
-            yield Static("")
             yield Static("Cleanup Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
                 yield Label("Show Cleanup mode (experimental)", classes="setting-label")
                 yield Switch(value=self._config.ui.show_cleanup, id="show-cleanup")
             yield Static(
-                "  Cleanup mode deletes files. Enable only when needed.",
+                "  Cleanup permanently deletes selected paths. Enable only when needed.",
                 classes="sysinfo-value",
             )
-            with Horizontal(classes="setting-row"):
-                yield Label("Confirm dangerous deletions", classes="setting-label")
-                yield Switch(
-                    value=self._config.cleanup.require_confirm_dangerous,
-                    id="confirm-dangerous",
-                )
 
             yield Static("")
             yield Static("Monitor Settings", classes="section-title")
@@ -279,13 +268,13 @@ class SettingsScreen(Screen):
             f"  Load: {load[0]:.2f} (1min) / {load[1]:.2f} (5min) / {load[2]:.2f} (15min)"
         )
 
-        storage_desc = info.fs_type
-        if info.is_rotational is True:
-            storage_desc += " (HDD)"
-        elif info.is_rotational is False:
-            storage_desc += " (SSD)"
+        # Use the shared classifier so this line agrees with the FS-Overview
+        # screen — it previously ignored network mounts and RAM-backed FSes.
+        label, _ = storage_class(
+            info.fs_type, info.is_network_fs, info.is_rotational
+        )
         self.query_one("#sysinfo-storage", Static).update(
-            f"  Storage: {storage_desc}"
+            f"  Storage: {info.fs_type} — {label}"
         )
 
         self.query_one("#sysinfo-recommendation", Static).update(
@@ -327,7 +316,15 @@ class SettingsScreen(Screen):
         try:
             save_config(self._config)
         except OSError:
-            pass  # Best-effort save
+            # Most likely a full disk — tell the user their settings
+            # didn't persist rather than failing silently.
+            self.app.notify(
+                "Couldn't save settings — disk may be full. Changes apply "
+                "for this session only.",
+                title="Settings not saved",
+                severity="warning",
+                timeout=8,
+            )
         self.app.pop_screen()
 
     def action_focus_next_field(self) -> None:
@@ -368,12 +365,8 @@ class SettingsScreen(Screen):
         return False
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        if event.switch.id == "show-hidden":
-            self._config.ui.show_hidden = event.value
-        elif event.switch.id == "show-cleanup":
+        if event.switch.id == "show-cleanup":
             self._config.ui.show_cleanup = event.value
-        elif event.switch.id == "confirm-dangerous":
-            self._config.cleanup.require_confirm_dangerous = event.value
         elif event.switch.id == "strict-path":
             self._config.monitor.strict_path = event.value
         elif event.switch.id == "hostname-aware-paths":

@@ -12,6 +12,8 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from fs_monitor import LEGACY_STORAGE_NAMESPACE
+
 log = logging.getLogger(__name__)
 
 from fs_monitor.models.tree import FSNode
@@ -29,30 +31,92 @@ def _default_db_path() -> str:
     data_dir = os.environ.get(
         "XDG_DATA_HOME", os.path.expanduser("~/.local/share")
     )
-    db_dir = os.path.join(data_dir, "fsmonitor-cli")
-    os.makedirs(db_dir, exist_ok=True)
+    db_dir = os.path.join(data_dir, LEGACY_STORAGE_NAMESPACE)
+    try:
+        os.makedirs(db_dir, exist_ok=True)
+    except OSError:
+        # The data directory can't be created — most likely the disk is
+        # full (ENOSPC) or read-only. Don't crash construction; return the
+        # intended path anyway. Database.connect() detects the unwritable
+        # location and falls back to an in-memory database so the app can
+        # still launch (which is exactly when the user needs it).
+        pass
     return os.path.join(db_dir, "data.db")
 
 
 class Database:
-    """SQLite-backed storage for fsmonitor-cli data."""
+    """SQLite-backed storage for fsmonitor data."""
 
     def __init__(self, path: str | None = None, run_migrations: bool = True):
         self._path = path or _default_db_path()
         self._conn: sqlite3.Connection | None = None
         self._run_migrations = run_migrations
+        # Set when the on-disk database can't be opened (typically a full
+        # disk) and we've fallen back to an in-memory database. In this
+        # state the app is fully usable but nothing is persisted across
+        # sessions. Callers can surface this to the user.
+        self.degraded = False
+        self.degraded_reason: str | None = None
 
     @property
     def path(self) -> str:
         """Filesystem path of the SQLite database file."""
         return self._path
 
-    def connect(self) -> None:
-        self._conn = sqlite3.connect(self._path)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+    def _open(self, path: str) -> sqlite3.Connection:
+        """Open a connection at ``path`` and bring it up to schema.
+
+        Enables WAL journaling + foreign keys and runs migrations. Any of
+        these can raise on a full disk (WAL needs to create -wal/-shm
+        sidecars; migrations write the schema), which is how connect()
+        detects that the location is unusable.
+        """
+        conn = sqlite3.connect(path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
         if self._run_migrations:
-            migrate(self._conn)
+            migrate(conn)
+        return conn
+
+    def connect(self) -> None:
+        """Open the database, degrading to memory if persistence is unavailable.
+
+        On a healthy system this opens the on-disk SQLite file. If opening
+        or migrating it fails, fall back to an in-memory database so the app
+        still launches and the explorer stays usable. The session's
+        snapshots/history simply aren't persisted; `degraded` records that
+        for callers to surface.
+        """
+        failure_reason = "unknown database error"
+        try:
+            self._conn = self._open(self._path)
+            self.degraded = False
+            self.degraded_reason = None
+            return
+        except (sqlite3.Error, OSError) as exc:
+            failure_reason = f"{type(exc).__name__}: {exc}"
+            log.warning(
+                "Could not open database at %s (%s); falling back to an "
+                "in-memory database. Snapshots and history will not be "
+                "persisted this session.",
+                self._path, exc,
+            )
+            self._close_quietly()
+
+        # Fallback: an in-memory database. This does not touch the disk, so
+        # it succeeds even when the volume is full.
+        self._conn = self._open(":memory:")
+        self.degraded = True
+        self.degraded_reason = f"cannot use {self._path}: {failure_reason}"
+
+    def _close_quietly(self) -> None:
+        """Close and drop the connection, swallowing any error."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     def close(self) -> None:
         if self._conn:
@@ -401,7 +465,7 @@ class Database:
             log.warning(
                 "Snapshot row %s uses pre-v3 schema; run the migration "
                 "to upgrade (delete and recreate the database, or launch "
-                "fsmonitor-cli once with migrations enabled).",
+                "fsmonitor once with migrations enabled).",
                 row[0],
             )
         return Snapshot(

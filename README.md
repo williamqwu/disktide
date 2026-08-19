@@ -1,4 +1,4 @@
-# fsmonitor-cli
+# fsmonitor
 
 Interactive terminal disk usage explorer built with Python and [Textual](https://github.com/Textualize/textual).
 
@@ -10,48 +10,55 @@ Interactive terminal disk usage explorer built with Python and [Textual](https:/
 ## Installation
 
 ```bash
-pip install -e .
+# Install a snapshot from the current checkout
+uv tool install .
+
+# Or keep the installed command linked to this checkout during development
+uv tool install --force --editable .
 ```
 
 To uninstall:
 
 ```bash
-pip uninstall fsmonitor-cli
+uv tool uninstall fsmonitor-cli
 ```
 
-**Stored data.** The app follows XDG conventions and writes to three locations (all safe to delete):
+The Python distribution is still named `fsmonitor-cli` for package-index compatibility. The canonical command is `fsmonitor`; the previous `fsmonitor-cli` command remains available as a compatibility alias.
+
+**Stored data.** The app follows XDG conventions and writes to two persistent locations. Deleting either is safe for the filesystem, but resets the corresponding settings or snapshot history. The existing `fsmonitor-cli` directory names are intentionally retained so upgrades keep current data:
 
 | Location | Contents | Typical size |
 |----------|----------|--------------|
 | `~/.config/fsmonitor-cli/config.toml` | User settings | < 1 KB |
 | `~/.local/share/fsmonitor-cli/data.db` | SQLite database (directory-level snapshots) | 1 -- 200 MB depending on tree size and snapshot count |
-| `~/.cache/fsmonitor-cli/` | Scan result cache (JSON) | < 10 MB |
 
-The database is only written by the CLI commands `scan --snapshot` and `watch`. The TUI reads from it (Monitor mode) but never writes. Old snapshots are pruned automatically based on retention settings (default: 30 days).
+Snapshot data is written by the CLI commands `scan --snapshot` and `watch`. The TUI opens the database for recent paths and Monitor mode but does not save snapshots. Old snapshots are pruned automatically based on retention settings (default: 30 days).
 
-Paths respect `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` if set. Settings can also be edited by pressing `?` inside the TUI. See the [User Guide](docs/user-guide.md) for the full configuration reference.
+Paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME` if set. Settings can also be edited by pressing `?` inside the TUI. See the [User Guide](docs/user-guide.md) for the full configuration reference.
 
 ## Quick Start
 
-`fsmonitor-cli` has two modes of operation: an **interactive TUI** for visual exploration (the main interface), and three **CLI commands** (`scan`, `watch`, `cleanup`) for scripting and one-shot tasks.
+`fsmonitor` has two modes of operation: an **interactive TUI** for visual exploration (the main interface), and three **CLI commands** (`scan`, `watch`, `cleanup`) for scripting and one-shot tasks.
 
 ### TUI
 
 ```bash
 # Launch interactive TUI (opens welcome screen)
-fsmonitor-cli
+fsmonitor
 ```
 
 #### Key Bindings
 
 | Key | Action |
 |-----|--------|
-| `e` / `c` / `m` | Switch mode (Explorer / Cleanup / Monitor) |
+| `e` / `m` / `f` | Switch mode (Explorer / Monitor / FS Overview) |
+| `c` | Switch to experimental Cleanup mode (enable it in Settings first) |
 | `1` / `2` / `3` | Switch visualization (Sunburst / Treemap / Details) |
 | `u` / `i` | Navigate up / drill into directory |
 | `s` | Cycle sort (Size / Name / Modified) |
 | `y` / `t` | Copy highlighted path / toggle size vs. file count |
 | `r` | Rescan / refresh |
+| `b` | Benchmark the highlighted mount in FS Overview (after confirmation) |
 | `?` | Settings |
 | `q` | Quit |
 
@@ -59,13 +66,13 @@ fsmonitor-cli
 
 ```bash
 # Scan a directory directly
-fsmonitor-cli scan /path --snapshot
+fsmonitor scan /path --snapshot
 
 # Watch for changes over time
-fsmonitor-cli watch /path --interval 6h
+fsmonitor watch /path --interval 6h
 
-# Find and clean up unnecessary files
-fsmonitor-cli cleanup /path
+# Find candidates and permanently delete all of them after confirmation
+fsmonitor cleanup /path
 ```
 
 ## Documentation

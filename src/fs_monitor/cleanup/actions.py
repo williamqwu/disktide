@@ -1,4 +1,4 @@
-"""Safe deletion with dry-run support and audit logging."""
+"""Permanent cleanup deletion with dry-run support."""
 
 from __future__ import annotations
 
@@ -41,7 +41,10 @@ def delete_targets(
     dry_run: bool = False,
     progress_callback=None,
 ) -> CleanupResult:
-    """Delete the given cleanup targets.
+    """Delete cleanup targets directly from the filesystem.
+
+    Actual deletions are permanent: this helper provides no trash, undo,
+    revalidation, or persistent audit log.
 
     Args:
         targets: List of targets to delete.
@@ -69,7 +72,9 @@ def delete_targets(
             continue
 
         try:
-            if os.path.isdir(target.path):
+            if os.path.islink(target.path):
+                os.unlink(target.path)
+            elif os.path.isdir(target.path):
                 shutil.rmtree(target.path)
             elif os.path.exists(target.path):
                 os.unlink(target.path)

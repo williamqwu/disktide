@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from textual import on, work
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -159,23 +159,37 @@ class CleanupScreen(Screen):
             callback=self._on_modal_result,
         )
 
-    def _on_modal_result(self, confirmed: bool) -> None:
+    def _on_modal_result(self, action: str | None) -> None:
         """Handle modal result."""
-        if not confirmed:
+        if action is None:
             return
         selected_targets = [
             t for t in self._targets if t.path in self._selected
         ]
-        self._do_delete(selected_targets)
+        self._do_delete(
+            selected_targets,
+            dry_run=(action == CleanupModal.DRY_RUN),
+        )
 
     @work(thread=True)
-    def _do_delete(self, targets: list[CleanupTarget]) -> None:
+    def _do_delete(
+        self, targets: list[CleanupTarget], dry_run: bool = False
+    ) -> None:
         """Perform deletion in a worker thread."""
-        result = delete_targets(targets)
+        result = delete_targets(targets, dry_run=dry_run)
         self.app.call_from_thread(self._on_delete_complete, result)
 
     def _on_delete_complete(self, result) -> None:
         """Handle deletion completion."""
+        is_dry_run = bool(result.results) and all(r.dry_run for r in result.results)
+        verb = "would delete" if is_dry_run else "deleted"
+        self.notify(
+            f"{len(result.successful)} item(s) {verb}; "
+            f"{humanize.naturalsize(result.total_freed, binary=True)} total.",
+            severity="warning" if result.failed else "information",
+        )
+        if is_dry_run:
+            return
         self._selected.clear()
         if self._root:
             self._scan_targets()

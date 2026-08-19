@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 CURRENT_VERSION = 3
 
 MIGRATIONS: dict[int, list[str]] = {
@@ -156,4 +158,11 @@ def migrate(conn) -> None:
     # VACUUM to reclaim disk space after destructive migrations
     # (must run outside a transaction)
     if ran_destructive:
-        conn.execute("VACUUM")
+        try:
+            conn.execute("VACUUM")
+        except sqlite3.Error:
+            # VACUUM only reclaims freed space; it needs a temporary copy
+            # of the database, which a full disk can refuse. The migration
+            # itself already committed above, so skip reclamation rather
+            # than fail the whole connection over an optimization.
+            pass

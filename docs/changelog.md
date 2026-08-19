@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.1.7
+
+Since `e174a6a` (v0.1.6 release).
+
+**Branding**
+
+- **change** The product and canonical executable are now named `fsmonitor`. The Python distribution and legacy `fsmonitor-cli` executable remain available for package-index and command compatibility, and the existing XDG config/data directories are retained so settings and snapshot history survive the rename.
+
+**Explorer**
+
+- **fix** The tree's quantitative sort now follows the active bar metric. With the bar toggled to file count (`t`), directories were still ordered by bytes; the default sort now orders by the active metric (count or size), matching what the treemap and sunburst already do, and toggling the metric re-sorts the tree. Name and modified-time sorts remain metric-independent. The sort indicator reflects this (`Sort: Files` when sorting by the count metric).
+- **fix** The tree cursor is no longer frozen after a rescan. The tree is `display: none` during a scan, so it loses focus; nothing restored it afterward, leaving arrow keys controlling whatever grabbed focus while it was hidden. The explorer now refocuses the tree once the scan completes, and a reload pins the cursor to the root so it's always live and visible.
+
+**FS Overview**
+
+- **feat** The single **Speed** column is replaced by a **Storage** column of facet badges that break the conflated speed heuristic into orthogonal physical properties. The first badge is the *medium* (`Flash` / `HDD` / `RAM` / `Network` / `?`); it is followed by any detected *transforms* — `RAID` (md device), `Encrypted` (dm-crypt, via a `CRYPT-*` sysfs uuid), `CoW` (btrfs/zfs), and `Compressed` (a `compress=` mount option) — each materially shifting the performance profile yet invisible to the flash-vs-HDD axis. Transforms are detected once at load with no extra I/O. The detail modal gains a matching **Attributes** row. The medium badge already encodes locality, so a network mount shows `Network` with no redundant `Local` badge. The classifier (`sysinfo.storage_class`) is now the single source of truth shared by every view, and newly recognises RAM-backed filesystems (`tmpfs`/`ramfs`), which previously fell through to "Unknown".
+- **feat** New opt-in **Benchmark mount** action (`b`): an on-demand throughput probe of the highlighted mount, since the storage-class badges are only heuristics. Because it writes a temporary file, it is gated behind a confirm prompt (press `b` again, muscle-memory friendly) so a stray keystroke never starts disk I/O. The probe atomically creates a unique mode-0600 temp file, writes ≤256 MiB (strictly capped at 25% of free space and refused when less than 1 MiB is safe), `fsync`s, drops the page cache via `posix_fadvise(DONTNEED)`, and reads back cold — reporting buffered-write and approximate cold-read bandwidth without root. The result is recorded per mount for the life of the screen and shown as a **Measured** row when that row is reopened. New module: `scanner/benchmark.py`.
+- **fix** "Used" and "Usage %" no longer over-report by the root-reserved block count. The screen computed `used = total - f_bavail`, which folds the unprivileged-user reservation (the default ~5% on ext4) into used space — on a typical root filesystem this nearly doubled the reported usage versus `df` (e.g. 11.4% shown vs 7% real, a 48 GB overstatement). It now follows `df` semantics exactly: `used = (f_blocks - f_bfree) * f_frsize`, `free = f_bavail * f_frsize`, and `usage_pct = used / (used + free)`. The reclaimed gap is exposed as a new **Reserved** row in the per-filesystem detail modal.
+- **fix** The aggregate summary (Total / Used / proportional bar) no longer double-counts capacity for devices mounted at more than one path. Bind mounts and btrfs subvolumes report the full pool size from each `statvfs`, so summing raw mount entries inflated the totals; the summary now de-duplicates by backing device first, and its percentage uses the same `used / (used + available)` denominator as the per-mount rows. The per-mount table still lists every mountpoint.
+- **fix** A stale NFS/CIFS mount can no longer wedge the loader on the spinner forever. `statvfs` on network filesystems now runs under a 3 s watchdog (local filesystems, which never block, are stat'd directly) and a timed-out mount is skipped.
+- **fix** Non-ASCII mountpoints are no longer mojibaked. `/proc/mounts` octal escapes (`\040` etc.) were decoded with `encode('utf-8').decode('unicode_escape')`, which reinterpreted UTF-8 bytes as Latin-1 (`/mnt/café` → `/mnt/cafÃ©`). A targeted octal-only unescape (`unescape_mount_path`) replaces it, shared across `sysinfo` and the overview screen.
+- **fix** The usage bar clamps over-100% values (the `*` over-quota case) instead of emitting an over-length bar with a negative empty count.
+- **fix** Refreshing (`r`) is now `exclusive`, so mashing the key can't stack overlapping loader threads.
+
+**Block Devices**
+
+- **feat** The FS Overview gains a second **Block Devices** panel that enumerates the whole block layer via `lsblk -J -b`, surfacing storage that `/proc/mounts` + `statvfs` fundamentally cannot see: unmounted-but-formatted filesystems, unformatted partitions, and raw disks with no detected filesystem or child device. Each disk is shown with its partition tree and a colour-coded status (`● mounted`, `○ not mounted`, `○ unformatted`, `○ raw / no filesystem`); the panel header reports disks with no mounted filesystem and their total capacity without implying the contents are safe to reclaim. Row-select opens a per-device detail modal (model, media type, partition list). The panel hides itself when `lsblk` is unavailable. New module: `scanner/blockdev.py`.
+
+**Scanner**
+
+- **fix** `sysinfo._find_block_device` now strips the partition suffix correctly for `mmcblk0p1` → `mmcblk0` (previously `mmcblk0p`) and keeps `loop0` / `dm-0` whole, so the Speed (HDD/SSD) column resolves on eMMC/SD and loop devices.
+- **fix** `_find_block_device` no longer mangles software-RAID devices. The trailing-digit strip turned `md0` into `md`, so the sysfs rotational lookup missed and the medium showed "Unknown"; the md number is part of the device identity and is now kept (`md0`, `md127`, partitionable `md_d0`), while md partitions (`md0p1`) strip to the parent like nvme.
+- **feat** New facet helpers in `sysinfo`: `classify_medium` (flash/hdd/ram/network/unknown), `detect_transforms` (cheap, no-I/O detection of RAID / dm-crypt / CoW / compression), and `facet_labels` (ordered medium-then-transform badge pairs). These back the FS-Overview Storage column and are consumable individually by downstream tuning.
+
+**Settings**
+
+- **fix** The System Information **Storage** line now uses the shared `storage_class` classifier, so it agrees with the FS-Overview screen. It previously appended only `(HDD)`/`(SSD)` from the rotational bit, ignoring network and RAM-backed mounts entirely.
+
+**Terminal Compatibility**
+
+- **fix** Launching with the standard `NO_COLOR` environment variable no longer crashes during Textual's monochrome render pass. The app selects Textual's no-color-safe ANSI path while still emitting a colorless UI.
+
+**Cleanup**
+
+- **fix** The TUI's **Dry Run** button now actually routes through `delete_targets(..., dry_run=True)` and reports what would be permanently deleted without modifying the filesystem. The previous button dismissed the modal but never invoked the action.
+- **fix** A cleanup target that is a symlink to a directory now unlinks the symlink itself. The old `os.path.isdir()`-first branch sent it to `shutil.rmtree()`, which failed on a directory symlink.
+- **docs** Cleanup is now described accurately as experimental permanent deletion: there is no trash/quarantine, undo, stale-target revalidation, or persistent audit trail yet.
+
+**Maintenance**
+
+- **remove** Deleted the never-integrated JSON `ScanCache`, its isolated tests, and the no-op `scan --force-rescan` flag. Scans have always gone directly through `ScanEngine`; the app no longer claims an XDG cache directory.
+- **remove** Deleted inert configuration keys and Settings controls that were serialized but never affected behavior: `scan.exclude_patterns`, the `[cleanup]` rule/confirmation keys, `ui.default_sort`, and `ui.show_hidden`. Existing TOML files remain loadable because unknown keys are ignored; the retired keys disappear on the next save.
+- **remove** Deleted the Explorer's unimplemented `/` search binding instead of leaving a visible no-op action in the key map.
+- **docs** Updated the architecture guide to schema v3 (interned paths plus baseline/delta snapshots), refreshed FS Overview and filesystem-touchpoint documentation, and removed obsolete cache references.
+
+**Storage**
+
+- **fix** A full disk no longer crashes launch. The SQLite database is set up eagerly at startup, and its setup requires writes — `os.makedirs` for the data dir (first launch), then `PRAGMA journal_mode=WAL` (the `-wal`/`-shm` sidecars) and the schema migrations. On a full disk any of these raised `OSError`/`sqlite3.OperationalError`, killing the TUI at the exact moment a user needs it to find what's filling the disk. `Database.connect()` now degrades to an in-memory database when the on-disk location is unwritable: the app launches and the explorer/cleanup stay fully usable, only snapshots and history aren't persisted for that session. The post-migration `VACUUM` is now non-fatal for the same reason (it needs temporary space the migration itself already committed without).
+- **fix** The degraded database state is now surfaced to the user rather than failing silently or assuming every failure is a full disk. The TUI shows a one-time `Running without persistence` warning on any launch path (welcome screen or straight into the explorer), the Settings screen warns when it can't save (`Settings not saved`), and `scan --snapshot` / `watch` report that snapshots can't be persisted. Degraded `watch` runs no longer accumulate throwaway snapshots in memory, and the database is closed on every exit path.
+
 ## v0.1.6
 
 Since `407136d` (v0.1.5 release).
@@ -31,6 +91,7 @@ Since `407136d` (v0.1.5 release).
 **Docs**
 
 - **docs** Architecture guide gains a short subsection on live-scan rendering (the snapshot path, the depth damping, the auto-gate) under Visualization.
+- **docs** New blog post [docs/blogs/2026-05-24-reading-the-sunburst.md](blogs/2026-05-24-reading-the-sunburst.md): a short field guide to the chart in the right panel, with the academic lineage of sunburst / radial space-filling visualizations (Shneiderman 1991 treemap, Stasko and Zhang 2000 sunburst), the disk-usage tool lineage that brought it to desktops (Filelight, DaisyDisk, Baobab), how the radial form maps to a Linux filesystem, and a key-by-key reading guide for our implementation.
 
 ## v0.1.5
 
@@ -39,7 +100,7 @@ Since `6cb0459` (v0.1.4 release).
 **Scanner**
 
 - **fix** Symlink scanning is now one syscall per entry. The walker previously did three (`entry.stat` for the link, `os.readlink` for the target text, `os.stat` to follow the link); on slow shared storage with many symlinks each extra syscall is a server round-trip, blowing up scan times by an order of magnitude. `os.readlink` and the target-following `os.stat` are now deferred to `classify_symlink`, called on demand by the Details panel and the `i` action; the result is cached on the node. Measured on one cluster home (6.1M files, 100 GB on NFS): 2386 s on the pre-fix build, 195 s after, a ~12x recovery and ~20% under the v0.1.3 baseline.
-- **feat** On top of that, the engine eagerly classifies the first 100 symlinks it sees at the scan root so a typical `fsmon ~` still shows `→ /target` arrows for the handful of links at home root. The cap is hard, so it cannot regress the case where the scan root itself contains hundreds of thousands of symlinks.
+- **feat** On top of that, the engine eagerly classifies the first 100 symlinks it sees at the scan root so a typical `fsmonitor ~` still shows `→ /target` arrows for the handful of links at home root. The cap is hard, so it cannot regress the case where the scan root itself contains hundreds of thousands of symlinks.
 - **fix** Directory scans no longer recurse forever on a filesystem cycle. A bind mount or other setup that makes a directory reappear inside itself used to send the scan into an infinite loop; the walker now tracks each directory's `(st_dev, st_ino)` identity along the path from the scan root and stops when a directory is its own ancestor, marking it `(loop)` in the tree and the Details panel. Symlink loops were already prevented; this closes the non-symlink case.
 
 **Progress**

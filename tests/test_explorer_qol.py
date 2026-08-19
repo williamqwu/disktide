@@ -125,6 +125,25 @@ def test_invalid_metric_is_ignored():
     assert tree.metric == "size"
 
 
+def test_sorted_quantitative_follows_metric():
+    """The quantitative sort orders by the active metric, not always by size."""
+    tree = _tree()  # big: 900 B / 2 files, many: 100 B / 8 files
+    children = tree._fs_root.children
+    # Size mode: 'big' leads.
+    assert [n.name for n in tree._sorted(children)] == ["big", "many"]
+    # Count mode: 'many' leads. (set the field directly to isolate _sorted)
+    tree._metric = "count"
+    assert [n.name for n in tree._sorted(children)] == ["many", "big"]
+
+
+def test_sorted_name_and_mtime_ignore_metric():
+    tree = _tree()
+    children = tree._fs_root.children
+    tree._sort_key = "name"
+    tree._metric = "count"
+    assert [n.name for n in tree._sorted(children)] == ["big", "many"]  # A->Z
+
+
 # --- integration tests: explorer key bindings -----------------------------
 
 
@@ -182,7 +201,7 @@ def test_press_t_toggles_bar_metric(tmp_path):
             await pilot.press("t")
             await pilot.pause()
             assert tree.metric == "count"
-            # _refresh_labels relabeled the materialized child nodes in place.
+            # Child labels now show file counts (size sort reloads to re-order).
             assert any("files" in c.label.plain for c in tree.root.children)
 
             await pilot.press("t")
@@ -192,8 +211,9 @@ def test_press_t_toggles_bar_metric(tmp_path):
     asyncio.run(go())
 
 
-def test_toggle_metric_preserves_cursor(tmp_path):
-    """Toggling metric refreshes labels in place; the cursor must not jump."""
+def test_toggle_metric_preserves_cursor_under_name_sort(tmp_path):
+    """Under name/mtime sort the order is metric-independent, so toggling the
+    metric only relabels in place and the cursor must not jump."""
     _make_tree_dir(tmp_path)
 
     async def go():
@@ -203,6 +223,8 @@ def test_toggle_metric_preserves_cursor(tmp_path):
         async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree", SizeTree)
+            await pilot.press("s")  # size -> name sort (order no longer follows metric)
+            await pilot.pause()
             await pilot.press("down", "down")
             await pilot.pause()
             line_before = tree.cursor_line
@@ -210,8 +232,67 @@ def test_toggle_metric_preserves_cursor(tmp_path):
 
             await pilot.press("t")
             await pilot.pause()
-            # A full reload() would reset the cursor to the root (line 0).
+            # Name sort: order is unchanged, so the label refresh keeps the cursor.
             assert tree.cursor_line == line_before
+
+    asyncio.run(go())
+
+
+def test_toggle_metric_resorts_under_quantitative_sort(tmp_path):
+    """Bug fix: under the default (size) sort, toggling to file count must
+    actually reorder the tree so the count-heavy dir leads."""
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        app = FSMonitorApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _wait_for_explorer(pilot, app)
+            tree = app.screen.query_one("#size-tree", SizeTree)
+            # Size order: 'big' (100 KB blob) leads.
+            assert tree.root.children[0].data.name == "big"
+
+            await pilot.press("t")  # -> file count
+            await pilot.pause()
+            assert tree.metric == "count"
+            # Count order: 'many' (20 files) now leads.
+            assert tree.root.children[0].data.name == "many"
+
+    asyncio.run(go())
+
+
+def test_cursor_usable_after_rescan(tmp_path):
+    """Bug fix: the tree regains focus and a live cursor after a rescan."""
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        app = FSMonitorApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _wait_for_explorer(pilot, app)
+            tree = app.screen.query_one("#size-tree", SizeTree)
+
+            await pilot.press("r")  # open the rescan confirm modal
+            await pilot.pause()
+            await pilot.press("r")  # confirm -> rescan starts (tree hidden, unfocused)
+
+            # Wait for the rescan to finish AND focus to return to the tree.
+            for _ in range(40):
+                await pilot.pause(delay=0.1)
+                if (
+                    not app.screen._scan_in_progress
+                    and app.screen._root is not None
+                    and app.focused is tree
+                ):
+                    break
+
+            assert app.focused is tree
+            assert tree.cursor_line == 0  # reload pins the cursor to the root
+            await pilot.press("down")
+            await pilot.pause()
+            assert tree.cursor_line == 1  # cursor is live, not frozen
 
     asyncio.run(go())
 

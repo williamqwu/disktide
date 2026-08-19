@@ -13,9 +13,122 @@ from fs_monitor.scanner.sysinfo import (
     detect_fs_type,
     detect_storage_type,
     detect_system_info,
+    storage_class,
+    classify_medium,
+    detect_transforms,
+    facet_labels,
+    unescape_mount_path,
     _compute_recommended_workers,
     _find_block_device,
 )
+
+
+class TestStorageClass:
+    def test_ssd(self):
+        assert storage_class("ext4", False, False) == ("Fast (SSD)", "green")
+
+    def test_hdd(self):
+        assert storage_class("ext4", False, True) == ("Medium (HDD)", "yellow")
+
+    def test_network_beats_rotational(self):
+        # A network mount has no meaningful rotational bit; locality wins.
+        assert storage_class("nfs4", True, False) == ("Slow (Network)", "red")
+
+    def test_ram_backed(self):
+        # Regression: tmpfs/ramfs used to fall through to "Unknown".
+        assert storage_class("tmpfs", False, None) == ("Fast (RAM)", "green")
+        assert storage_class("ramfs", False, None) == ("Fast (RAM)", "green")
+
+    def test_unknown_fallback(self):
+        assert storage_class("xfs", False, None) == ("Unknown", "dim")
+
+
+class TestFacets:
+    def test_classify_medium(self):
+        assert classify_medium("ext4", False, False) == "flash"
+        assert classify_medium("ext4", False, True) == "hdd"
+        assert classify_medium("tmpfs", False, None) == "ram"
+        assert classify_medium("nfs4", True, None) == "network"
+        assert classify_medium("xfs", False, None) == "unknown"
+
+    def test_transforms_raid(self):
+        with patch("os.path.realpath", side_effect=lambda p: p):
+            assert detect_transforms("/dev/md0", "xfs", "rw") == ["RAID"]
+
+    def test_transforms_cow_and_compress(self):
+        with patch("os.path.realpath", side_effect=lambda p: p):
+            t = detect_transforms("/dev/sda1", "btrfs", "rw,compress=zstd:3")
+            assert t == ["CoW", "Compressed"]
+
+    def test_transforms_none(self):
+        with patch("os.path.realpath", side_effect=lambda p: p):
+            assert detect_transforms("/dev/sda1", "ext4", "rw,noatime") == []
+
+    def test_transforms_encrypted(self):
+        # dm-crypt advertises a CRYPT-* uuid in sysfs.
+        with patch("os.path.realpath", side_effect=lambda p: "/dev/dm-0"):
+            with patch("builtins.open", mock_open(read_data="CRYPT-LUKS2-abc\n")):
+                assert detect_transforms("/dev/mapper/secret", "ext4") == ["Encrypted"]
+
+    def test_facet_labels_order_medium_then_transforms(self):
+        labels = facet_labels("xfs", False, False, ["RAID"])
+        assert labels == [("Flash", "green"), ("RAID", "cyan")]
+
+    def test_facet_labels_network_no_local_badge(self):
+        labels = facet_labels("nfs4", True, None, [])
+        assert labels == [("Network", "red")]
+
+
+class TestUnescapeMountPath:
+    def test_plain_path_unchanged(self):
+        assert unescape_mount_path("/home/user") == "/home/user"
+
+    def test_octal_space(self):
+        assert unescape_mount_path(r"/mnt/my\040drive") == "/mnt/my drive"
+
+    def test_octal_tab_and_newline(self):
+        assert unescape_mount_path(r"/a\011b") == "/a\tb"
+
+    def test_preserves_non_ascii(self):
+        # The old encode/decode trick corrupted this to '/mnt/cafÃ©'.
+        assert unescape_mount_path(r"/mnt/café\040x") == "/mnt/café x"
+
+
+class TestFindBlockDevicePartitionStripping:
+    def _check(self, devnode, expected):
+        mounts = f"{devnode} / ext4 rw 0 0\n"
+        with patch("builtins.open", mock_open(read_data=mounts)):
+            with patch("os.path.realpath", side_effect=lambda p: p):
+                assert _find_block_device("/") == expected
+
+    def test_sata(self):
+        self._check("/dev/sda1", "sda")
+
+    def test_nvme(self):
+        self._check("/dev/nvme0n1p1", "nvme0n1")
+
+    def test_mmcblk(self):
+        self._check("/dev/mmcblk0p1", "mmcblk0")
+
+    def test_loop_kept_whole(self):
+        self._check("/dev/loop0", "loop0")
+
+    def test_device_mapper_kept_whole(self):
+        self._check("/dev/dm-0", "dm-0")
+
+    def test_md_raid_number_kept(self):
+        # Regression: rstrip("0-9") used to mangle "md0" -> "md", so the
+        # sysfs rotational lookup missed and speed showed "Unknown".
+        self._check("/dev/md0", "md0")
+
+    def test_md_raid_high_number_kept(self):
+        self._check("/dev/md127", "md127")
+
+    def test_md_raid_partition_stripped(self):
+        self._check("/dev/md0p1", "md0")
+
+    def test_md_partitionable_kept(self):
+        self._check("/dev/md_d0", "md_d0")
 
 
 class TestDetectCpuCount:

@@ -1,4 +1,4 @@
-"""Historical trends and alerts dashboard screen."""
+"""Historical snapshot trends and directory-diff screen."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ _MIN_CHANGE_BYTES = 0
 
 
 class MonitorScreen(Screen):
-    """Monitoring dashboard with trends and alerts."""
+    """Monitoring dashboard with snapshot trends and directory diffs."""
 
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=True),
