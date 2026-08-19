@@ -13,6 +13,10 @@ src/fs_monitor/
   metrics.py             Size vs. file-count view metric helpers
   rendering.py           Process-wide safe-rendering state
 
+  domain/
+    metrics.py           MetricId + StorageMeasurements semantics
+    policy.py            Explicit ScanPolicy metadata
+
   scanner/
     benchmark.py         Opt-in mount throughput probe
     blockdev.py          lsblk-backed block-device inventory
@@ -90,6 +94,21 @@ When `workers` is set in config or CLI, the auto-detection is skipped.
 
 `ProgressThrottle` batches callbacks to a 100ms interval to avoid UI thrashing. It tracks dirs scanned, files scanned, total size, and current path. A `force_report()` call flushes immediately on scan completion.
 
+Progress reports Logical bytes because Unique requires global hardlink
+reconciliation. The final tree additionally carries Allocated and Unique.
+
+### Measurement and Scope Policy
+
+- Logical is the existing `st_size` payload aggregate.
+- Allocated is `st_blocks * 512` per visible file/symlink path.
+- Unique assigns one deterministic lexical owner per `(st_dev, st_ino)`.
+- Missing `st_blocks` remains unavailable rather than becoming zero.
+- One-filesystem mode stops at device boundaries and keeps an `xdev` node.
+- Descendant pseudo mounts are excluded by default; an explicit root is allowed.
+- Max-depth and policy exclusions are separate from access errors.
+
+See `docs/adr/0001-storage-metric-semantics.md` for the complete contract.
+
 ### Error Resilience
 
 Each `os.scandir()` entry is wrapped in try/except. A permission error on one directory doesn't abort the scan -- the error is stored in `FSNode.error` and the scan continues with partial results.
@@ -113,6 +132,8 @@ class FSNode:
     path: str              # absolute path
     size: int              # subtree total (files + children)
     own_size: int          # own bytes, or direct file/link bytes for a dir
+    allocated_size: int | None
+    unique_allocated_size: int | None
     file_count: int
     dir_count: int
     is_dir: bool
@@ -129,7 +150,11 @@ Key behaviors:
 - `find(path)` -- recursive path lookup
 - `size_percent(parent_size)` -- percentage of parent
 
-The model also carries partial-access aggregates, lazy symlink classification fields, and a bind-mount/cycle marker. Those fields let the UI surface incomplete scans without re-walking the tree.
+The model also carries `StorageMeasurements`, device/inode/link identity,
+hardlink ownership, partial-access aggregates, lazy symlink classification,
+filesystem-boundary/pseudo exclusion markers, max-depth truncation, and the
+root `ScanPolicy`. Those fields let every presentation consume the same
+semantics without re-walking the filesystem.
 
 ### Snapshot
 

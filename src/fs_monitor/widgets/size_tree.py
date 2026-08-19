@@ -6,7 +6,14 @@ from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 from rich.text import Text
 
-from fs_monitor.metrics import METRICS, metric_text, metric_value
+from fs_monitor.metrics import (
+    DEFAULT_METRIC,
+    METRICS,
+    metric_text,
+    metric_value,
+    metric_value_or_zero,
+    normalize_metric,
+)
 from fs_monitor.models.tree import FSNode
 from fs_monitor.rendering import bar_chars, denied_glyph, link_arrow, partial_glyph
 
@@ -25,13 +32,13 @@ class SizeTree(Tree[FSNode]):
         self,
         root_node: FSNode | None = None,
         sort_key: str = "size",
-        metric: str = "size",
+        metric: str = DEFAULT_METRIC,
         **kwargs,
     ):
         label = root_node.name if root_node else "/"
         super().__init__(label, data=root_node, **kwargs)
         self._sort_key = sort_key
-        self._metric = metric if metric in METRICS else "size"
+        self._metric = normalize_metric(metric)
         self._fs_root = root_node
         if root_node:
             self.root.expand()
@@ -49,14 +56,15 @@ class SizeTree(Tree[FSNode]):
 
     @property
     def metric(self) -> str:
-        """Active bar metric: 'size' (byte share) or 'count' (file-count share)."""
+        """Active canonical storage metric identifier."""
         return self._metric
 
     @metric.setter
     def metric(self, value: str) -> None:
-        if value not in METRICS or value == self._metric:
+        normalized = normalize_metric(value)
+        if normalized not in METRICS or normalized == self._metric:
             return
-        self._metric = value
+        self._metric = normalized
         # When the quantitative sort is active the ordering depends on the
         # metric, so the tree has to be re-sorted (a reload) for the new
         # order to take effect. For name/mtime sorts only the labels change,
@@ -117,16 +125,16 @@ class SizeTree(Tree[FSNode]):
         else:  # quantitative (default): largest of the active metric first
             return sorted(
                 children,
-                key=lambda n: (-metric_value(n, self._metric), n.name.lower()),
+                key=lambda n: (
+                    -metric_value_or_zero(n, self._metric),
+                    n.name.lower(),
+                ),
             )
 
     def _make_label(self, node: FSNode) -> Text:
         """Create a rich label with name, a metric value, and a proportional bar.
 
-        The active metric (`self._metric`) governs both the inline value
-        shown for a directory and what its bar measures. Files always show
-        their byte size: a file's "file count" is trivially 1, so there is
-        nothing meaningful to toggle.
+        The active metric governs both the inline value and directory bar.
         """
         text = Text()
 
@@ -147,10 +155,24 @@ class SizeTree(Tree[FSNode]):
         else:
             text.append(node.name, style="white")
 
-        # Metric value: directories follow the active metric; files always
-        # show their byte size, since a file's count is trivially 1.
-        value = metric_text(node, self._metric if node.is_dir else "size")
+        value = metric_text(node, self._metric)
         text.append(f"  {value}", style="dim")
+
+        if node.is_hardlink:
+            if node.is_hardlink_duplicate and node.hardlink_owner_path:
+                owner = node.hardlink_owner_path.rsplit("/", 1)[-1]
+                text.append(f"  [hardlink → {owner}]", style="dim magenta")
+            else:
+                text.append(
+                    f"  [hardlink owner; {node.link_count} links]",
+                    style="dim magenta",
+                )
+
+        if node.excluded:
+            marker = "xdev" if node.filesystem_boundary else node.exclusion_reason
+            text.append(f"  [{marker or 'excluded'}]", style="bold yellow")
+        elif node.depth_limited:
+            text.append("  [max-depth]", style="bold yellow")
 
         # Proportional bar for directories (share of the scan root total)
         if node.is_dir:
@@ -187,9 +209,10 @@ class SizeTree(Tree[FSNode]):
         if root is None:
             return None
         total = metric_value(root, self._metric)
-        if total <= 0:
+        value = metric_value(node, self._metric)
+        if total is None or value is None or total <= 0:
             return None
-        return metric_value(node, self._metric) / total
+        return value / total
 
     def _refresh_labels(self) -> None:
         """Re-render every materialized node's label in place.
@@ -213,6 +236,7 @@ class SizeTree(Tree[FSNode]):
         return self._sort_key
 
     def toggle_metric(self) -> str:
-        """Switch the bar between size and file-count; return the new metric."""
-        self.metric = "count" if self._metric == "size" else "size"
+        """Cycle through all storage metrics; return the new metric."""
+        index = METRICS.index(self._metric)
+        self.metric = METRICS[(index + 1) % len(METRICS)]
         return self._metric

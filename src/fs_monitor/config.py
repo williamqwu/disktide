@@ -39,6 +39,8 @@ def format_duration(seconds: int) -> str:
 class ScanConfig:
     max_depth: int | None = None
     workers: int | None = None
+    one_file_system: bool = False
+    exclude_pseudo_filesystems: bool = True
 
 
 @dataclass
@@ -136,6 +138,10 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append(f"max_depth = {config.scan.max_depth}")
     if config.scan.workers is not None:
         lines.append(f"workers = {config.scan.workers}")
+    if config.scan.one_file_system:
+        lines.append("one_file_system = true")
+    if not config.scan.exclude_pseudo_filesystems:
+        lines.append("exclude_pseudo_filesystems = false")
     lines.append("")
 
     lines.append("[monitor]")
@@ -193,6 +199,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         scan = data["scan"]
         config.scan.max_depth = scan.get("max_depth")
         config.scan.workers = scan.get("workers")
+        config.scan.one_file_system = scan.get("one_file_system", False)
+        config.scan.exclude_pseudo_filesystems = scan.get(
+            "exclude_pseudo_filesystems", True
+        )
 
     if "monitor" in data:
         monitor = data["monitor"]

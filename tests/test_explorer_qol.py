@@ -25,43 +25,46 @@ def _tree() -> SizeTree:
     """A two-level tree where one child dominates by size, the other by count."""
     root = FSNode(
         name="root", path="/root", size=1000, is_dir=True, depth=0,
+        allocated_size=1000, unique_allocated_size=950,
         file_count=10, dir_count=2,
     )
     big = FSNode(
         name="big", path="/root/big", size=900, is_dir=True, depth=1,
+        allocated_size=100, unique_allocated_size=50,
         file_count=2,
     )
     many = FSNode(
         name="many", path="/root/many", size=100, is_dir=True, depth=1,
+        allocated_size=900, unique_allocated_size=900,
         file_count=8,
     )
     root.children = [big, many]
     return SizeTree(root)
 
 
-def test_default_metric_is_size():
-    assert _tree().metric == "size"
+def test_default_metric_is_logical():
+    assert _tree().metric == "logical"
 
 
-def test_toggle_metric_flips_and_returns():
+def test_toggle_metric_cycles_all_measurements():
     tree = _tree()
-    assert tree.toggle_metric() == "count"
-    assert tree.metric == "count"
-    assert tree.toggle_metric() == "size"
-    assert tree.metric == "size"
+    assert [tree.toggle_metric() for _ in range(4)] == [
+        "allocated", "unique", "files", "logical",
+    ]
+    assert tree.metric == "logical"
 
 
-def test_size_mode_label_shows_bytes_and_size_share():
-    tree = _tree()  # size mode (default)
+def test_logical_mode_label_shows_bytes_and_share():
+    tree = _tree()
     big = tree._fs_root.children[0]  # 900 / 1000 bytes
     label = tree._make_label(big).plain
     assert "900 Bytes" in label
     assert "90.0%" in label
 
 
-def test_count_mode_label_shows_file_count_and_count_share():
+def test_files_mode_label_shows_file_count_and_share():
     tree = _tree()
-    tree.metric = "count"
+    tree.metric = "files"
     many = tree._fs_root.children[1]  # 8 / 10 files
     label = tree._make_label(many).plain
     assert "8 files" in label
@@ -69,14 +72,14 @@ def test_count_mode_label_shows_file_count_and_count_share():
     assert "Bytes" not in label  # the size text is replaced, not appended
 
 
-def test_count_mode_share_differs_from_size_share():
+def test_files_mode_share_differs_from_logical_share():
     """The point of the toggle: 'big' leads by size, 'many' leads by count."""
     tree = _tree()
     big, many = tree._fs_root.children
 
     size_big = tree._make_label(big).plain
     size_many = tree._make_label(many).plain
-    tree.metric = "count"
+    tree.metric = "files"
     count_big = tree._make_label(big).plain
     count_many = tree._make_label(many).plain
 
@@ -84,36 +87,34 @@ def test_count_mode_share_differs_from_size_share():
     assert "20.0%" in count_big and "80.0%" in count_many
 
 
-def test_files_always_show_size_even_in_count_mode():
-    """A file's count is trivially 1, so leaves keep showing their byte size."""
+def test_file_leaf_follows_files_metric():
     root = FSNode(name="r", path="/r", size=50, is_dir=True, file_count=1)
     leaf = FSNode(name="a.txt", path="/r/a.txt", size=50, file_count=1)
     root.children = [leaf]
     tree = SizeTree(root)
-    tree.metric = "count"
+    tree.metric = "files"
     label = tree._make_label(leaf).plain
-    assert "50 Bytes" in label
-    assert "file" not in label  # no "1 file" noise for a leaf
+    assert "1 file" in label
 
 
-def test_count_mode_singular_grammar():
+def test_files_mode_singular_grammar():
     root = FSNode(name="r", path="/r", size=10, is_dir=True, file_count=1)
     sub = FSNode(name="sub", path="/r/sub", size=10, is_dir=True, file_count=1)
     root.children = [sub]
     tree = SizeTree(root)
-    tree.metric = "count"
+    tree.metric = "files"
     label = tree._make_label(sub).plain
     assert "1 file" in label
     assert "1 files" not in label
 
 
-def test_count_mode_handles_zero_file_root():
+def test_files_mode_handles_zero_file_root():
     """An empty scan root (0 files) must not divide by zero in count mode."""
     root = FSNode(name="empty", path="/empty", size=0, is_dir=True, file_count=0)
     sub = FSNode(name="sub", path="/empty/sub", size=0, is_dir=True, file_count=0)
     root.children = [sub]
     tree = SizeTree(root)
-    tree.metric = "count"
+    tree.metric = "files"
     label = tree._make_label(sub).plain
     assert "0 files" in label
     assert "%" not in label  # bar skipped instead of dividing by zero
@@ -122,17 +123,17 @@ def test_count_mode_handles_zero_file_root():
 def test_invalid_metric_is_ignored():
     tree = _tree()
     tree.metric = "bogus"
-    assert tree.metric == "size"
+    assert tree.metric == "logical"
 
 
 def test_sorted_quantitative_follows_metric():
     """The quantitative sort orders by the active metric, not always by size."""
     tree = _tree()  # big: 900 B / 2 files, many: 100 B / 8 files
     children = tree._fs_root.children
-    # Size mode: 'big' leads.
+    # Logical mode: 'big' leads.
     assert [n.name for n in tree._sorted(children)] == ["big", "many"]
-    # Count mode: 'many' leads. (set the field directly to isolate _sorted)
-    tree._metric = "count"
+    # Files mode: 'many' leads. (set the field directly to isolate _sorted)
+    tree._metric = "files"
     assert [n.name for n in tree._sorted(children)] == ["many", "big"]
 
 
@@ -140,7 +141,7 @@ def test_sorted_name_and_mtime_ignore_metric():
     tree = _tree()
     children = tree._fs_root.children
     tree._sort_key = "name"
-    tree._metric = "count"
+    tree._metric = "files"
     assert [n.name for n in tree._sorted(children)] == ["big", "many"]  # A->Z
 
 
@@ -186,7 +187,7 @@ def test_press_y_copies_highlighted_path(tmp_path):
     asyncio.run(go())
 
 
-def test_press_t_toggles_bar_metric(tmp_path):
+def test_press_t_cycles_bar_metric(tmp_path):
     _make_tree_dir(tmp_path)
 
     async def go():
@@ -196,17 +197,20 @@ def test_press_t_toggles_bar_metric(tmp_path):
         async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree", SizeTree)
-            assert tree.metric == "size"
+            assert tree.metric == "logical"
 
             await pilot.press("t")
             await pilot.pause()
-            assert tree.metric == "count"
-            # Child labels now show file counts (size sort reloads to re-order).
+            assert tree.metric == "allocated"
+
+            await pilot.press("t", "t")
+            await pilot.pause()
+            assert tree.metric == "files"
             assert any("files" in c.label.plain for c in tree.root.children)
 
             await pilot.press("t")
             await pilot.pause()
-            assert tree.metric == "size"
+            assert tree.metric == "logical"
 
     asyncio.run(go())
 
@@ -253,9 +257,9 @@ def test_toggle_metric_resorts_under_quantitative_sort(tmp_path):
             # Size order: 'big' (100 KB blob) leads.
             assert tree.root.children[0].data.name == "big"
 
-            await pilot.press("t")  # -> file count
+            await pilot.press("t", "t", "t")  # -> file count
             await pilot.pause()
-            assert tree.metric == "count"
+            assert tree.metric == "files"
             # Count order: 'many' (20 files) now leads.
             assert tree.root.children[0].data.name == "many"
 
@@ -301,23 +305,38 @@ def test_cursor_usable_after_rescan(tmp_path):
 
 
 def test_metrics_vocabulary():
-    assert METRICS == ("size", "count")
-    assert METRIC_NAMES["size"] == "Size"
-    assert METRIC_NAMES["count"] == "Files"
+    assert METRICS == ("logical", "allocated", "unique", "files")
+    assert METRIC_NAMES["logical"] == "Logical"
+    assert METRIC_NAMES["allocated"] == "Allocated"
+    assert METRIC_NAMES["unique"] == "Unique"
+    assert METRIC_NAMES["files"] == "Files"
 
 
 def test_metric_value_selects_field():
-    node = FSNode(name="d", path="/d", size=4096, is_dir=True, file_count=7)
+    node = FSNode(
+        name="d", path="/d", size=4096, allocated_size=2048,
+        unique_allocated_size=1024, is_dir=True, file_count=7,
+    )
+    assert metric_value(node, "logical") == 4096
+    assert metric_value(node, "allocated") == 2048
+    assert metric_value(node, "unique") == 1024
+    assert metric_value(node, "files") == 7
     assert metric_value(node, "size") == 4096
     assert metric_value(node, "count") == 7
 
 
 def test_metric_text_formats_each_metric():
-    node = FSNode(name="d", path="/d", size=2048, is_dir=True, file_count=12)
-    assert metric_text(node, "size") == "2.0 KiB"
-    assert metric_text(node, "count") == "12 files"
+    node = FSNode(
+        name="d", path="/d", size=2048, allocated_size=1024,
+        unique_allocated_size=512, is_dir=True, file_count=12,
+    )
+    assert metric_text(node, "logical") == "2.0 KiB"
+    assert metric_text(node, "allocated") == "1.0 KiB"
+    assert metric_text(node, "unique") == "512 Bytes"
+    assert metric_text(node, "files") == "12 files"
     one = FSNode(name="d", path="/d", size=10, is_dir=True, file_count=1)
-    assert metric_text(one, "count") == "1 file"  # singular
+    assert metric_text(one, "files") == "1 file"  # singular
+    assert metric_text(one, "allocated") == "Unavailable"
 
 
 # --- unit tests: visualizations honor the metric --------------------------
@@ -327,9 +346,16 @@ def _viz_tree() -> FSNode:
     """Root with one byte-heavy child and one file-count-heavy child."""
     root = FSNode(
         name="root", path="/r", size=1100, is_dir=True, file_count=22, dir_count=2,
+        allocated_size=1100, unique_allocated_size=900,
     )
-    big = FSNode(name="big", path="/r/big", size=1000, is_dir=True, file_count=2)
-    many = FSNode(name="many", path="/r/many", size=100, is_dir=True, file_count=20)
+    big = FSNode(
+        name="big", path="/r/big", size=1000, allocated_size=100,
+        unique_allocated_size=50, is_dir=True, file_count=2,
+    )
+    many = FSNode(
+        name="many", path="/r/many", size=100, allocated_size=1000,
+        unique_allocated_size=850, is_dir=True, file_count=20,
+    )
     root.children = [big, many]
     return root
 
@@ -343,8 +369,8 @@ def test_treemap_rect_area_follows_metric():
         rect = next(r for r in layout.rects if r.node is node)
         return rect.w * rect.h
 
-    size_layout = compute_layout(root, 80, 40, metric="size")
-    count_layout = compute_layout(root, 80, 40, metric="count")
+    size_layout = compute_layout(root, 80, 40, metric="logical")
+    count_layout = compute_layout(root, 80, 40, metric="files")
 
     # 'big' owns most of the bytes; 'many' owns most of the files.
     assert area(size_layout, big) > area(size_layout, many)
@@ -360,8 +386,8 @@ def test_sunburst_arc_span_follows_metric():
         arc = next(a for a in layout.arcs if a.node is node)
         return arc.angle_span
 
-    size_layout = compute_sunburst(root, 80, 40, metric="size")
-    count_layout = compute_sunburst(root, 80, 40, metric="count")
+    size_layout = compute_sunburst(root, 80, 40, metric="logical")
+    count_layout = compute_sunburst(root, 80, 40, metric="files")
 
     assert span(size_layout, big) > span(size_layout, many)
     assert span(count_layout, many) > span(count_layout, big)
@@ -375,8 +401,8 @@ def test_count_mode_treemap_does_not_crash_on_empty_files():
         FSNode(name="b", path="/r/b", size=0, file_count=1),
     ]
     # Size mode: nothing to draw (total bytes 0). Count mode: two leaves.
-    assert not compute_layout(root, 60, 20, metric="size").rects
-    assert compute_layout(root, 60, 20, metric="count").rects
+    assert not compute_layout(root, 60, 20, metric="logical").rects
+    assert compute_layout(root, 60, 20, metric="files").rects
 
 
 def _render_info_panel(node: FSNode, metric: str) -> str:
@@ -393,7 +419,7 @@ def _render_info_panel(node: FSNode, metric: str) -> str:
 
 def test_info_panel_top_items_follow_metric():
     root = _viz_tree()
-    out = _render_info_panel(root, "count")
+    out = _render_info_panel(root, "files")
     assert "Top Items (by files)" in out
     assert "20 files" in out          # 'many'
     assert "90.9%" in out             # 20 of 22 files
@@ -401,11 +427,10 @@ def test_info_panel_top_items_follow_metric():
     assert out.index("many") < out.index("big")
 
 
-def test_info_panel_size_mode_unchanged():
+def test_info_panel_logical_mode_orders_by_logical_bytes():
     root = _viz_tree()
-    out = _render_info_panel(root, "size")
-    assert "Top Items" in out
-    assert "(by files)" not in out
+    out = _render_info_panel(root, "logical")
+    assert "Top Items (by logical)" in out
     # ranked by size: 'big' outranks 'many'
     assert out.index("big") < out.index("many")
 
@@ -428,15 +453,15 @@ def test_press_t_propagates_metric_to_visualizations(tmp_path):
                 scr.query_one("#sunburst-view"),
                 scr.query_one("#info-panel"),
             ]
-            assert all(v._metric == "size" for v in views)
+            assert all(v._metric == "logical" for v in views)
 
             await pilot.press("t")
             await pilot.pause()
-            assert all(v._metric == "count" for v in views)
+            assert all(v._metric == "allocated" for v in views)
 
-            await pilot.press("t")
+            await pilot.press("t", "t", "t")
             await pilot.pause()
-            assert all(v._metric == "size" for v in views)
+            assert all(v._metric == "logical" for v in views)
 
     asyncio.run(go())
 
@@ -452,10 +477,10 @@ def test_treemap_recomputes_in_count_mode_after_toggle(tmp_path):
             await _wait_for_explorer(pilot, app)
             await pilot.press("2")   # switch to the treemap tab
             await pilot.pause()
-            await pilot.press("t")   # toggle to file count
+            await pilot.press("t", "t", "t")   # cycle to file count
             await pilot.pause()
             treemap = app.screen.query_one("#treemap-view")
-            assert treemap._metric == "count"
+            assert treemap._metric == "files"
             # The active tab re-rendered: a fresh count-mode layout exists.
             assert treemap._layout is not None
             assert treemap._layout.rects

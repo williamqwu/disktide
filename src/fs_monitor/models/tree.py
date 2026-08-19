@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from fs_monitor.domain.metrics import StorageMeasurements
+from fs_monitor.domain.policy import ScanPolicy
+
 
 @dataclass(slots=True)
 class FSNode:
@@ -17,6 +20,11 @@ class FSNode:
         size: Inclusive subtree size in bytes.
         own_size: The entry's bytes for files/symlinks; for directories,
             the sum of direct file and symlink bytes.
+        allocated_size: Inclusive allocated payload bytes. None when the
+            platform cannot provide st_blocks.
+        unique_allocated_size: Inclusive allocated payload bytes after
+            deterministic hardlink deduplication. None until global
+            accounting is complete or allocated size is unavailable.
         file_count: Number of files in subtree.
         dir_count: Number of directories in subtree.
         is_dir: Whether this node is a directory.
@@ -51,12 +59,19 @@ class FSNode:
         is_loop: Whether this directory was skipped because it is its
             own ancestor (a bind mount or similar filesystem cycle).
             Not recursed into, so it contributes no size or counts.
+        excluded: Whether scan policy intentionally skipped this node.
+        filesystem_boundary: Whether one-filesystem policy stopped here.
+        depth_limited: Whether max-depth policy stopped here.
     """
 
     name: str
     path: str
     size: int = 0
     own_size: int = 0
+    allocated_size: int | None = None
+    own_allocated_size: int | None = None
+    unique_allocated_size: int | None = None
+    own_unique_allocated_size: int | None = None
     file_count: int = 0
     dir_count: int = 0
     is_dir: bool = False
@@ -74,6 +89,18 @@ class FSNode:
     link_broken: bool = False
     link_classified: bool = False
     is_loop: bool = False
+    device_id: int | None = None
+    inode: int | None = None
+    link_count: int = 1
+    hardlink_owner_path: str | None = None
+    excluded: bool = False
+    exclusion_reason: str | None = None
+    filesystem_boundary: bool = False
+    filesystem_type: str | None = None
+    depth_limited: bool = False
+    excluded_subtree_count: int = 0
+    depth_limited_subtree_count: int = 0
+    scan_policy: ScanPolicy | None = None
 
     _sorted_cache: list[FSNode] | None = field(
         default=None, repr=False, compare=False
@@ -106,6 +133,52 @@ class FSNode:
         for node in self.walk():
             if node.is_dir:
                 yield node
+
+    @property
+    def measurements(self) -> StorageMeasurements:
+        """Return the normalized inclusive measurement bundle."""
+        return StorageMeasurements(
+            logical_bytes=self.size,
+            allocated_bytes=self.allocated_size,
+            unique_allocated_bytes=self.unique_allocated_size,
+            file_count=self.file_count,
+            dir_count=self.dir_count,
+        )
+
+    @property
+    def own_measurements(self) -> StorageMeasurements:
+        """Return direct-entry measurements for this node."""
+        return StorageMeasurements(
+            logical_bytes=self.own_size,
+            allocated_bytes=self.own_allocated_size,
+            unique_allocated_bytes=self.own_unique_allocated_size,
+            file_count=0 if self.is_dir else self.file_count,
+            dir_count=0,
+        )
+
+    @property
+    def is_hardlink(self) -> bool:
+        """Whether this non-directory entry has multiple filesystem links."""
+        return not self.is_dir and self.link_count > 1
+
+    @property
+    def is_hardlink_duplicate(self) -> bool:
+        """Whether unique accounting assigns this entry to another path."""
+        return (
+            self.is_hardlink
+            and self.hardlink_owner_path is not None
+            and self.hardlink_owner_path != self.path
+        )
+
+    @property
+    def has_policy_omissions(self) -> bool:
+        """Whether this subtree intentionally omits policy-excluded content."""
+        return (
+            self.excluded
+            or self.depth_limited
+            or self.excluded_subtree_count > 0
+            or self.depth_limited_subtree_count > 0
+        )
 
     def find(self, path: str) -> FSNode | None:
         """Find a node by its absolute path."""

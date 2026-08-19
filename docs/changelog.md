@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.0
+
+Since `a2872c7` (v0.1.7 release).
+
+**Trustworthy Metrics**
+
+- **feat** Explorer metrics now cycle through **Logical**, **Allocated**, **Unique**, and **Files**. Tree bars and sorting, Treemap area, Sunburst angles, Details rankings, and the header use the same typed metric vocabulary.
+- **feat** Scanner nodes record `st_blocks * 512` allocated payload bytes. Sparse files now show the difference between apparent size and actual allocated blocks; platforms without `st_blocks` show `Unavailable` instead of a false zero or logical fallback.
+- **feat** Hardlinks are deduplicated in the Unique metric by `(st_dev, st_ino)`. The lexicographically first path owns the bytes, duplicate paths identify that owner, and results are deterministic across worker counts.
+- **feat** `fsmonitor scan` gains `--metric logical|allocated|unique|files`, `--one-file-system`, `--cross-filesystems`, `--exclude-pseudo`, and `--include-pseudo`. Completion output includes all measurements, the active scan policy, policy omissions, and hardlink deduplication count.
+- **feat** One-filesystem scans leave visible `xdev` boundary nodes. Descendant pseudo-filesystem mounts are excluded by default while an explicitly selected pseudo-filesystem root remains scannable. Max-depth truncation is now visible instead of looking like an empty complete directory.
+- **architecture** Added framework-independent `MetricId`, `StorageMeasurements`, and `ScanPolicy` domain types while keeping `FSNode.size` and `ScanEngine().scan(...).size` compatible with existing logical totals.
+- **docs/tests** Added ADR 0001 and correctness fixtures for sparse files, hardlinks, device identity, xdev, pseudo mounts, max depth, unavailable allocation data, CLI policy reporting, and four-metric TUI propagation.
+
 ## v0.1.7
 
 Since `e174a6a` (v0.1.6 release).

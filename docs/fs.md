@@ -48,7 +48,7 @@ os.scandir(path)                 # iterate directory entries
   entry.is_symlink()             # classify: symlink?
   entry.is_dir(follow_symlinks=False)   # classify: directory?
   entry.is_file(follow_symlinks=False)  # classify: regular file?
-  entry.stat(follow_symlinks=False)     # read st_size, st_mtime (incl. symlinks)
+  entry.stat(follow_symlinks=False)     # st_size, st_blocks, dev/inode/nlink, mtime
   entry.name                     # basename (str)
   entry.path                     # full path (str)
 
@@ -59,9 +59,9 @@ os.scandir(path)                 # iterate directory entries
   os.stat(node.path)             # symlinks only: classify target type
 ```
 
-**Metadata captured per entry:** size (`st_size`), modification time (`st_mtime`), type (dir/file/symlink). For symlinks the target path and target type are populated lazily (see Symlink Handling below).
+**Metadata captured per entry:** logical payload (`st_size`), allocated payload (`st_blocks * 512` when available), device/inode identity (`st_dev`, `st_ino`), hard link count (`st_nlink`), modification time (`st_mtime`), and type. For symlinks the target path and target type are populated lazily (see Symlink Handling below).
 
-**Metadata NOT captured:** permissions, ownership (uid/gid), inode number, extended attributes, ACLs, creation time, hard link count.
+**Metadata NOT captured:** permissions, ownership (uid/gid), extended attributes, ACLs, creation time, filesystem compression ratio, reflink sharing, or snapshot-exclusive physical blocks.
 
 `os.scandir()` is used instead of `os.listdir()` + `os.stat()` because it avoids a second syscall per entry on Linux (the kernel returns `d_type` from `getdents64`).
 
@@ -198,11 +198,13 @@ The scanner stores paths exactly as returned by `os.scandir()`. On case-insensit
 
 ### Sparse Files
 
-`st_size` reports the logical size, not the on-disk allocation. A 1 GB sparse file with only 4 KB allocated will show as 1 GB. This matches what `du --apparent-size` reports, but differs from `du` (which reports allocated blocks). There is no `st_blocks` tracking.
+Logical uses `st_size`; Allocated uses `st_blocks * 512`. A 1 GB sparse file with only 4 KB allocated therefore shows roughly 1 GB in Logical and 4 KB in Allocated/Unique. On platforms without `st_blocks`, Allocated and Unique are shown as `Unavailable`, not zero.
 
 ### Hard Links
 
-Each hard link is counted independently. If the same inode is linked from two paths, its size is counted twice. There is no inode-based deduplication. For most use cases this doesn't matter, but on filesystems with heavy hard link usage (e.g., some backup systems, Nix store), reported sizes may exceed actual disk usage.
+Logical and Allocated count each visible path independently. Unique groups entries by `(st_dev, st_ino)` and assigns the allocated bytes to the lexicographically first absolute path in the scan root; other links show zero Unique bytes and identify the owner. This is deterministic across worker counts. Equal inode numbers on different devices are not deduplicated.
+
+Directory metadata blocks are not included in the 0.2.0 metrics, so Allocated/Unique can differ slightly from `du`, which also accounts for directory blocks.
 
 ### Network Filesystems (NFS, CIFS, sshfs)
 
@@ -237,4 +239,4 @@ Similar to Btrfs -- deduplication and compression mean apparent sizes may differ
 
 ### procfs / sysfs / devfs
 
-These virtual filesystems can be scanned but the results are meaningless for disk usage purposes. The scanner reports whatever `st_size` the kernel returns (often 0 for procfs entries), so choose a narrower scan root instead of scanning a tree that crosses into them. FS Overview filters pseudo-filesystems automatically.
+Descendant pseudo-filesystem mountpoints are excluded by default and remain visible as policy-excluded boundary nodes. The scan root itself is never excluded, so explicitly scanning `/proc`, tmpfs, or an overlay root still works. Use `--include-pseudo` or `scan.exclude_pseudo_filesystems = false` to include descendant pseudo filesystems. FS Overview and the scanner share the same pseudo-filesystem classification.

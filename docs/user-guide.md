@@ -28,7 +28,7 @@ The interactive TUI has four modes, switched with the `E`, `C`, `M`, and `F` key
 
 ### Explorer (E)
 
-The main view. A file tree on the left shows directories sorted by size, with inline size bars. The right panel shows one of three visualizations:
+The main view. A file tree on the left shows directories sorted by the active metric, with inline proportional bars. The right panel shows one of three visualizations:
 
 - **Sunburst** (`1`) -- Concentric rings radiating outward by depth. Each arc's angle represents its share of the parent.
 - **Treemap** (`2`) -- Rectangles sized proportionally to disk usage. Drill into directories by clicking or selecting them.
@@ -46,9 +46,16 @@ Navigation:
 | `s` | Cycle sort order: size, name, modified |
 | `r` | Rescan the current directory (prompts y/n first) |
 | `y` | Copy the highlighted item's absolute path to the clipboard |
-| `t` | Toggle size vs. file count (tree, sunburst, treemap, Details) |
+| `t` | Cycle Logical, Allocated, Unique, Files across all views |
 
-The indicator line above the tree shows the current sort order and metric. Press `t` to toggle the metric between total size (the default) and number of files. The tree bar, the sunburst, the treemap, and the Details panel all re-express their proportions accordingly, so every view stays consistent. Both totals are aggregated during the scan, so toggling does no extra filesystem work. Press `y` to copy the highlighted item's absolute path to the system clipboard; it uses the terminal's OSC 52 escape, so it works over SSH and in web-based shells where there is no local clipboard tool.
+The indicator line above the tree shows the current sort order and metric. Press `t` to cycle through:
+
+- **Logical** -- apparent payload bytes from `st_size` (default).
+- **Allocated** -- `st_blocks * 512` for every visible path, including every hardlink path.
+- **Unique** -- allocated payload with each hardlinked inode counted once.
+- **Files** -- regular-file and symlink entry count.
+
+The tree, sunburst, treemap, Details rankings, and header change together. Unique hardlink ownership is finalized after the full scan, so a live in-progress view can temporarily show Unique as unavailable. Platforms without `st_blocks` show Allocated/Unique as `Unavailable`; they are never shown as zero. Press `y` to copy the highlighted item's absolute path to the system clipboard; it uses the terminal's OSC 52 escape, so it works over SSH and in web-based shells where there is no local clipboard tool.
 
 Symbolic links are shown as `name → target` and never counted toward folder sizes (only the link's own size). When a link points to a directory, `i` resolves it and rescans from the real location, so linked folders stay navigable without the scan ever traversing the link. Broken links and links to files are marked and cannot be entered.
 
@@ -105,7 +112,7 @@ Review every selected path before acting. **Delete is permanent**: the current i
 | `u` / `i` | Explorer | Navigate up / drill into directory |
 | `s` | Explorer | Cycle sort order |
 | `y` | Explorer | Copy highlighted path to clipboard |
-| `t` | Explorer | Toggle size / file count across all views |
+| `t` | Explorer | Cycle Logical / Allocated / Unique / Files across all views |
 | Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
 | Up / Down | Settings | Move focus between fields (also Tab/Shift+Tab) |
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
@@ -127,7 +134,16 @@ One-shot scan with a text summary:
 fsmonitor scan /path
 fsmonitor scan /path --snapshot      # save results to the database
 fsmonitor scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
+fsmonitor scan /path --metric allocated
+fsmonitor scan / --metric unique --one-file-system --exclude-pseudo
 ```
+
+`--metric` controls the completion total, sorting, and top-directory bars.
+Every completion summary still prints Logical, Allocated, and Unique together.
+Cross-filesystem scanning is the default; `--one-file-system` leaves visible
+`xdev` boundary nodes. Descendant pseudo-filesystem mounts are excluded by
+default, while an explicitly selected pseudo root is still scanned. Use
+`--include-pseudo` to opt in to descendant pseudo filesystems.
 
 ### watch
 
@@ -186,6 +202,8 @@ Settings are stored in `~/.config/fsmonitor-cli/config.toml` (respects `XDG_CONF
 [scan]
 max_depth = 10                           # omit for unlimited
 workers = 4                              # omit for auto-detect
+# one_file_system = true                 # default: false
+# exclude_pseudo_filesystems = false     # default: true
 
 [monitor]
 default_interval = 21600                 # 6 hours, in seconds

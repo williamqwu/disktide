@@ -14,6 +14,8 @@ class TestConfig:
         assert isinstance(config, AppConfig)
         assert config.ui.default_viz == "sunburst"
         assert config.scan.max_depth is None
+        assert config.scan.one_file_system is False
+        assert config.scan.exclude_pseudo_filesystems is True
         assert config.monitor.default_interval == 21600
 
     def test_load_from_toml(self, tmp_path):
@@ -22,6 +24,8 @@ class TestConfig:
 [scan]
 max_depth = 10
 workers = 2
+one_file_system = true
+exclude_pseudo_filesystems = false
 
 [monitor]
 default_interval = 3600
@@ -34,6 +38,8 @@ safe_rendering = true
         config = load_config(str(config_file))
         assert config.scan.max_depth == 10
         assert config.scan.workers == 2
+        assert config.scan.one_file_system is True
+        assert config.scan.exclude_pseudo_filesystems is False
         assert config.monitor.default_interval == 3600
         assert config.ui.color_theme == "dark"
         assert config.ui.default_viz == "sunburst"
@@ -91,6 +97,8 @@ show_hidden = true
         config = AppConfig()
         config.scan.workers = 4
         config.scan.max_depth = 5
+        config.scan.one_file_system = True
+        config.scan.exclude_pseudo_filesystems = False
         config.monitor.default_interval = 7200
         config.ui.color_theme = "dark"
         config.ui.default_viz = "sunburst"
@@ -102,6 +110,8 @@ show_hidden = true
         loaded = load_config(config_file)
         assert loaded.scan.workers == 4
         assert loaded.scan.max_depth == 5
+        assert loaded.scan.one_file_system is True
+        assert loaded.scan.exclude_pseudo_filesystems is False
         assert loaded.monitor.default_interval == 7200
         assert loaded.ui.color_theme == "dark"
         assert loaded.ui.default_viz == "sunburst"

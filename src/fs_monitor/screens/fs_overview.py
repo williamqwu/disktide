@@ -31,15 +31,8 @@ from fs_monitor.scanner.blockdev import (
     idle_summary,
 )
 from fs_monitor.scanner.benchmark import benchmark_mount, BenchmarkResult
+from fs_monitor.scanner.policy import PSEUDO_FS_TYPES
 from fs_monitor.widgets.confirm_modal import ConfirmModal
-
-# Filesystem types that carry no real disk space (pseudo-filesystems).
-_PSEUDO_FS_TYPES = {
-    "proc", "sysfs", "devtmpfs", "cgroup", "cgroup2", "tmpfs", "devpts",
-    "hugetlbfs", "mqueue", "securityfs", "pstore", "efivarfs", "debugfs",
-    "tracefs", "fusectl", "binfmt_misc", "autofs", "ramfs", "rpc_pipefs",
-    "nfsd", "sunrpc", "overlay",
-}
 
 
 @dataclass
@@ -226,7 +219,7 @@ def _load_fs_entries() -> list[FSEntry]:
     entries: list[FSEntry] = []
 
     for device, mountpoint, fstype, options in _read_mounts():
-        if fstype in _PSEUDO_FS_TYPES:
+        if fstype in PSEUDO_FS_TYPES:
             continue
         if mountpoint in seen_mountpoints:
             continue

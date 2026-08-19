@@ -6,11 +6,16 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Callable
 
+from fs_monitor.domain.metrics import sum_available
+from fs_monitor.domain.policy import ScanPolicy
 from fs_monitor.models.tree import FSNode
+from fs_monitor.scanner.accounting import finalize_unique_allocated
+from fs_monitor.scanner.policy import discover_pseudo_mounts
 from fs_monitor.scanner.walker import (
-    scan_directory, make_symlink_node, classify_symlink,
+    scan_directory, make_symlink_node, make_file_node, classify_symlink,
 )
 from fs_monitor.scanner.progress import ScanProgress, ProgressThrottle
 
@@ -24,6 +29,19 @@ from fs_monitor.scanner.progress import ScanProgress, ProgressThrottle
 _TOP_LEVEL_CLASSIFY_CAP = 100
 
 
+@dataclass(slots=True)
+class _Aggregate:
+    logical_size: int
+    allocated_size: int | None
+    file_count: int
+    dir_count: int
+    inaccessible_subtree_count: int
+    denied_dir_subtree_count: int
+    partial_dir_subtree_count: int
+    excluded_subtree_count: int
+    depth_limited_subtree_count: int
+
+
 class ScanEngine:
     """Multi-threaded filesystem scanner."""
 
@@ -35,6 +53,8 @@ class ScanEngine:
         scan_path: str | None = None,
         tree_callback: Callable[[FSNode], None] | None = None,
         tree_callback_interval: float = 0.25,
+        one_file_system: bool = False,
+        exclude_pseudo_filesystems: bool = True,
     ):
         if workers is not None:
             self._workers = workers
@@ -44,6 +64,13 @@ class ScanEngine:
             self._workers = info.recommended_workers
         self._cancel_event = threading.Event()
         self._max_depth = max_depth
+        self._policy = ScanPolicy(
+            one_file_system=one_file_system,
+            exclude_pseudo_filesystems=exclude_pseudo_filesystems,
+            max_depth=max_depth,
+        )
+        self._root_device: int | None = None
+        self._excluded_mounts: dict[str, str] = {}
         self._lock = threading.Lock()
         self._progress = ProgressThrottle(
             progress_callback or (lambda p: None),
@@ -82,20 +109,34 @@ class ScanEngine:
             raise ValueError(f"Not a directory: {path}")
 
         name = os.path.basename(path) or path
-        root = FSNode(name=name, path=path, is_dir=True, depth=0)
+        root = FSNode(
+            name=name, path=path, is_dir=True, depth=0,
+            scan_policy=self._policy,
+        )
 
         root_ancestors: frozenset[tuple[int, int]] = frozenset()
         try:
             rst = os.stat(path)
             root.mtime = rst.st_mtime
+            root.device_id = getattr(rst, "st_dev", None)
+            root.inode = getattr(rst, "st_ino", None)
+            root.link_count = getattr(rst, "st_nlink", 1)
+            self._root_device = root.device_id
             root_ancestors = frozenset({(rst.st_dev, rst.st_ino)})
         except OSError:
-            pass
+            self._root_device = None
+
+        self._excluded_mounts = (
+            discover_pseudo_mounts(path)
+            if self._policy.exclude_pseudo_filesystems
+            else {}
+        )
 
         # Collect top-level entries (streaming scandir)
         top_files: list[FSNode] = []
         top_dirs: list[str] = []
         own_size = 0
+        own_allocated: int | None = 0
         top_inaccessible = 0
         top_classified = 0      # symlinks classified eagerly, capped below
 
@@ -132,6 +173,9 @@ class ScanEngine:
                         else:
                             top_files.append(child)
                             own_size += child.own_size
+                            own_allocated = sum_available(
+                                (own_allocated, child.own_allocated_size)
+                            )
                             if top_classified < _TOP_LEVEL_CLASSIFY_CAP:
                                 classify_symlink(child)
                                 top_classified += 1
@@ -141,14 +185,12 @@ class ScanEngine:
                     elif entry.is_file(follow_symlinks=False):
                         try:
                             st = entry.stat(follow_symlinks=False)
-                            child = FSNode(
-                                name=entry.name, path=entry.path,
-                                size=st.st_size, own_size=st.st_size,
-                                is_dir=False, mtime=st.st_mtime, depth=1,
-                                file_count=1,
-                            )
+                            child = make_file_node(entry, st, depth=1)
                             top_files.append(child)
                             own_size += st.st_size
+                            own_allocated = sum_available(
+                                (own_allocated, child.own_allocated_size)
+                            )
                         except OSError:
                             top_inaccessible += 1
                 except OSError:
@@ -181,7 +223,8 @@ class ScanEngine:
         # treemap rects) before the first subdir worker comes back.
         self._tree_last_emit = 0.0
         self._emit_tree_snapshot(
-            root, top_files, dir_results, own_size, top_inaccessible,
+            root, top_files, dir_results, own_size, own_allocated,
+            top_inaccessible,
             force=True,
         )
 
@@ -214,14 +257,16 @@ class ScanEngine:
                     # the throttle handles redundant-state coalescing.
                     self._emit_tree_snapshot(
                         root, top_files, dir_results,
-                        own_size, top_inaccessible,
+                        own_size, own_allocated, top_inaccessible,
                         force=False,
                     )
 
         # Assemble the final root in place.
         self._finalize_root(
-            root, top_files, dir_results, own_size, top_inaccessible,
+            root, top_files, dir_results, own_size, own_allocated,
+            top_inaccessible,
         )
+        finalize_unique_allocated(root)
 
         self._progress.update(
             dirs_scanned=root.dir_count,
@@ -252,21 +297,15 @@ class ScanEngine:
         if self._cancel_event.is_set():
             return None
 
-        max_depth = None
-        if self._max_depth is not None:
-            max_depth = self._max_depth
-            if max_depth < 1:
-                return FSNode(
-                    name=os.path.basename(path),
-                    path=path, is_dir=True, depth=1,
-                )
-
         self._progress.update(current_path=path)
         return scan_directory(
-            path, depth=1, max_depth=max_depth,
+            path, depth=1, max_depth=self._max_depth,
             cancel_event=self._cancel_event,
             ancestors=ancestors,
             on_dir_done=self._tick,
+            root_device=self._root_device,
+            one_file_system=self._policy.one_file_system,
+            excluded_mounts=self._excluded_mounts,
         )
 
     def _tick(
@@ -299,10 +338,10 @@ class ScanEngine:
     def _roll_up(
         children: list[FSNode],
         own_size: int,
+        own_allocated: int | None,
         top_inaccessible: int,
-    ) -> tuple[int, int, int, int, int, int]:
-        """Compute (size, file_count, dir_count, inaccessible_subtree,
-        denied_sub, partial_sub) from a list of finalized children.
+    ) -> _Aggregate:
+        """Compute normalized aggregates from finalized children.
 
         Single source of truth for the aggregate math, shared by the live
         snapshot path and the final root assembly so they cannot drift.
@@ -313,6 +352,8 @@ class ScanEngine:
         inacc_sub = top_inaccessible
         denied_sub = 0
         partial_sub = 0
+        excluded_sub = 0
+        depth_limited_sub = 0
         for c in children:
             if c.is_dir:
                 size += c.size
@@ -325,9 +366,27 @@ class ScanEngine:
                     denied_sub += 1
                 elif c.inaccessible_count > 0:
                     partial_sub += 1
+                excluded_sub += c.excluded_subtree_count + int(c.excluded)
+                depth_limited_sub += (
+                    c.depth_limited_subtree_count + int(c.depth_limited)
+                )
             else:
                 file_count += c.file_count
-        return (size, file_count, dir_count, inacc_sub, denied_sub, partial_sub)
+        allocated = sum_available(
+            [own_allocated]
+            + [c.allocated_size for c in children if c.is_dir]
+        )
+        return _Aggregate(
+            logical_size=size,
+            allocated_size=allocated,
+            file_count=file_count,
+            dir_count=dir_count,
+            inaccessible_subtree_count=inacc_sub,
+            denied_dir_subtree_count=denied_sub,
+            partial_dir_subtree_count=partial_sub,
+            excluded_subtree_count=excluded_sub,
+            depth_limited_subtree_count=depth_limited_sub,
+        )
 
     def _finalize_root(
         self,
@@ -335,21 +394,26 @@ class ScanEngine:
         top_files: list[FSNode],
         dir_results: list[FSNode],
         own_size: int,
+        own_allocated: int | None,
         top_inaccessible: int,
     ) -> None:
         """Mutate `root` into its final form with aggregated children."""
         root.children = top_files + dir_results
         root.own_size = own_size
+        root.own_allocated_size = own_allocated
         root.inaccessible_count = top_inaccessible
-        size, files, dirs, inacc_sub, denied_sub, partial_sub = self._roll_up(
-            root.children, own_size, top_inaccessible,
+        aggregate = self._roll_up(
+            root.children, own_size, own_allocated, top_inaccessible,
         )
-        root.size = size
-        root.file_count = files
-        root.dir_count = dirs
-        root.inaccessible_subtree_count = inacc_sub
-        root.denied_dir_subtree_count = denied_sub
-        root.partial_dir_subtree_count = partial_sub
+        root.size = aggregate.logical_size
+        root.allocated_size = aggregate.allocated_size
+        root.file_count = aggregate.file_count
+        root.dir_count = aggregate.dir_count
+        root.inaccessible_subtree_count = aggregate.inaccessible_subtree_count
+        root.denied_dir_subtree_count = aggregate.denied_dir_subtree_count
+        root.partial_dir_subtree_count = aggregate.partial_dir_subtree_count
+        root.excluded_subtree_count = aggregate.excluded_subtree_count
+        root.depth_limited_subtree_count = aggregate.depth_limited_subtree_count
         root.invalidate_sort()
 
     def _emit_tree_snapshot(
@@ -358,6 +422,7 @@ class ScanEngine:
         top_files: list[FSNode],
         dir_results: list[FSNode],
         own_size: int,
+        own_allocated: int | None,
         top_inaccessible: int,
         *,
         force: bool,
@@ -392,17 +457,25 @@ class ScanEngine:
             is_dir=True,
             depth=0,
             mtime=root.mtime,
+            device_id=root.device_id,
+            inode=root.inode,
+            link_count=root.link_count,
+            scan_policy=self._policy,
         )
         snap.children = list(top_files) + list(dir_results)
         snap.own_size = own_size
+        snap.own_allocated_size = own_allocated
         snap.inaccessible_count = top_inaccessible
-        size, files, dirs, inacc_sub, denied_sub, partial_sub = self._roll_up(
-            snap.children, own_size, top_inaccessible,
+        aggregate = self._roll_up(
+            snap.children, own_size, own_allocated, top_inaccessible,
         )
-        snap.size = size
-        snap.file_count = files
-        snap.dir_count = dirs
-        snap.inaccessible_subtree_count = inacc_sub
-        snap.denied_dir_subtree_count = denied_sub
-        snap.partial_dir_subtree_count = partial_sub
+        snap.size = aggregate.logical_size
+        snap.allocated_size = aggregate.allocated_size
+        snap.file_count = aggregate.file_count
+        snap.dir_count = aggregate.dir_count
+        snap.inaccessible_subtree_count = aggregate.inaccessible_subtree_count
+        snap.denied_dir_subtree_count = aggregate.denied_dir_subtree_count
+        snap.partial_dir_subtree_count = aggregate.partial_dir_subtree_count
+        snap.excluded_subtree_count = aggregate.excluded_subtree_count
+        snap.depth_limited_subtree_count = aggregate.depth_limited_subtree_count
         self._tree_callback(snap)

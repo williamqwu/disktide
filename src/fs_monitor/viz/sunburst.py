@@ -9,7 +9,7 @@ from rich.segment import Segment
 from rich.style import Style
 
 from fs_monitor.glyphs import visible_width
-from fs_monitor.metrics import metric_text, metric_value
+from fs_monitor.metrics import metric_text, metric_value, metric_value_or_zero
 from fs_monitor.models.tree import FSNode
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.viz.braille import ColorBrailleCanvas
@@ -78,7 +78,7 @@ def compute_sunburst(
     char_width: int,
     char_height: int,
     max_depth: int = 4,
-    metric: str = "size",
+    metric: str = "logical",
 ) -> SunburstLayout:
     """Compute and render a sunburst chart.
 
@@ -86,12 +86,17 @@ def compute_sunburst(
     (height:width).  Each braille dot therefore maps to a roughly square
     area on screen, so no aspect-ratio correction is needed.
 
-    `metric` selects what arc angles encode: 'size' (bytes) or 'count'
-    (file count).
+    `metric` selects what arc angles encode.
     """
     layout = SunburstLayout(char_width=char_width, char_height=char_height)
 
-    if char_width <= 0 or char_height <= 0 or metric_value(node, metric) <= 0:
+    root_value = metric_value(node, metric)
+    if (
+        char_width <= 0
+        or char_height <= 0
+        or root_value is None
+        or root_value <= 0
+    ):
         return layout
 
     canvas = ColorBrailleCanvas(char_width, char_height)
@@ -201,19 +206,19 @@ def _build_arcs(
 
     children = node.children
     sized = sorted(
-        (c for c in children if metric_value(c, metric) > 0),
-        key=lambda c: (-metric_value(c, metric), c.name),
+        (c for c in children if metric_value_or_zero(c, metric) > 0),
+        key=lambda c: (-metric_value_or_zero(c, metric), c.name),
     )
     if not sized:
         return
 
-    total = sum(metric_value(c, metric) for c in sized)
+    total = sum(metric_value_or_zero(c, metric) for c in sized)
     if total <= 0:
         return
 
     current_angle = angle_start
     for child in sized:
-        child_span = (metric_value(child, metric) / total) * span
+        child_span = (metric_value_or_zero(child, metric) / total) * span
         child_end = current_angle + child_span
         _build_arcs(
             child, current_angle, child_end,

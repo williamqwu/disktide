@@ -11,7 +11,14 @@ from rich.table import Table
 from rich.text import Text
 import humanize
 
-from fs_monitor.metrics import metric_text, metric_value
+from fs_monitor.metrics import (
+    DEFAULT_METRIC,
+    METRIC_NAMES,
+    metric_text,
+    metric_value,
+    metric_value_or_zero,
+    normalize_metric,
+)
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.walker import classify_symlink
 from fs_monitor.rendering import denied_glyph, partial_glyph
@@ -31,7 +38,7 @@ class InfoPanel(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._node: FSNode | None = None
-        self._metric = "size"
+        self._metric = DEFAULT_METRIC
         self._display = Static("")
 
     def compose(self) -> ComposeResult:
@@ -39,6 +46,7 @@ class InfoPanel(Widget):
 
     def set_metric(self, metric: str) -> None:
         """Set the proportion metric for the Top Items list, then re-render."""
+        metric = normalize_metric(metric)
         if metric == self._metric:
             return
         self._metric = metric
@@ -80,20 +88,68 @@ class InfoPanel(Widget):
                     Text("Filesystem loop (not scanned)", style="bold yellow"),
                 )
 
-        # Size — qualify with ≥ when the subtree has hidden bytes
-        size_text = humanize.naturalsize(node.size, binary=True)
-        if node.is_dir and (
+        hidden = node.is_dir and (
             node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0
+        )
+        for label, metric in (
+            ("Logical", "logical"),
+            ("Allocated", "allocated"),
+            ("Unique on disk", "unique"),
         ):
-            size_text = f"≥ {size_text}  (partial — some entries unreadable)"
-            table.add_row("Size", Text(size_text, style="yellow"))
-        else:
-            table.add_row("Size", size_text)
+            value = metric_text(node, metric)
+            if hidden and value != "Unavailable":
+                table.add_row(label, Text(f"≥ {value}  (partial)", style="yellow"))
+            else:
+                table.add_row(label, value)
+
+        if node.is_hardlink:
+            table.add_row("Hard links", f"{node.link_count:,}")
+            if node.hardlink_owner_path:
+                owner_text = node.hardlink_owner_path
+                if node.is_hardlink_duplicate:
+                    owner_text += "  (unique bytes assigned there)"
+                else:
+                    owner_text += "  (this path owns unique bytes)"
+                table.add_row("Unique owner", owner_text)
 
         if node.is_dir:
-            table.add_row("Own Size", humanize.naturalsize(node.own_size, binary=True))
+            table.add_row(
+                "Own Logical",
+                humanize.naturalsize(node.own_size, binary=True),
+            )
+            table.add_row(
+                "Own Allocated",
+                "Unavailable" if node.own_allocated_size is None else
+                humanize.naturalsize(node.own_allocated_size, binary=True),
+            )
+            table.add_row(
+                "Own Unique",
+                "Unavailable" if node.own_unique_allocated_size is None else
+                humanize.naturalsize(node.own_unique_allocated_size, binary=True),
+            )
             table.add_row("Files", f"{node.file_count:,}")
             table.add_row("Subdirs", f"{node.dir_count:,}")
+
+            if node.excluded:
+                table.add_row(
+                    "Scan scope",
+                    Text(node.exclusion_reason or "Excluded", style="bold yellow"),
+                )
+            elif node.depth_limited:
+                table.add_row(
+                    "Scan scope", Text("Stopped at max depth", style="bold yellow")
+                )
+            elif node.excluded_subtree_count or node.depth_limited_subtree_count:
+                table.add_row(
+                    "Scan scope",
+                    Text(
+                        f"{node.excluded_subtree_count} excluded; "
+                        f"{node.depth_limited_subtree_count} depth-limited",
+                        style="yellow",
+                    ),
+                )
+            if node.scan_policy is not None:
+                table.add_row("Policy", node.scan_policy.summary())
 
             # Access row — full denial / partial / hidden descendants only / ok
             if node.error is not None:
@@ -131,17 +187,20 @@ class InfoPanel(Widget):
         # Top children by the active metric (size by default, or file count)
         if node.is_dir and node.children:
             table.add_row("", "")
-            heading = "Top Items (by files)" if self._metric == "count" else "Top Items"
+            metric_name = METRIC_NAMES.get(self._metric, self._metric)
+            heading = f"Top Items (by {metric_name.lower()})"
             table.add_row(heading, "")
             total = metric_value(node, self._metric)
             ranked = sorted(
                 node.children,
-                key=lambda c: (-metric_value(c, self._metric), c.name),
+                key=lambda c: (-metric_value_or_zero(c, self._metric), c.name),
             )
             for child in ranked[:10]:
                 value_str = metric_text(child, self._metric)
-                pct = (metric_value(child, self._metric) / total * 100) if total else 0.0
+                child_value = metric_value(child, self._metric)
                 name = f"{'📁 ' if child.is_dir else '📄 '}{child.name}"
-                table.add_row(f"  {name}", f"{value_str} ({pct:.1f}%)")
+                if total is not None and child_value is not None and total > 0:
+                    value_str += f" ({child_value / total * 100:.1f}%)"
+                table.add_row(f"  {name}", value_str)
 
         self._display.update(table)

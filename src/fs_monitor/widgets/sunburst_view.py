@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from rich.segment import Segment
+from rich.style import Style
 from textual.events import Resize
 from textual.strip import Strip
 from textual.widget import Widget
 
+from fs_monitor.metrics import (
+    DEFAULT_METRIC,
+    METRIC_NAMES,
+    metric_available,
+    normalize_metric,
+)
 from fs_monitor.models.tree import FSNode
 from fs_monitor.viz.sunburst import SunburstLayout, compute_sunburst, render_sunburst_line
 
@@ -30,7 +38,7 @@ class SunburstView(Widget):
     def __init__(self, node: FSNode | None = None, **kwargs):
         super().__init__(**kwargs)
         self._node = node
-        self._metric = "size"
+        self._metric = DEFAULT_METRIC
         self._layout: SunburstLayout | None = None
         self._stale = True
         self._live_mode = False
@@ -54,7 +62,8 @@ class SunburstView(Widget):
         self.refresh()
 
     def set_metric(self, metric: str) -> None:
-        """Set the arc metric ('size' or 'count'). Layout recomputed next render."""
+        """Set the arc metric. Layout recomputed next render."""
+        metric = normalize_metric(metric)
         if metric == self._metric:
             return
         self._metric = metric
@@ -83,6 +92,14 @@ class SunburstView(Widget):
         )
 
     def render_line(self, y: int) -> Strip:
+        if self._node is not None and not metric_available(self._node, self._metric):
+            if y == self.size.height // 2:
+                label = METRIC_NAMES.get(self._metric, self._metric)
+                message = f"{label} unavailable"[: self.size.width]
+                return Strip([
+                    Segment(message.center(self.size.width), Style(dim=True))
+                ])
+            return Strip.blank(self.size.width)
         self._ensure_layout()
         if self._layout is None:
             return Strip.blank(self.size.width)

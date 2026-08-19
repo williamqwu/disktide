@@ -10,10 +10,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
-import humanize
 
 from fs_monitor.config import AppConfig, resolve_live_scan_render
-from fs_monitor.metrics import METRIC_NAMES
+from fs_monitor.metrics import METRIC_EXPLANATIONS, METRIC_NAMES, metric_text
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.engine import ScanEngine
@@ -119,7 +118,7 @@ class ExplorerScreen(Screen):
         yield Breadcrumb(self._scan_path, id="breadcrumb")
         with Horizontal(id="explorer-main"):
             with Vertical(id="tree-panel"):
-                yield Static("Sort: Size  Bar: Size", id="sort-indicator")
+                yield Static("Sort: Logical  Bar: Logical", id="sort-indicator")
                 yield SizeTree(id="size-tree")
                 # During a scan the tree is empty; the overlay takes its
                 # place in the same panel. CSS toggles which child shows.
@@ -215,6 +214,13 @@ class ExplorerScreen(Screen):
             max_depth=max_depth,
             scan_path=self._scan_path,
             tree_callback=on_tree if self._live_render else None,
+            one_file_system=(
+                self._config.scan.one_file_system if self._config else False
+            ),
+            exclude_pseudo_filesystems=(
+                self._config.scan.exclude_pseudo_filesystems
+                if self._config else True
+            ),
         )
         # Wrap engine.scan in try/except so an unexpected failure (e.g.
         # the scan dir got deleted between welcome-screen validation
@@ -336,25 +342,31 @@ class ExplorerScreen(Screen):
         """Update the header subtitle and the tree indicator."""
         if self._root is None:
             return
-        size = humanize.naturalsize(self._root.size, binary=True)
-        # Both totals are aggregated bottom-up during the scan, so
-        # reading them is O(1) — no subtree walk per status update.
+        tree = self.query_one("#size-tree", SizeTree)
+        metric_label = METRIC_NAMES.get(tree.metric, tree.metric)
+        total = metric_text(self._root, tree.metric)
         denied = self._root.denied_dir_subtree_count
         partial = self._root.partial_dir_subtree_count
         suffix = ""
-        if denied or partial:
+        if denied or partial or self._root.has_policy_omissions:
             parts = []
             if denied:
-                # "unreadable" not "denied": walker.error catches any OSError
-                # (EACCES, EIO, ESTALE, ENOENT-during-recurse, ...).
                 parts.append(f"{denied_glyph()} {denied} unreadable")
             if partial:
                 parts.append(f"{partial_glyph()} {partial} partial")
+            if self._root.excluded_subtree_count:
+                parts.append(
+                    f"{self._root.excluded_subtree_count} policy-excluded"
+                )
+            if self._root.depth_limited_subtree_count:
+                parts.append(
+                    f"{self._root.depth_limited_subtree_count} depth-limited"
+                )
             suffix = "  |  " + ", ".join(parts)
         self.app.sub_title = (
             f"{self._root.file_count:,} files, "
             f"{self._root.dir_count:,} dirs  |  "
-            f"Total: {size}{suffix}"
+            f"{metric_label}: {total}{suffix}"
         )
         self._update_tree_indicator()
 
@@ -410,6 +422,8 @@ class ExplorerScreen(Screen):
         if node.error is not None:
             return "denied"
         if node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0:
+            return "partial"
+        if node.has_policy_omissions:
             return "partial"
         return "full"
 
@@ -491,21 +505,18 @@ class ExplorerScreen(Screen):
         self.app.notify(path, title="Copied path", timeout=4)
 
     def action_toggle_metric(self) -> None:
-        """Toggle size vs. file count across the tree and the visualizations.
-
-        `size` and `file_count` are both aggregated bottom-up during the
-        scan, so switching only relabels and re-lays out data already in
-        memory: no extra filesystem access, and no more work than the
-        layout recompute a tab switch already does.
-        """
+        """Cycle one normalized metric across every explorer view."""
         tree = self.query_one("#size-tree", SizeTree)
         metric = tree.toggle_metric()
         self.query_one("#treemap-view", TreemapView).set_metric(metric)
         self.query_one("#sunburst-view", SunburstView).set_metric(metric)
         self.query_one("#info-panel", InfoPanel).set_metric(metric)
-        self._update_tree_indicator()
-        shown = "file count" if metric == "count" else "total size"
-        self.app.notify(f"Views now sized by {shown}", timeout=2)
+        self._update_status()
+        label = METRIC_NAMES.get(metric, metric)
+        explanation = METRIC_EXPLANATIONS.get(metric, "")
+        if metric == "unique" and self._scan_in_progress:
+            explanation = "available after global hardlink accounting completes"
+        self.app.notify(f"{label}: {explanation}", timeout=3)
 
     def action_scroll_quarter(self, direction: str) -> None:
         """Move the tree cursor by a quarter of the visible tree height.

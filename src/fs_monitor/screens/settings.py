@@ -108,6 +108,20 @@ class SettingsScreen(Screen):
                 )
                 yield Label("(blank = unlimited)", classes="input-hint")
 
+            with Horizontal(classes="setting-row"):
+                yield Label("One filesystem", classes="setting-label")
+                yield Switch(
+                    value=self._config.scan.one_file_system,
+                    id="one-file-system",
+                )
+
+            with Horizontal(classes="setting-row"):
+                yield Label("Exclude pseudo filesystems", classes="setting-label")
+                yield Switch(
+                    value=self._config.scan.exclude_pseudo_filesystems,
+                    id="exclude-pseudo-filesystems",
+                )
+
             yield Static("")
             yield Static("Cleanup Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
@@ -367,6 +381,10 @@ class SettingsScreen(Screen):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "show-cleanup":
             self._config.ui.show_cleanup = event.value
+        elif event.switch.id == "one-file-system":
+            self._config.scan.one_file_system = event.value
+        elif event.switch.id == "exclude-pseudo-filesystems":
+            self._config.scan.exclude_pseudo_filesystems = event.value
         elif event.switch.id == "strict-path":
             self._config.monitor.strict_path = event.value
         elif event.switch.id == "hostname-aware-paths":

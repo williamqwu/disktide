@@ -15,9 +15,25 @@ from fs_monitor import APP_NAME, __version__
 @click.group(invoke_without_command=True)
 @click.option("--max-depth", "-d", type=int, default=None, help="Maximum scan depth")
 @click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
+@click.option(
+    "--one-file-system/--cross-filesystems",
+    default=None,
+    help="Stay on the scan root filesystem",
+)
+@click.option(
+    "--exclude-pseudo/--include-pseudo",
+    default=None,
+    help="Exclude pseudo-filesystem mountpoints below the scan root",
+)
 @click.version_option(version=__version__)
 @click.pass_context
-def cli(ctx, max_depth: int | None, workers: int | None):
+def cli(
+    ctx,
+    max_depth: int | None,
+    workers: int | None,
+    one_file_system: bool | None,
+    exclude_pseudo: bool | None,
+):
     """Interactive terminal disk usage explorer.
 
     Launch TUI: fsmonitor
@@ -26,6 +42,8 @@ def cli(ctx, max_depth: int | None, workers: int | None):
     ctx.ensure_object(dict)
     ctx.obj["max_depth"] = max_depth
     ctx.obj["workers"] = workers
+    ctx.obj["one_file_system"] = one_file_system
+    ctx.obj["exclude_pseudo"] = exclude_pseudo
 
     if ctx.invoked_subcommand is None:
         from fs_monitor.app import FSMonitorApp
@@ -36,6 +54,10 @@ def cli(ctx, max_depth: int | None, workers: int | None):
             config.scan.max_depth = max_depth
         if workers is not None:
             config.scan.workers = workers
+        if one_file_system is not None:
+            config.scan.one_file_system = one_file_system
+        if exclude_pseudo is not None:
+            config.scan.exclude_pseudo_filesystems = exclude_pseudo
 
         app = FSMonitorApp(show_welcome=True, config=config)
         app.run(mouse=False)
@@ -101,10 +123,44 @@ def _force_teardown(app) -> None:
 @click.option("--snapshot", "-s", is_flag=True, help="Save snapshot to database")
 @click.option("--max-depth", "-d", type=int, default=None, help="Maximum scan depth")
 @click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
-def scan(path: str, snapshot: bool, max_depth: int | None, workers: int | None):
+@click.option(
+    "--metric",
+    type=click.Choice(["logical", "allocated", "unique", "files"]),
+    default="logical",
+    show_default=True,
+    help="Measurement used for totals, sorting, and bars",
+)
+@click.option(
+    "--one-file-system/--cross-filesystems",
+    default=False,
+    show_default=True,
+    help="Stay on the scan root filesystem",
+)
+@click.option(
+    "--exclude-pseudo/--include-pseudo",
+    default=True,
+    show_default=True,
+    help="Exclude pseudo-filesystem mountpoints below the scan root",
+)
+def scan(
+    path: str,
+    snapshot: bool,
+    max_depth: int | None,
+    workers: int | None,
+    metric: str,
+    one_file_system: bool,
+    exclude_pseudo: bool,
+):
     """Scan a directory and display results."""
     from fs_monitor.scanner.engine import ScanEngine
     from fs_monitor.scanner.progress import ScanProgress
+    from fs_monitor.metrics import (
+        METRIC_EXPLANATIONS,
+        METRIC_NAMES,
+        metric_text,
+        metric_value,
+        metric_value_or_zero,
+    )
     import humanize
 
     path = str(Path(path).resolve())
@@ -115,7 +171,7 @@ def scan(path: str, snapshot: bool, max_depth: int | None, workers: int | None):
     def on_progress(p: ScanProgress):
         click.echo(
             f"\r  {p.dirs_scanned:,} dirs, {p.files_scanned:,} files, "
-            f"{humanize.naturalsize(p.total_size, binary=True)}",
+            f"logical {humanize.naturalsize(p.total_size, binary=True)}",
             nl=False,
         )
 
@@ -123,24 +179,59 @@ def scan(path: str, snapshot: bool, max_depth: int | None, workers: int | None):
         workers=workers,
         progress_callback=on_progress,
         max_depth=max_depth,
+        scan_path=path,
+        one_file_system=one_file_system,
+        exclude_pseudo_filesystems=exclude_pseudo,
     )
     root = engine.scan(path)
     elapsed = time.monotonic() - start
 
     click.echo()
     click.echo(f"\nScan complete in {elapsed:.1f}s")
-    click.echo(f"  Total size: {humanize.naturalsize(root.size, binary=True)}")
+    metric_name = METRIC_NAMES[metric]
+    click.echo(f"  Metric: {metric_name} — {METRIC_EXPLANATIONS[metric]}")
+    click.echo(f"  Total ({metric_name}): {metric_text(root, metric)}")
+    click.echo(f"  Logical: {metric_text(root, 'logical')}")
+    click.echo(f"  Allocated: {metric_text(root, 'allocated')}")
+    click.echo(f"  Unique on disk: {metric_text(root, 'unique')}")
     click.echo(f"  Files: {root.file_count:,}")
     click.echo(f"  Directories: {root.dir_count:,}")
+    if root.scan_policy is not None:
+        click.echo(f"  Policy: {root.scan_policy.summary()}")
+    if root.inaccessible_subtree_count:
+        click.echo(
+            f"  Coverage: partial ({root.inaccessible_subtree_count:,} "
+            "unreadable entries/subtrees)"
+        )
+    if root.excluded_subtree_count or root.depth_limited_subtree_count:
+        click.echo(
+            f"  Scoped out: {root.excluded_subtree_count:,} policy-excluded, "
+            f"{root.depth_limited_subtree_count:,} depth-limited"
+        )
+    duplicate_links = sum(1 for node in root.walk() if node.is_hardlink_duplicate)
+    if duplicate_links:
+        click.echo(f"  Hardlinks deduplicated in Unique: {duplicate_links:,}")
 
     # Show top directories
-    click.echo("\nTop directories:")
-    for child in root.sorted_children[:15]:
-        if child.is_dir:
-            pct = child.size_percent(root.size)
-            size_str = humanize.naturalsize(child.size, binary=True)
-            bar = "█" * int(pct / 2) + "░" * (50 - int(pct / 2))
-            click.echo(f"  {bar} {pct:5.1f}% {size_str:>10s}  {child.name}/")
+    click.echo(f"\nTop directories by {metric_name.lower()}:")
+    total_value = metric_value(root, metric)
+    children = sorted(
+        (child for child in root.children if child.is_dir),
+        key=lambda child: (-metric_value_or_zero(child, metric), child.name),
+    )
+    for child in children[:15]:
+        child_value = metric_value(child, metric)
+        pct = (
+            child_value / total_value * 100
+            if child_value is not None and total_value not in (None, 0)
+            else 0.0
+        )
+        filled = min(50, int(pct / 2))
+        bar = "█" * filled + "░" * (50 - filled)
+        click.echo(
+            f"  {bar} {pct:5.1f}% {metric_text(child, metric):>12s}  "
+            f"{child.name}/"
+        )
 
     if snapshot:
         from fs_monitor.models.snapshot import Snapshot
@@ -218,7 +309,14 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
         try:
             while True:
                 start = time.monotonic()
-                engine = ScanEngine(workers=workers, scan_path=path)
+                engine = ScanEngine(
+                    workers=workers,
+                    scan_path=path,
+                    one_file_system=config.scan.one_file_system,
+                    exclude_pseudo_filesystems=(
+                        config.scan.exclude_pseudo_filesystems
+                    ),
+                )
                 root = engine.scan(path)
                 elapsed = time.monotonic() - start
 
@@ -274,12 +372,19 @@ def cleanup(path: str, workers: int | None):
     from fs_monitor.scanner.engine import ScanEngine
     from fs_monitor.cleanup.detector import detect_targets, group_by_category, total_savings
     from fs_monitor.cleanup.actions import delete_targets
+    from fs_monitor.config import load_config
     import humanize
 
     path = str(Path(path).resolve())
     click.echo(f"Scanning {path} for cleanup targets...")
 
-    engine = ScanEngine(workers=workers, scan_path=path)
+    config = load_config()
+    engine = ScanEngine(
+        workers=workers,
+        scan_path=path,
+        one_file_system=config.scan.one_file_system,
+        exclude_pseudo_filesystems=config.scan.exclude_pseudo_filesystems,
+    )
     root = engine.scan(path)
 
     targets = detect_targets(root)

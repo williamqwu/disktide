@@ -9,7 +9,7 @@ from rich.segment import Segment
 from rich.style import Style
 
 from fs_monitor.glyphs import visible_width
-from fs_monitor.metrics import metric_text, metric_value
+from fs_monitor.metrics import metric_text, metric_value, metric_value_or_zero
 from fs_monitor.models.tree import FSNode
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.viz.colors import file_category, get_color_scheme, hsl_to_rgb
@@ -97,16 +97,16 @@ def compute_layout(
     width: int,
     height: int,
     max_depth: int = 3,
-    metric: str = "size",
+    metric: str = "logical",
 ) -> TreemapLayout:
     """Compute a squarified treemap layout for the given node.
 
-    `metric` selects what the rectangle areas encode: 'size' (bytes) or
-    'count' (file count).
+    `metric` selects what the rectangle areas encode.
     """
     layout = TreemapLayout(width=width, height=height)
 
-    if width <= 0 or height <= 0 or metric_value(node, metric) <= 0:
+    root_value = metric_value(node, metric)
+    if width <= 0 or height <= 0 or root_value is None or root_value <= 0:
         layout.build_grid()
         return layout
 
@@ -205,14 +205,14 @@ def _layout_node(
     # Children with a positive metric value, largest first (squarify wants
     # descending input, and "largest" depends on the active metric).
     sized = sorted(
-        (c for c in children if metric_value(c, metric) > 0),
-        key=lambda c: (-metric_value(c, metric), c.name),
+        (c for c in children if metric_value_or_zero(c, metric) > 0),
+        key=lambda c: (-metric_value_or_zero(c, metric), c.name),
     )
     if not sized:
         return
 
     # Compute sub-rectangles using squarify
-    sizes = [metric_value(c, metric) for c in sized]
+    sizes = [metric_value_or_zero(c, metric) for c in sized]
     total = sum(sizes)
     if total <= 0:
         return

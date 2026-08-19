@@ -2,6 +2,11 @@
 
 Interactive terminal disk usage explorer built with Python and [Textual](https://github.com/Textualize/textual).
 
+Explore the same tree by logical bytes, allocated blocks, unique on-disk
+allocation, or file count. Sparse files, hardlinks, filesystem boundaries,
+policy exclusions, and unreadable subtrees stay explicit instead of being
+collapsed into one ambiguous size number.
+
 <p align="center">
   <img src="docs/images/sunburst.png" width="49%" alt="Explorer with sunburst visualization" />
   <img src="docs/images/monitor.png" width="49%" alt="Monitor with snapshot history and size trends" />
@@ -56,7 +61,7 @@ fsmonitor
 | `1` / `2` / `3` | Switch visualization (Sunburst / Treemap / Details) |
 | `u` / `i` | Navigate up / drill into directory |
 | `s` | Cycle sort (Size / Name / Modified) |
-| `y` / `t` | Copy highlighted path / toggle size vs. file count |
+| `y` / `t` | Copy highlighted path / cycle Logical, Allocated, Unique, Files |
 | `r` | Rescan / refresh |
 | `b` | Benchmark the highlighted mount in FS Overview (after confirmation) |
 | `?` | Settings |
@@ -66,7 +71,10 @@ fsmonitor
 
 ```bash
 # Scan a directory directly
-fsmonitor scan /path --snapshot
+fsmonitor scan /path --metric allocated --snapshot
+
+# Stay on one filesystem and skip pseudo-filesystem mounts
+fsmonitor scan / --metric unique --one-file-system --exclude-pseudo
 
 # Watch for changes over time
 fsmonitor watch /path --interval 6h

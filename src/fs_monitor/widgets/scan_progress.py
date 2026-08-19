@@ -84,7 +84,7 @@ class ScanProgressOverlay(Widget):
         stats_text.append(f"  Dirs: {progress.dirs_scanned:,}", style="cyan")
         stats_text.append(f"  Files: {progress.files_scanned:,}", style="green")
         stats_text.append(
-            f"  Size: {humanize.naturalsize(progress.total_size, binary=True)}",
+            f"  Logical: {humanize.naturalsize(progress.total_size, binary=True)}",
             style="yellow",
         )
         speed = progress.items_per_second

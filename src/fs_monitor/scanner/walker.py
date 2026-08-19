@@ -4,7 +4,9 @@ from __future__ import annotations
 import os
 import stat
 import threading
-from typing import Callable
+from typing import Callable, Mapping
+
+from fs_monitor.domain.metrics import allocated_bytes_from_stat, sum_available
 from fs_monitor.models.tree import FSNode
 
 
@@ -32,11 +34,36 @@ def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
         path=entry.path,
         size=st.st_size,
         own_size=st.st_size,
+        allocated_size=allocated_bytes_from_stat(st),
+        own_allocated_size=allocated_bytes_from_stat(st),
         is_dir=False,
         mtime=st.st_mtime,
         depth=depth,
         file_count=1,
         is_symlink=True,
+        device_id=getattr(st, "st_dev", None),
+        inode=getattr(st, "st_ino", None),
+        link_count=getattr(st, "st_nlink", 1),
+    )
+
+
+def make_file_node(entry: os.DirEntry, stat_result, depth: int) -> FSNode:
+    """Build a regular-file node from the single stat already paid for."""
+    allocated = allocated_bytes_from_stat(stat_result)
+    return FSNode(
+        name=entry.name,
+        path=entry.path,
+        size=stat_result.st_size,
+        own_size=stat_result.st_size,
+        allocated_size=allocated,
+        own_allocated_size=allocated,
+        is_dir=False,
+        mtime=stat_result.st_mtime,
+        depth=depth,
+        file_count=1,
+        device_id=getattr(stat_result, "st_dev", None),
+        inode=getattr(stat_result, "st_ino", None),
+        link_count=getattr(stat_result, "st_nlink", 1),
     )
 
 
@@ -73,6 +100,9 @@ def scan_directory(
     cancel_event: threading.Event | None = None,
     ancestors: frozenset[tuple[int, int]] = frozenset(),
     on_dir_done: Callable[[int, int, int, str], None] | None = None,
+    root_device: int | None = None,
+    one_file_system: bool = False,
+    excluded_mounts: Mapping[str, str] | None = None,
 ) -> FSNode:
     """Scan a directory and return an FSNode tree.
 
@@ -94,14 +124,43 @@ def scan_directory(
     if cancel_event is not None and cancel_event.is_set():
         return node
 
-    if max_depth is not None and depth >= max_depth:
-        return node
-
     try:
         st = os.stat(path)
         node.mtime = st.st_mtime
+        node.device_id = getattr(st, "st_dev", None)
+        node.inode = getattr(st, "st_ino", None)
+        node.link_count = getattr(st, "st_nlink", 1)
     except OSError:
         st = None
+
+    canonical_path = os.path.realpath(path)
+    filesystem_type = (excluded_mounts or {}).get(canonical_path)
+    if filesystem_type is not None:
+        node.excluded = True
+        node.exclusion_reason = f"pseudo filesystem ({filesystem_type})"
+        node.filesystem_type = filesystem_type
+        node.allocated_size = 0
+        node.own_allocated_size = 0
+        return node
+
+    if (
+        one_file_system
+        and root_device is not None
+        and st is not None
+        and getattr(st, "st_dev", root_device) != root_device
+    ):
+        node.excluded = True
+        node.filesystem_boundary = True
+        node.exclusion_reason = "filesystem boundary"
+        node.allocated_size = 0
+        node.own_allocated_size = 0
+        return node
+
+    if max_depth is not None and depth >= max_depth:
+        node.depth_limited = True
+        node.allocated_size = 0
+        node.own_allocated_size = 0
+        return node
 
     # Cycle guard: a bind mount (or container rootfs) can make a
     # directory reappear inside itself. If this directory's identity is
@@ -125,6 +184,7 @@ def scan_directory(
         return node
 
     own_size = 0
+    own_allocated: int | None = 0
     file_count = 0
     dir_count = 0
     inaccessible = 0
@@ -147,6 +207,9 @@ def scan_directory(
                     else:
                         node.children.append(child)
                         own_size += child.own_size
+                        own_allocated = sum_available(
+                            (own_allocated, child.own_allocated_size)
+                        )
                         file_count += 1
                         local_files += 1
                     continue
@@ -154,7 +217,8 @@ def scan_directory(
                 if entry.is_dir(follow_symlinks=False):
                     child = scan_directory(
                         entry.path, depth + 1, max_depth, cancel_event,
-                        ancestors, on_dir_done,
+                        ancestors, on_dir_done, root_device,
+                        one_file_system, excluded_mounts,
                     )
                     node.children.append(child)
                     dir_count += 1 + child.dir_count
@@ -164,18 +228,12 @@ def scan_directory(
                 elif entry.is_file(follow_symlinks=False):
                     try:
                         st = entry.stat(follow_symlinks=False)
-                        child = FSNode(
-                            name=entry.name,
-                            path=entry.path,
-                            size=st.st_size,
-                            own_size=st.st_size,
-                            is_dir=False,
-                            mtime=st.st_mtime,
-                            depth=depth + 1,
-                            file_count=1,
-                        )
+                        child = make_file_node(entry, st, depth + 1)
                         node.children.append(child)
                         own_size += st.st_size
+                        own_allocated = sum_available(
+                            (own_allocated, child.own_allocated_size)
+                        )
                         file_count += 1
                         local_files += 1
                     except OSError:
@@ -190,6 +248,11 @@ def scan_directory(
     subtree_size = own_size + sum(c.size for c in node.children if c.is_dir)
     node.size = subtree_size
     node.own_size = own_size
+    node.own_allocated_size = own_allocated
+    node.allocated_size = sum_available(
+        [own_allocated]
+        + [c.allocated_size for c in node.children if c.is_dir]
+    )
     node.file_count = file_count
     node.dir_count = dir_count
     node.inaccessible_count = inaccessible
@@ -203,6 +266,8 @@ def scan_directory(
     # they're a denied or partial dir.
     denied_sub = 0
     partial_sub = 0
+    excluded_sub = 0
+    depth_limited_sub = 0
     for c in node.children:
         if not c.is_dir:
             continue
@@ -212,8 +277,12 @@ def scan_directory(
             denied_sub += 1
         elif c.inaccessible_count > 0:
             partial_sub += 1
+        excluded_sub += c.excluded_subtree_count + int(c.excluded)
+        depth_limited_sub += c.depth_limited_subtree_count + int(c.depth_limited)
     node.denied_dir_subtree_count = denied_sub
     node.partial_dir_subtree_count = partial_sub
+    node.excluded_subtree_count = excluded_sub
+    node.depth_limited_subtree_count = depth_limited_sub
 
     if on_dir_done is not None:
         # Tick at the end of this directory so live progress moves per
