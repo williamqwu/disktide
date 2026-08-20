@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "dev/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python "${{ matrix.python-version }}"
+      - name: Run test suite
+        run: .venv/bin/python -m pytest -q
+
+  minimal-distribution:
+    name: Minimal wheel and sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python 3.13
+      - name: Build and inspect distributions
+        run: |
+          uv build
+          .venv/bin/python tool/verify_distribution.py
+      - name: Install wheel into a clean environment
+        run: |
+          uv venv --python 3.13 .venv-smoke
+          uv pip install --python .venv-smoke/bin/python dist/fsmonitor_cli-*.whl
+          uv venv --python 3.13 .venv-sdist-smoke
+          uv pip install --python .venv-sdist-smoke/bin/python dist/fsmonitor_cli-*.tar.gz
+      - name: Smoke test installed entry points
+        run: |
+          .venv-smoke/bin/fsmonitor --version
+          .venv-smoke/bin/fsmonitor doctor --json > doctor.json
+          .venv-smoke/bin/python -c 'import json; json.load(open("doctor.json"))'
+          mkdir -p /tmp/fsmonitor-smoke/data
+          printf 'smoke' > /tmp/fsmonitor-smoke/data/file.txt
+          .venv-smoke/bin/fsmonitor scan /tmp/fsmonitor-smoke --metric unique --workers 1
+          .venv-sdist-smoke/bin/fsmonitor --version
+          .venv-sdist-smoke/bin/fsmonitor doctor --json > doctor-sdist.json
+          .venv-sdist-smoke/bin/python -c 'import json; json.load(open("doctor-sdist.json"))'
+      - name: Enforce core dependency budget
+        run: .venv-smoke/bin/python tool/check_dependency_budget.py

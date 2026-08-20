@@ -6,22 +6,23 @@ Guide for developers working on fsmonitor.
 
 ```bash
 git clone <repo-url> fsmonitor && cd fsmonitor
-pip install -e ".[dev]"
+uv sync --locked
 ```
 
-This installs the project in editable mode with dev dependencies (pytest, pytest-asyncio, textual-dev).
+This creates an editable `.venv` from the committed `uv.lock`, including the
+default development dependency group (pytest, pytest-asyncio, textual-dev).
 
 ## Running Tests
 
 ```bash
-# full suite
-python -m pytest tests/ -v
+# full locked suite
+uv run pytest tests/ -v
 
 # specific module
-python -m pytest tests/test_scanner.py -v
+uv run pytest tests/test_scanner.py -v
 
 # with coverage (if pytest-cov installed)
-python -m pytest tests/ --cov=fs_monitor
+uv run pytest tests/ --cov=fs_monitor
 ```
 
 The test suite covers the scanner and tree model, configuration, snapshot/database storage, cleanup detection and actions, visualizations, TUI navigation and modals, FS Overview/block devices/benchmarking, progress reporting, system detection, welcome flow, and migrations.
@@ -35,6 +36,9 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - `src/fs_monitor/` -- all source code
 - `tests/` -- test suite (no subdirectories, flat layout)
 - `assets/` -- TCSS stylesheets
+- `src/fs_monitor/collectors/platform/` -- isolated OS/procfs/sysfs/command probes
+- `src/fs_monitor/extensions/` -- typed capability contracts
+- `src/fs_monitor/services/` -- CLI/TUI-neutral application services such as doctor
 - `tool/` -- development utilities (e.g., `gen_activity` for generating test data)
 - `docs/` -- documentation
 
@@ -49,6 +53,8 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 ### Module Boundaries
 
 - **models/** -- pure data structures, no I/O. Can be imported anywhere.
+- **collectors/platform/** -- all platform-specific probes; callers consume structured results rather than `/proc`, `/sys`, or commands directly.
+- **services/** -- application orchestration with no Textual dependency.
 - **scanner/** -- filesystem I/O only. No Textual imports.
 - **storage/** -- SQLite I/O only. No Textual imports.
 - **cleanup/** -- operates on FSNode trees. No Textual imports.
@@ -57,6 +63,18 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - **screens/** and **widgets/** -- Textual UI layer. Can import everything above.
 
 This layering means the scanner, storage, cleanup, and viz modules are testable without a running Textual app.
+
+## Distribution Checks
+
+```bash
+uv build
+uv run python tool/verify_distribution.py
+```
+
+The CI minimal-install job installs the wheel into a fresh environment, runs
+`fsmonitor doctor` plus a small scan, and enforces at most 20 runtime
+distributions, at most 20 MiB of installed files, and no native extension.
+See [release-process.md](release-process.md) for the tag and PyPI flow.
 
 ### Configuration
 

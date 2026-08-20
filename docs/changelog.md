@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.1
+
+**Capabilities and diagnostics**
+
+- **feat** Added `fsmonitor doctor` with human-readable and versioned JSON output covering versions, active platform adapter, redacted XDG paths, database schema/writability, metric support, platform capabilities, optional extras, and default scan policy.
+- **feat** Added typed `PlatformCapabilities`, structured probe status/reason/suggestion values, a Linux adapter, and conservative macOS/Windows adapters.
+- **fix** FS Overview now displays explicit mount/block-device capability failures instead of silently hiding an empty `lsblk` panel.
+- **refactor** Centralized procfs, sysfs, mount-table, block-device, storage-medium, and transform probes under `collectors/platform`; scanner compatibility APIs remain available.
+
+**Distribution**
+
+- **build** Added committed `uv.lock`, locked Python 3.11/3.12/3.13 CI, clean wheel/sdist smoke tests, and verified Textual/Textual Plotext version ranges.
+- **build** Added a 20-distribution / 20-MiB / pure-Python core budget gate, package-content verification, SHA-256 checksums, CycloneDX SBOM generation, and build-provenance attestation.
+- **docs** Documented `uvx`, `uv tool`, `pipx`, virtualenv installation, upgrades, clean release validation, and PyPI Trusted Publishing.
+
 ## v0.2.0
 
 Since `a2872c7` (v0.1.7 release).

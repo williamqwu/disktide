@@ -1,0 +1,176 @@
+/* fsmonitor default stylesheet */
+
+Screen {
+    background: $background;
+}
+
+Header {
+    dock: top;
+    background: $primary;
+}
+
+Footer {
+    dock: bottom;
+}
+
+/* Explorer Screen */
+#explorer-main {
+    height: 1fr;
+}
+
+#tree-panel {
+    width: 40%;
+    min-width: 30;
+    border-right: thick $primary-background;
+}
+
+#viz-panel {
+    width: 60%;
+}
+
+Breadcrumb {
+    height: 1;
+    dock: top;
+    background: $primary-background;
+    color: $text;
+    padding: 0 1;
+}
+
+/* Scan Progress */
+ScanProgressOverlay {
+    width: 60;
+    height: 12;
+    background: $surface;
+    border: thick $primary;
+    padding: 1 2;
+    layer: overlay;
+    align: center middle;
+    offset-x: 50%;
+    offset-y: 50%;
+    margin: -6 -30;
+}
+
+/* Cleanup Screen */
+#cleanup-summary {
+    height: 3;
+    padding: 0 1;
+    background: $primary-background;
+    color: $text;
+}
+
+#cleanup-table {
+    height: 1fr;
+}
+
+/* Monitor Screen */
+#monitor-top {
+    height: 50%;
+}
+
+#monitor-bottom {
+    height: 50%;
+}
+
+#snapshots-panel {
+    width: 40%;
+    border-right: thick $primary-background;
+}
+
+#trend-panel {
+    width: 60%;
+}
+
+#snap-title, #changes-title {
+    height: 1;
+    background: $primary-background;
+    padding: 0 1;
+}
+
+/* Settings Screen */
+#settings-container {
+    padding: 1 2;
+    height: 1fr;
+}
+
+.title {
+    text-style: bold;
+    padding: 0 0 1 0;
+}
+
+.section-title {
+    text-style: bold;
+    color: $primary;
+    padding: 1 0 0 0;
+}
+
+.setting-row {
+    height: 3;
+    padding: 0 2;
+}
+
+.setting-label {
+    width: 30;
+    height: 3;
+    content-align: left middle;
+}
+
+/* Cleanup Modal */
+#cleanup-dialog {
+    width: 80;
+    max-height: 40;
+    background: $surface;
+    border: thick $primary;
+    padding: 1 2;
+}
+
+#cleanup-table {
+    height: auto;
+    max-height: 20;
+}
+
+.button-row {
+    height: 3;
+    align: center middle;
+    padding: 1 0;
+}
+
+.button-row Button {
+    margin: 0 1;
+}
+
+/* Welcome Screen */
+#welcome-dialog {
+    align: center middle;
+    padding: 2 4;
+    max-width: 80;
+    height: auto;
+}
+
+#welcome-title {
+    text-align: center;
+    padding: 1 0;
+    text-style: bold;
+}
+
+#welcome-commands {
+    padding: 1 0;
+}
+
+#suggestion-list {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+.completions-display {
+    max-height: 4;
+    color: $text-muted;
+}
+
+#welcome-tab-hint {
+    text-align: center;
+    padding: 1 0;
+}
+
+#welcome-save-default {
+    padding: 0 0 1 0;
+}

@@ -20,7 +20,11 @@ How fsmonitor interacts with the filesystem, and what works (or breaks) on diffe
 
 ## Platform Support
 
-The core scanner (`os.scandir`, `os.stat`, `os.path`) is cross-platform Python. However, the adaptive threading system in `scanner/sysinfo.py` reads Linux-specific interfaces:
+The core scanner (`os.scandir`, `os.stat`, `os.path`) is cross-platform Python.
+Platform-specific probes are isolated under `collectors/platform/`. Linux uses
+procfs, sysfs, and optional system commands; macOS, Windows, and unknown
+platforms use conservative adapters that return structured unavailable reasons
+instead of raising into the scanner or UI.
 
 | Interface | Purpose | Fallback when absent |
 |-----------|---------|---------------------|
@@ -30,9 +34,14 @@ The core scanner (`os.scandir`, `os.stat`, `os.path`) is cross-platform Python. 
 | `os.sched_getaffinity(0)` | cgroup-aware CPU count | Falls back to `os.cpu_count()` |
 | `os.getloadavg()` | System load | `(0, 0, 0)` (no load-based reduction) |
 
-On macOS, `/proc` and `/sys` don't exist. All sysinfo functions catch `OSError`/`AttributeError` and return safe defaults, so scanning works -- but worker count won't adapt to storage type or filesystem. Set `workers` in config explicitly on non-Linux systems.
+On macOS, `/proc` and `/sys` do not exist. Scanning still works, while mount,
+block-device, and medium detection report unavailable through `fsmonitor doctor`
+and FS Overview. Set `workers` explicitly on platforms where storage-medium
+autodetection is unavailable.
 
-FS Overview is currently Linux-oriented: mount discovery reads `/proc/mounts`, and the block-device panel uses `lsblk`. On platforms without those interfaces, scanning still works but FS Overview may be empty or omit the block-device panel.
+FS Overview consumes the same adapter results. On platforms without mount or
+`lsblk` support, it displays the capability status, reason, and remediation
+instead of silently presenting an empty panel.
 
 On Windows, `os.scandir` and `os.stat` work, but `os.getloadavg()` and `os.sched_getaffinity()` don't exist (`AttributeError` caught). The deeper issue is that the project hasn't been tested on Windows and the TUI depends on terminal capabilities that may not work under cmd.exe (Textual has partial Windows support via Windows Terminal).
 
@@ -158,16 +167,18 @@ os.path.join(parent, name)      # construct full path
 Path(raw).resolve()             # resolve before submitting
 ```
 
-### System Info -- `scanner/sysinfo.py`
+### Platform Adapters and System Info
 
-Linux-specific reads (all wrapped in try/except with safe fallbacks):
+`scanner/sysinfo.py` remains the compatibility facade used by worker tuning.
+The Linux I/O lives in `collectors/platform/linux.py`; each probe returns an
+available, degraded, or unavailable result with a reason.
 
 ```python
 os.cpu_count()                  # CPU count
 os.sched_getaffinity(0)         # cgroup-aware CPU count
 os.getloadavg()                 # 1/5/15-min load averages
 open("/proc/meminfo")           # total and available memory
-open("/proc/mounts")            # filesystem type, mountpoint
+open("/proc/self/mounts")       # filesystem type, mountpoint
 os.path.realpath(path)          # resolve symlinks for device lookup
 os.path.exists("/sys/block/...") # check sysfs paths
 open("/sys/block/.../rotational") # HDD vs SSD
@@ -175,15 +186,15 @@ os.listdir("/sys/block/.../slaves") # device-mapper slave devices
 os.path.basename(os.path.realpath(dev)) # resolve /dev symlinks
 ```
 
-### FS Overview -- `screens/fs_overview.py`, `scanner/blockdev.py`, `scanner/benchmark.py`
+### FS Overview -- `screens/fs_overview.py`, platform adapter, benchmark
 
 Mounted-filesystem discovery and capacity reporting use:
 
 ```python
-open("/proc/mounts")            # device, mountpoint, fs type, options
+adapter.enumerate_mounts()      # structured mount capability + records
 os.statvfs(mountpoint)          # blocks, available space, inode counts
 subprocess.run(["quota", ...]) # optional current-user quota data
-subprocess.run(["lsblk", ...]) # optional JSON block-device tree
+adapter.list_block_devices()    # structured lsblk capability + device tree
 ```
 
 `statvfs` for network mounts runs in a worker with a 3-second timeout so a stale NFS/CIFS mount cannot block the screen indefinitely. Local mounts are queried directly. Pseudo-filesystems and zero-capacity mounts are filtered from the table.

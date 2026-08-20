@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Iterable
 
-from fs_monitor.scanner.sysinfo import unescape_mount_path
+from fs_monitor.collectors.platform import get_platform_adapter
 
 
 PSEUDO_FS_TYPES = frozenset({
@@ -24,21 +24,17 @@ class MountEntry:
 
 
 def read_mount_entries() -> list[MountEntry]:
-    """Read the local mount table when the platform exposes `/proc/mounts`."""
-    entries: list[MountEntry] = []
-    try:
-        with open("/proc/mounts") as mount_file:
-            for line in mount_file:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                entries.append(MountEntry(
-                    mountpoint=os.path.realpath(unescape_mount_path(parts[1])),
-                    filesystem_type=parts[2],
-                ))
-    except (OSError, ValueError):
+    """Read mount entries through the active platform adapter."""
+    result = get_platform_adapter().enumerate_mounts()
+    if result.value is None:
         return []
-    return entries
+    return [
+        MountEntry(
+            mountpoint=os.path.realpath(record.mountpoint),
+            filesystem_type=record.filesystem_type,
+        )
+        for record in result.value
+    ]
 
 
 def discover_pseudo_mounts(

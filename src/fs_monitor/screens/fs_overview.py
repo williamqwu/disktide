@@ -16,20 +16,19 @@ from textual.widgets import Footer, Header, Static, DataTable, LoadingIndicator
 from rich.text import Text
 import humanize
 
-from fs_monitor.scanner.sysinfo import (
-    detect_storage_type,
-    detect_transforms,
-    facet_labels,
-    storage_class,
-    unescape_mount_path,
-    _NETWORK_FS_TYPES,
-)
-from fs_monitor.scanner.blockdev import (
+from fs_monitor.collectors.platform import get_platform_adapter
+from fs_monitor.collectors.platform.base import PlatformAdapter
+from fs_monitor.collectors.platform.models import (
     BlockDevice,
     DeviceStatus,
-    list_block_devices,
-    idle_summary,
+    ProbeResult,
 )
+from fs_monitor.extensions.capabilities import CapabilityStatus
+from fs_monitor.scanner.sysinfo import (
+    facet_labels,
+    storage_class,
+)
+from fs_monitor.scanner.blockdev import idle_summary
 from fs_monitor.scanner.benchmark import benchmark_mount, BenchmarkResult
 from fs_monitor.scanner.policy import PSEUDO_FS_TYPES
 from fs_monitor.widgets.confirm_modal import ConfirmModal
@@ -115,22 +114,22 @@ class FSEntry:
         return t
 
 
-def _read_mounts() -> list[tuple[str, str, str, str]]:
-    """Read /proc/mounts. Returns list of (device, mountpoint, fstype, options)."""
-    entries = []
-    try:
-        with open("/proc/mounts") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                device, mountpoint, fstype, options = (
-                    parts[0], unescape_mount_path(parts[1]), parts[2], parts[3]
-                )
-                entries.append((device, mountpoint, fstype, options))
-    except OSError:
-        pass
-    return entries
+def _read_mounts(
+    adapter: PlatformAdapter | None = None,
+) -> list[tuple[str, str, str, str]]:
+    """Compatibility view of adapter mount records as legacy tuples."""
+    result = (adapter or get_platform_adapter()).enumerate_mounts()
+    if result.value is None:
+        return []
+    return [
+        (
+            record.device,
+            record.mountpoint,
+            record.filesystem_type,
+            record.options,
+        )
+        for record in result.value
+    ]
 
 
 def _statvfs_safe(mountpoint: str, is_network: bool) -> os.statvfs_result | None:
@@ -213,21 +212,38 @@ def _load_user_quotas() -> dict[str, tuple[int, int, int]]:
     return result
 
 
-def _load_fs_entries() -> list[FSEntry]:
-    """Load filesystem info for all real mounted filesystems."""
+def probe_fs_entries(
+    adapter: PlatformAdapter | None = None,
+) -> ProbeResult[list[FSEntry]]:
+    """Load real mounted filesystems with structured probe status."""
+    platform_adapter = adapter or get_platform_adapter()
+    mounts = platform_adapter.enumerate_mounts()
+    if mounts.value is None:
+        return ProbeResult(
+            status=mounts.status,
+            reason=mounts.reason,
+            suggestion=mounts.suggestion,
+        )
+
     seen_mountpoints: set[str] = set()
     entries: list[FSEntry] = []
+    skipped = 0
 
-    for device, mountpoint, fstype, options in _read_mounts():
+    for record in mounts.value:
+        device = record.device
+        mountpoint = record.mountpoint
+        fstype = record.filesystem_type
+        options = record.options
         if fstype in PSEUDO_FS_TYPES:
             continue
         if mountpoint in seen_mountpoints:
             continue
         seen_mountpoints.add(mountpoint)
 
-        is_network = fstype in _NETWORK_FS_TYPES
+        is_network = record.is_network
         stat = _statvfs_safe(mountpoint, is_network)
         if stat is None:
+            skipped += 1
             continue
 
         frsize = stat.f_frsize
@@ -244,8 +260,8 @@ def _load_fs_entries() -> list[FSEntry]:
         if total == 0:
             continue
 
-        is_rotational = detect_storage_type(mountpoint)
-        transforms = detect_transforms(device, fstype, options)
+        is_rotational = platform_adapter.storage_medium(mountpoint).value
+        transforms = platform_adapter.detect_transforms(device, fstype, options)
 
         entries.append(FSEntry(
             mountpoint=mountpoint,
@@ -274,7 +290,25 @@ def _load_fs_entries() -> list[FSEntry]:
             entry.quota_hard_bytes = hard
 
     entries.sort(key=lambda e: e.mountpoint)
-    return entries
+    if skipped:
+        return ProbeResult.degraded(
+            entries,
+            f"loaded {len(entries)} filesystems; skipped {skipped} inaccessible mounts",
+            "Stale network mounts can be omitted after a three-second timeout.",
+        )
+    return ProbeResult(
+        status=mounts.status,
+        reason=mounts.reason,
+        value=entries,
+        suggestion=mounts.suggestion,
+    )
+
+
+def _load_fs_entries(
+    adapter: PlatformAdapter | None = None,
+) -> list[FSEntry]:
+    """Return filesystem entries with the legacy empty-list fallback."""
+    return probe_fs_entries(adapter).value or []
 
 
 def _usage_bar(pct: float, width: int = 12) -> Text:
@@ -309,6 +343,21 @@ def _format_benchmark(res: BenchmarkResult) -> str:
         f"read ~{humanize.naturalsize(res.read_bps)}/s "
         f"({humanize.naturalsize(res.bytes_io, binary=True)} probed)"
     )
+
+
+def _probe_message(label: str, result: ProbeResult) -> Text:
+    """Render an explicit available/degraded/unavailable probe summary."""
+    if result.status is CapabilityStatus.AVAILABLE:
+        style = "green"
+    elif result.status is CapabilityStatus.DEGRADED:
+        style = "yellow"
+    else:
+        style = "red"
+    text = Text(f"  {label}: {result.status.value}", style=style)
+    text.append(f" — {result.reason}", style="dim")
+    if result.suggestion:
+        text.append(f" · {result.suggestion}", style="dim")
+    return text
 
 
 def _dedup_by_device(entries: list[FSEntry]) -> list[FSEntry]:
@@ -658,11 +707,22 @@ class FSOverviewScreen(Screen):
     }
     """
 
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        adapter: PlatformAdapter | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
+        self._adapter = adapter or get_platform_adapter()
         self._entries: list[FSEntry] = []
         self._block_devices: list[BlockDevice] = []
         self._block_rows: list[BlockDevice] = []
+        self._filesystem_probe: ProbeResult[list[FSEntry]] = (
+            ProbeResult.unavailable("filesystem probe has not run")
+        )
+        self._block_probe: ProbeResult[list[BlockDevice]] = (
+            ProbeResult.unavailable("block-device probe has not run")
+        )
         # Measured throughput per mountpoint, kept for the life of the screen so
         # reopening a row shows its last result. Later runs overwrite earlier.
         self._benchmarks: dict[str, BenchmarkResult] = {}
@@ -697,14 +757,22 @@ class FSOverviewScreen(Screen):
     @work(thread=True, exclusive=True)
     def _load_data(self) -> None:
         try:
-            entries = _load_fs_entries()
-        except Exception:
-            entries = []
+            filesystem_probe = probe_fs_entries(self._adapter)
+        except Exception as exc:
+            filesystem_probe = ProbeResult.unavailable(
+                f"filesystem probe failed: {type(exc).__name__}: {exc}"
+            )
         try:
-            block_devices = list_block_devices()
-        except Exception:
-            block_devices = []
-        self.app.call_from_thread(self._populate_ui, entries, block_devices)
+            block_probe = self._adapter.list_block_devices()
+        except Exception as exc:
+            block_probe = ProbeResult.unavailable(
+                f"block-device probe failed: {type(exc).__name__}: {exc}"
+            )
+        self.app.call_from_thread(
+            self._populate_ui,
+            filesystem_probe,
+            block_probe,
+        )
 
     def _show_loading(self, show: bool) -> None:
         container = self.query_one("#fs-overview-loading-container", Vertical)
@@ -716,23 +784,31 @@ class FSOverviewScreen(Screen):
             "#fs-overview-block-table",
         ):
             self.query_one(wid).display = not show
-        # Hide the block panel entirely when lsblk gave us nothing.
-        if not show and not self._block_devices:
-            self.query_one("#fs-overview-block-label").display = False
-            self.query_one("#fs-overview-block-table").display = False
 
     def _populate_ui(
-        self, entries: list[FSEntry], block_devices: list[BlockDevice]
+        self,
+        filesystem_probe: ProbeResult[list[FSEntry]],
+        block_probe: ProbeResult[list[BlockDevice]],
     ) -> None:
+        entries = filesystem_probe.value or []
+        block_devices = block_probe.value or []
+        self._filesystem_probe = filesystem_probe
+        self._block_probe = block_probe
         self._entries = entries
         self._block_devices = block_devices
         self._show_loading(False)
 
         summary = self.query_one("#fs-overview-summary", Static)
         if entries:
-            summary.update(_build_summary(entries))
+            summary_text = _build_summary(entries)
+            if filesystem_probe.status is CapabilityStatus.DEGRADED:
+                summary_text.append(
+                    f"\n  Coverage: degraded — {filesystem_probe.reason}",
+                    style="yellow",
+                )
+            summary.update(summary_text)
         else:
-            summary.update("  No real filesystems found.")
+            summary.update(_probe_message("Filesystems", filesystem_probe))
 
         table = self.query_one("#fs-overview-table", DataTable)
         table.clear()
@@ -757,8 +833,11 @@ class FSOverviewScreen(Screen):
         table.clear()
         self._block_rows = []
         if not self._block_devices:
+            label.update(_probe_message("Block devices", self._block_probe))
+            table.display = False
             return
 
+        table.display = True
         label.update(_build_block_summary(self._block_devices))
         for dev, display_name in _block_tree_rows(self._block_devices):
             self._block_rows.append(dev)

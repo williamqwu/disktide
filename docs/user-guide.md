@@ -7,9 +7,14 @@ fsmonitor is an interactive terminal tool for exploring disk usage, detecting cl
 Install and launch:
 
 ```bash
-uv tool install .
+uv tool install fsmonitor-cli
 fsmonitor
 ```
+
+For a one-shot launch, use `uvx fsmonitor-cli`. `pipx install
+fsmonitor-cli` and a normal `pip install fsmonitor-cli` inside a virtual
+environment are also supported. The installed command is always `fsmonitor`;
+`fsmonitor-cli` remains a compatibility alias.
 
 The welcome screen shows a single path input with a list of suggested starting directories:
 
@@ -86,6 +91,11 @@ The top bar summarises total mounted space and usage percentage. Aggregate capac
 
 When `lsblk` is available, a second panel shows block devices and partitions, including mounted, unmounted, unformatted, and raw devices. An unmounted or raw device is **not** presented as safe-to-reclaim space; select a row to inspect details.
 
+Mount and block-device data comes from the active platform adapter. If procfs,
+sysfs, `lsblk`, or device permissions are unavailable, this screen shows the
+capability status and reason instead of failing or silently presenting an empty
+panel.
+
 Press `Enter` on a filesystem or block-device row to open its details. Press `b` on a filesystem row to run an opt-in throughput probe after a second confirmation. The probe creates a mode-0600 temporary file, writes at most 256 MiB and never more than 25% of currently available space, then removes the file. The displayed read result is approximate because cache eviction is advisory.
 
 Pseudo-filesystems (`proc`, `sysfs`, `tmpfs`, etc.) are automatically filtered out. Press `r` to refresh.
@@ -125,6 +135,22 @@ Review every selected path before acting. **Delete is permanent**: the current i
 ## CLI Commands
 
 These commands run outside the TUI and print results to stdout.
+
+### doctor
+
+Report the installed version, Python/Textual versions, active platform adapter,
+application paths, database status/schema, storage metrics, platform
+capabilities, optional extras, and default scan policy:
+
+```bash
+fsmonitor doctor
+fsmonitor doctor --json
+```
+
+The JSON schema is versioned and suitable for attaching to issue reports. App
+paths are represented as `~` or `$XDG_*` paths by default; use `--show-paths`
+only when raw local paths are intentionally required. The report never walks a
+scan tree or lists user files.
 
 ### scan
 

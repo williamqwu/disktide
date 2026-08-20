@@ -17,9 +17,21 @@ src/fs_monitor/
     metrics.py           MetricId + StorageMeasurements semantics
     policy.py            Explicit ScanPolicy metadata
 
+  collectors/platform/
+    base.py              Portable adapter + shared capability probes
+    linux.py             procfs/sysfs/lsblk implementation
+    portable.py          Conservative macOS/Windows/unknown adapters
+    models.py            Mount, block-device, and ProbeResult data
+
+  extensions/
+    capabilities.py      CapabilityId/status/reason public vocabulary
+
+  services/
+    doctor.py            Human + JSON installation diagnostics
+
   scanner/
     benchmark.py         Opt-in mount throughput probe
-    blockdev.py          lsblk-backed block-device inventory
+    blockdev.py          Compatibility facade over platform adapter
     engine.py            Multi-threaded scan orchestrator
     walker.py            os.scandir()-based recursive walker
     progress.py          Throttled progress reporting
@@ -69,6 +81,19 @@ src/fs_monitor/
     cleanup_modal.py     Deletion confirmation dialog
     confirm_modal.py     Reusable y/n confirmation dialog
 ```
+
+## Platform Capability Boundary
+
+All procfs, sysfs, mount-table, `lsblk`, and storage-medium probes live behind
+`PlatformAdapter`. Probe failures are values (`available`, `degraded`, or
+`unavailable`) with a reason and optional suggestion; they are not exceptions
+that screens must catch. `scanner/sysinfo.py` and `scanner/blockdev.py` retain
+their existing call signatures as compatibility facades while delegating I/O to
+the active adapter.
+
+`fsmonitor doctor` consumes the same capability snapshot as FS Overview. Its
+versioned JSON output redacts application paths by default and does not enumerate
+the user's scan tree.
 
 ## Scanner
 
@@ -332,17 +357,26 @@ The monitor screen loads data both on first mount (`on_mount`) and every time it
 
 ### FS Overview Loading
 
-FS Overview reads `/proc/mounts`, uses `statvfs` for capacity, optionally reads user quota output, and queries `lsblk` for the block-device tree. Network `statvfs` calls run behind a 3-second watchdog so a stale NFS/CIFS mount cannot freeze the screen. The `b` action is the only write path: after confirmation it creates and removes a bounded temporary benchmark file on the selected mount.
+FS Overview requests mount and block-device probes from the active platform
+adapter, uses `statvfs` for capacity, and optionally reads user quota output.
+Unavailable probes stay visible with their reason. Network `statvfs` calls run
+behind a 3-second watchdog so a stale NFS/CIFS mount cannot freeze the screen.
+The `b` action is the only write path: after confirmation it creates and removes
+a bounded temporary benchmark file on the selected mount.
 
 ## Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| textual >= 1.0.0 | TUI framework |
-| textual-plotext >= 0.2.0 | Line chart plotting |
+| textual >= 8.2, < 9 | TUI framework |
+| textual-plotext >= 1.0, < 2 | Line chart plotting |
 | squarify >= 0.4.0 | Treemap squarification algorithm |
 | drawille >= 0.2.0 | Braille canvas drawing |
 | click >= 8.0 | CLI argument parsing |
 | humanize >= 4.0 | Human-readable sizes and dates |
 
 Python >= 3.11 required (uses `tomllib`, `slots=True` dataclasses, `X | Y` union syntax).
+
+`uv.lock` is committed. CI tests Python 3.11, 3.12, and 3.13 with
+`uv sync --locked`, then installs the wheel into a clean environment. The core
+budget is at most 20 runtime distributions and 20 MiB with no native extension.

@@ -126,6 +126,11 @@ def _config_path() -> Path:
     return Path(config_dir) / LEGACY_STORAGE_NAMESPACE / "config.toml"
 
 
+def config_path() -> Path:
+    """Return the active config path without creating it."""
+    return _config_path()
+
+
 def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     """Save configuration to TOML file."""
     config_file = Path(path) if path else _config_path()

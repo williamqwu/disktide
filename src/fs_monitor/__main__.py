@@ -119,6 +119,32 @@ def _force_teardown(app) -> None:
 
 
 @cli.command()
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Emit a stable machine-readable report",
+)
+@click.option(
+    "--show-paths",
+    is_flag=True,
+    help="Include raw application paths instead of redacted XDG paths",
+)
+def doctor(json_output: bool, show_paths: bool) -> None:
+    """Report installation, database, and platform capabilities."""
+    from fs_monitor.services.doctor import (
+        build_doctor_report,
+        render_doctor_report,
+    )
+
+    report = build_doctor_report(show_paths=show_paths)
+    if json_output:
+        click.echo(report.to_json())
+    else:
+        click.echo(render_doctor_report(report))
+
+
+@cli.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
 @click.option("--snapshot", "-s", is_flag=True, help="Save snapshot to database")
 @click.option("--max-depth", "-d", type=int, default=None, help="Maximum scan depth")
