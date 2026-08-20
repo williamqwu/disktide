@@ -14,6 +14,7 @@ from fs_monitor.config import (
     get_effective_paths, set_effective_paths,
 )
 from fs_monitor.rendering import set_safe_rendering
+from fs_monitor.services.scan import ScanService
 from fs_monitor.viz.colors import set_color_scheme
 from fs_monitor.storage.database import Database
 from fs_monitor.screens.explorer import ExplorerScreen
@@ -53,6 +54,7 @@ class FSMonitorApp(App):
         self._scan_path = str(Path(scan_path).resolve()) if scan_path else None
         self._config = config or load_config()
         self._db = Database()
+        self._scan_service = ScanService()
         self._show_welcome = show_welcome
         # Ensures the "running without persistence" warning is only shown
         # once per session, no matter how many times we check.
@@ -145,7 +147,11 @@ class FSMonitorApp(App):
         """Install mode screens and push the explorer."""
         self._scan_path = scan_path
 
-        self._explorer = ExplorerScreen(self._scan_path, config=self._config)
+        self._explorer = ExplorerScreen(
+            self._scan_path,
+            config=self._config,
+            scan_service=self._scan_service,
+        )
         self._cleanup = CleanupScreen()
         self._monitor = MonitorScreen(
             db=self._db, root_path=self._scan_path,
@@ -168,7 +174,7 @@ class FSMonitorApp(App):
         """Gate quit behind a y/n prompt to avoid accidental exits.
 
         On confirm, the real teardown runs in `_perform_quit`. The
-        walker checks the engine's cancel event at every directory
+        scanner checks the service cancellation token at every directory
         boundary, so the worker thread bails out quickly. The terminal
         side prints "Exiting..." after TUI teardown and joins the
         scanner thread before printing the final goodbye — see
@@ -201,7 +207,7 @@ class FSMonitorApp(App):
         try:
             self._explorer.cancel_active_scan()
         except AttributeError:
-            pass
+            self._scan_service.cancel_all()
         self.exit()
 
     def action_switch_mode(self, mode: str) -> None:

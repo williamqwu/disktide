@@ -62,6 +62,11 @@ The indicator line above the tree shows the current sort order and metric. Press
 
 The tree, sunburst, treemap, Details rankings, and header change together. Unique hardlink ownership is finalized after the full scan, so a live in-progress view can temporarily show Unique as unavailable. Platforms without `st_blocks` show Allocated/Unique as `Unavailable`; they are never shown as zero. Press `y` to copy the highlighted item's absolute path to the system clipboard; it uses the terminal's OSC 52 escape, so it works over SSH and in web-based shells where there is no local clipboard tool.
 
+During a scan, the progress panel shows the scan run id, current phase, active
+policy, current path, counts, Logical bytes, and rate. Rescan and quit cancel by
+run id. Events from an older run are ignored after a newer scan starts, so a
+late partial update cannot overwrite the final view from the current run.
+
 Symbolic links are shown as `name → target` and never counted toward folder sizes (only the link's own size). When a link points to a directory, `i` resolves it and rescans from the real location, so linked folders stay navigable without the scan ever traversing the link. Broken links and links to files are marked and cannot be entered.
 
 ### Monitor (M)
@@ -171,6 +176,11 @@ Cross-filesystem scanning is the default; `--one-file-system` leaves visible
 default, while an explicitly selected pseudo root is still scanned. Use
 `--include-pseudo` to opt in to descendant pseudo filesystems.
 
+The command prints a short run id, phase, policy, and terminal status. Exit codes
+are `0` for complete or partial success, `1` for scan failure, `2` for invalid
+input, and `130` for cancellation. A partial result remains usable but includes
+an explicit coverage line; cancellation never prints a completion summary.
+
 ### watch
 
 Periodic scanning with automatic snapshots. Runs until interrupted or `--max-time` is reached:
@@ -181,7 +191,10 @@ fsmonitor watch /path --interval 1h     # scan every hour
 fsmonitor watch /path -i 30m -t 12h    # every 30 min, stop after 12 hours
 ```
 
-Snapshots are saved to the database and visible in the Monitor tab. Old snapshots are pruned automatically based on the `snapshot_retention` setting (default: 30 days).
+Each interval is a distinct scan run and prints its run id, policy, terminal
+status, duration, and snapshot result. Snapshots are saved to the database and
+visible in the Monitor tab. Old snapshots are pruned automatically based on the
+`snapshot_retention` setting (default: 30 days).
 
 Since `watch` runs in the foreground, use tmux or nohup for persistent monitoring:
 

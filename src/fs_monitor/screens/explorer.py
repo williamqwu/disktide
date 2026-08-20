@@ -12,12 +12,27 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 
 from fs_monitor.config import AppConfig, resolve_live_scan_render
+from fs_monitor.domain.metrics import MetricId
+from fs_monitor.domain.policy import ScanPolicy
+from fs_monitor.domain.scan import (
+    NodeAggregateUpdated,
+    ScanCancelled,
+    ScanCompleted,
+    ScanEvent,
+    ScanFailed,
+    ScanPhaseChanged,
+    ScanProgressUpdated,
+    ScanRequest,
+    ScanRequestError,
+    ScanRun,
+    ScanStarted,
+    ScanStatus,
+)
 from fs_monitor.metrics import METRIC_EXPLANATIONS, METRIC_NAMES, metric_text
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.models.tree import FSNode
-from fs_monitor.scanner.engine import ScanEngine
 from fs_monitor.scanner.walker import classify_symlink
-from fs_monitor.scanner.progress import ScanProgress
+from fs_monitor.services.scan import ScanService
 from fs_monitor.widgets.size_tree import SizeTree
 from fs_monitor.widgets.breadcrumb import Breadcrumb
 from fs_monitor.widgets.confirm_modal import ConfirmModal
@@ -94,13 +109,21 @@ class ExplorerScreen(Screen):
     }
     """
 
-    def __init__(self, scan_path: str, config: AppConfig | None = None, **kwargs):
+    def __init__(
+        self,
+        scan_path: str,
+        config: AppConfig | None = None,
+        scan_service: ScanService | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._scan_path = scan_path
         self._config = config
+        self._scan_service = scan_service or ScanService()
         self._root: FSNode | None = None
         self._current: FSNode | None = None
-        self._engine: ScanEngine | None = None
+        self._live_snapshot: FSNode | None = None
+        self._active_run: ScanRun | None = None
         # True while a scan is in flight. Used to gate drill-into (which
         # would otherwise read stale aggregates off the live snapshot)
         # and to decide whether to forward tree snapshots to the viz.
@@ -147,6 +170,11 @@ class ExplorerScreen(Screen):
 
     def _start_scan(self, force: bool = False) -> None:
         """Kick off a filesystem scan."""
+        if self._scan_in_progress and self._active_run is not None:
+            if not force:
+                return
+            self._scan_service.cancel(self._active_run.run_id)
+
         setting = (
             self._config.ui.live_scan_render
             if self._config is not None
@@ -165,10 +193,41 @@ class ExplorerScreen(Screen):
             )
         else:
             self._live_render = resolve_live_scan_render(setting)
+        workers = self._config.scan.workers if self._config else None
+        max_depth = self._config.scan.max_depth if self._config else None
+        policy = ScanPolicy(
+            one_file_system=(
+                self._config.scan.one_file_system if self._config else False
+            ),
+            exclude_pseudo_filesystems=(
+                self._config.scan.exclude_pseudo_filesystems
+                if self._config else True
+            ),
+            max_depth=max_depth,
+        )
+        request = ScanRequest(
+            path=self._scan_path,
+            metric=MetricId.LOGICAL,
+            policy=policy,
+            workers=workers,
+            emit_tree_updates=self._live_render,
+            source="explorer",
+        )
+        try:
+            run = self._scan_service.create_run(request)
+        except ScanRequestError as exc:
+            self._on_scan_failed(exc)
+            return
+        self._active_run = run
         self._scan_in_progress = True
+        self._live_snapshot = None
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
-        overlay.start()
+        overlay.start(
+            run_id=run.run_id,
+            phase=run.phase.value,
+            policy=run.policy.summary(),
+        )
         # The overlay lives inside #tree-panel during a scan; adding the
         # `scanning` class to the panel hides the (empty) tree and its
         # sort indicator and unhides the overlay in their place.
@@ -189,52 +248,50 @@ class ExplorerScreen(Screen):
         # Reset the Details panel too: otherwise the previous scan's
         # detail block stays visible until the user re-highlights.
         self.query_one("#info-panel", InfoPanel).update_node(None)
-        self._run_scan()
+        self._run_scan(run)
 
     @work(thread=True)
-    def _run_scan(self) -> None:
+    def _run_scan(self, run: ScanRun) -> None:
         """Run filesystem scan in a worker thread."""
 
-        def on_progress(progress: ScanProgress) -> None:
-            self.app.call_from_thread(self._apply_progress, progress)
+        def on_event(event: ScanEvent) -> None:
+            self.app.call_from_thread(self._apply_scan_event, event)
 
-        # The engine builds a fresh snapshot FSNode for every emit, so
-        # this callback runs on the engine thread and just marshals the
-        # already-immutable snapshot to the Textual main loop.
-        def on_tree(node: FSNode) -> None:
-            if not self._live_render:
-                return
-            self.app.call_from_thread(self._apply_tree_snapshot, node)
-
-        workers = self._config.scan.workers if self._config else None
-        max_depth = self._config.scan.max_depth if self._config else None
-        self._engine = ScanEngine(
-            workers=workers,
-            progress_callback=on_progress,
-            max_depth=max_depth,
-            scan_path=self._scan_path,
-            tree_callback=on_tree if self._live_render else None,
-            one_file_system=(
-                self._config.scan.one_file_system if self._config else False
-            ),
-            exclude_pseudo_filesystems=(
-                self._config.scan.exclude_pseudo_filesystems
-                if self._config else True
-            ),
-        )
-        # Wrap engine.scan in try/except so an unexpected failure (e.g.
-        # the scan dir got deleted between welcome-screen validation
-        # and the scan starting, or any uncaught exception inside the
-        # walker) cannot leave _scan_in_progress=True permanently, which
-        # would silently gate every subsequent rescan / drill-into.
         try:
-            root = self._engine.scan(self._scan_path)
+            self._scan_service.execute(run, consumers=(on_event,))
         except Exception as exc:
-            self.app.call_from_thread(self._on_scan_failed, exc)
-            return
-        self.app.call_from_thread(self._on_scan_complete, root)
+            self.app.call_from_thread(self._on_scan_failed, exc, run.run_id)
 
-    def _apply_progress(self, progress: ScanProgress) -> None:
+    def _apply_scan_event(self, event: ScanEvent) -> None:
+        """Apply one service event on Textual's main thread."""
+        active = self._active_run
+        if active is None or event.run_id != active.run_id:
+            return
+        overlay = self.query_one("#scan-progress", ScanProgressOverlay)
+        if isinstance(event, ScanStarted):
+            overlay.update_context(
+                run_id=event.run_id,
+                phase=event.phase.value,
+                policy=event.policy.summary(),
+            )
+        elif isinstance(event, ScanPhaseChanged):
+            overlay.update_context(run_id=event.run_id, phase=event.phase.value)
+        elif isinstance(event, ScanProgressUpdated):
+            self._apply_progress(event.progress)
+        elif isinstance(event, NodeAggregateUpdated):
+            if self._live_render and not event.final:
+                self._apply_tree_snapshot(event.root)
+        elif isinstance(event, ScanCompleted):
+            self._on_scan_complete(event.root, event.run_id, event.status)
+        elif isinstance(event, ScanCancelled):
+            self._on_scan_cancelled(event)
+        elif isinstance(event, ScanFailed):
+            self._on_scan_failed(
+                RuntimeError(f"{event.error_type}: {event.message}"),
+                event.run_id,
+            )
+
+    def _apply_progress(self, progress) -> None:
         """Apply progress update on the main thread."""
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.update_progress(progress)
@@ -254,20 +311,35 @@ class ExplorerScreen(Screen):
         # partial data on any future ordering change.
         if not self._scan_in_progress:
             return
-        # Track the latest snapshot so a tab switch mid-scan can render
-        # the newly-active panel without waiting for the next emit.
-        self._current = node
+        # Keep transient aggregates separate from the last completed
+        # navigation state so cancellation can restore the stable tree.
+        self._live_snapshot = node
         self._update_active_viz(node)
 
-    def _on_scan_complete(self, root: FSNode) -> None:
+    def _on_scan_complete(
+        self,
+        root: FSNode,
+        run_id: str | None = None,
+        status: ScanStatus = ScanStatus.COMPLETED,
+    ) -> None:
         """Handle scan completion on the main thread."""
+        if (
+            run_id is not None
+            and self._active_run is not None
+            and run_id != self._active_run.run_id
+        ):
+            return
         self._scan_in_progress = False
+        self._live_snapshot = None
         self._root = root
         self._current = root
 
         # Hide the overlay and restore the tree in the tree-panel.
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
-        overlay.scan_complete()
+        overlay.scan_complete(
+            run_id=(self._active_run.run_id if self._active_run else run_id),
+            partial=status is ScanStatus.PARTIAL,
+        )
         self.query_one("#tree-panel").remove_class("scanning")
 
         # Restore the viz tabs to their static (full-depth) render mode
@@ -296,7 +368,31 @@ class ExplorerScreen(Screen):
         self._update_active_viz(root)
         self._update_status()
 
-    def _on_scan_failed(self, exc: BaseException) -> None:
+    def _on_scan_cancelled(self, event: ScanCancelled) -> None:
+        """Reset live UI state without presenting a partial tree as final."""
+        self._scan_in_progress = False
+        self._live_snapshot = None
+        overlay = self.query_one("#scan-progress", ScanProgressOverlay)
+        overlay.scan_cancelled(run_id=event.run_id)
+        self.query_one("#tree-panel").remove_class("scanning")
+        for view_id, view_cls in (
+            ("#sunburst-view", SunburstView),
+            ("#treemap-view", TreemapView),
+        ):
+            self.query_one(view_id, view_cls).set_live_mode(False)
+        if self._current is not None:
+            self._update_active_viz(self._current)
+        self.app.notify(
+            f"Scan {event.run_id[:8]} cancelled.",
+            severity="warning",
+            timeout=4,
+        )
+
+    def _on_scan_failed(
+        self,
+        exc: BaseException,
+        run_id: str | None = None,
+    ) -> None:
         """Handle a worker-thread exception so the UI doesn't deadlock.
 
         Resets the same state `_on_scan_complete` clears (overlay
@@ -306,10 +402,17 @@ class ExplorerScreen(Screen):
         tree to render, and clobbering the previous scan's data would
         wipe state the user might still want to see.
         """
+        if (
+            run_id is not None
+            and self._active_run is not None
+            and run_id != self._active_run.run_id
+        ):
+            return
         self._scan_in_progress = False
+        self._live_snapshot = None
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
-        overlay.scan_complete()
+        overlay.scan_failed(run_id=run_id)
         self.query_one("#tree-panel").remove_class("scanning")
 
         for view_id, view_cls in (
@@ -317,6 +420,8 @@ class ExplorerScreen(Screen):
             ("#treemap-view", TreemapView),
         ):
             self.query_one(view_id, view_cls).set_live_mode(False)
+        if self._current is not None:
+            self._update_active_viz(self._current)
 
         self.app.notify(
             f"Scan failed: {type(exc).__name__}: {exc}",
@@ -363,8 +468,14 @@ class ExplorerScreen(Screen):
                     f"{self._root.depth_limited_subtree_count} depth-limited"
                 )
             suffix = "  |  " + ", ".join(parts)
+        run_prefix = ""
+        if self._active_run is not None:
+            run_prefix = (
+                f"Run {self._active_run.run_id[:8]} "
+                f"({self._active_run.status.value})  |  "
+            )
         self.app.sub_title = (
-            f"{self._root.file_count:,} files, "
+            f"{run_prefix}{self._root.file_count:,} files, "
             f"{self._root.dir_count:,} dirs  |  "
             f"{metric_label}: {total}{suffix}"
         )
@@ -406,9 +517,10 @@ class ExplorerScreen(Screen):
     @on(TabbedContent.TabActivated)
     def on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Refresh viz when switching tabs so the newly visible panel is current."""
-        if self._current is None:
+        node = self._live_snapshot if self._scan_in_progress else self._current
+        if node is None:
             return
-        self._update_active_viz(self._current)
+        self._update_active_viz(node)
 
     def _drill_into(self, node: FSNode) -> None:
         """Drill into a directory node."""
@@ -533,12 +645,11 @@ class ExplorerScreen(Screen):
     def cancel_active_scan(self) -> None:
         """Public hook to abort the in-flight scan, if any.
 
-        Used by app-level shutdown so we don't have to reach into the
-        screen's private `_engine` from outside.
+        Used by app-level shutdown without reaching into collector details.
         """
-        engine = self._engine
-        if engine is not None:
-            engine.cancel()
+        run = self._active_run
+        if run is not None and self._scan_in_progress:
+            self._scan_service.cancel(run.run_id)
 
     def action_rescan(self) -> None:
         """Confirm with the user, then rescan the current path.

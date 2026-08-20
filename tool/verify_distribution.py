@@ -40,8 +40,12 @@ def _verify_wheel(path: Path, version: str) -> None:
         required = {
             "fs_monitor/__init__.py",
             "fs_monitor/assets/default.tcss",
+            "fs_monitor/collectors/local_scanner.py",
             "fs_monitor/collectors/platform/linux.py",
+            "fs_monitor/domain/scan.py",
             "fs_monitor/services/doctor.py",
+            "fs_monitor/services/scan.py",
+            "fs_monitor/services/scan_consumers.py",
             f"fsmonitor_cli-{version}.dist-info/METADATA",
             f"fsmonitor_cli-{version}.dist-info/entry_points.txt",
         }
@@ -77,7 +81,11 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "docs/user-guide.md",
         prefix + "docs/release-process.md",
         prefix + "src/fs_monitor/assets/default.tcss",
+        prefix + "src/fs_monitor/collectors/local_scanner.py",
+        prefix + "src/fs_monitor/domain/scan.py",
         prefix + "src/fs_monitor/services/doctor.py",
+        prefix + "src/fs_monitor/services/scan.py",
+        prefix + "src/fs_monitor/services/scan_consumers.py",
     }
     missing = sorted(required - names)
     if missing:

@@ -106,7 +106,10 @@ def _force_teardown(app) -> None:
     accomplished nothing the kernel doesn't do for free on exit.
     """
     try:
-        if getattr(app, "_explorer", None) is not None:
+        service = getattr(app, "_scan_service", None)
+        if service is not None:
+            service.cancel_all()
+        elif getattr(app, "_explorer", None) is not None:
             app._explorer.cancel_active_scan()
     except Exception:
         pass
@@ -168,7 +171,9 @@ def doctor(json_output: bool, show_paths: bool) -> None:
     show_default=True,
     help="Exclude pseudo-filesystem mountpoints below the scan root",
 )
+@click.pass_context
 def scan(
+    ctx,
     path: str,
     snapshot: bool,
     max_depth: int | None,
@@ -178,8 +183,19 @@ def scan(
     exclude_pseudo: bool,
 ):
     """Scan a directory and display results."""
-    from fs_monitor.scanner.engine import ScanEngine
-    from fs_monitor.scanner.progress import ScanProgress
+    from fs_monitor.domain.metrics import MetricId
+    from fs_monitor.domain.policy import ScanPolicy
+    from fs_monitor.domain.scan import (
+        ScanCancelled,
+        ScanCompleted,
+        ScanFailed,
+        ScanPhaseChanged,
+        ScanProgressUpdated,
+        ScanRequest,
+        ScanRequestError,
+        ScanStarted,
+        ScanStatus,
+    )
     from fs_monitor.metrics import (
         METRIC_EXPLANATIONS,
         METRIC_NAMES,
@@ -187,33 +203,85 @@ def scan(
         metric_value,
         metric_value_or_zero,
     )
+    from fs_monitor.services.scan import ScanService
     import humanize
 
     path = str(Path(path).resolve())
-    click.echo(f"Scanning {path}...")
-
-    start = time.monotonic()
-
-    def on_progress(p: ScanProgress):
-        click.echo(
-            f"\r  {p.dirs_scanned:,} dirs, {p.files_scanned:,} files, "
-            f"logical {humanize.naturalsize(p.total_size, binary=True)}",
-            nl=False,
-        )
-
-    engine = ScanEngine(
-        workers=workers,
-        progress_callback=on_progress,
-        max_depth=max_depth,
-        scan_path=path,
+    policy = ScanPolicy(
         one_file_system=one_file_system,
         exclude_pseudo_filesystems=exclude_pseudo,
+        max_depth=max_depth,
     )
-    root = engine.scan(path)
-    elapsed = time.monotonic() - start
+    request = ScanRequest(
+        path=path,
+        metric=MetricId(metric),
+        policy=policy,
+        workers=workers,
+        source="cli",
+    )
+    service = ScanService()
+    try:
+        run = service.create_run(request)
+    except ScanRequestError as exc:
+        raise click.BadParameter(str(exc), param_hint="path") from exc
 
-    click.echo()
-    click.echo(f"\nScan complete in {elapsed:.1f}s")
+    class Reporter:
+        def __init__(self):
+            self.progress_written = False
+
+        def _finish_progress_line(self) -> None:
+            if self.progress_written:
+                click.echo()
+                self.progress_written = False
+
+        def __call__(self, event) -> None:
+            if isinstance(event, ScanStarted):
+                click.echo(f"Scan {event.run_id[:8]} started")
+                click.echo(f"  Path: {event.request.path}")
+                click.echo(f"  Phase: {event.phase.value}")
+                click.echo(f"  Policy: {event.policy.summary()}")
+            elif isinstance(event, ScanProgressUpdated):
+                progress = event.progress
+                click.echo(
+                    f"\r  Run {event.run_id[:8]} [{event.phase.value}] "
+                    f"{progress.dirs_scanned:,} dirs, "
+                    f"{progress.files_scanned:,} files, logical "
+                    f"{humanize.naturalsize(progress.logical_bytes, binary=True)}",
+                    nl=False,
+                )
+                self.progress_written = True
+            elif isinstance(event, ScanPhaseChanged):
+                if event.phase.value == "finalizing":
+                    self._finish_progress_line()
+                    click.echo(f"  Phase: {event.phase.value}")
+            elif isinstance(event, ScanCancelled):
+                self._finish_progress_line()
+                click.echo(
+                    f"Scan {event.run_id[:8]} cancelled: {event.reason}",
+                    err=True,
+                )
+            elif isinstance(event, ScanFailed):
+                self._finish_progress_line()
+                click.echo(
+                    f"Scan {event.run_id[:8]} failed: "
+                    f"{event.error_type}: {event.message}",
+                    err=True,
+                )
+            elif isinstance(event, ScanCompleted):
+                self._finish_progress_line()
+
+    reporter = Reporter()
+    run = service.execute(run, consumers=(reporter,))
+    if run.status is ScanStatus.CANCELLED:
+        ctx.exit(130)
+    if run.status is ScanStatus.FAILED or run.root is None:
+        ctx.exit(1)
+
+    root = run.root
+    metric = run.request.metric.value
+    status_label = "partial" if run.partial else "complete"
+    click.echo(f"\nScan {run.run_id[:8]} {status_label} in {run.duration_seconds:.1f}s")
+    click.echo(f"  Status: {run.status.value}")
     metric_name = METRIC_NAMES[metric]
     click.echo(f"  Metric: {metric_name} — {METRIC_EXPLANATIONS[metric]}")
     click.echo(f"  Total ({metric_name}): {metric_text(root, metric)}")
@@ -224,6 +292,8 @@ def scan(
     click.echo(f"  Directories: {root.dir_count:,}")
     if root.scan_policy is not None:
         click.echo(f"  Policy: {root.scan_policy.summary()}")
+    for warning in run.capability_warnings:
+        click.echo(f"  Capability warning: {warning}")
     if root.inaccessible_subtree_count:
         click.echo(
             f"  Coverage: partial ({root.inaccessible_subtree_count:,} "
@@ -279,7 +349,7 @@ def scan(
                 total_size=root.size,
                 file_count=root.file_count,
                 dir_count=root.dir_count,
-                scan_duration=elapsed,
+                scan_duration=run.duration_seconds,
             )
             snap_id = db.save_snapshot(snap, root)
             db.close()
@@ -317,12 +387,21 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
         click.echo(f"  Max watch time: {format_duration(max_seconds)}")
 
     async def run():
-        from fs_monitor.scanner.engine import ScanEngine
+        from fs_monitor.domain.metrics import MetricId
+        from fs_monitor.domain.policy import ScanPolicy
+        from fs_monitor.domain.scan import (
+            ScanRequest,
+            ScanRequestError,
+            ScanStarted,
+            ScanStatus,
+        )
         from fs_monitor.models.snapshot import Snapshot
+        from fs_monitor.services.scan import ScanService
         from fs_monitor.storage.database import Database
         import humanize
 
         db = Database()
+        scan_service = ScanService()
         db.connect()
         if db.degraded:
             click.echo(
@@ -334,17 +413,55 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
 
         try:
             while True:
-                start = time.monotonic()
-                engine = ScanEngine(
-                    workers=workers,
-                    scan_path=path,
-                    one_file_system=config.scan.one_file_system,
-                    exclude_pseudo_filesystems=(
-                        config.scan.exclude_pseudo_filesystems
+                request = ScanRequest(
+                    path=path,
+                    metric=MetricId.LOGICAL,
+                    policy=ScanPolicy(
+                        one_file_system=config.scan.one_file_system,
+                        exclude_pseudo_filesystems=(
+                            config.scan.exclude_pseudo_filesystems
+                        ),
+                        max_depth=config.scan.max_depth,
                     ),
+                    workers=workers,
+                    source="watch",
                 )
-                root = engine.scan(path)
-                elapsed = time.monotonic() - start
+                try:
+                    scan_run = scan_service.create_run(request)
+                except ScanRequestError as exc:
+                    raise click.BadParameter(str(exc), param_hint="path") from exc
+
+                def report_start(event) -> None:
+                    if isinstance(event, ScanStarted):
+                        click.echo(
+                            f"[{datetime.now():%H:%M:%S}] "
+                            f"Run {event.run_id[:8]} started "
+                            f"({event.policy.summary()})"
+                        )
+
+                scan_run = scan_service.execute(
+                    scan_run,
+                    consumers=(report_start,),
+                )
+                if scan_run.status is ScanStatus.CANCELLED:
+                    click.echo("Stopped watching.")
+                    return
+                if scan_run.status is ScanStatus.FAILED or scan_run.root is None:
+                    click.echo(
+                        f"[{datetime.now():%H:%M:%S}] "
+                        f"Run {scan_run.run_id[:8]} failed: "
+                        f"{scan_run.error_type}: {scan_run.error_message}",
+                        err=True,
+                    )
+                    if max_seconds is not None:
+                        total_elapsed = time.monotonic() - watch_start
+                        if total_elapsed + seconds >= max_seconds:
+                            click.echo("Max watch time reached. Stopping.")
+                            return
+                    await asyncio.sleep(seconds)
+                    continue
+
+                root = scan_run.root
 
                 if db.degraded:
                     snapshot_status = "not persisted"
@@ -356,7 +473,7 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
                         total_size=root.size,
                         file_count=root.file_count,
                         dir_count=root.dir_count,
-                        scan_duration=elapsed,
+                        scan_duration=scan_run.duration_seconds,
                     )
                     snap_id = db.save_snapshot(snap, root)
                     snapshot_status = f"snapshot #{snap_id}"
@@ -365,10 +482,11 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
                     )
 
                 status = (
-                    f"[{datetime.now():%H:%M:%S}] Scan complete: "
+                    f"[{datetime.now():%H:%M:%S}] "
+                    f"Run {scan_run.run_id[:8]} {scan_run.status.value}: "
                     f"{humanize.naturalsize(root.size, binary=True)}, "
                     f"{root.file_count:,} files "
-                    f"({snapshot_status}, {elapsed:.1f}s)"
+                    f"({snapshot_status}, {scan_run.duration_seconds:.1f}s)"
                 )
                 if pruned:
                     status += f", pruned {pruned} old snapshot(s)"
@@ -382,6 +500,7 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
 
                 await asyncio.sleep(seconds)
         finally:
+            scan_service.cancel_all()
             db.close()
 
     try:
@@ -395,23 +514,40 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
 @click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
 def cleanup(path: str, workers: int | None):
     """Detect candidates and permanently delete them after confirmation."""
-    from fs_monitor.scanner.engine import ScanEngine
     from fs_monitor.cleanup.detector import detect_targets, group_by_category, total_savings
     from fs_monitor.cleanup.actions import delete_targets
     from fs_monitor.config import load_config
+    from fs_monitor.domain.metrics import MetricId
+    from fs_monitor.domain.policy import ScanPolicy
+    from fs_monitor.domain.scan import ScanRequest, ScanRequestError, ScanStatus
+    from fs_monitor.services.scan import ScanService
     import humanize
 
     path = str(Path(path).resolve())
     click.echo(f"Scanning {path} for cleanup targets...")
 
     config = load_config()
-    engine = ScanEngine(
+    request = ScanRequest(
+        path=path,
+        metric=MetricId.LOGICAL,
+        policy=ScanPolicy(
+            one_file_system=config.scan.one_file_system,
+            exclude_pseudo_filesystems=config.scan.exclude_pseudo_filesystems,
+            max_depth=config.scan.max_depth,
+        ),
         workers=workers,
-        scan_path=path,
-        one_file_system=config.scan.one_file_system,
-        exclude_pseudo_filesystems=config.scan.exclude_pseudo_filesystems,
+        source="cleanup",
     )
-    root = engine.scan(path)
+    try:
+        scan_run = ScanService().scan(request)
+    except ScanRequestError as exc:
+        raise click.BadParameter(str(exc), param_hint="path") from exc
+    if scan_run.status is ScanStatus.CANCELLED:
+        raise click.ClickException("Cleanup scan was cancelled")
+    if scan_run.status is ScanStatus.FAILED or scan_run.root is None:
+        detail = scan_run.error_message or "unknown scan failure"
+        raise click.ClickException(f"Cleanup scan failed: {detail}")
+    root = scan_run.root
 
     targets = detect_targets(root)
     if not targets:

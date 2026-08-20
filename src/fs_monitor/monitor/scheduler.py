@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Callable, Awaitable
 
-from fs_monitor.scanner.engine import ScanEngine
+from fs_monitor.domain.metrics import MetricId
+from fs_monitor.domain.policy import ScanPolicy
+from fs_monitor.domain.scan import ScanRequest
 from fs_monitor.models.tree import FSNode
+from fs_monitor.services.scan import ScanService
 
 
 class ScanScheduler:
@@ -18,14 +20,19 @@ class ScanScheduler:
         path: str,
         interval_seconds: float = 21600,  # 6 hours
         on_scan_complete: Callable[[FSNode], Awaitable[None]] | None = None,
-        engine: ScanEngine | None = None,
+        service: ScanService | None = None,
+        policy: ScanPolicy | None = None,
+        workers: int | None = None,
     ):
         self._path = path
         self._interval = interval_seconds
         self._on_complete = on_scan_complete
-        self._engine = engine or ScanEngine()
+        self._service = service or ScanService()
+        self._policy = policy or ScanPolicy()
+        self._workers = workers
         self._running = False
         self._task: asyncio.Task | None = None
+        self._active_run_id: str | None = None
 
     async def start(self) -> None:
         """Start the periodic scan loop."""
@@ -37,7 +44,8 @@ class ScanScheduler:
     async def stop(self) -> None:
         """Stop the periodic scan loop."""
         self._running = False
-        self._engine.cancel()
+        if self._active_run_id is not None:
+            self._service.cancel(self._active_run_id)
         if self._task:
             self._task.cancel()
             try:
@@ -58,9 +66,22 @@ class ScanScheduler:
     async def _run_scan(self) -> None:
         """Run a single scan in a thread."""
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, self._engine.scan, self._path)
-        if self._on_complete and result:
-            await self._on_complete(result)
+        run = self._service.create_run(
+            ScanRequest(
+                path=self._path,
+                metric=MetricId.LOGICAL,
+                policy=self._policy,
+                workers=self._workers,
+                source="monitor-scheduler",
+            )
+        )
+        self._active_run_id = run.run_id
+        try:
+            result = await loop.run_in_executor(None, self._service.execute, run)
+        finally:
+            self._active_run_id = None
+        if self._on_complete and result.succeeded and result.root is not None:
+            await self._on_complete(result.root)
 
     @property
     def is_running(self) -> bool:

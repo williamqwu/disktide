@@ -103,6 +103,10 @@ fsmonitor watch /path --interval 6h
 fsmonitor cleanup /path
 ```
 
+Each scan reports a short run id, active phase and policy, and one explicit
+terminal status (`completed`, `partial`, `cancelled`, or `failed`). The TUI,
+one-shot CLI, and periodic watch use the same scan service and result semantics.
+
 ## Documentation
 
 - **[User Guide](docs/user-guide.md)** -- Usage, configuration, CLI commands, all key bindings

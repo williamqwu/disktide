@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.2
+
+**Scan service and events**
+
+- **feat** Added framework-independent `ScanRequest`, `ScanRun`, lifecycle status/phase types, and a sequenced typed event protocol for start, progress, directory checkpoints, aggregate trees, access errors, cancellation, completion, and failure.
+- **feat** Added `ScanService` with request validation, platform/metric capability resolution, run-id cancellation, terminal run handoff, consumer exception isolation, event recording, deterministic replay, and progress/tree view-model consumers.
+- **refactor** Migrated `fsmonitor scan`, Explorer, periodic `watch`, cleanup discovery, and the monitor scheduler to the same service while retaining `ScanEngine().scan(path)` for benchmark and diagnostic compatibility.
+- **fix** CLI/TUI cancellation and failure now have explicit terminal states; cancelled runs never emit completion, consumer failures cannot abort scanning, and Explorer rejects late events from an older run.
+- **docs/tests** Added ADR 0002 plus complete/partial/cancel/failure sequence tests, replay tests, CLI exit-code coverage, CLI/TUI result parity, consumer isolation, and static product-boundary checks.
+
 ## v0.2.1
 
 **Capabilities and diagnostics**

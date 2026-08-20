@@ -38,7 +38,7 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - `assets/` -- TCSS stylesheets
 - `src/fs_monitor/collectors/platform/` -- isolated OS/procfs/sysfs/command probes
 - `src/fs_monitor/extensions/` -- typed capability contracts
-- `src/fs_monitor/services/` -- CLI/TUI-neutral application services such as doctor
+- `src/fs_monitor/services/` -- CLI/TUI-neutral application services such as doctor and scan orchestration
 - `tool/` -- development utilities (e.g., `gen_activity` for generating test data)
 - `docs/` -- documentation
 
@@ -54,7 +54,9 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 
 - **models/** -- pure data structures, no I/O. Can be imported anywhere.
 - **collectors/platform/** -- all platform-specific probes; callers consume structured results rather than `/proc`, `/sys`, or commands directly.
+- **domain/** -- framework-independent metric, policy, request, run, and event contracts.
 - **services/** -- application orchestration with no Textual dependency.
+- **collectors/local_scanner.py** -- the only product adapter that constructs the compatibility `ScanEngine`.
 - **scanner/** -- filesystem I/O only. No Textual imports.
 - **storage/** -- SQLite I/O only. No Textual imports.
 - **cleanup/** -- operates on FSNode trees. No Textual imports.
@@ -63,6 +65,15 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - **screens/** and **widgets/** -- Textual UI layer. Can import everything above.
 
 This layering means the scanner, storage, cleanup, and viz modules are testable without a running Textual app.
+
+### Scan Service and Consumers
+
+- Product code submits `ScanRequest` to `ScanService`; screens and CLI commands do not construct `ScanEngine`.
+- Every event consumer must tolerate scanner-thread delivery. Textual consumers may only call `app.call_from_thread()` from that callback.
+- Do not compute a second set of totals in a consumer. Consume `ScanProgressSnapshot`, `NodeAggregateUpdated`, and the terminal `ScanRun` result.
+- Consumer exceptions are isolated by the service. Add a regression test whenever a new consumer is introduced.
+- Use `ScanEventRecorder` plus `ProgressViewModel`/`TreeViewModel` for replay tests. Journals must have one run id, contiguous sequences, and one final terminal event.
+- Keep `ScanEngine().scan(path)` compatibility for `tool/bench_scan.py` and `tool/diag_scan.py` until the compatibility facade is intentionally retired.
 
 ## Distribution Checks
 
@@ -133,6 +144,7 @@ CleanupRule(
 ## Testing Tips
 
 - **Scanner tests**: Use `tmp_path` fixtures to create real directory trees. The scanner operates on real filesystems, not mocks.
+- **Scan service tests**: Cover complete, partial, cancelled, and failed terminals; assert no events follow a terminal event and replay reconstructs the same view model.
 - **Database tests**: Use in-memory SQLite (`:memory:`) or `tmp_path` for the db file. The `db` fixture in `tests/test_storage.py` provides a connected, migrated database.
 - **Async tests**: Use `@pytest.mark.asyncio` for focused coroutine tests. For Textual app flows, use the established `asyncio.run(go())` + `app.run_test()` pattern.
 - **Visualization tests**: Test layout computation separately from rendering. Verify rectangle coordinates, arc angles, etc. numerically.

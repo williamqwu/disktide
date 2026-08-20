@@ -65,14 +65,14 @@ def test_modal_n_cancels(tmp_path):
         app = _new_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_explorer(pilot, app)
-            engine_before = app.screen._engine
+            run_before = app.screen._active_run
             await pilot.press("r")
             await pilot.pause()
             await pilot.press("n")
             await pilot.pause()
             assert isinstance(app.screen, ExplorerScreen)
-            # No new engine was created (no rescan kicked off)
-            assert app.screen._engine is engine_before
+            # No new service run was created (no rescan kicked off).
+            assert app.screen._active_run is run_before
 
     asyncio.run(go())
 

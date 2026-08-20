@@ -229,8 +229,9 @@ class ScanEngine:
         )
 
         if top_dirs:
-            with ThreadPoolExecutor(max_workers=self._workers) as pool:
-                futures = {}
+            pool = ThreadPoolExecutor(max_workers=self._workers)
+            futures = {}
+            try:
                 for d in top_dirs:
                     if self._cancel_event.is_set():
                         break
@@ -260,6 +261,18 @@ class ScanEngine:
                         own_size, own_allocated, top_inaccessible,
                         force=False,
                     )
+            except BaseException:
+                # KeyboardInterrupt reaches the main scanner thread while
+                # workers are still inside the recursive walker. Signal the
+                # same cancellation event used by TUI/service cancellation
+                # before waiting for executor shutdown, otherwise Ctrl+C can
+                # block until the entire subtree finishes.
+                self._cancel_event.set()
+                for future in futures:
+                    future.cancel()
+                raise
+            finally:
+                pool.shutdown(wait=True, cancel_futures=True)
 
         # Assemble the final root in place.
         self._finalize_root(
