@@ -12,6 +12,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 
 from fs_monitor.config import AppConfig, resolve_live_scan_render
+from fs_monitor.domain.live_view import LiveViewNode, build_live_view
 from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.policy import ScanPolicy
 from fs_monitor.domain.scan import (
@@ -89,12 +90,8 @@ class ExplorerScreen(Screen):
         width: 60%;
     }
 
-    /* During a scan the SizeTree is empty anyway, so we use the
-       tree-panel real estate to show the progress overlay instead of
-       floating a panel in the middle of the screen and occluding the
-       live viz behind it. Adding `.scanning` to the tree-panel swaps
-       the tree (and its sort indicator) for the overlay; removing it
-       on completion swaps them back. */
+    /* Progress-only scans keep the full panel. Live scans dock a compact
+       progress surface above the incrementally updated SizeTree. */
     #scan-progress {
         display: none;
     }
@@ -106,6 +103,15 @@ class ExplorerScreen(Screen):
     }
     #tree-panel.scanning #sort-indicator {
         display: none;
+    }
+    #tree-panel.scanning.live-tree #scan-progress {
+        dock: top;
+        display: block;
+        height: 9;
+        padding: 0 1;
+    }
+    #tree-panel.scanning.live-tree #size-tree {
+        display: block;
     }
     """
 
@@ -123,6 +129,7 @@ class ExplorerScreen(Screen):
         self._root: FSNode | None = None
         self._current: FSNode | None = None
         self._live_snapshot: FSNode | None = None
+        self._live_view_snapshot: LiveViewNode | None = None
         self._active_run: ScanRun | None = None
         # True while a scan is in flight. Used to gate drill-into (which
         # would otherwise read stale aggregates off the live snapshot)
@@ -143,8 +150,8 @@ class ExplorerScreen(Screen):
             with Vertical(id="tree-panel"):
                 yield Static("Sort: Logical  Bar: Logical", id="sort-indicator")
                 yield SizeTree(id="size-tree")
-                # During a scan the tree is empty; the overlay takes its
-                # place in the same panel. CSS toggles which child shows.
+                # Progress-only mode swaps this panel; live mode docks a
+                # compact progress surface above the incremental tree.
                 yield ScanProgressOverlay(id="scan-progress")
             with Vertical(id="viz-panel"):
                 with TabbedContent(id="viz-tabs"):
@@ -221,6 +228,7 @@ class ExplorerScreen(Screen):
         self._active_run = run
         self._scan_in_progress = True
         self._live_snapshot = None
+        self._live_view_snapshot = None
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.start(
@@ -228,10 +236,14 @@ class ExplorerScreen(Screen):
             phase=run.phase.value,
             policy=run.policy.summary(),
         )
-        # The overlay lives inside #tree-panel during a scan; adding the
-        # `scanning` class to the panel hides the (empty) tree and its
-        # sort indicator and unhides the overlay in their place.
-        self.query_one("#tree-panel").add_class("scanning")
+        tree_panel = self.query_one("#tree-panel")
+        tree_panel.add_class("scanning")
+        tree = self.query_one("#size-tree", SizeTree)
+        if self._live_render:
+            tree.begin_live(self._scan_path)
+            tree_panel.add_class("live-tree")
+        else:
+            tree_panel.remove_class("live-tree")
 
         # Clear the viz tabs unconditionally so a previous scan's chart
         # doesn't sit behind the overlay during the new scan. (Now that
@@ -280,7 +292,7 @@ class ExplorerScreen(Screen):
             self._apply_progress(event.progress)
         elif isinstance(event, NodeAggregateUpdated):
             if self._live_render and not event.final:
-                self._apply_tree_snapshot(event.root)
+                self._apply_tree_snapshot(event)
         elif isinstance(event, ScanCompleted):
             self._on_scan_complete(event.root, event.run_id, event.status)
         elif isinstance(event, ScanCancelled):
@@ -296,7 +308,10 @@ class ExplorerScreen(Screen):
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.update_progress(progress)
 
-    def _apply_tree_snapshot(self, node: FSNode) -> None:
+    def _apply_tree_snapshot(
+        self,
+        event: NodeAggregateUpdated | FSNode,
+    ) -> None:
         """Push a partial-tree snapshot to the active viz tab.
 
         Aggregates on this snapshot are honest for the parts that have
@@ -313,8 +328,26 @@ class ExplorerScreen(Screen):
             return
         # Keep transient aggregates separate from the last completed
         # navigation state so cancellation can restore the stable tree.
+        if isinstance(event, FSNode):
+            node = event
+            changed_nodes = (event,)
+            view_root = build_live_view(event)
+        else:
+            node = event.root
+            changed_nodes = event.changed_nodes or (node,)
+            view_root = event.view_root or build_live_view(node)
         self._live_snapshot = node
-        self._update_active_viz(node)
+        self._live_view_snapshot = view_root
+        self.query_one("#size-tree", SizeTree).apply_live_update(
+            node,
+            changed_nodes,
+        )
+        active_run = self._active_run
+        if active_run is not None:
+            active_run.visual_update_count += 1
+            if active_run.time_to_first_visual_seconds is None:
+                active_run.time_to_first_visual_seconds = active_run.duration_seconds
+        self._update_active_viz(node, visual_node=self._live_view_snapshot)
 
     def _on_scan_complete(
         self,
@@ -331,6 +364,7 @@ class ExplorerScreen(Screen):
             return
         self._scan_in_progress = False
         self._live_snapshot = None
+        self._live_view_snapshot = None
         self._root = root
         self._current = root
 
@@ -340,7 +374,9 @@ class ExplorerScreen(Screen):
             run_id=(self._active_run.run_id if self._active_run else run_id),
             partial=status is ScanStatus.PARTIAL,
         )
-        self.query_one("#tree-panel").remove_class("scanning")
+        tree_panel = self.query_one("#tree-panel")
+        tree_panel.remove_class("scanning")
+        tree_panel.remove_class("live-tree")
 
         # Restore the viz tabs to their static (full-depth) render mode
         # whether or not live mode was active this scan, so a config flip
@@ -372,15 +408,19 @@ class ExplorerScreen(Screen):
         """Reset live UI state without presenting a partial tree as final."""
         self._scan_in_progress = False
         self._live_snapshot = None
+        self._live_view_snapshot = None
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_cancelled(run_id=event.run_id)
-        self.query_one("#tree-panel").remove_class("scanning")
+        tree_panel = self.query_one("#tree-panel")
+        tree_panel.remove_class("scanning")
+        tree_panel.remove_class("live-tree")
         for view_id, view_cls in (
             ("#sunburst-view", SunburstView),
             ("#treemap-view", TreemapView),
         ):
             self.query_one(view_id, view_cls).set_live_mode(False)
         if self._current is not None:
+            self.query_one("#size-tree", SizeTree).reload(self._root or self._current)
             self._update_active_viz(self._current)
         self.app.notify(
             f"Scan {event.run_id[:8]} cancelled.",
@@ -410,10 +450,13 @@ class ExplorerScreen(Screen):
             return
         self._scan_in_progress = False
         self._live_snapshot = None
+        self._live_view_snapshot = None
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_failed(run_id=run_id)
-        self.query_one("#tree-panel").remove_class("scanning")
+        tree_panel = self.query_one("#tree-panel")
+        tree_panel.remove_class("scanning")
+        tree_panel.remove_class("live-tree")
 
         for view_id, view_cls in (
             ("#sunburst-view", SunburstView),
@@ -421,6 +464,7 @@ class ExplorerScreen(Screen):
         ):
             self.query_one(view_id, view_cls).set_live_mode(False)
         if self._current is not None:
+            self.query_one("#size-tree", SizeTree).reload(self._root or self._current)
             self._update_active_viz(self._current)
 
         self.app.notify(
@@ -429,15 +473,21 @@ class ExplorerScreen(Screen):
             timeout=8,
         )
 
-    def _update_active_viz(self, node: FSNode) -> None:
+    def _update_active_viz(
+        self,
+        node: FSNode,
+        *,
+        visual_node: FSNode | LiveViewNode | None = None,
+    ) -> None:
         """Update only the currently visible visualization panel."""
         tabs = self.query_one("#viz-tabs", TabbedContent)
         active = tabs.active
 
+        selected_visual = visual_node or node
         if active == "tab-treemap":
-            self.query_one("#treemap-view", TreemapView).set_node(node)
+            self.query_one("#treemap-view", TreemapView).set_node(selected_visual)
         elif active == "tab-sunburst":
-            self.query_one("#sunburst-view", SunburstView).set_node(node)
+            self.query_one("#sunburst-view", SunburstView).set_node(selected_visual)
         elif active == "tab-details":
             self.query_one("#info-panel", InfoPanel).update_node(node)
 
@@ -511,6 +561,11 @@ class ExplorerScreen(Screen):
             return
         if self._scan_in_progress:
             # Sizes/counts on a live snapshot are still settling; defer.
+            self.app.notify(
+                "Scan still running; open folders after aggregates stabilize.",
+                severity="warning",
+                timeout=3,
+            )
             return
         self._drill_into(event.node.data)
 
@@ -520,7 +575,12 @@ class ExplorerScreen(Screen):
         node = self._live_snapshot if self._scan_in_progress else self._current
         if node is None:
             return
-        self._update_active_viz(node)
+        self._update_active_viz(
+            node,
+            visual_node=(
+                self._live_view_snapshot if self._scan_in_progress else None
+            ),
+        )
 
     def _drill_into(self, node: FSNode) -> None:
         """Drill into a directory node."""
@@ -542,6 +602,11 @@ class ExplorerScreen(Screen):
     def action_go_up(self) -> None:
         """Navigate up one directory level, rescanning from parent if at scan root."""
         if self._scan_in_progress:
+            self.app.notify(
+                "Scan still running; navigation is available after stabilization.",
+                severity="warning",
+                timeout=3,
+            )
             return
         if (
             self._current is not None
@@ -567,6 +632,11 @@ class ExplorerScreen(Screen):
         folder" even though the scan never recurses through the link.
         """
         if self._scan_in_progress:
+            self.app.notify(
+                "Scan still running; navigation is available after stabilization.",
+                severity="warning",
+                timeout=3,
+            )
             return
         tree = self.query_one("#size-tree", SizeTree)
         node = tree.cursor_node

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 from rich.text import Text
@@ -40,6 +42,10 @@ class SizeTree(Tree[FSNode]):
         self._sort_key = sort_key
         self._metric = normalize_metric(metric)
         self._fs_root = root_node
+        self._tree_nodes: dict[str, TreeNode[FSNode]] = {}
+        self._live_update_count = 0
+        if root_node is not None:
+            self._tree_nodes[root_node.path] = self.root
         if root_node:
             self.root.expand()
 
@@ -78,6 +84,7 @@ class SizeTree(Tree[FSNode]):
         """Reload the tree with a new root node."""
         self._fs_root = root_node
         self.clear()
+        self._tree_nodes = {root_node.path: self.root}
         self.root.data = root_node
         self.root.set_label(self._make_label(root_node))
         self._populate_children(self.root, root_node)
@@ -88,6 +95,54 @@ class SizeTree(Tree[FSNode]):
         # instead of a frozen or invisible one. (Focus is restored by the
         # screen after a scan completes; see ExplorerScreen._on_scan_complete.)
         self.cursor_line = 0
+
+    @property
+    def live_update_count(self) -> int:
+        return self._live_update_count
+
+    def begin_live(self, path: str) -> None:
+        """Reset to a stable root placeholder before live updates arrive."""
+
+        root = FSNode(
+            name=Path(path).name or path,
+            path=path,
+            is_dir=True,
+            allocated_size=0,
+            own_allocated_size=0,
+        )
+        self._live_update_count = 0
+        self.reload(root)
+
+    def apply_live_update(
+        self,
+        root_node: FSNode,
+        changed_nodes: tuple[FSNode, ...],
+    ) -> None:
+        """Apply changed directory checkpoints without rebuilding the tree."""
+
+        if self._fs_root is None or self._fs_root.path != root_node.path:
+            self.reload(root_node)
+            self._live_update_count += 1
+            return
+
+        changed_by_path = {node.path: node for node in changed_nodes}
+        changed_by_path[root_node.path] = root_node
+        self._fs_root = root_node
+
+        for path, node in sorted(
+            changed_by_path.items(),
+            key=lambda item: (item[1].depth, item[0]),
+        ):
+            tree_node = self._tree_nodes.get(path)
+            if tree_node is None:
+                continue
+            tree_node.data = node
+            tree_node.set_label(self._make_label(node))
+            if tree_node is self.root or tree_node.is_expanded:
+                self._sync_children(tree_node, node, changed_by_path)
+
+        self._live_update_count += 1
+        self.refresh()
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded[FSNode]) -> None:
         """Lazily load children when a node is expanded."""
@@ -106,9 +161,55 @@ class SizeTree(Tree[FSNode]):
         for child in children:
             label = self._make_label(child)
             if child.is_dir:
-                tree_node.add(label, data=child, allow_expand=True)
+                added = tree_node.add(label, data=child, allow_expand=True)
             else:
-                tree_node.add_leaf(label, data=child)
+                added = tree_node.add_leaf(label, data=child)
+            self._tree_nodes[child.path] = added
+
+    def _sync_children(
+        self,
+        tree_node: TreeNode[FSNode],
+        fs_node: FSNode,
+        changed_by_path: dict[str, FSNode],
+    ) -> None:
+        existing = {
+            child.data.path: child
+            for child in tree_node.children
+            if child.data is not None
+        }
+        desired = {child.path: child for child in fs_node.children}
+
+        for path, child_node in tuple(existing.items()):
+            if path in desired:
+                continue
+            self._unregister_subtree(child_node)
+            child_node.remove()
+
+        for child in self._sorted(fs_node.children):
+            child_node = existing.get(child.path)
+            if child_node is None:
+                label = self._make_label(child)
+                if child.is_dir:
+                    child_node = tree_node.add(
+                        label,
+                        data=child,
+                        allow_expand=True,
+                    )
+                else:
+                    child_node = tree_node.add_leaf(label, data=child)
+                self._tree_nodes[child.path] = child_node
+                continue
+            if child.path in changed_by_path:
+                child_node.data = changed_by_path[child.path]
+                child_node.set_label(self._make_label(changed_by_path[child.path]))
+
+    def _unregister_subtree(self, tree_node: TreeNode[FSNode]) -> None:
+        stack = [tree_node]
+        while stack:
+            current = stack.pop()
+            if current.data is not None:
+                self._tree_nodes.pop(current.data.path, None)
+            stack.extend(current.children)
 
     def _sorted(self, children: list[FSNode]) -> list[FSNode]:
         """Sort children based on current sort key.

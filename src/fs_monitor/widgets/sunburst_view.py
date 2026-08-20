@@ -8,6 +8,7 @@ from textual.events import Resize
 from textual.strip import Strip
 from textual.widget import Widget
 
+from fs_monitor.domain.live_view import LiveViewNode
 from fs_monitor.metrics import (
     DEFAULT_METRIC,
     METRIC_NAMES,
@@ -35,19 +36,26 @@ class SunburstView(Widget):
     _STATIC_MAX_DEPTH = 4
     _LIVE_MAX_DEPTH = 2
 
-    def __init__(self, node: FSNode | None = None, **kwargs):
+    def __init__(self, node: FSNode | LiveViewNode | None = None, **kwargs):
         super().__init__(**kwargs)
         self._node = node
         self._metric = DEFAULT_METRIC
         self._layout: SunburstLayout | None = None
         self._stale = True
         self._live_mode = False
+        self._live_update_count = 0
 
-    def set_node(self, node: FSNode | None) -> None:
+    def set_node(self, node: FSNode | LiveViewNode | None) -> None:
         """Set the root node. Layout recomputed on next render."""
         self._node = node
+        if self._live_mode and node is not None:
+            self._live_update_count += 1
         self._stale = True
         self.refresh()
+
+    @property
+    def live_update_count(self) -> int:
+        return self._live_update_count
 
     def set_live_mode(self, live: bool) -> None:
         """Toggle reduced-depth rendering for the in-flight-scan path.
@@ -58,6 +66,8 @@ class SunburstView(Widget):
         if self._live_mode == live:
             return
         self._live_mode = live
+        if live:
+            self._live_update_count = 0
         self._stale = True
         self.refresh()
 

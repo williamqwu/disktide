@@ -130,6 +130,18 @@ class ScanProgressOverlay(Widget):
             f"  Logical: {humanize.naturalsize(logical_bytes, binary=True)}",
             style="yellow",
         )
+        queue_depth = getattr(progress, "queue_depth", 0)
+        active_workers = getattr(progress, "active_workers", 0)
+        dirs_queued = getattr(progress, "dirs_queued", 0)
+        if queue_depth or active_workers or dirs_queued:
+            stats_text.append(
+                f"  Queue: {queue_depth:,}/{dirs_queued:,}",
+                style="magenta",
+            )
+            stats_text.append(
+                f"  Active: {active_workers:,}",
+                style="cyan",
+            )
         speed = progress.items_per_second
         if speed > 0:
             stats_text.append(f"  ({speed:,.0f} items/s)", style="dim")

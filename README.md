@@ -113,5 +113,5 @@ one-shot CLI, and periodic watch use the same scan service and result semantics.
 - **[Architecture](docs/architecture.md)** -- Internals: scanner threading, database schema, visualization algorithms, screen management
 - **[Filesystem Compatibility](docs/fs.md)** -- Supported filesystems, every syscall the tool makes, platform-specific behavior
 - **[Release Process](docs/release-process.md)** -- Locked builds, clean-wheel smoke tests, checksums, SBOM, provenance, and PyPI publishing
-- **[Delivery Waves](docs/waves/README.md)** -- Interactive Wave 01–03 feature, architecture, and validation briefs
+- **[Delivery Waves](docs/waves/README.md)** -- Interactive Wave 01–04 feature, architecture, and validation briefs
 - **[Contributing](docs/contributing.md)** -- Dev setup, testing, how to add rules/screens/visualizations

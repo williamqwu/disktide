@@ -221,22 +221,18 @@ def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
     async def go():
         import time
         from fs_monitor.config import AppConfig
-        from fs_monitor.scanner import walker as walker_mod
+        from fs_monitor.scanner import scheduler as scheduler_mod
         from fs_monitor.widgets.sunburst_view import SunburstView
 
-        # Slow each subdir scan by 30ms so a 40-top-dir tree takes ~1.2s
+        # Slow each directory task by 30ms so a 40-top-dir tree takes ~1.2s
         # with workers=1, leaving comfortable mid-scan windows.
-        orig_scan = walker_mod.scan_directory
+        orig_scan = scheduler_mod.scan_directory_once
 
         def slow_scan(*args, **kwargs):
             time.sleep(0.03)
             return orig_scan(*args, **kwargs)
 
-        walker_mod.scan_directory = slow_scan
-        # Engine imported scan_directory from walker at module import, so
-        # also patch it on the engine module.
-        from fs_monitor.scanner import engine as engine_mod
-        engine_mod.scan_directory = slow_scan
+        scheduler_mod.scan_directory_once = slow_scan
 
         try:
             cfg = AppConfig()
@@ -285,8 +281,7 @@ def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
                         f"id={widget.id}"
                     )
         finally:
-            walker_mod.scan_directory = orig_scan
-            engine_mod.scan_directory = orig_scan
+            scheduler_mod.scan_directory_once = orig_scan
 
     asyncio.run(go())
 
@@ -343,13 +338,10 @@ def test_viz_clears_at_scan_start_regardless_of_live_render(tmp_path):
 
 
 def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
-    """During a scan, the scan-progress overlay must occupy the
-    tree-panel (the SizeTree is empty anyway). After the scan, the
-    tree comes back and the overlay is hidden.
+    """Live scans show a compact progress surface and incremental tree.
 
-    Cross-checks: tree-panel hit-test returns the overlay mid-scan
-    and the SizeTree post-scan; the SizeTree.display flips False then
-    True; overlay.display does the inverse.
+    Cross-checks: both widgets own separate parts of the tree panel during
+    the scan, then the progress surface disappears after completion.
     """
     (tmp_path / "a.txt").write_text("hi")
     (tmp_path / "sub").mkdir()
@@ -358,23 +350,22 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
     async def go():
         import time
         from fs_monitor.config import AppConfig
-        from fs_monitor.scanner import walker as walker_mod
-        from fs_monitor.scanner import engine as engine_mod
+        from fs_monitor.scanner import scheduler as scheduler_mod
         from fs_monitor.widgets.scan_progress import ScanProgressOverlay
         from fs_monitor.widgets.size_tree import SizeTree
 
-        orig_scan = walker_mod.scan_directory
+        orig_scan = scheduler_mod.scan_directory_once
 
         def slow_scan(*args, **kwargs):
             time.sleep(0.05)
             return orig_scan(*args, **kwargs)
 
-        walker_mod.scan_directory = slow_scan
-        engine_mod.scan_directory = slow_scan
+        scheduler_mod.scan_directory_once = slow_scan
 
         try:
             cfg = AppConfig()
             cfg.scan.workers = 1
+            cfg.ui.live_scan_render = "on"
             app = FSMonitorApp(
                 scan_path=str(tmp_path), show_welcome=False, config=cfg
             )
@@ -390,19 +381,20 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
                 overlay = screen.query_one("#scan-progress", ScanProgressOverlay)
                 tree = screen.query_one("#size-tree", SizeTree)
 
-                # Mid-scan: overlay is visible inside the tree-panel,
-                # tree is hidden.
+                # Mid-scan: compact progress and incremental tree coexist.
                 assert overlay.display is True, "overlay hidden mid-scan"
-                assert tree.display is False, "tree visible mid-scan"
-                # Hit-test the tree-panel region: should be the overlay.
-                w_at = screen.get_widget_at(10, 15)[0]
-                # `w_at` may be the overlay itself or one of its inner
-                # Static labels; either way the ScanProgressOverlay must
-                # be in its ancestor chain.
+                assert tree.display is True, "live tree hidden mid-scan"
+                w_at = screen.get_widget_at(10, 5)[0]
                 ancestors = [w_at] + list(getattr(w_at, "ancestors", []))
                 assert any(isinstance(a, ScanProgressOverlay) for a in ancestors), (
-                    f"tree-panel cell (10,15) during scan not owned by the "
+                    f"tree-panel cell (10,5) during scan not owned by the "
                     f"overlay; got {w_at.__class__.__name__} id={w_at.id}"
+                )
+                w_at = screen.get_widget_at(10, 18)[0]
+                ancestors = [w_at] + list(getattr(w_at, "ancestors", []))
+                assert any(isinstance(a, SizeTree) for a in ancestors), (
+                    f"tree-panel cell (10,18) during scan not owned by the "
+                    f"tree; got {w_at.__class__.__name__} id={w_at.id}"
                 )
 
                 # Wait for completion.
@@ -414,6 +406,9 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
                 # Post-scan: tree returns, overlay is hidden.
                 assert tree.display is True, "tree still hidden post-scan"
                 assert overlay.display is False, "overlay still visible post-scan"
+                assert screen._active_run is not None
+                assert screen._active_run.time_to_first_visual_seconds is not None
+                assert screen._active_run.visual_update_count > 0
                 w_at = screen.get_widget_at(10, 15)[0]
                 ancestors = [w_at] + list(getattr(w_at, "ancestors", []))
                 assert any(isinstance(a, SizeTree) for a in ancestors), (
@@ -421,8 +416,7 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
                     f"tree; got {w_at.__class__.__name__} id={w_at.id}"
                 )
         finally:
-            walker_mod.scan_directory = orig_scan
-            engine_mod.scan_directory = orig_scan
+            scheduler_mod.scan_directory_once = orig_scan
 
     asyncio.run(go())
 

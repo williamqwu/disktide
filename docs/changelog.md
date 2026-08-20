@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.3
+
+**Bounded all-tree scheduling and live Explorer**
+
+- **feat** Replaced top-level-only recursive futures with a bounded all-tree directory scheduler. Every directory is an independent task, executor submissions default to `2 × workers`, the coordinator frontier has a separate hard capacity, and child jobs are materialized lazily from parent cursors.
+- **feat** Added deep incremental tree frames with queued directory placeholders, O(1) ancestor contribution deltas, generation-based copy-on-write ownership, and iterative final cloning before hardlink accounting when live frames were published.
+- **feat** Added a bounded per-run event mailbox and dispatcher. Pending progress, queued/completed directory, and non-final tree events coalesce while delivered sequence numbers remain contiguous and terminal events are drained exactly once.
+- **feat** Explorer now updates Tree as well as Treemap/Sunburst during a scan. Tree nodes update in place with selection identity preserved; visualizations consume a bounded immutable live model rather than the mutable full tree.
+- **feat** Scan runs record time-to-first-event/visual, event batches, coalesced and dropped counts, mailbox/frontier high-water marks, and cancellation latency. `tool/bench_scan.py --mode events|live` reports these separately from the stable raw benchmark.
+- **compat/tests** Kept `ScanEngine().scan(path)`, the recursive walker, symlink classification cap, metrics, policy markers, cancellation, and tool contracts; added worker-count determinism, frontier bounds, COW frames, slow-consumer pressure, sub-second cancellation, view-model bounds, selection stability, and non-file-linear update tests.
+
 ## v0.2.2
 
 **Scan service and events**

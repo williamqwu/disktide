@@ -13,6 +13,10 @@ class ScanProgress:
     total_size: int = 0
     current_path: str = ""
     errors: int = 0
+    dirs_queued: int = 1
+    queue_depth: int = 0
+    active_workers: int = 0
+    last_queued_path: str = ""
     top_dir_total: int = 0
     top_dirs_done: int = 0
     started_at: float = field(default_factory=time.monotonic)

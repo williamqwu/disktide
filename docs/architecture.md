@@ -37,8 +37,9 @@ src/fs_monitor/
   scanner/
     benchmark.py         Opt-in mount throughput probe
     blockdev.py          Compatibility facade over platform adapter
-    engine.py            Multi-threaded scan orchestrator
-    walker.py            os.scandir()-based recursive walker
+    engine.py            ScanEngine compatibility facade
+    scheduler.py         Bounded all-tree directory scheduler + COW frames
+    walker.py            Recursive os.scandir() compatibility walker
     progress.py          Throttled progress reporting
     sysinfo.py           System detection for adaptive threading
 
@@ -125,23 +126,39 @@ the failure is recorded on `ScanRun.consumer_errors` and does not abort the
 scanner or other consumers. A separate `ScanRunConsumer` seam receives the
 normalized terminal run for future repository/persistence migration.
 
-The service dispatches on the scanner thread. CLI consumers may render directly;
-the Explorer consumer only schedules `app.call_from_thread()`, so worker threads
-never mutate Textual widgets or view models. The app owns one service instance,
-injects it into `ExplorerScreen`, and cancels active run ids during rescan/quit.
+Each run dispatches through a bounded mailbox (64 pending events by default) on
+one service-owned dispatcher thread. Pending progress, queued-directory,
+completed-directory, and non-final tree events coalesce; terminal events do not.
+The dispatcher drains pending items in batches and assigns sequence numbers only
+at delivery, so journals remain contiguous after coalescing. `ScanRun` records
+time-to-first-event, batch/coalesced counts, mailbox high-water mark, scheduler
+queue bounds, time-to-first-visual, and cancellation latency. The Explorer
+consumer only schedules `app.call_from_thread()`, so scanner and dispatcher
+threads never mutate Textual widgets or view models.
 
-See `docs/adr/0002-scan-service-event-protocol.md` for the accepted contract.
+See `docs/adr/0002-scan-service-event-protocol.md` and
+`docs/adr/0003-all-tree-scheduler-and-event-backpressure.md` for the accepted
+contracts.
 
 ## Scanner
 
 ### Threading Model
 
-`collectors/local_scanner.py` adapts `ScanService` requests to the existing
-`ScanEngine`. The engine scans root entries on the calling thread, dispatches
-top-level subdirectories to a `ThreadPoolExecutor`, recursively walks each
-subtree with `os.scandir()`, and aggregates results bottom-up. The long-standing
-`ScanEngine().scan(path)` API remains for benchmarks and compatibility tools;
-product presentation code does not construct it directly.
+`collectors/local_scanner.py` adapts `ScanService` requests to `ScanEngine`, which
+is now a compatibility facade over `TreeScanScheduler`. Every directory is one
+non-recursive task: a worker scans direct entries and the coordinator lazily
+materializes child-directory jobs across the whole tree. Executor submissions
+are capped at two times the worker count by default. The coordinator pending
+frontier has its own capacity and parent cursors create jobs only as slots open,
+so neither the executor queue nor the coordinator deque can hold the full tree.
+
+Direct scan completion installs zero-valued child-directory placeholders.
+Descendant results update ancestor aggregates with contribution deltas. Live
+roots use generation-based copy-on-write: once a root is published, later task
+completion clones only modified directory paths, so old frames remain safe to
+read. The recursive `scanner.walker.scan_directory()` and long-standing
+`ScanEngine().scan(path)` APIs remain for diagnostics and compatibility tools;
+product presentation code does not construct the engine directly.
 
 The main Textual event loop stays on the main thread. Long-running scans use the
 `@work(thread=True)` decorator. The screen submits a `ScanRun`, consumes typed
@@ -163,9 +180,11 @@ When `workers` is set in config or CLI, the auto-detection is skipped.
 
 `ProgressThrottle` batches collector callbacks to a 100ms interval to avoid UI
 thrashing. `ScanService` immediately copies each mutable callback payload into an
-immutable `ScanProgressSnapshot` before publishing it. It tracks directories,
-files, Logical bytes, current path, elapsed time, and top-level completion data.
-A `force_report()` call flushes collector state before the terminal event.
+immutable `ScanProgressSnapshot` before publishing it. It tracks completed and
+queued directories, queue depth, active workers, files, Logical bytes, current
+and last-queued paths, elapsed time, and top-level completion data. A
+`force_report()` call flushes collector state before the terminal event; queued
+and completed deltas may therefore arrive as a batch without losing totals.
 
 Progress reports Logical bytes because Unique requires global hardlink
 reconciliation. The final tree additionally carries Allocated and Unique.
@@ -353,14 +372,26 @@ Ring chart where each concentric ring represents a depth level, and arc angles a
 
 ### Live Scan Rendering
 
-The Sunburst and Treemap tabs can draw themselves as the scan runs, so the user sees the result form ring by ring (or rect by rect) instead of staring at an indeterminate bar for the duration. The mechanism is intentionally small:
+Tree, Sunburst, and Treemap update throughout a scan instead of waiting for the
+terminal tree:
 
-- The local scanner adapter translates the engine's optional tree callback into `NodeAggregateUpdated`. The engine fires once after top-level `scandir`, then at most once per 0.25 s as top-level subdirectories resolve, and once at the end. The service marks its own final aggregate event, assigns run/sequence identity, and guarantees that the terminal event is last.
-- `_roll_up()` on the engine is the single source of truth for aggregate math (`size`, `file_count`, `dir_count`, denied/partial subtree counts). Both the live snapshot path and the final `_finalize_root()` call it, so the numbers cannot drift between mid-scan and end-of-scan reads.
-- The explorer filters events by active run id before `_apply_tree_snapshot()` pushes a partial aggregate to the active visualization. Late events from an old run cannot overwrite a newer rescan. `SunburstView.set_live_mode(True)` and `TreemapView.set_live_mode(True)` swap `max_depth` to 2 for in-flight frames (vs. 4 / 3 normally); full depth is restored on completion.
-- Drill-into is gated by `_scan_in_progress`: `u`, `i`, `r`, and tree-click-to-drill all return early until the final snapshot arrives. The per-subtree aggregates inside a live snapshot are honest, but the root totals are not, and the Details panel must not show numbers that contradict themselves a second later.
-- The user-facing toggle is `ui.live_scan_render`: `auto` (default), `on`, or `off`. `resolve_live_scan_render()` in `config.py` resolves `auto` against the Textual app's canvas size (passed in by the explorer at scan start) and `os.cpu_count()`: live mode is on only when the canvas is at least 80 columns by 24 rows AND at least 4 CPUs are available. Below that, the per-frame cost is measurable against the scan and the chart has no room to be visible around the 60x12 progress overlay, so we silently fall back to the v0.1.5 behavior. The Settings screen exposes the same dropdown.
-- The progress overlay lives inside `#tree-panel` (a sibling of `SizeTree`) and only shows during a scan, via a `.scanning` CSS class on the tree-panel that hides the tree + sort indicator and unhides the overlay in their place. The tree is empty mid-scan anyway, so the panel real estate gets put to good use AND the viz panel on the right is left entirely free for the live render. (Earlier v0.1.6 iterations floated the overlay centered: first via a full-screen wrapper with `background: transparent`, which occluded the viz because Textual treats transparent-bg widgets as owning their cells; then via `position: absolute` on the overlay itself, which fixed the occlusion but still ate the center of the viz panel.)
+- `TreeScanScheduler` publishes directory checkpoints at most once per 0.25 s.
+  Each `ScanTreeUpdate` carries the COW root, changed nodes, newly stable paths,
+  and a bounded immutable `LiveViewNode` model.
+- `SizeTree.apply_live_update()` updates changed materialized nodes in place.
+  Cursor path and expanded branches survive updates; the final tree is reloaded
+  once deterministic accounting completes.
+- Treemap and Sunburst consume the immutable model, limited to depth 2 and 96
+  children per node. Excess children collapse into an aggregate “Other” node,
+  so live rendering does not copy the complete mutable `FSNode` graph.
+- The Explorer filters events by active run id. Late updates from an older scan
+  cannot replace a newer run. In-flight drill/navigation is blocked with an
+  explicit notification because aggregates below unfinished nodes can change.
+- `ui.live_scan_render` remains `auto`, `on`, or `off`. `auto` requires at least
+  an 80x24 canvas and four CPUs; lower-resource sessions use progress-only mode.
+- In live mode the progress surface docks above the incremental tree. In
+  progress-only mode it owns the tree panel until completion. The visualization
+  panel remains unobstructed in both modes.
 
 ### Color Schemes
 

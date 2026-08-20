@@ -11,6 +11,7 @@ from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.policy import ScanPolicy
 
 if TYPE_CHECKING:
+    from fs_monitor.domain.live_view import LiveViewNode
     from fs_monitor.models.tree import FSNode
 
 
@@ -70,6 +71,10 @@ class ScanProgressSnapshot:
     logical_bytes: int = 0
     current_path: str = ""
     errors: int = 0
+    dirs_queued: int = 1
+    queue_depth: int = 0
+    active_workers: int = 0
+    last_queued_path: str = ""
     top_dir_total: int = 0
     top_dirs_done: int = 0
     elapsed_seconds: float = 0.0
@@ -120,6 +125,18 @@ class ScanRun:
     capability_warnings: tuple[str, ...] = ()
     consumer_errors: list[ScanConsumerError] = field(default_factory=list)
     event_count: int = 0
+    event_batch_count: int = 0
+    coalesced_event_count: int = 0
+    dropped_event_count: int = 0
+    event_queue_high_watermark: int = 0
+    time_to_first_event_seconds: float | None = None
+    time_to_first_visual_seconds: float | None = None
+    visual_update_count: int = 0
+    cancellation_requested_at: datetime | None = None
+    cancellation_latency_seconds: float | None = None
+    scheduler_queue_capacity: int = 0
+    scheduler_queue_high_watermark: int = 0
+    scheduler_in_flight_high_watermark: int = 0
 
     @property
     def duration_seconds(self) -> float:
@@ -165,6 +182,18 @@ class ScanPhaseChanged(ScanEvent):
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DirectoryQueued(ScanEvent):
     path: str
+    count: int = 1
+    queue_depth: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ScanTreeUpdate:
+    """One immutable live-tree handoff produced by the local scheduler."""
+
+    root: FSNode
+    changed_nodes: tuple[FSNode, ...] = ()
+    stable_paths: frozenset[str] = frozenset()
+    view_root: LiveViewNode | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -185,6 +214,9 @@ class DirectoryCompleted(ScanEvent):
 class NodeAggregateUpdated(ScanEvent):
     root: FSNode
     final: bool = False
+    changed_nodes: tuple[FSNode, ...] = ()
+    stable_paths: frozenset[str] = frozenset()
+    view_root: LiveViewNode | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

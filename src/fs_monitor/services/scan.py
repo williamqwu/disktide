@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 import threading
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Protocol
 
 from fs_monitor.collectors.local_scanner import LocalScanner
 from fs_monitor.collectors.platform import get_platform_adapter
+from fs_monitor.domain.live_view import build_live_view
 from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.scan import (
     AccessError,
@@ -31,6 +34,8 @@ from fs_monitor.domain.scan import (
     ScanRun,
     ScanStarted,
     ScanStatus,
+    ScanTreeUpdate,
+    TERMINAL_SCAN_EVENTS,
     utc_now,
 )
 from fs_monitor.models.tree import FSNode
@@ -47,7 +52,11 @@ class ScannerCollector(Protocol):
 
 
 ScannerFactory = Callable[
-    [ScanRequest, Callable[[ScanProgress], None], Callable[[FSNode], None] | None],
+    [
+        ScanRequest,
+        Callable[[ScanProgress], None],
+        Callable[[FSNode | ScanTreeUpdate], None] | None,
+    ],
     ScannerCollector,
 ]
 ScanEventConsumer = Callable[[ScanEvent], None]
@@ -62,7 +71,7 @@ class ScanRunConsumer(Protocol):
 def _default_scanner_factory(
     request: ScanRequest,
     progress_callback: Callable[[ScanProgress], None],
-    tree_callback: Callable[[FSNode], None] | None,
+    tree_callback: Callable[[FSNode | ScanTreeUpdate], None] | None,
 ) -> ScannerCollector:
     return LocalScanner(
         request,
@@ -79,46 +88,168 @@ def _consumer_name(consumer: object) -> str:
     )
 
 
+@dataclass(slots=True)
+class _PendingEmission:
+    event_type: type[ScanEvent]
+    phase: ScanPhase
+    payload: dict[str, object]
+
+
 class _RunEmitter:
-    def __init__(self, run: ScanRun, consumers: Iterable[ScanEventConsumer]):
+    def __init__(
+        self,
+        run: ScanRun,
+        consumers: Iterable[ScanEventConsumer],
+        *,
+        queue_capacity: int,
+    ):
         self._run = run
         self._consumers = tuple(consumers)
         self._disabled: set[int] = set()
         self._sequence = 0
-        self._terminal = False
-        self._lock = threading.RLock()
+        self._queue_capacity = queue_capacity
+        self._queue: deque[_PendingEmission] = deque()
+        self._condition = threading.Condition()
+        self._terminal_queued = False
+        self._closing = False
+        self._thread = threading.Thread(
+            target=self._dispatch_loop,
+            name=f"scan-events-{run.run_id[:8]}",
+            daemon=True,
+        )
+        self._thread.start()
 
     def emit(self, event_type: type[ScanEvent], **payload) -> ScanEvent | None:
-        with self._lock:
-            if self._terminal:
+        pending = _PendingEmission(event_type, self._run.phase, dict(payload))
+        with self._condition:
+            if self._terminal_queued or self._closing:
                 return None
-            self._sequence += 1
-            event = event_type(
-                run_id=self._run.run_id,
-                sequence=self._sequence,
-                phase=self._run.phase,
-                **payload,
+            if event_type in TERMINAL_SCAN_EVENTS:
+                self._terminal_queued = True
+            if self._coalesce_locked(pending):
+                self._run.coalesced_event_count += 1
+                return None
+            while len(self._queue) >= self._queue_capacity:
+                self._condition.wait()
+            self._queue.append(pending)
+            self._run.event_queue_high_watermark = max(
+                self._run.event_queue_high_watermark,
+                len(self._queue),
             )
-            self._run.event_count = self._sequence
-            if event.terminal:
-                self._terminal = True
-            for consumer in self._consumers:
-                identity = id(consumer)
-                if identity in self._disabled:
-                    continue
-                try:
-                    consumer(event)
-                except Exception as exc:
-                    self._disabled.add(identity)
-                    self._run.consumer_errors.append(
-                        ScanConsumerError(
-                            consumer=_consumer_name(consumer),
-                            sequence=event.sequence,
-                            error_type=type(exc).__name__,
-                            message=str(exc),
-                        )
+            self._condition.notify_all()
+        return None
+
+    def close(self) -> None:
+        with self._condition:
+            if self._closing:
+                return
+            self._closing = True
+            self._condition.notify_all()
+        self._thread.join()
+
+    def _dispatch_loop(self) -> None:
+        while True:
+            with self._condition:
+                while not self._queue and not self._closing:
+                    self._condition.wait()
+                if not self._queue and self._closing:
+                    return
+                batch = tuple(self._queue)
+                self._queue.clear()
+                self._condition.notify_all()
+
+            self._run.event_batch_count += 1
+            for pending in batch:
+                self._sequence += 1
+                event = pending.event_type(
+                    run_id=self._run.run_id,
+                    sequence=self._sequence,
+                    phase=pending.phase,
+                    **pending.payload,
+                )
+                if self._run.time_to_first_event_seconds is None:
+                    started_at = self._run.started_at or self._run.created_at
+                    self._run.time_to_first_event_seconds = max(
+                        0.0,
+                        (utc_now() - started_at).total_seconds(),
                     )
-            return event
+                self._run.event_count = self._sequence
+                for consumer in self._consumers:
+                    identity = id(consumer)
+                    if identity in self._disabled:
+                        continue
+                    try:
+                        consumer(event)
+                    except Exception as exc:
+                        self._disabled.add(identity)
+                        self._run.consumer_errors.append(
+                            ScanConsumerError(
+                                consumer=_consumer_name(consumer),
+                                sequence=event.sequence,
+                                error_type=type(exc).__name__,
+                                message=str(exc),
+                            )
+                        )
+
+    def _coalesce_locked(self, incoming: _PendingEmission) -> bool:
+        if incoming.event_type not in {
+            ScanProgressUpdated,
+            DirectoryQueued,
+            DirectoryCompleted,
+            NodeAggregateUpdated,
+        }:
+            return False
+
+        barriers = {
+            ScanStarted,
+            ScanPhaseChanged,
+            AccessError,
+            ScanCancelled,
+            ScanCompleted,
+            ScanFailed,
+        }
+        for existing in reversed(self._queue):
+            if existing.event_type in barriers:
+                break
+            if existing.event_type is not incoming.event_type:
+                continue
+            if incoming.event_type is ScanProgressUpdated:
+                existing.phase = incoming.phase
+                existing.payload = incoming.payload
+                return True
+            if incoming.event_type is DirectoryQueued:
+                existing.phase = incoming.phase
+                existing.payload = {
+                    "path": incoming.payload["path"],
+                    "count": int(existing.payload.get("count", 1))
+                    + int(incoming.payload.get("count", 1)),
+                    "queue_depth": incoming.payload.get("queue_depth", 0),
+                }
+                return True
+            if incoming.event_type is DirectoryCompleted:
+                existing.phase = incoming.phase
+                existing.payload = {
+                    "path": incoming.payload["path"],
+                    "dirs_delta": int(existing.payload["dirs_delta"])
+                    + int(incoming.payload["dirs_delta"]),
+                    "files_delta": int(existing.payload["files_delta"])
+                    + int(incoming.payload["files_delta"]),
+                    "logical_bytes_delta": int(
+                        existing.payload["logical_bytes_delta"]
+                    )
+                    + int(incoming.payload["logical_bytes_delta"]),
+                    "progress": incoming.payload["progress"],
+                }
+                return True
+            if (
+                incoming.event_type is NodeAggregateUpdated
+                and not incoming.payload.get("final", False)
+                and not existing.payload.get("final", False)
+            ):
+                existing.phase = incoming.phase
+                existing.payload = incoming.payload
+                return True
+        return False
 
 
 class ScanService:
@@ -131,14 +262,19 @@ class ScanService:
         run_id_factory: Callable[[], str] | None = None,
         consumers: Iterable[ScanEventConsumer] = (),
         run_consumers: Iterable[ScanRunConsumer] = (),
+        event_queue_capacity: int = 64,
     ):
+        if event_queue_capacity <= 0:
+            raise ValueError("event_queue_capacity must be greater than zero")
         self._scanner_factory = scanner_factory or _default_scanner_factory
         self._run_id_factory = run_id_factory or (lambda: uuid.uuid4().hex)
         self._consumers = tuple(consumers)
         self._run_consumers = tuple(run_consumers)
+        self._event_queue_capacity = event_queue_capacity
         self._active: dict[str, ScannerCollector] = {}
         self._known_run_ids: set[str] = set()
         self._cancel_reasons: dict[str, str] = {}
+        self._cancel_requested_at: dict[str, datetime] = {}
         self._lock = threading.RLock()
 
     def create_run(self, request: ScanRequest) -> ScanRun:
@@ -177,7 +313,11 @@ class ScanService:
         with self._lock:
             self._known_run_ids.add(run.run_id)
 
-        emitter = _RunEmitter(run, (*self._consumers, *tuple(consumers)))
+        emitter = _RunEmitter(
+            run,
+            (*self._consumers, *tuple(consumers)),
+            queue_capacity=self._event_queue_capacity,
+        )
         run.status = ScanStatus.RUNNING
         run.phase = ScanPhase.DISCOVERING
         run.started_at = utc_now()
@@ -187,13 +327,16 @@ class ScanService:
             policy=run.policy,
             platform_adapter=run.platform_adapter,
         )
-        emitter.emit(DirectoryQueued, path=run.request.path)
+        emitter.emit(
+            DirectoryQueued,
+            path=run.request.path,
+            count=1,
+            queue_depth=1,
+        )
 
-        previous_progress = ScanProgressSnapshot()
-        last_completed_path = ""
-
+        previous_progress = ScanProgressSnapshot(dirs_queued=1)
         def on_progress(progress: ScanProgress) -> None:
-            nonlocal previous_progress, last_completed_path
+            nonlocal previous_progress
             snapshot = self._snapshot_progress(progress)
             run.progress = snapshot
             if run.phase is not ScanPhase.SCANNING:
@@ -201,12 +344,22 @@ class ScanService:
                 run.phase = ScanPhase.SCANNING
                 emitter.emit(ScanPhaseChanged, previous=previous_phase)
             emitter.emit(ScanProgressUpdated, progress=snapshot)
+            queued_delta = max(
+                0,
+                snapshot.dirs_queued - previous_progress.dirs_queued,
+            )
+            if queued_delta:
+                emitter.emit(
+                    DirectoryQueued,
+                    path=snapshot.last_queued_path or run.request.path,
+                    count=queued_delta,
+                    queue_depth=snapshot.queue_depth,
+                )
             dirs_delta = max(0, snapshot.dirs_scanned - previous_progress.dirs_scanned)
             files_delta = max(0, snapshot.files_scanned - previous_progress.files_scanned)
             bytes_delta = max(0, snapshot.logical_bytes - previous_progress.logical_bytes)
             if (
                 snapshot.current_path
-                and snapshot.current_path != last_completed_path
                 and (dirs_delta or files_delta or bytes_delta)
             ):
                 emitter.emit(
@@ -217,11 +370,26 @@ class ScanService:
                     logical_bytes_delta=bytes_delta,
                     progress=snapshot,
                 )
-                last_completed_path = snapshot.current_path
             previous_progress = snapshot
 
-        def on_tree(root: FSNode) -> None:
-            emitter.emit(NodeAggregateUpdated, root=root, final=False)
+        def on_tree(update: FSNode | ScanTreeUpdate) -> None:
+            if isinstance(update, ScanTreeUpdate):
+                emitter.emit(
+                    NodeAggregateUpdated,
+                    root=update.root,
+                    final=False,
+                    changed_nodes=update.changed_nodes,
+                    stable_paths=update.stable_paths,
+                    view_root=update.view_root,
+                )
+                return
+            emitter.emit(
+                NodeAggregateUpdated,
+                root=update,
+                final=False,
+                changed_nodes=(update,),
+                view_root=build_live_view(update),
+            )
 
         collector: ScannerCollector | None = None
         try:
@@ -244,6 +412,7 @@ class ScanService:
 
             root = collector.scan()
             run.root = root
+            self._capture_collector_stats(run, collector)
             if collector.cancelled:
                 self._finish_cancelled(
                     run,
@@ -289,10 +458,14 @@ class ScanService:
             self._finish_failed(run, emitter, exc)
             return run
         finally:
+            if collector is not None:
+                self._capture_collector_stats(run, collector)
+            emitter.close()
             with self._lock:
                 self._active.pop(run.run_id, None)
                 self._known_run_ids.discard(run.run_id)
                 self._cancel_reasons.pop(run.run_id, None)
+                self._cancel_requested_at.pop(run.run_id, None)
             self._notify_run_consumers(run)
 
     def cancel(self, run_id: str, reason: str = "cancel requested") -> bool:
@@ -300,6 +473,7 @@ class ScanService:
             if run_id not in self._known_run_ids and run_id not in self._active:
                 return False
             self._cancel_reasons[run_id] = reason
+            self._cancel_requested_at.setdefault(run_id, utc_now())
             collector = self._active.get(run_id)
         if collector is not None:
             collector.cancel()
@@ -310,6 +484,7 @@ class ScanService:
             run_ids = set(self._known_run_ids) | set(self._active)
             for run_id in run_ids:
                 self._cancel_reasons[run_id] = reason
+                self._cancel_requested_at.setdefault(run_id, utc_now())
             collectors = tuple(self._active.values())
         for collector in collectors:
             collector.cancel()
@@ -365,6 +540,10 @@ class ScanService:
             logical_bytes=progress.total_size,
             current_path=progress.current_path,
             errors=progress.errors,
+            dirs_queued=progress.dirs_queued,
+            queue_depth=progress.queue_depth,
+            active_workers=progress.active_workers,
+            last_queued_path=progress.last_queued_path,
             top_dir_total=progress.top_dir_total,
             top_dirs_done=progress.top_dirs_done,
             elapsed_seconds=progress.elapsed,
@@ -393,8 +572,8 @@ class ScanService:
                     count=unrepresented,
                 )
 
-    @staticmethod
     def _finish_cancelled(
+        self,
         run: ScanRun,
         emitter: _RunEmitter,
         reason: str,
@@ -403,11 +582,34 @@ class ScanService:
         run.phase = ScanPhase.FINISHED
         run.finished_at = utc_now()
         run.cancellation_reason = reason
+        requested_at = self._cancel_requested_at.get(run.run_id)
+        if requested_at is not None:
+            run.cancellation_requested_at = requested_at
+            run.cancellation_latency_seconds = max(
+                0.0,
+                (run.finished_at - requested_at).total_seconds(),
+            )
         emitter.emit(
             ScanCancelled,
             progress=run.progress,
             reason=reason,
             root=run.root,
+        )
+
+    @staticmethod
+    def _capture_collector_stats(
+        run: ScanRun,
+        collector: ScannerCollector,
+    ) -> None:
+        stats = getattr(collector, "scheduler_stats", None)
+        if stats is None:
+            return
+        run.scheduler_queue_capacity = int(getattr(stats, "queue_capacity", 0))
+        run.scheduler_queue_high_watermark = int(
+            getattr(stats, "max_pending", 0)
+        )
+        run.scheduler_in_flight_high_watermark = int(
+            getattr(stats, "max_in_flight", 0)
         )
 
     @staticmethod

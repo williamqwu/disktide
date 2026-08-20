@@ -72,6 +72,25 @@ def test_bench_scan_defaults_to_cwd(tmp_path, monkeypatch):
     assert "bench: done in" in cp.stdout
 
 
+def test_bench_scan_live_mode_reports_event_and_visual_metrics(tmp_path):
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py",
+        str(tmp_path),
+        "--workers",
+        "1",
+        "--mode",
+        "live",
+    )
+    assert cp.returncode == 0, cp.stderr
+    assert "bench: events=" in cp.stdout
+    assert "batches=" in cp.stdout
+    assert "scheduler_queue_hwm=" in cp.stdout
+    assert "bench: live_updates=" in cp.stdout
+    assert "first_visual=" in cp.stdout
+    assert "bench: done in" in cp.stdout
+
+
 # --- diag_scan -------------------------------------------------------
 
 

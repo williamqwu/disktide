@@ -92,9 +92,7 @@ def test_engine_progress_callback_fires_and_final_totals_match(tmp_path):
 # --- live tree snapshots (the explorer's "render-as-we-scan" path) ----
 
 def test_engine_tree_callback_fires_initial_and_final(tmp_path):
-    """tree_callback fires at least twice: once with just the top-level
-    files/symlinks before workers run, and once at the very end with
-    the fully-aggregated root."""
+    """The first frame exposes queued dirs, and the last is fully final."""
     # Two top-level files + two subdirs with their own file each.
     (tmp_path / "a.txt").write_text("x")
     (tmp_path / "b.txt").write_text("yy")
@@ -113,11 +111,17 @@ def test_engine_tree_callback_fires_initial_and_final(tmp_path):
 
     assert len(snaps) >= 2
 
-    # First snapshot: just the top-level files (subdir results have not
-    # come back yet), so own_size matches and the only children present
-    # are the two text files at the root.
+    # First snapshot: direct files are complete and subdirectories are
+    # visible as zero-valued placeholders before their own tasks finish.
     first = snaps[0]
-    assert all(not c.is_dir for c in first.children)
+    assert {child.name for child in first.children} == {
+        "a.txt", "b.txt", "sub1", "sub2",
+    }
+    assert all(
+        child.size == 0 and child.children == []
+        for child in first.children
+        if child.is_dir
+    )
     assert first.own_size == 3
     assert first.size == 3
 

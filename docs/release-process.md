@@ -25,6 +25,18 @@ uv build
 uv run python tool/verify_distribution.py
 ```
 
+Refresh the developer's installed checkout after every source version change.
+Do not hard-code the expected version; derive it from the package and verify
+both entry points:
+
+```bash
+expected="$(uv run python -c 'from fs_monitor import __version__; print(__version__)')"
+uv tool install --force .
+test "$(fsmonitor --version | awk '{print $NF}')" = "$expected"
+test "$(fsmonitor-cli --version | awk '{print $NF}')" = "$expected"
+uv tool list
+```
+
 Install the wheel into a clean environment rather than reusing the development
 environment:
 

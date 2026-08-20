@@ -1,49 +1,30 @@
-"""Scan orchestrator with a ThreadPoolExecutor and an async bridge."""
+"""Compatibility scan engine backed by the all-tree scheduler."""
 
 from __future__ import annotations
 
 import os
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from typing import Callable
 
-from fs_monitor.domain.metrics import sum_available
 from fs_monitor.domain.policy import ScanPolicy
+from fs_monitor.domain.scan import ScanTreeUpdate
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.accounting import finalize_unique_allocated
 from fs_monitor.scanner.policy import discover_pseudo_mounts
-from fs_monitor.scanner.walker import (
-    scan_directory, make_symlink_node, make_file_node, classify_symlink,
+from fs_monitor.scanner.progress import ProgressThrottle, ScanProgress
+from fs_monitor.scanner.scheduler import (
+    _TOP_LEVEL_CLASSIFY_CAP,
+    ScheduledTree,
+    SchedulerProgress,
+    SchedulerStats,
+    TreeScanScheduler,
+    clone_tree,
 )
-from fs_monitor.scanner.progress import ScanProgress, ProgressThrottle
-
-
-# Maximum number of symlinks at the scan root that the engine classifies
-# eagerly (one extra readlink + follow-stat per link). Keeps the typical
-# `fsmonitor ~` case showing target arrows in the tree without classification
-# while bounding the cost when someone scans a directory whose contents
-# *are* a giant pile of symlinks (e.g. 215k image-cache symlinks at one
-# depth). 100 * ~600us NFS RTT = ~60ms, imperceptible.
-_TOP_LEVEL_CLASSIFY_CAP = 100
-
-
-@dataclass(slots=True)
-class _Aggregate:
-    logical_size: int
-    allocated_size: int | None
-    file_count: int
-    dir_count: int
-    inaccessible_subtree_count: int
-    denied_dir_subtree_count: int
-    partial_dir_subtree_count: int
-    excluded_subtree_count: int
-    depth_limited_subtree_count: int
+from fs_monitor.scanner.walker import scan_directory
 
 
 class ScanEngine:
-    """Multi-threaded filesystem scanner."""
+    """Multi-threaded filesystem scanner with a stable legacy entry point."""
 
     def __init__(
         self,
@@ -55,43 +36,33 @@ class ScanEngine:
         tree_callback_interval: float = 0.25,
         one_file_system: bool = False,
         exclude_pseudo_filesystems: bool = True,
+        scheduler_submission_limit: int | None = None,
+        scheduler_queue_capacity: int | None = None,
+        tree_update_callback: Callable[[ScanTreeUpdate], None] | None = None,
     ):
         if workers is not None:
             self._workers = workers
         else:
             from fs_monitor.scanner.sysinfo import detect_system_info
+
             info = detect_system_info(scan_path or "/")
             self._workers = info.recommended_workers
         self._cancel_event = threading.Event()
-        self._max_depth = max_depth
         self._policy = ScanPolicy(
             one_file_system=one_file_system,
             exclude_pseudo_filesystems=exclude_pseudo_filesystems,
             max_depth=max_depth,
         )
-        self._root_device: int | None = None
-        self._excluded_mounts: dict[str, str] = {}
-        self._lock = threading.Lock()
         self._progress = ProgressThrottle(
-            progress_callback or (lambda p: None),
+            progress_callback or (lambda progress: None),
             interval=0.1,
         )
-        # Live tree snapshots for the explorer's "render-as-we-scan" mode.
-        # The callback gets a fresh shallow-copy FSNode at most once per
-        # tree_callback_interval seconds; subtrees inside that snapshot are
-        # the same finalized nodes the workers returned, so they are safe
-        # to read on the UI thread after we hand the snapshot off. None
-        # disables the live path entirely (matches v0.1.5 behavior).
         self._tree_callback = tree_callback
+        self._tree_update_callback = tree_update_callback
         self._tree_callback_interval = tree_callback_interval
-        self._tree_last_emit = 0.0
-        # The first non-forced emit after a force bypasses the throttle
-        # so the user sees the first subdir's data the moment a worker
-        # returns it, instead of waiting up to tree_callback_interval
-        # seconds for the next throttle window to open. Without this the
-        # typical home-dir scan (no top-level files) sits visually blank
-        # for the full interval before the first ring slice appears.
-        self._tree_first_after_force = True
+        self._scheduler_submission_limit = scheduler_submission_limit
+        self._scheduler_queue_capacity = scheduler_queue_capacity
+        self._scheduler_stats: SchedulerStats | None = None
 
     def cancel(self) -> None:
         self._cancel_event.set()
@@ -100,395 +71,87 @@ class ScanEngine:
     def cancelled(self) -> bool:
         return self._cancel_event.is_set()
 
+    @property
+    def scheduler_stats(self) -> SchedulerStats | None:
+        return self._scheduler_stats
+
     def scan(self, path: str) -> FSNode:
-        """Scan a directory tree, using thread pool for top-level subdirs."""
+        """Scan a directory tree while preserving ``ScanEngine().scan()``."""
+
         path = os.path.abspath(path)
         self._cancel_event.clear()
-
         if not os.path.isdir(path):
             raise ValueError(f"Not a directory: {path}")
 
-        name = os.path.basename(path) or path
-        root = FSNode(
-            name=name, path=path, is_dir=True, depth=0,
-            scan_policy=self._policy,
-        )
-
-        root_ancestors: frozenset[tuple[int, int]] = frozenset()
-        try:
-            rst = os.stat(path)
-            root.mtime = rst.st_mtime
-            root.device_id = getattr(rst, "st_dev", None)
-            root.inode = getattr(rst, "st_ino", None)
-            root.link_count = getattr(rst, "st_nlink", 1)
-            self._root_device = root.device_id
-            root_ancestors = frozenset({(rst.st_dev, rst.st_ino)})
-        except OSError:
-            self._root_device = None
-
-        self._excluded_mounts = (
+        excluded_mounts = (
             discover_pseudo_mounts(path)
             if self._policy.exclude_pseudo_filesystems
             else {}
         )
-
-        # Collect top-level entries (streaming scandir)
-        top_files: list[FSNode] = []
-        top_dirs: list[str] = []
-        own_size = 0
-        own_allocated: int | None = 0
-        top_inaccessible = 0
-        top_classified = 0      # symlinks classified eagerly, capped below
-
-        try:
-            scandir_it = os.scandir(path)
-        except PermissionError:
-            root.error = f"Permission denied: {path}"
-            self._progress.force_report()
-            return root
-        except OSError as e:
-            root.error = str(e)
-            self._progress.force_report()
-            return root
-
-        try:
-            for entry in scandir_it:
-                if self._cancel_event.is_set():
-                    break
-                try:
-                    if entry.is_symlink():
-                        # Walker pays one stat per symlink; the UI calls
-                        # classify_symlink on demand for symlinks the
-                        # user looks at. We additionally classify the
-                        # first _TOP_LEVEL_CLASSIFY_CAP symlinks at the
-                        # scan root eagerly, which gets the typical
-                        # `fsmonitor ~` case (handful of links at home root)
-                        # rendered with target arrows from the start
-                        # without re-introducing the per-symlink cost
-                        # when the scan root *is* a giant symlink pile.
-                        # Deeper symlinks remain fully lazy.
-                        child = make_symlink_node(entry, depth=1)
-                        if child is None:
-                            top_inaccessible += 1
-                        else:
-                            top_files.append(child)
-                            own_size += child.own_size
-                            own_allocated = sum_available(
-                                (own_allocated, child.own_allocated_size)
-                            )
-                            if top_classified < _TOP_LEVEL_CLASSIFY_CAP:
-                                classify_symlink(child)
-                                top_classified += 1
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        top_dirs.append(entry.path)
-                    elif entry.is_file(follow_symlinks=False):
-                        try:
-                            st = entry.stat(follow_symlinks=False)
-                            child = make_file_node(entry, st, depth=1)
-                            top_files.append(child)
-                            own_size += st.st_size
-                            own_allocated = sum_available(
-                                (own_allocated, child.own_allocated_size)
-                            )
-                        except OSError:
-                            top_inaccessible += 1
-                except OSError:
-                    top_inaccessible += 1
-                    continue
-        finally:
-            scandir_it.close()
-
-        # Scan subdirectories in parallel
-        dir_results: list[FSNode] = []
-
-        # Live progress: walker threads call self._tick per directory
-        # finished, so Dirs/Files/Size in the overlay climb continuously
-        # instead of freezing while one big subtree is being scanned.
-        self._live_dirs = 0
-        self._live_files = len(top_files)
-        self._live_size = own_size
-        # Push the top-level files/symlinks straight away so the overlay
-        # shows something before the first worker tick fires.
-        with self._lock:
-            self._progress.update(
-                dirs_scanned=self._live_dirs,
-                files_scanned=self._live_files,
-                total_size=self._live_size,
-                current_path=path,
-            )
-
-        # Live tree snapshot #1: top-level files/symlinks only. Lets the
-        # UI render the inner ring of the sunburst (and the top-level
-        # treemap rects) before the first subdir worker comes back.
-        self._tree_last_emit = 0.0
-        self._emit_tree_snapshot(
-            root, top_files, dir_results, own_size, own_allocated,
-            top_inaccessible,
-            force=True,
+        scheduler = TreeScanScheduler(
+            workers=self._workers,
+            policy=self._policy,
+            cancel_event=self._cancel_event,
+            excluded_mounts=excluded_mounts,
+            progress_callback=self._on_scheduler_progress,
+            tree_callback=(
+                self._on_scheduler_tree_update
+                if self._tree_callback is not None
+                or self._tree_update_callback is not None
+                else None
+            ),
+            tree_callback_interval=self._tree_callback_interval,
+            submission_limit=self._scheduler_submission_limit,
+            queue_capacity=self._scheduler_queue_capacity,
         )
 
-        if top_dirs:
-            pool = ThreadPoolExecutor(max_workers=self._workers)
-            futures = {}
-            try:
-                for d in top_dirs:
-                    if self._cancel_event.is_set():
-                        break
-                    f = pool.submit(self._scan_subdir, d, root_ancestors)
-                    futures[f] = d
-
-                for future in as_completed(futures):
-                    if self._cancel_event.is_set():
-                        break
-                    try:
-                        child_node = future.result()
-                        if child_node is not None:
-                            dir_results.append(child_node)
-                            if child_node.error is not None:
-                                top_inaccessible += 1
-                    except Exception:
-                        pass
-                    # Throttle: _emit_tree_snapshot drops calls that
-                    # land within tree_callback_interval of the last
-                    # one, so a burst of fast finishers doesn't trigger
-                    # a full sunburst redraw N times in a row. We call
-                    # on every iteration (including the future-raised
-                    # case where no new dir_results entry was added);
-                    # the throttle handles redundant-state coalescing.
-                    self._emit_tree_snapshot(
-                        root, top_files, dir_results,
-                        own_size, own_allocated, top_inaccessible,
-                        force=False,
-                    )
-            except BaseException:
-                # KeyboardInterrupt reaches the main scanner thread while
-                # workers are still inside the recursive walker. Signal the
-                # same cancellation event used by TUI/service cancellation
-                # before waiting for executor shutdown, otherwise Ctrl+C can
-                # block until the entire subtree finishes.
-                self._cancel_event.set()
-                for future in futures:
-                    future.cancel()
-                raise
-            finally:
-                pool.shutdown(wait=True, cancel_futures=True)
-
-        # Assemble the final root in place.
-        self._finalize_root(
-            root, top_files, dir_results, own_size, own_allocated,
-            top_inaccessible,
+        scheduled: ScheduledTree = scheduler.scan(path)
+        self._scheduler_stats = scheduled.stats
+        root = (
+            clone_tree(scheduled.root)
+            if scheduled.published_snapshots > 0
+            else scheduled.root
         )
+        root.scan_policy = self._policy
         finalize_unique_allocated(root)
 
-        self._progress.update(
-            dirs_scanned=root.dir_count,
-            files_scanned=root.file_count,
-            total_size=root.size,
-            current_path="",
-        )
+        if not self.cancelled:
+            self._progress.update(
+                dirs_scanned=root.dir_count,
+                files_scanned=root.file_count,
+                total_size=root.size,
+                queue_depth=0,
+                active_workers=0,
+                top_dirs_done=self._progress.progress.top_dir_total,
+            )
+        else:
+            self._progress.update(
+                queue_depth=0,
+                active_workers=0,
+            )
         self._progress.force_report()
 
-        # Final tree emit. Unlike the throttled in-progress emits above
-        # which hand the UI a self-contained shallow-copy "snapshot"
-        # built from partial state, this passes the actual finalized
-        # root directly. By this point _finalize_root has set every
-        # aggregate and the engine will not mutate root again, so it
-        # is safe to share; consumers that want root-only fields
-        # (`error`, `is_loop`, the access-state counts) can read them
-        # from the final node without a separate handoff. The consumer
-        # must treat the final node as read-only.
         if self._tree_callback is not None:
             self._tree_callback(root)
-
         return root
 
-    def _scan_subdir(
-        self, path: str, ancestors: frozenset[tuple[int, int]] = frozenset()
-    ) -> FSNode | None:
-        """Scan a single subdirectory (runs in thread pool)."""
-        if self._cancel_event.is_set():
-            return None
+    def _on_scheduler_tree_update(self, update: ScanTreeUpdate) -> None:
+        if self._tree_update_callback is not None:
+            self._tree_update_callback(update)
+        if self._tree_callback is not None:
+            self._tree_callback(update.root)
 
-        self._progress.update(current_path=path)
-        return scan_directory(
-            path, depth=1, max_depth=self._max_depth,
-            cancel_event=self._cancel_event,
-            ancestors=ancestors,
-            on_dir_done=self._tick,
-            root_device=self._root_device,
-            one_file_system=self._policy.one_file_system,
-            excluded_mounts=self._excluded_mounts,
+    def _on_scheduler_progress(self, progress: SchedulerProgress) -> None:
+        self._progress.update(
+            dirs_scanned=progress.dirs_scanned,
+            files_scanned=progress.files_scanned,
+            total_size=progress.logical_bytes,
+            current_path=progress.current_path,
+            errors=progress.errors,
+            dirs_queued=progress.dirs_queued,
+            queue_depth=progress.queue_depth,
+            active_workers=progress.active_workers,
+            last_queued_path=progress.last_queued_path,
+            top_dir_total=progress.top_dir_total,
+            top_dirs_done=progress.top_dirs_done,
         )
-
-    def _tick(
-        self,
-        dirs_delta: int,
-        files_delta: int,
-        size_delta: int,
-        current_path: str,
-    ) -> None:
-        """Called by the walker after each directory it finishes scanning.
-
-        Folds per-directory deltas into shared live counters and forwards
-        them through the throttled progress callback, so the overlay
-        updates continuously while a deep subtree is being walked.
-        """
-        with self._lock:
-            self._live_dirs += dirs_delta
-            self._live_files += files_delta
-            self._live_size += size_delta
-            self._progress.update(
-                dirs_scanned=self._live_dirs,
-                files_scanned=self._live_files,
-                total_size=self._live_size,
-                current_path=current_path,
-            )
-
-    # --- live tree snapshots + final assembly ----------------------------
-
-    @staticmethod
-    def _roll_up(
-        children: list[FSNode],
-        own_size: int,
-        own_allocated: int | None,
-        top_inaccessible: int,
-    ) -> _Aggregate:
-        """Compute normalized aggregates from finalized children.
-
-        Single source of truth for the aggregate math, shared by the live
-        snapshot path and the final root assembly so they cannot drift.
-        """
-        size = own_size
-        file_count = 0
-        dir_count = 0
-        inacc_sub = top_inaccessible
-        denied_sub = 0
-        partial_sub = 0
-        excluded_sub = 0
-        depth_limited_sub = 0
-        for c in children:
-            if c.is_dir:
-                size += c.size
-                file_count += c.file_count
-                dir_count += 1 + c.dir_count
-                inacc_sub += c.inaccessible_subtree_count
-                denied_sub += c.denied_dir_subtree_count
-                partial_sub += c.partial_dir_subtree_count
-                if c.error is not None:
-                    denied_sub += 1
-                elif c.inaccessible_count > 0:
-                    partial_sub += 1
-                excluded_sub += c.excluded_subtree_count + int(c.excluded)
-                depth_limited_sub += (
-                    c.depth_limited_subtree_count + int(c.depth_limited)
-                )
-            else:
-                file_count += c.file_count
-        allocated = sum_available(
-            [own_allocated]
-            + [c.allocated_size for c in children if c.is_dir]
-        )
-        return _Aggregate(
-            logical_size=size,
-            allocated_size=allocated,
-            file_count=file_count,
-            dir_count=dir_count,
-            inaccessible_subtree_count=inacc_sub,
-            denied_dir_subtree_count=denied_sub,
-            partial_dir_subtree_count=partial_sub,
-            excluded_subtree_count=excluded_sub,
-            depth_limited_subtree_count=depth_limited_sub,
-        )
-
-    def _finalize_root(
-        self,
-        root: FSNode,
-        top_files: list[FSNode],
-        dir_results: list[FSNode],
-        own_size: int,
-        own_allocated: int | None,
-        top_inaccessible: int,
-    ) -> None:
-        """Mutate `root` into its final form with aggregated children."""
-        root.children = top_files + dir_results
-        root.own_size = own_size
-        root.own_allocated_size = own_allocated
-        root.inaccessible_count = top_inaccessible
-        aggregate = self._roll_up(
-            root.children, own_size, own_allocated, top_inaccessible,
-        )
-        root.size = aggregate.logical_size
-        root.allocated_size = aggregate.allocated_size
-        root.file_count = aggregate.file_count
-        root.dir_count = aggregate.dir_count
-        root.inaccessible_subtree_count = aggregate.inaccessible_subtree_count
-        root.denied_dir_subtree_count = aggregate.denied_dir_subtree_count
-        root.partial_dir_subtree_count = aggregate.partial_dir_subtree_count
-        root.excluded_subtree_count = aggregate.excluded_subtree_count
-        root.depth_limited_subtree_count = aggregate.depth_limited_subtree_count
-        root.invalidate_sort()
-
-    def _emit_tree_snapshot(
-        self,
-        root: FSNode,
-        top_files: list[FSNode],
-        dir_results: list[FSNode],
-        own_size: int,
-        own_allocated: int | None,
-        top_inaccessible: int,
-        *,
-        force: bool,
-    ) -> None:
-        """Hand the UI a self-contained partial-tree snapshot.
-
-        Internal mutation of `dir_results` happens on this engine thread,
-        but the snapshot we hand off is a fresh shallow-copy FSNode with
-        a fresh `children` list. Subtrees inside it are the same finalized
-        objects the workers returned, which the UI thread can read safely
-        because workers do not mutate them after `future.result()` lands.
-        """
-        if self._tree_callback is None:
-            return
-        now = time.monotonic()
-        if force:
-            # Reset the bypass so the first emit after this force-emit
-            # is again ungated by the throttle.
-            self._tree_first_after_force = True
-        bypass_throttle = force or self._tree_first_after_force
-        if not bypass_throttle and (now - self._tree_last_emit) < self._tree_callback_interval:
-            return
-        self._tree_last_emit = now
-        if not force:
-            # The first non-forced emit consumed its bypass; subsequent
-            # emits go through the throttle as usual.
-            self._tree_first_after_force = False
-
-        snap = FSNode(
-            name=root.name,
-            path=root.path,
-            is_dir=True,
-            depth=0,
-            mtime=root.mtime,
-            device_id=root.device_id,
-            inode=root.inode,
-            link_count=root.link_count,
-            scan_policy=self._policy,
-        )
-        snap.children = list(top_files) + list(dir_results)
-        snap.own_size = own_size
-        snap.own_allocated_size = own_allocated
-        snap.inaccessible_count = top_inaccessible
-        aggregate = self._roll_up(
-            snap.children, own_size, own_allocated, top_inaccessible,
-        )
-        snap.size = aggregate.logical_size
-        snap.allocated_size = aggregate.allocated_size
-        snap.file_count = aggregate.file_count
-        snap.dir_count = aggregate.dir_count
-        snap.inaccessible_subtree_count = aggregate.inaccessible_subtree_count
-        snap.denied_dir_subtree_count = aggregate.denied_dir_subtree_count
-        snap.partial_dir_subtree_count = aggregate.partial_dir_subtree_count
-        snap.excluded_subtree_count = aggregate.excluded_subtree_count
-        snap.depth_limited_subtree_count = aggregate.depth_limited_subtree_count
-        self._tree_callback(snap)
