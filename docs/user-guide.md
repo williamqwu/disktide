@@ -181,6 +181,29 @@ are `0` for complete or partial success, `1` for scan failure, `2` for invalid
 input, and `130` for cancellation. A partial result remains usable but includes
 an explicit coverage line; cancellation never prints a completion summary.
 
+### compare
+
+Compare a target snapshot with a baseline snapshot:
+
+```bash
+fsmonitor compare latest previous /path
+fsmonitor compare 42 41
+fsmonitor compare --since 7d /path
+```
+
+The first selector is the target and the second is the baseline, so the report
+reads `baseline → target`. Selectors can be `latest`, `previous`, `oldest`, or a
+numeric snapshot id. `--since` compares the latest snapshot with the newest
+snapshot at least that old.
+
+The report includes logical/allocated/unique and file-count totals, top growth
+and shrink, new and removed paths, directory churn, and partial/error
+confidence. Snapshot format, root identity, metric semantics/selection, xdev,
+symlink, hardlink, exclude, and max-depth policy must be compatible. An
+incompatible comparison exits with status 2 and does not present a trusted
+growth result. `--raw` explicitly requests an untrusted diagnostic diff and
+keeps every incompatibility visible in the output.
+
 ### watch
 
 Periodic scanning with automatic snapshots. Runs until interrupted or `--max-time` is reached:

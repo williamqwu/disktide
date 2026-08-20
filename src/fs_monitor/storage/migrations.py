@@ -1,10 +1,12 @@
-"""Schema versioning for SQLite database."""
+"""Transactional schema versioning for the SQLite snapshot store."""
 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
+from pathlib import Path
 
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -129,10 +131,135 @@ MIGRATIONS: dict[int, list[str]] = {
         "DELETE FROM alert_events",
         "DELETE FROM snapshots",
     ],
+    4: [
+        "ALTER TABLE nodes ADD COLUMN allocated_size INTEGER",
+        "ALTER TABLE nodes ADD COLUMN own_allocated_size INTEGER",
+        "ALTER TABLE nodes ADD COLUMN unique_allocated_size INTEGER",
+        "ALTER TABLE nodes ADD COLUMN own_unique_allocated_size INTEGER",
+        "ALTER TABLE nodes ADD COLUMN is_dir INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE deltas ADD COLUMN allocated_size INTEGER",
+        "ALTER TABLE deltas ADD COLUMN own_allocated_size INTEGER",
+        "ALTER TABLE deltas ADD COLUMN unique_allocated_size INTEGER",
+        "ALTER TABLE deltas ADD COLUMN own_unique_allocated_size INTEGER",
+        "ALTER TABLE deltas ADD COLUMN is_dir INTEGER NOT NULL DEFAULT 1",
+        """CREATE TABLE monitored_roots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_path TEXT NOT NULL UNIQUE,
+            device_id INTEGER,
+            inode INTEGER,
+            filesystem_type TEXT,
+            last_seen_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE scan_runs (
+            run_id TEXT PRIMARY KEY,
+            root_id INTEGER,
+            created_at TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            status TEXT NOT NULL,
+            duration REAL NOT NULL DEFAULT 0.0,
+            platform_adapter TEXT,
+            scanner_version TEXT,
+            selected_metric TEXT,
+            policy_json TEXT,
+            error_type TEXT,
+            error_message TEXT,
+            partial INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            excluded_count INTEGER NOT NULL DEFAULT 0,
+            depth_limited_count INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (root_id) REFERENCES monitored_roots(id)
+        )""",
+        """CREATE TABLE snapshot_metadata (
+            snapshot_id INTEGER PRIMARY KEY,
+            snapshot_format_version INTEGER NOT NULL,
+            snapshot_api_version INTEGER NOT NULL,
+            metric_semantics_version TEXT,
+            logical_available INTEGER NOT NULL DEFAULT 1,
+            allocated_available INTEGER NOT NULL DEFAULT 0,
+            unique_available INTEGER NOT NULL DEFAULT 0,
+            total_allocated_size INTEGER,
+            total_unique_allocated_size INTEGER,
+            selected_metric TEXT,
+            policy_json TEXT,
+            exclude_patterns_json TEXT NOT NULL DEFAULT '[]',
+            scanner_version TEXT,
+            platform_adapter TEXT,
+            completion_status TEXT,
+            partial INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            excluded_count INTEGER NOT NULL DEFAULT 0,
+            depth_limited_count INTEGER NOT NULL DEFAULT 0,
+            root_device_id INTEGER,
+            root_inode INTEGER,
+            root_filesystem TEXT,
+            timestamp_timezone TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL DEFAULT '[]',
+            legacy INTEGER NOT NULL DEFAULT 0,
+            inference_source TEXT NOT NULL,
+            scan_run_id TEXT,
+            root_id INTEGER,
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE,
+            FOREIGN KEY (scan_run_id) REFERENCES scan_runs(run_id),
+            FOREIGN KEY (root_id) REFERENCES monitored_roots(id)
+        )""",
+        "CREATE INDEX idx_snapshot_metadata_run ON snapshot_metadata(scan_run_id)",
+        "CREATE INDEX idx_snapshot_metadata_root ON snapshot_metadata(root_id)",
+        "CREATE INDEX idx_scan_runs_root_finished ON scan_runs(root_id, finished_at)",
+    ],
 }
 
 
-def get_version(conn) -> int:
+def _backfill_v4(conn: sqlite3.Connection) -> None:
+    """Mark pre-v2 snapshots as readable legacy records without guessing policy."""
+    conn.execute(
+        """INSERT OR IGNORE INTO monitored_roots
+           (root_path, last_seen_at)
+           SELECT root_path, MAX(timestamp)
+           FROM snapshots
+           GROUP BY root_path"""
+    )
+    conn.execute(
+        """INSERT INTO snapshot_metadata (
+               snapshot_id,
+               snapshot_format_version,
+               snapshot_api_version,
+               metric_semantics_version,
+               logical_available,
+               allocated_available,
+               unique_available,
+               selected_metric,
+               completion_status,
+               timestamp_timezone,
+               legacy,
+               inference_source,
+               root_id
+           )
+           SELECT
+               s.id,
+               1,
+               1,
+               'legacy-logical-v1',
+               1,
+               0,
+               0,
+               'logical',
+               'legacy-unknown',
+               'legacy-local-unknown',
+               1,
+               'v0.1.7:snapshots+directory-aggregates',
+               r.id
+           FROM snapshots s
+           LEFT JOIN monitored_roots r ON r.root_path = s.root_path"""
+    )
+
+
+MIGRATION_CALLBACKS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    4: _backfill_v4,
+}
+
+
+def get_version(conn: sqlite3.Connection) -> int:
     """Get current schema version."""
     try:
         cursor = conn.execute("SELECT version FROM schema_version")
@@ -142,27 +269,78 @@ def get_version(conn) -> int:
         return 0
 
 
-def migrate(conn) -> None:
-    """Run all pending migrations."""
-    current = get_version(conn)
-    ran_destructive = False
-    for version in range(current + 1, CURRENT_VERSION + 1):
-        if version in MIGRATIONS:
-            for sql in MIGRATIONS[version]:
-                conn.execute(sql)
-            conn.execute("UPDATE schema_version SET version = ?", (version,))
-            if version >= 3:
-                ran_destructive = True
-    conn.commit()
+def migration_backup_path(
+    database_path: str | Path, target_version: int = CURRENT_VERSION
+) -> Path:
+    return Path(f"{database_path}.pre-v{target_version}.bak")
 
-    # VACUUM to reclaim disk space after destructive migrations
-    # (must run outside a transaction)
-    if ran_destructive:
-        try:
-            conn.execute("VACUUM")
-        except sqlite3.Error:
-            # VACUUM only reclaims freed space; it needs a temporary copy
-            # of the database, which a full disk can refuse. The migration
-            # itself already committed above, so skip reclamation rather
-            # than fail the whole connection over an optimization.
-            pass
+
+def _database_path(conn: sqlite3.Connection) -> Path | None:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if row is None or not row[2]:
+        return None
+    return Path(row[2])
+
+
+def _create_backup(
+    conn: sqlite3.Connection,
+    *,
+    current_version: int,
+    target_version: int,
+) -> Path | None:
+    database_path = _database_path(conn)
+    if (
+        database_path is None
+        or current_version <= 0
+        or current_version >= target_version
+        or not database_path.exists()
+        or database_path.stat().st_size == 0
+    ):
+        return None
+    backup_path = migration_backup_path(database_path, target_version)
+    if backup_path.exists():
+        return backup_path
+    backup_conn = sqlite3.connect(str(backup_path))
+    try:
+        conn.backup(backup_conn)
+    except Exception:
+        backup_conn.close()
+        backup_path.unlink(missing_ok=True)
+        raise
+    backup_conn.close()
+    return backup_path
+
+
+def migrate(
+    conn: sqlite3.Connection,
+    *,
+    target_version: int | None = None,
+) -> Path | None:
+    """Run pending migrations atomically and return the recovery backup path."""
+    target = CURRENT_VERSION if target_version is None else target_version
+    if target < 0 or target > CURRENT_VERSION:
+        raise ValueError(f"unsupported migration target: {target}")
+    current = get_version(conn)
+    if current >= target:
+        return None
+    if conn.in_transaction:
+        conn.commit()
+    backup_path = _create_backup(
+        conn,
+        current_version=current,
+        target_version=target,
+    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for version in range(current + 1, target + 1):
+            for sql in MIGRATIONS.get(version, ()):
+                conn.execute(sql)
+            callback = MIGRATION_CALLBACKS.get(version)
+            if callback is not None:
+                callback(conn)
+            conn.execute("UPDATE schema_version SET version = ?", (version,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return backup_path

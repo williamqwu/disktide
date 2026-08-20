@@ -14,8 +14,9 @@ from textual.widgets import Footer, Header, Static, DataTable, LoadingIndicator
 from rich.text import Text
 import humanize
 
-from fs_monitor.models.snapshot import SizeDelta
-from fs_monitor.storage.database import Database
+from fs_monitor.domain.delta import CompatibilityResult, SizeDelta
+from fs_monitor.repositories.snapshots import SnapshotRepository
+from fs_monitor.services.compare import CompareService
 from fs_monitor.widgets.trend_chart import TrendChart
 
 # How many snapshots to show in the table / fetch from DB.
@@ -80,12 +81,18 @@ class MonitorScreen(Screen):
     }
     """
 
-    def __init__(self, db: Database | None = None, root_path: str = "",
-                 strict_path: bool = False, **kwargs):
+    def __init__(
+        self,
+        repository: SnapshotRepository | None = None,
+        root_path: str = "",
+        strict_path: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self._db = db
+        self._repository = repository
         self._root_path = root_path
         self._strict_path = strict_path
+        self._repository_state = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -117,7 +124,7 @@ class MonitorScreen(Screen):
     @work(thread=True)
     def _load_data(self) -> None:
         """Load snapshot data from database in a background thread."""
-        if self._db is None:
+        if self._repository is None:
             return
 
         self.app.call_from_thread(self._show_loading, True)
@@ -126,40 +133,55 @@ class MonitorScreen(Screen):
         history: list = []
         deltas: list = []
         history_path = self._root_path
+        compatibility: CompatibilityResult | None = None
+        repository_state = ""
 
         try:
-            # Open a dedicated read-only connection for this thread — SQLite
-            # connections cannot be shared across threads.  Skip migrations
-            # since the main-thread connection already handles those.
-            db = Database(path=self._db.path, run_migrations=False)
-            db.connect()
+            repository = self._repository.clone(read_only=True)
+            repository.connect()
             try:
-                snapshots = db.list_snapshots(
-                    self._root_path or None, limit=_SNAPSHOT_DISPLAY_LIMIT,
-                    strict_path=self._strict_path,
-                )
-
-                if snapshots:
-                    # Use the actual root_path from snapshots — it may
-                    # differ from self._root_path when ancestor/descendant
-                    # matching is in effect.
-                    history_path = snapshots[0].root_path
-                if history_path:
-                    history = db.get_size_history(history_path)
-
-                if len(snapshots) >= 2:
-                    deltas = db.compare_snapshots(
-                        snapshots[1].id, snapshots[0].id, min_delta=_MIN_CHANGE_BYTES
+                if not repository.status.available:
+                    repository_state = "unavailable"
+                else:
+                    if repository.status.read_only:
+                        repository_state = "read-only"
+                    snapshots = repository.list_snapshots(
+                        self._root_path or None,
+                        limit=_SNAPSHOT_DISPLAY_LIMIT,
+                        strict_path=self._strict_path,
                     )
+
+                    if snapshots:
+                        # Use the actual root_path from snapshots — it may
+                        # differ from self._root_path when ancestor/descendant
+                        # matching is in effect.
+                        history_path = snapshots[0].root_path
+                    if history_path:
+                        history = repository.get_size_history(history_path)
+
+                    if len(snapshots) >= 2:
+                        result = CompareService(repository).compare_snapshots(
+                            snapshots[1],
+                            snapshots[0],
+                            min_delta=_MIN_CHANGE_BYTES,
+                        )
+                        compatibility = result.compatibility
+                        deltas = list(result.deltas)
             finally:
-                db.close()
+                repository.close()
         except Exception:
             # Database may not be migrated yet, or may have no data.
             # Show empty results rather than crashing.
             pass
 
         self.app.call_from_thread(
-            self._populate_ui, snapshots, history, deltas, history_path,
+            self._populate_ui,
+            snapshots,
+            history,
+            deltas,
+            history_path,
+            compatibility,
+            repository_state,
         )
         self.app.call_from_thread(self._show_loading, False)
 
@@ -183,6 +205,8 @@ class MonitorScreen(Screen):
         history: list[tuple[str, int]],
         deltas: list[SizeDelta],
         history_path: str = "",
+        compatibility: CompatibilityResult | None = None,
+        repository_state: str = "",
     ) -> None:
         """Populate all UI elements (must be called from main thread)."""
         # Snapshots table
@@ -196,6 +220,14 @@ class MonitorScreen(Screen):
                 f"{snap.scan_duration:.1f}s",
                 key=str(snap.id),
             )
+        snapshot_title = self.query_one("#snap-title", Static)
+        self._repository_state = repository_state
+        if repository_state:
+            snapshot_title.update(
+                Text(f"  Snapshots · {repository_state}", style="bold yellow")
+            )
+        else:
+            snapshot_title.update(Text("  Snapshots", style="bold"))
 
         # Trend chart
         if history:
@@ -203,19 +235,41 @@ class MonitorScreen(Screen):
             chart.set_data({history_path or self._root_path: history})
 
         # Changes table
-        self._show_deltas(deltas, snapshots)
+        self._show_deltas(
+            deltas,
+            snapshots,
+            compatibility,
+            repository_state,
+        )
 
-    def _show_deltas(self, deltas: list[SizeDelta], snapshots=None) -> None:
+    def _show_deltas(
+        self,
+        deltas: list[SizeDelta],
+        snapshots=None,
+        compatibility: CompatibilityResult | None = None,
+        repository_state: str = "",
+    ) -> None:
         """Populate changes table."""
         # Update title to show which snapshots are compared
         title = self.query_one("#changes-title", Static)
-        if snapshots and len(snapshots) >= 2:
+        if repository_state and repository_state != "read-only":
+            title.update(
+                Text("  Changes · unavailable", style="bold yellow")
+            )
+        elif snapshots and len(snapshots) >= 2:
             old_time = snapshots[1].display_time
             new_time = snapshots[0].display_time
-            title.update(Text(
-                f"  Changes ({old_time}  \u2192  {new_time})",
-                style="bold",
-            ))
+            suffix = (
+                f" · {compatibility.decision.value}"
+                if compatibility is not None
+                else ""
+            )
+            title.update(
+                Text(
+                    f"  Changes ({old_time}  \u2192  {new_time}){suffix}",
+                    style="bold",
+                )
+            )
         else:
             title.update(Text("  Changes", style="bold"))
 
@@ -260,7 +314,15 @@ class MonitorScreen(Screen):
         now = datetime.now().strftime("%H:%M:%S")
         title.update(Text(f"  Snapshots — refreshed at {now}", style="bold green"))
         await asyncio.sleep(2)
-        title.update(Text("  Snapshots", style="bold"))
+        if self._repository_state:
+            title.update(
+                Text(
+                    f"  Snapshots · {self._repository_state}",
+                    style="bold yellow",
+                )
+            )
+        else:
+            title.update(Text("  Snapshots", style="bold"))
 
 
 def _truncate_path(path: str, max_len: int) -> str:

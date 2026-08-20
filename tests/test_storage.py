@@ -107,7 +107,10 @@ class TestDatabase:
         assert loaded is not None
         assert loaded.name == "root"
         assert loaded.size == 1000
-        assert len(loaded.children) == 1  # only directories are stored
+        assert {child.name for child in loaded.children} == {
+            "child",
+            "file.txt",
+        }
 
     def test_load_tree_delta_snapshot(self, db):
         """load_tree should work for delta snapshots too."""
@@ -305,9 +308,9 @@ class TestDatabase:
         snap2 = Snapshot(root_path="/test/root", total_size=1000)
         db.save_snapshot(snap2, root)
 
-        # Only 2 unique dir paths (root + child), regardless of snapshots
+        # Root, child directory, and file paths are interned once.
         count = db.conn.execute("SELECT COUNT(*) FROM paths").fetchone()[0]
-        assert count == 2
+        assert count == 3
 
     def test_delta_stores_only_changes(self, db):
         """Delta snapshot should only store rows for changed directories."""

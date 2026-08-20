@@ -14,9 +14,11 @@ src/fs_monitor/
   rendering.py           Process-wide safe-rendering state
 
   domain/
+    delta.py             Compatibility decisions + shared delta result
     metrics.py           MetricId + StorageMeasurements semantics
     policy.py            Explicit ScanPolicy metadata
     scan.py              ScanRequest/ScanRun/status/event contracts
+    snapshot.py          Snapshot format v2 metadata
 
   collectors/
     local_scanner.py     ScanEngine adapter used by ScanService
@@ -30,9 +32,15 @@ src/fs_monitor/
     capabilities.py      CapabilityId/status/reason public vocabulary
 
   services/
+    compare.py           Policy-aware snapshot selection + compare reports
     doctor.py            Human + JSON installation diagnostics
     scan.py              Run lifecycle, cancellation, event dispatch
     scan_consumers.py    Progress/tree view models and event replay
+    snapshots.py         Persist successful ScanRun results
+
+  repositories/
+    snapshots.py         SnapshotRepository protocol + status contract
+    sqlite.py            SQLite repository adapter
 
   scanner/
     benchmark.py         Opt-in mount throughput probe
@@ -45,7 +53,7 @@ src/fs_monitor/
 
   models/
     tree.py              FSNode -- the core filesystem tree
-    snapshot.py          Snapshot metadata, SizeDelta for diffs
+    snapshot.py          Pre-Wave05 compatibility imports
     patterns.py          CleanupRule, CleanupTarget, RiskLevel
 
   storage/
@@ -59,7 +67,7 @@ src/fs_monitor/
 
   monitor/
     alerts.py            Threshold alert rules and event checking
-    diff.py              Tree-level snapshot comparison (SizeDelta)
+    diff.py              In-memory comparison using shared SizeDelta
     scheduler.py         Interval-based periodic scan scheduling
 
   viz/
@@ -250,26 +258,46 @@ semantics without re-walking the filesystem.
 
 ### Snapshot
 
-Captures a point-in-time scan result:
+`domain/snapshot.py` defines snapshot format v2 independently of the SQLite
+schema. It records the stable scan result plus the metadata required to decide
+whether a comparison is meaningful:
 
 ```python
 @dataclass
 class Snapshot:
     id: int | None
-    root_path: str         # resolved absolute path
-    timestamp: datetime
+    root_path: str
+    timestamp: datetime               # aware UTC for new snapshots
     total_size: int
+    total_allocated_size: int | None
+    total_unique_allocated_size: int | None
     file_count: int
     dir_count: int
     scan_duration: float
-    label: str
-    is_baseline: bool
-    baseline_id: int | None
+    format_version: int                # snapshot format, currently 2
+    metric_semantics_version: str
+    selected_metric: MetricId
+    policy: ScanPolicy | None
+    scanner_version: str | None
+    scan_run_id: str | None
+    completion_status: str
+    partial: bool
+    error_count: int
+    root_device_id: int | None
+    root_inode: int | None
+    root_filesystem: str | None
+    legacy: bool
+    inference_source: str
 ```
+
+Legacy rows remain readable. Missing policy fields are represented as unknown;
+they are never filled with current defaults and presented as historical fact.
 
 ### SizeDelta
 
-Result of comparing two snapshots at the same path:
+`domain/delta.py` is shared by CLI, Monitor, and later visualizations. A path
+delta carries logical, allocated, unique, file-count, and directory-count
+changes while retaining the pre-Wave05 `old_size`/`new_size` API:
 
 ```python
 @dataclass
@@ -277,11 +305,35 @@ class SizeDelta:
     path: str
     old_size: int
     new_size: int
-    is_new: bool           # appeared in new snapshot
-    is_removed: bool       # gone from new snapshot
+    is_new: bool
+    is_removed: bool
+    is_dir: bool
+    old_allocated_size: int | None
+    new_allocated_size: int | None
+    old_unique_size: int | None
+    new_unique_size: int | None
+    old_file_count: int
+    new_file_count: int
 ```
 
-Properties `delta`, `growth_percent`, `is_growth`, `is_shrink` are derived.
+`CompatibilityResult` separately records `compatible`,
+`compatible-with-warning`, or `incompatible` plus field-level explanations and
+recovery actions. `CompareResult` combines that decision with deterministic
+path deltas and total changes.
+
+## Snapshot Repository and Compare
+
+Product code depends on `SnapshotRepository`, not SQLite. The protocol exposes
+snapshot save/list/load, measurement reconstruction, history, deletion/pruning,
+status, and read-only clone operations. `SQLiteSnapshotRepository` is the
+current adapter; CLI and Textual screens receive it through the default factory.
+
+`SnapshotService` converts a successful terminal `ScanRun` into canonical v2
+metadata. `CompareService` resolves `latest`, `previous`, `oldest`, numeric ids,
+and `--since` windows, then checks root identity, metric semantics/selection,
+xdev, pseudo-filesystem, max-depth, symlink, hardlink, exclude, and partial
+coverage metadata before loading measurements. Incompatible comparisons are
+blocked unless the caller explicitly requests a raw/untrusted diff.
 
 ## Database
 
@@ -289,17 +341,31 @@ SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects
 
 ### Schema
 
-The current schema (v3) interns directory paths and stores periodic full baselines plus per-snapshot deltas. Files are represented in directory aggregates; snapshot persistence does not store one row per file.
+Database schema v4 remains distinct from snapshot format v2 and the public
+snapshot API version.
 
-**snapshots** -- One metadata row per scan. In addition to root path, timestamp, totals, duration, and label, `is_baseline` marks full snapshots and `baseline_id` links delta snapshots to their baseline.
+**monitored_roots** -- Stable root path plus observed device, inode, filesystem,
+and last-seen timestamp.
 
-**paths** -- One row per unique directory path, with `parent_id`, basename, and depth. Reusing path IDs prevents identical path strings from being duplicated across snapshots.
+**scan_runs** -- Run id, lifecycle timestamps/status, duration, adapter/version,
+selected metric, serialized policy, and coverage counts.
 
-**nodes** -- Full directory state for baseline snapshots only: `snapshot_id`, `path_id`, size, own size, file/dir counts, mtime, and error.
+**snapshots** -- Stable legacy-compatible totals plus baseline/delta links.
 
-**deltas** -- Changed, added, or removed directory state for non-baseline snapshots. It mirrors the node metrics and adds `is_removed`.
+**snapshot_metadata** -- Snapshot format/API versions, metric semantics and
+availability, policy, scanner/run/root identity, completion/coverage fields,
+timezone rule, capabilities, and legacy inference source.
 
-**Other tables:** `alert_rules`, `alert_events`, the legacy `deletion_log` API table, and `schema_version`.
+**paths** -- Interned file and directory paths with parent, basename, and depth.
+
+**nodes** -- Full file/directory measurements for baseline snapshots: logical,
+allocated, unique, own measurements, counts, mtime, error, and node kind.
+
+**deltas** -- Changed, added, or removed file/directory state for non-baseline
+snapshots, using the same measurements plus `is_removed`.
+
+**Other tables:** `alert_rules`, `alert_events`, the legacy `deletion_log` API
+table, and `schema_version`.
 
 The first snapshot for a root is a baseline; another full baseline is stored every 50 snapshots. Intermediate snapshots compare against the previously resolved state and persist only changed directory rows. When retention deletes a baseline, the earliest surviving dependent is materialized and promoted before the old baseline is removed.
 
@@ -307,9 +373,24 @@ The first snapshot for a root is a baseline; another full baseline is stored eve
 
 `list_snapshots(root_path)` uses bidirectional matching by default: given `/a/b`, it finds exact, ancestor, and descendant watch roots. `strict_path=True` restricts this to exact matches.
 
-`load_tree()` and `compare_snapshots()` reconstruct each requested state by loading its baseline and applying ordered deltas. Comparison then operates on the two resolved path-ID maps and returns `SizeDelta` objects for changed, added, or removed directories. A `min_delta` threshold filters out noise.
+`load_tree()`, `load_measurements()`, and `compare_snapshots()` reconstruct each
+requested state by loading its baseline and applying ordered deltas. File paths
+are retained, so reports can name `b/new.bin` rather than only its parent.
 
 `get_size_history(path)` combines baseline rows and deltas, then forward-fills unchanged snapshots to return `(timestamp, size)` pairs.
+
+### Migration and degraded behavior
+
+Before changing a non-empty on-disk database, migration writes a SQLite backup
+next to it (for schema v4: `data.db.pre-v4.bak`). All DDL, backfill, and schema
+version changes run in one transaction; failure rolls back without advancing
+`schema_version`. Existing schema-v3/v0.1.7 snapshots are marked legacy with an
+explicit inference source rather than discarded.
+
+If migration or writes fail but the database is readable, the adapter opens the
+original read-only so list/history remain available. If the file is corrupt or
+cannot be read, the app uses an in-memory degraded repository for scan-only use.
+It never deletes or overwrites the user's database as an automatic repair.
 
 ## Cleanup System
 

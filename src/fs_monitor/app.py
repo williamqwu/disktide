@@ -14,9 +14,10 @@ from fs_monitor.config import (
     get_effective_paths, set_effective_paths,
 )
 from fs_monitor.rendering import set_safe_rendering
+from fs_monitor.repositories import default_snapshot_repository
+from fs_monitor.repositories.snapshots import SnapshotRepository
 from fs_monitor.services.scan import ScanService
 from fs_monitor.viz.colors import set_color_scheme
-from fs_monitor.storage.database import Database
 from fs_monitor.screens.explorer import ExplorerScreen
 from fs_monitor.screens.cleanup import CleanupScreen
 from fs_monitor.screens.monitor import MonitorScreen
@@ -46,6 +47,7 @@ class FSMonitorApp(App):
         scan_path: str | None = None,
         config: AppConfig | None = None,
         show_welcome: bool = False,
+        snapshot_repository: SnapshotRepository | None = None,
         **kwargs,
     ):
         if "NO_COLOR" in os.environ:
@@ -53,7 +55,9 @@ class FSMonitorApp(App):
         super().__init__(**kwargs)
         self._scan_path = str(Path(scan_path).resolve()) if scan_path else None
         self._config = config or load_config()
-        self._db = Database()
+        self._snapshot_repository = (
+            snapshot_repository or default_snapshot_repository()
+        )
         self._scan_service = ScanService()
         self._show_welcome = show_welcome
         # Ensures the "running without persistence" warning is only shown
@@ -68,14 +72,14 @@ class FSMonitorApp(App):
         # detected before the session starts. The warning is
         # emitted after the first screen is pushed (below), so the toast
         # lands on a visible screen rather than the pre-mount default one.
-        self._db.connect()
+        self._snapshot_repository.connect()
 
         if self._show_welcome:
             from fs_monitor.screens.welcome import WelcomeScreen
 
             paths = get_effective_paths(self._config)
             cwd = os.getcwd()
-            recent = self._db.recent_paths(limit=5)
+            recent = self._snapshot_repository.recent_paths(limit=5)
 
             self.push_screen(
                 WelcomeScreen(
@@ -99,12 +103,22 @@ class FSMonitorApp(App):
         whether they came in through the welcome screen or straight into
         the explorer.
         """
-        if not self._db.degraded or self._warned_degraded:
+        status = self._snapshot_repository.status
+        if status.writable or self._warned_degraded:
             return
         self._warned_degraded = True
+        if status.read_only:
+            message = (
+                "The snapshot database is read-only. Existing history can "
+                "be viewed, but new snapshots will not be saved."
+            )
+        else:
+            message = (
+                "The storage database is unavailable. Snapshots and history "
+                "won't be saved this session; file exploration still works."
+            )
         self.notify(
-            "The storage database is unavailable — snapshots and history "
-            "won't be saved this session. You can still explore files.",
+            message,
             title="Running without persistence",
             severity="warning",
             timeout=10,
@@ -154,7 +168,8 @@ class FSMonitorApp(App):
         )
         self._cleanup = CleanupScreen()
         self._monitor = MonitorScreen(
-            db=self._db, root_path=self._scan_path,
+            repository=self._snapshot_repository,
+            root_path=self._scan_path,
             strict_path=self._config.monitor.strict_path,
         )
         self._fs_overview = FSOverviewScreen()
@@ -164,7 +179,11 @@ class FSMonitorApp(App):
         self.install_screen(self._monitor, name="monitor")
         self.install_screen(self._fs_overview, name="fs_overview")
         self.install_screen(
-            SettingsScreen(self._config, db=self._db, scan_path=self._scan_path),
+            SettingsScreen(
+                self._config,
+                repository=self._snapshot_repository,
+                scan_path=self._scan_path,
+            ),
             name="settings",
         )
 

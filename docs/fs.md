@@ -105,7 +105,7 @@ A `PermissionError` on the directory itself (`os.scandir()` fails) records the e
 
 Errors are stored in `FSNode.error` and displayed in the TUI details panel.
 
-### Database -- `storage/database.py`
+### Snapshot repository -- `repositories/sqlite.py`, `storage/database.py`
 
 SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant; the legacy directory name is retained for upgrade compatibility).
 
@@ -114,10 +114,22 @@ SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant;
 | Locate DB | `os.environ.get("XDG_DATA_HOME")`, `os.path.expanduser("~/.local/share")` |
 | Create dir | `os.makedirs(db_dir, exist_ok=True)` |
 | Open/create DB | `sqlite3.connect(path)` |
+| Open read-only recovery | SQLite URI with `mode=ro`, then `PRAGMA query_only=ON` |
+| Pre-migration backup | SQLite backup API to `data.db.pre-v4.bak` |
+| Integrity probe | `PRAGMA quick_check` |
 
-Snapshot roots are stored as absolute strings in `snapshots.root_path`; directory paths are interned in `paths.path` and referenced by integer IDs from baseline and delta rows. Query filtering uses exact or ancestor/descendant string comparison. No additional normalization is applied at the database layer -- CLI roots are stored after `Path.resolve()`.
+Snapshot roots are stored as absolute strings in `snapshots.root_path`; file and
+directory paths are interned in `paths.path` and referenced by integer IDs from
+baseline and delta rows. Query filtering uses exact or ancestor/descendant
+string comparison. No additional normalization is applied at the database
+layer -- CLI roots are stored after `Path.resolve()`.
 
 SQLite pragmas: `journal_mode=WAL` (allows concurrent readers with one writer), `foreign_keys=ON`.
+
+Schema migration is transactional. If write/migration setup fails but the file
+is readable, history opens read-only; if it is corrupt, scanning continues with
+an in-memory degraded repository. The original database is never automatically
+deleted or overwritten.
 
 On network filesystems, placing the database on the network share would be slow. The default XDG path puts it on the local filesystem, which is correct.
 

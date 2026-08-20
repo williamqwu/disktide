@@ -113,10 +113,10 @@ def _force_teardown(app) -> None:
             app._explorer.cancel_active_scan()
     except Exception:
         pass
-    db = getattr(app, "_db", None)
-    if db is not None:
+    repository = getattr(app, "_snapshot_repository", None)
+    if repository is not None:
         try:
-            db.close()
+            repository.close()
         except Exception:
             pass
 
@@ -330,30 +330,120 @@ def scan(
         )
 
     if snapshot:
-        from fs_monitor.models.snapshot import Snapshot
-        from fs_monitor.storage.database import Database
+        from fs_monitor.repositories import default_snapshot_repository
+        from fs_monitor.services.snapshots import SnapshotService
 
-        db = Database()
-        db.connect()
-        if db.degraded:
-            db.close()
-            click.echo(
-                "\nCould not save snapshot: the storage database is "
-                "unavailable or not writable.",
-                err=True,
+        repository = default_snapshot_repository()
+        repository.connect()
+        try:
+            if not repository.status.writable:
+                click.echo(
+                    "\nCould not save snapshot: the storage database is "
+                    "unavailable or read-only. "
+                    f"{repository.status.reason or ''}".rstrip(),
+                    err=True,
+                )
+            else:
+                try:
+                    saved = SnapshotService(repository).save_run(run)
+                except Exception as exc:
+                    click.echo(
+                        "\nCould not save snapshot; the scan result is "
+                        f"still valid: {type(exc).__name__}: {exc}",
+                        err=True,
+                    )
+                else:
+                    click.echo(f"\nSnapshot saved (id={saved.id})")
+        finally:
+            repository.close()
+
+
+@cli.command()
+@click.argument("selectors", nargs=-1)
+@click.option(
+    "--since",
+    metavar="DURATION",
+    help="Compare latest with the newest snapshot at least this old (e.g. 7d)",
+)
+@click.option(
+    "--raw",
+    "raw_diff",
+    is_flag=True,
+    help="Show an explicitly untrusted diff when policies are incompatible",
+)
+@click.option("--limit", default=10, show_default=True, type=click.IntRange(1, 100))
+def compare(
+    selectors: tuple[str, ...],
+    since: str | None,
+    raw_diff: bool,
+    limit: int,
+) -> None:
+    """Compare snapshots: TARGET BASELINE [PATH].
+
+    Examples: ``compare latest previous /data`` or ``compare 42 41``.
+    """
+    from datetime import timedelta
+
+    from fs_monitor.config import parse_duration
+    from fs_monitor.repositories import default_snapshot_repository
+    from fs_monitor.services.compare import (
+        CompareService,
+        SnapshotRepositoryUnavailable,
+        SnapshotSelectionError,
+        render_compare_result,
+    )
+
+    if since is not None:
+        if len(selectors) != 1:
+            raise click.UsageError("--since requires exactly one PATH argument")
+        target_selector = "latest"
+        baseline_selector = "previous"
+        root_path = str(Path(selectors[0]).expanduser().resolve())
+    else:
+        if len(selectors) not in {0, 2, 3}:
+            raise click.UsageError(
+                "use: fsmonitor compare TARGET BASELINE [PATH]"
+            )
+        target_selector = selectors[0] if selectors else "latest"
+        baseline_selector = selectors[1] if selectors else "previous"
+        root_path = (
+            str(Path(selectors[2]).expanduser().resolve())
+            if len(selectors) == 3
+            else None
+        )
+
+    repository = default_snapshot_repository()
+    repository.connect()
+    service = CompareService(repository)
+    try:
+        if since is not None:
+            try:
+                seconds = parse_duration(since)
+            except (TypeError, ValueError) as exc:
+                raise click.BadParameter(
+                    "expected a duration such as 7d, 12h, or 30m",
+                    param_hint="--since",
+                ) from exc
+            result = service.compare_since(
+                timedelta(seconds=seconds),
+                root_path=root_path,
+                raw=raw_diff,
             )
         else:
-            snap = Snapshot(
-                root_path=path,
-                timestamp=datetime.now(),
-                total_size=root.size,
-                file_count=root.file_count,
-                dir_count=root.dir_count,
-                scan_duration=run.duration_seconds,
+            result = service.compare(
+                target_selector,
+                baseline_selector,
+                root_path=root_path,
+                raw=raw_diff,
             )
-            snap_id = db.save_snapshot(snap, root)
-            db.close()
-            click.echo(f"\nSnapshot saved (id={snap_id})")
+    except (SnapshotSelectionError, SnapshotRepositoryUnavailable) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        repository.close()
+
+    click.echo(render_compare_result(result, limit=limit))
+    if result.blocked:
+        raise click.exceptions.Exit(2)
 
 
 @cli.command()
@@ -395,18 +485,19 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
             ScanStarted,
             ScanStatus,
         )
-        from fs_monitor.models.snapshot import Snapshot
+        from fs_monitor.repositories import default_snapshot_repository
         from fs_monitor.services.scan import ScanService
-        from fs_monitor.storage.database import Database
+        from fs_monitor.services.snapshots import SnapshotService
         import humanize
 
-        db = Database()
+        repository = default_snapshot_repository()
         scan_service = ScanService()
-        db.connect()
-        if db.degraded:
+        repository.connect()
+        if not repository.status.writable:
             click.echo(
                 "Warning: the storage database is unavailable or not "
-                "writable; snapshots will not be persisted.",
+                "writable; snapshots will not be persisted. "
+                f"{repository.status.reason or ''}".rstrip(),
                 err=True,
             )
         watch_start = time.monotonic()
@@ -463,23 +554,22 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
 
                 root = scan_run.root
 
-                if db.degraded:
+                if not repository.status.writable:
                     snapshot_status = "not persisted"
                     pruned = 0
                 else:
-                    snap = Snapshot(
-                        root_path=path,
-                        timestamp=datetime.now(),
-                        total_size=root.size,
-                        file_count=root.file_count,
-                        dir_count=root.dir_count,
-                        scan_duration=scan_run.duration_seconds,
-                    )
-                    snap_id = db.save_snapshot(snap, root)
-                    snapshot_status = f"snapshot #{snap_id}"
-                    pruned = db.prune_snapshots(
-                        path, config.monitor.snapshot_retention
-                    )
+                    try:
+                        saved = SnapshotService(repository).save_run(scan_run)
+                        snapshot_status = f"snapshot #{saved.id}"
+                        pruned = repository.prune_snapshots(
+                            path, config.monitor.snapshot_retention
+                        )
+                    except Exception as exc:
+                        snapshot_status = (
+                            "not persisted: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        pruned = 0
 
                 status = (
                     f"[{datetime.now():%H:%M:%S}] "
@@ -501,7 +591,7 @@ def watch(path: str, interval: str | None, max_time: str | None, workers: int | 
                 await asyncio.sleep(seconds)
         finally:
             scan_service.cancel_all()
-            db.close()
+            repository.close()
 
     try:
         asyncio.run(run())

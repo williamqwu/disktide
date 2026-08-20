@@ -10,7 +10,7 @@ from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 
 from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration, current_hostname
 from fs_monitor.scanner.sysinfo import storage_class
-from fs_monitor.storage.database import Database
+from fs_monitor.repositories.snapshots import SnapshotRepository
 from fs_monitor.viz.colors import SCHEMES, set_color_scheme
 
 
@@ -66,11 +66,16 @@ class SettingsScreen(Screen):
     }
     """
 
-    def __init__(self, config: AppConfig, db: Database | None = None,
-                 scan_path: str = "/", **kwargs):
+    def __init__(
+        self,
+        config: AppConfig,
+        repository: SnapshotRepository | None = None,
+        scan_path: str = "/",
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._config = config
-        self._db = db
+        self._repository = repository
         self._scan_path = scan_path
         self._system_info = None
 
@@ -305,12 +310,14 @@ class SettingsScreen(Screen):
         import os
         import humanize
 
-        if self._db is None:
+        if self._repository is None:
             return
         try:
-            size = os.path.getsize(self._db.path)
+            size = os.path.getsize(self._repository.path)
             self.query_one("#sysinfo-dbsize", Static).update(
-                f"  Database: {humanize.naturalsize(size, binary=True)} ({self._db.path})"
+                "  Database: "
+                f"{humanize.naturalsize(size, binary=True)} "
+                f"({self._repository.path})"
             )
         except OSError:
             self.query_one("#sysinfo-dbsize", Static).update(

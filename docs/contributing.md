@@ -38,6 +38,7 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - `assets/` -- TCSS stylesheets
 - `src/fs_monitor/collectors/platform/` -- isolated OS/procfs/sysfs/command probes
 - `src/fs_monitor/extensions/` -- typed capability contracts
+- `src/fs_monitor/repositories/` -- persistence-neutral protocols and adapters
 - `src/fs_monitor/services/` -- CLI/TUI-neutral application services such as doctor and scan orchestration
 - `tool/` -- development utilities (e.g., `gen_activity` for generating test data)
 - `docs/` -- documentation
@@ -52,10 +53,11 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 
 ### Module Boundaries
 
-- **models/** -- pure data structures, no I/O. Can be imported anywhere.
+- **models/** -- legacy-compatible pure data structures; new snapshot contracts live in `domain/`.
 - **collectors/platform/** -- all platform-specific probes; callers consume structured results rather than `/proc`, `/sys`, or commands directly.
-- **domain/** -- framework-independent metric, policy, request, run, and event contracts.
+- **domain/** -- framework-independent metric, policy, scan, snapshot, compatibility, and delta contracts.
 - **services/** -- application orchestration with no Textual dependency.
+- **repositories/** -- persistence-neutral protocols plus concrete adapters; product entry points use factories/protocols rather than importing SQLite.
 - **collectors/local_scanner.py** -- the only product adapter that constructs the compatibility `ScanEngine`.
 - **scanner/** -- filesystem I/O only. No Textual imports.
 - **storage/** -- SQLite I/O only. No Textual imports.
@@ -100,12 +102,19 @@ See [release-process.md](release-process.md) for the tag and PyPI flow.
 
 ### Database Migrations
 
-`storage/migrations.py` uses a `schema_version` table. To add a migration:
+`storage/migrations.py` uses a `schema_version` table. Snapshot format and API
+versions are separate domain metadata and must not be inferred from that table.
+To add a migration:
 
 1. Increment `CURRENT_VERSION`
 2. Add the ordered SQL statements under the new integer key in `MIGRATIONS`
-3. Handle any required post-commit work explicitly in `migrate()`
-4. Add a test in `tests/test_migrations.py`
+3. Put data backfill in a `MIGRATION_CALLBACKS` entry; it runs inside the same transaction
+4. Keep the pre-migration backup and rollback behavior intact
+5. Add success, legacy-data-preservation, and interrupted-migration tests
+
+Do not commit a schema version before its DDL/backfill succeeds, silently fill
+unknown legacy policy with current defaults, or delete a corrupt database as a
+repair strategy.
 
 ## Adding a New Cleanup Rule
 

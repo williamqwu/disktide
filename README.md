@@ -51,9 +51,13 @@ checkouts use `uv sync --locked`; see [Contributing](docs/contributing.md).
 | Location | Contents | Typical size |
 |----------|----------|--------------|
 | `~/.config/fsmonitor-cli/config.toml` | User settings | < 1 KB |
-| `~/.local/share/fsmonitor-cli/data.db` | SQLite database (directory-level snapshots) | 1 -- 200 MB depending on tree size and snapshot count |
+| `~/.local/share/fsmonitor-cli/data.db` | SQLite snapshot store (policy metadata plus file/directory baselines and deltas) | Depends on tree size and snapshot count |
 
-Snapshot data is written by the CLI commands `scan --snapshot` and `watch`. The TUI opens the database for recent paths and Monitor mode but does not save snapshots. Old snapshots are pruned automatically based on retention settings (default: 30 days).
+Snapshot data is written by the CLI commands `scan --snapshot` and `watch`.
+`fsmonitor compare` checks policy and root compatibility before reporting
+growth. The TUI opens the repository for recent paths and Monitor mode but does
+not save snapshots. Old snapshots are pruned automatically based on retention
+settings (default: 30 days).
 
 Paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME` if set. Settings can also be edited by pressing `?` inside the TUI. See the [User Guide](docs/user-guide.md) for the full configuration reference.
 
@@ -99,6 +103,10 @@ fsmonitor scan / --metric unique --one-file-system --exclude-pseudo
 # Watch for changes over time
 fsmonitor watch /path --interval 6h
 
+# Explain growth between snapshots (target first, baseline second)
+fsmonitor compare latest previous /path
+fsmonitor compare --since 7d /path
+
 # Find candidates and permanently delete all of them after confirmation
 fsmonitor cleanup /path
 ```
@@ -113,5 +121,5 @@ one-shot CLI, and periodic watch use the same scan service and result semantics.
 - **[Architecture](docs/architecture.md)** -- Internals: scanner threading, database schema, visualization algorithms, screen management
 - **[Filesystem Compatibility](docs/fs.md)** -- Supported filesystems, every syscall the tool makes, platform-specific behavior
 - **[Release Process](docs/release-process.md)** -- Locked builds, clean-wheel smoke tests, checksums, SBOM, provenance, and PyPI publishing
-- **[Delivery Waves](docs/waves/README.md)** -- Interactive Wave 01–04 feature, architecture, and validation briefs
+- **[Delivery Waves](docs/waves/README.md)** -- Interactive Wave 01–05 feature, architecture, and validation briefs
 - **[Contributing](docs/contributing.md)** -- Dev setup, testing, how to add rules/screens/visualizations

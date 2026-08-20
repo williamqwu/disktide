@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.4
+
+**Snapshot v2 and policy-aware compare**
+
+- **feat** Added snapshot format v2 metadata for metric semantics and availability, scan policy, scanner/run identity, completion and partial/error counts, UTC timestamp rules, and root device/filesystem identity. Baselines and deltas now retain file paths plus logical, allocated, unique, and file-count measurements.
+- **feat** Added a persistence-neutral `SnapshotRepository` protocol, SQLite adapter, `SnapshotService`, and `CompareService`. CLI, App, Monitor, and Settings no longer depend directly on the SQLite implementation.
+- **feat** Added `fsmonitor compare TARGET BASELINE [PATH]` and `fsmonitor compare --since 7d PATH` with deterministic top growth/shrink, new/removed paths, file-count changes, directory churn, confidence, and compatibility summaries.
+- **safety** Compare rejects incompatible root identity, metric semantics/selection, xdev, symlink, hardlink, exclude, and max-depth policies by default. `--raw` is an explicit untrusted override; partial/error coverage remains visible as a warning.
+- **migration** Added transactional schema v4 migration with a pre-migration recovery backup, legacy metadata inference markers, rollback-on-failure, and read-only fallback. Existing v0.1.7/schema-v3 snapshots remain listable/loadable and require explicit raw comparison because their policy metadata is incomplete.
+- **resilience/tests** Corrupted or unwritable databases no longer block scan-only use and are never auto-deleted. Added migration interruption, legacy fixture, repository, selector, compatibility, CLI, file-level delta, and degraded/read-only tests; full suite passes with 675 tests.
+
 ## v0.2.3
 
 **Bounded all-tree scheduling and live Explorer**

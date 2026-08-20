@@ -6,25 +6,50 @@ Uses path interning (each unique path stored once) and delta storage
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fs_monitor import LEGACY_STORAGE_NAMESPACE
+from fs_monitor.domain.delta import NodeMeasurement, SizeDelta
+from fs_monitor.domain.metrics import MetricId
+from fs_monitor.domain.snapshot import (
+    Snapshot,
+    policy_from_dict,
+    policy_to_dict,
+)
 
 log = logging.getLogger(__name__)
 
 from fs_monitor.models.tree import FSNode
-from fs_monitor.models.snapshot import Snapshot, SizeDelta
-from fs_monitor.storage.migrations import migrate
+from fs_monitor.storage.migrations import (
+    CURRENT_VERSION,
+    migrate,
+    migration_backup_path,
+)
 
 # How often to store a full baseline (every N snapshots per root_path).
 _BASELINE_INTERVAL = 50
 
-# Node tuple fields: (size, own_size, file_count, dir_count, mtime, error)
-_NodeTuple = tuple[int, int, int, int, float, str | None]
+# Node tuple fields: logical, own logical, allocated, own allocated, unique,
+# own unique, file count, dir count, mtime, error, is_dir.
+_NodeTuple = tuple[
+    int,
+    int,
+    int | None,
+    int | None,
+    int | None,
+    int | None,
+    int,
+    int,
+    float,
+    str | None,
+    bool,
+]
 
 
 def _default_db_path() -> str:
@@ -47,23 +72,37 @@ def _default_db_path() -> str:
 class Database:
     """SQLite-backed storage for fsmonitor data."""
 
-    def __init__(self, path: str | None = None, run_migrations: bool = True):
+    def __init__(
+        self,
+        path: str | None = None,
+        run_migrations: bool = True,
+        read_only: bool = False,
+    ):
         self._path = path or _default_db_path()
         self._conn: sqlite3.Connection | None = None
         self._run_migrations = run_migrations
+        self._read_only_requested = read_only
+        self.read_only = read_only
         # Set when the on-disk database can't be opened (typically a full
         # disk) and we've fallen back to an in-memory database. In this
         # state the app is fully usable but nothing is persisted across
         # sessions. Callers can surface this to the user.
         self.degraded = False
         self.degraded_reason: str | None = None
+        self.recovery_hint: str | None = None
 
     @property
     def path(self) -> str:
         """Filesystem path of the SQLite database file."""
         return self._path
 
-    def _open(self, path: str) -> sqlite3.Connection:
+    def _open(
+        self,
+        path: str,
+        *,
+        read_only: bool = False,
+        run_migrations: bool | None = None,
+    ) -> sqlite3.Connection:
         """Open a connection at ``path`` and bring it up to schema.
 
         Enables WAL journaling + foreign keys and runs migrations. Any of
@@ -71,12 +110,33 @@ class Database:
         sidecars; migrations write the schema), which is how connect()
         detects that the location is unusable.
         """
-        conn = sqlite3.connect(path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        if self._run_migrations:
-            migrate(conn)
-        return conn
+        use_migrations = (
+            self._run_migrations
+            if run_migrations is None
+            else run_migrations
+        )
+        if read_only and path != ":memory:":
+            uri = f"file:{quote(str(Path(path).resolve()))}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+        else:
+            conn = sqlite3.connect(path)
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+            if read_only:
+                conn.execute("PRAGMA query_only=ON")
+            else:
+                conn.execute("PRAGMA journal_mode=WAL")
+            quick_check = conn.execute("PRAGMA quick_check").fetchone()
+            if quick_check is not None and quick_check[0] != "ok":
+                raise sqlite3.DatabaseError(
+                    f"database integrity check failed: {quick_check[0]}"
+                )
+            if use_migrations and not read_only:
+                migrate(conn)
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
     def connect(self) -> None:
         """Open the database, degrading to memory if persistence is unavailable.
@@ -88,26 +148,79 @@ class Database:
         for callers to surface.
         """
         failure_reason = "unknown database error"
-        try:
-            self._conn = self._open(self._path)
-            self.degraded = False
-            self.degraded_reason = None
-            return
-        except (sqlite3.Error, OSError) as exc:
-            failure_reason = f"{type(exc).__name__}: {exc}"
-            log.warning(
-                "Could not open database at %s (%s); falling back to an "
-                "in-memory database. Snapshots and history will not be "
-                "persisted this session.",
-                self._path, exc,
-            )
-            self._close_quietly()
+        self.recovery_hint = None
+        if self._read_only_requested:
+            try:
+                self._conn = self._open(
+                    self._path,
+                    read_only=True,
+                    run_migrations=False,
+                )
+                self.read_only = True
+                self.degraded = False
+                self.degraded_reason = None
+                return
+            except (sqlite3.Error, OSError) as exc:
+                failure_reason = f"{type(exc).__name__}: {exc}"
+                self._close_quietly()
+        if not self._read_only_requested:
+            try:
+                self._conn = self._open(self._path)
+                self.read_only = False
+                self.degraded = False
+                self.degraded_reason = None
+                return
+            except (sqlite3.Error, OSError) as exc:
+                failure_reason = f"{type(exc).__name__}: {exc}"
+                log.warning(
+                    "Could not open database at %s (%s); attempting "
+                    "read-only recovery before falling back to memory.",
+                    self._path,
+                    exc,
+                )
+                self._close_quietly()
+
+            if self._path != ":memory:" and Path(self._path).exists():
+                try:
+                    self._conn = self._open(
+                        self._path,
+                        read_only=True,
+                        run_migrations=False,
+                    )
+                    self.read_only = True
+                    self.degraded = True
+                    self.degraded_reason = (
+                        f"cannot migrate or write {self._path}: "
+                        f"{failure_reason}; opened the existing database "
+                        "read-only"
+                    )
+                    backup_path = migration_backup_path(
+                        self._path, CURRENT_VERSION
+                    )
+                    if backup_path.exists():
+                        self.recovery_hint = (
+                            f"restore from {backup_path} after resolving "
+                            "the migration or disk problem"
+                        )
+                    else:
+                        self.recovery_hint = (
+                            "copy the database before attempting manual "
+                            "recovery"
+                        )
+                    return
+                except (sqlite3.Error, OSError):
+                    self._close_quietly()
 
         # Fallback: an in-memory database. This does not touch the disk, so
         # it succeeds even when the volume is full.
-        self._conn = self._open(":memory:")
+        self._conn = self._open(":memory:", run_migrations=True)
+        self.read_only = False
         self.degraded = True
         self.degraded_reason = f"cannot use {self._path}: {failure_reason}"
+        self.recovery_hint = (
+            "repair permissions, free disk space, or restore a known-good "
+            "database copy; fsmonitor will not delete the file automatically"
+        )
 
     def _close_quietly(self) -> None:
         """Close and drop the connection, swallowing any error."""
@@ -139,22 +252,21 @@ class Database:
     # ── Path interning ──
 
     def _intern_paths(self, root: FSNode) -> dict[str, int]:
-        """Ensure all directory paths from root exist in the paths table.
+        """Ensure all file and directory paths exist in the paths table.
 
         Returns a mapping of path string -> path_id.
         """
-        # Collect all dirs
-        dirs = list(root.walk_dirs())
+        nodes = list(root.walk())
 
         # Batch insert (ignore duplicates)
         self.conn.executemany(
             "INSERT OR IGNORE INTO paths (path, name, depth) VALUES (?, ?, ?)",
-            [(n.path, n.name, n.depth) for n in dirs],
+            [(node.path, node.name, node.depth) for node in nodes],
         )
 
         # Fetch all path_ids for these paths
-        placeholders = ",".join("?" * len(dirs))
-        paths = [n.path for n in dirs]
+        placeholders = ",".join("?" * len(nodes))
+        paths = [node.path for node in nodes]
         rows = self.conn.execute(
             f"SELECT id, path FROM paths WHERE path IN ({placeholders})",
             paths,
@@ -162,7 +274,7 @@ class Database:
         path_to_id = {r[1]: r[0] for r in rows}
 
         # Update parent_id for any newly inserted paths
-        for node in dirs:
+        for node in nodes:
             pid = path_to_id.get(node.path)
             if pid is None:
                 continue
@@ -181,7 +293,7 @@ class Database:
     def _resolve_flat(self, snapshot_id: int) -> dict[int, _NodeTuple]:
         """Reconstruct the full directory state for a snapshot.
 
-        Returns {path_id: (size, own_size, file_count, dir_count, mtime, error)}.
+        Returns path IDs mapped to the complete persisted measurement tuple.
         """
         snap = self.get_snapshot(snapshot_id)
         if snap is None:
@@ -189,11 +301,20 @@ class Database:
 
         if snap.is_baseline:
             rows = self.conn.execute(
-                "SELECT path_id, size, own_size, file_count, dir_count, mtime, error "
+                "SELECT path_id, size, own_size, allocated_size, "
+                "own_allocated_size, unique_allocated_size, "
+                "own_unique_allocated_size, file_count, dir_count, mtime, "
+                "error, is_dir "
                 "FROM nodes WHERE snapshot_id = ?",
                 (snapshot_id,),
             ).fetchall()
-            return {r[0]: (r[1], r[2], r[3], r[4], r[5], r[6]) for r in rows}
+            return {
+                row[0]: (
+                    row[1], row[2], row[3], row[4], row[5], row[6],
+                    row[7], row[8], row[9], row[10], bool(row[11]),
+                )
+                for row in rows
+            }
 
         # Start from baseline
         baseline_id = snap.baseline_id
@@ -201,31 +322,43 @@ class Database:
             return {}
 
         rows = self.conn.execute(
-            "SELECT path_id, size, own_size, file_count, dir_count, mtime, error "
+            "SELECT path_id, size, own_size, allocated_size, "
+            "own_allocated_size, unique_allocated_size, "
+            "own_unique_allocated_size, file_count, dir_count, mtime, "
+            "error, is_dir "
             "FROM nodes WHERE snapshot_id = ?",
             (baseline_id,),
         ).fetchall()
         state: dict[int, _NodeTuple] = {
-            r[0]: (r[1], r[2], r[3], r[4], r[5], r[6]) for r in rows
+            row[0]: (
+                row[1], row[2], row[3], row[4], row[5], row[6],
+                row[7], row[8], row[9], row[10], bool(row[11]),
+            )
+            for row in rows
         }
 
         # Apply all deltas from baseline to this snapshot (inclusive), in order
         delta_rows = self.conn.execute(
-            """SELECT d.path_id, d.size, d.own_size, d.file_count,
-                      d.dir_count, d.mtime, d.error, d.is_removed
+            """SELECT d.path_id, d.size, d.own_size, d.allocated_size,
+                      d.own_allocated_size, d.unique_allocated_size,
+                      d.own_unique_allocated_size, d.file_count,
+                      d.dir_count, d.mtime, d.error, d.is_dir, d.is_removed
                FROM deltas d
                JOIN snapshots s ON d.snapshot_id = s.id
                WHERE s.baseline_id = ? AND s.id <= ?
-               ORDER BY s.timestamp ASC, d.id ASC""",
+               ORDER BY s.timestamp ASC, s.id ASC, d.id ASC""",
             (baseline_id, snapshot_id),
         ).fetchall()
 
-        for r in delta_rows:
-            path_id = r[0]
-            if r[7]:  # is_removed
+        for row in delta_rows:
+            path_id = row[0]
+            if row[12]:
                 state.pop(path_id, None)
             else:
-                state[path_id] = (r[1], r[2], r[3], r[4], r[5], r[6])
+                state[path_id] = (
+                    row[1], row[2], row[3], row[4], row[5], row[6],
+                    row[7], row[8], row[9], row[10], bool(row[11]),
+                )
 
         return state
 
@@ -242,131 +375,267 @@ class Database:
 
     # ── Snapshots ──
 
+    @staticmethod
+    def _node_tuple(node: FSNode) -> _NodeTuple:
+        return (
+            node.size,
+            node.own_size,
+            node.allocated_size,
+            node.own_allocated_size,
+            node.unique_allocated_size,
+            node.own_unique_allocated_size,
+            node.file_count,
+            node.dir_count,
+            node.mtime,
+            node.error,
+            node.is_dir,
+        )
+
+    def _save_snapshot_metadata(
+        self,
+        snapshot_id: int,
+        snapshot: Snapshot,
+        root: FSNode,
+    ) -> None:
+        timestamp = snapshot.timestamp
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            snapshot.timestamp = timestamp
+        root_device_id = snapshot.root_device_id
+        if root_device_id is None:
+            root_device_id = root.device_id
+        root_inode = snapshot.root_inode
+        if root_inode is None:
+            root_inode = root.inode
+        root_filesystem = snapshot.root_filesystem or root.filesystem_type
+        self.conn.execute(
+            """INSERT INTO monitored_roots
+               (root_path, device_id, inode, filesystem_type, last_seen_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(root_path) DO UPDATE SET
+                   device_id = excluded.device_id,
+                   inode = excluded.inode,
+                   filesystem_type = excluded.filesystem_type,
+                   last_seen_at = excluded.last_seen_at""",
+            (
+                snapshot.root_path,
+                root_device_id,
+                root_inode,
+                root_filesystem,
+                timestamp.isoformat(),
+            ),
+        )
+        root_id = self.conn.execute(
+            "SELECT id FROM monitored_roots WHERE root_path = ?",
+            (snapshot.root_path,),
+        ).fetchone()[0]
+        policy_json = json.dumps(
+            policy_to_dict(snapshot.policy),
+            sort_keys=True,
+            separators=(",", ":"),
+        ) if snapshot.policy is not None else None
+        selected_metric = MetricId.parse(snapshot.selected_metric).value
+        if snapshot.scan_run_id:
+            self.conn.execute(
+                """INSERT INTO scan_runs (
+                       run_id, root_id, created_at, started_at, finished_at,
+                       status, duration, platform_adapter, scanner_version,
+                       selected_metric, policy_json, partial, error_count,
+                       excluded_count, depth_limited_count
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id) DO UPDATE SET
+                       root_id = excluded.root_id,
+                       finished_at = excluded.finished_at,
+                       status = excluded.status,
+                       duration = excluded.duration,
+                       partial = excluded.partial,
+                       error_count = excluded.error_count,
+                       excluded_count = excluded.excluded_count,
+                       depth_limited_count = excluded.depth_limited_count""",
+                (
+                    snapshot.scan_run_id,
+                    root_id,
+                    snapshot.created_at.isoformat() if snapshot.created_at else None,
+                    snapshot.started_at.isoformat() if snapshot.started_at else None,
+                    snapshot.finished_at.isoformat() if snapshot.finished_at else None,
+                    snapshot.completion_status,
+                    snapshot.scan_duration,
+                    snapshot.platform_adapter,
+                    snapshot.scanner_version,
+                    selected_metric,
+                    policy_json,
+                    int(snapshot.partial),
+                    snapshot.error_count,
+                    snapshot.excluded_count,
+                    snapshot.depth_limited_count,
+                ),
+            )
+        self.conn.execute(
+            """INSERT INTO snapshot_metadata (
+                   snapshot_id, snapshot_format_version,
+                   snapshot_api_version, metric_semantics_version,
+                   logical_available, allocated_available, unique_available,
+                   total_allocated_size, total_unique_allocated_size,
+                   selected_metric, policy_json, exclude_patterns_json,
+                   scanner_version, platform_adapter, completion_status,
+                   partial, error_count, excluded_count, depth_limited_count,
+                   root_device_id, root_inode, root_filesystem,
+                   timestamp_timezone, capabilities_json, legacy,
+                   inference_source, scan_run_id, root_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                snapshot_id,
+                snapshot.format_version,
+                snapshot.api_version,
+                snapshot.metric_semantics_version,
+                int(snapshot.logical_available),
+                int(snapshot.allocated_available),
+                int(snapshot.unique_available),
+                snapshot.total_allocated_size,
+                snapshot.total_unique_allocated_size,
+                selected_metric,
+                policy_json,
+                json.dumps(snapshot.exclude_patterns),
+                snapshot.scanner_version,
+                snapshot.platform_adapter,
+                snapshot.completion_status,
+                int(snapshot.partial),
+                snapshot.error_count,
+                snapshot.excluded_count,
+                snapshot.depth_limited_count,
+                root_device_id,
+                root_inode,
+                root_filesystem,
+                snapshot.timestamp_timezone,
+                json.dumps(snapshot.capabilities),
+                int(snapshot.legacy),
+                snapshot.inference_source,
+                snapshot.scan_run_id,
+                root_id,
+            ),
+        )
+
     def save_snapshot(self, snapshot: Snapshot, root: FSNode) -> int:
         """Save a snapshot with path interning and delta storage.
 
         Returns the snapshot ID.
         """
-        # Intern paths
-        path_to_id = self._intern_paths(root)
+        if self.read_only:
+            raise sqlite3.OperationalError("snapshot repository is read-only")
+        try:
+            path_to_id = self._intern_paths(root)
 
-        # Decide: baseline or delta?
-        prev_baseline_id = None
-        is_baseline = True
+            prev_baseline_id = None
+            is_baseline = True
 
-        last_baseline = self.conn.execute(
-            """SELECT id FROM snapshots
-               WHERE root_path = ? AND is_baseline = 1
-               ORDER BY timestamp DESC LIMIT 1""",
-            (snapshot.root_path,),
-        ).fetchone()
+            last_baseline = self.conn.execute(
+                """SELECT id FROM snapshots
+                   WHERE root_path = ? AND is_baseline = 1
+                   ORDER BY timestamp DESC, id DESC LIMIT 1""",
+                (snapshot.root_path,),
+            ).fetchone()
 
-        if last_baseline is not None:
-            # Count deltas since that baseline
-            delta_count = self.conn.execute(
-                """SELECT COUNT(*) FROM snapshots
-                   WHERE root_path = ? AND baseline_id = ?""",
-                (snapshot.root_path, last_baseline[0]),
-            ).fetchone()[0]
+            if last_baseline is not None:
+                delta_count = self.conn.execute(
+                    """SELECT COUNT(*) FROM snapshots
+                       WHERE root_path = ? AND baseline_id = ?""",
+                    (snapshot.root_path, last_baseline[0]),
+                ).fetchone()[0]
 
-            if delta_count < _BASELINE_INTERVAL - 1:
-                is_baseline = False
-                prev_baseline_id = last_baseline[0]
+                if delta_count < _BASELINE_INTERVAL - 1:
+                    is_baseline = False
+                    prev_baseline_id = last_baseline[0]
 
-        # Insert snapshot row
-        cursor = self.conn.execute(
-            """INSERT INTO snapshots
-               (root_path, timestamp, total_size, file_count, dir_count,
-                scan_duration, label, is_baseline, baseline_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                snapshot.root_path,
-                snapshot.timestamp.isoformat(),
-                snapshot.total_size,
-                snapshot.file_count,
-                snapshot.dir_count,
-                snapshot.scan_duration,
-                snapshot.label,
-                1 if is_baseline else 0,
-                None if is_baseline else prev_baseline_id,
-            ),
-        )
-        snapshot_id = cursor.lastrowid
-
-        if is_baseline:
-            # Store all nodes
-            nodes_data = []
-            for node in root.walk_dirs():
-                pid = path_to_id.get(node.path)
-                if pid is None:
-                    continue
-                nodes_data.append((
-                    snapshot_id, pid,
-                    node.size, node.own_size, node.file_count, node.dir_count,
-                    node.mtime, node.error,
-                ))
-            self.conn.executemany(
-                """INSERT INTO nodes
-                   (snapshot_id, path_id, size, own_size, file_count,
-                    dir_count, mtime, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                nodes_data,
+            timestamp = snapshot.timestamp
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                snapshot.timestamp = timestamp
+            cursor = self.conn.execute(
+                """INSERT INTO snapshots
+                   (root_path, timestamp, total_size, file_count, dir_count,
+                    scan_duration, label, is_baseline, baseline_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    snapshot.root_path,
+                    timestamp.isoformat(),
+                    snapshot.total_size,
+                    snapshot.file_count,
+                    snapshot.dir_count,
+                    snapshot.scan_duration,
+                    snapshot.label,
+                    1 if is_baseline else 0,
+                    None if is_baseline else prev_baseline_id,
+                ),
             )
-        else:
-            # Compute delta against previous state
-            prev_state = self._resolve_flat(
-                self._get_previous_snapshot_id(snapshot.root_path, snapshot_id)
-                or prev_baseline_id
-            )
+            snapshot_id = cursor.lastrowid
+            self._save_snapshot_metadata(snapshot_id, snapshot, root)
 
-            # Build current state
-            current: dict[int, _NodeTuple] = {}
-            for node in root.walk_dirs():
-                pid = path_to_id.get(node.path)
-                if pid is None:
-                    continue
-                current[pid] = (
-                    node.size, node.own_size, node.file_count,
-                    node.dir_count, node.mtime, node.error,
-                )
-
-            # Find changes
-            delta_rows = []
-            all_pids = set(prev_state.keys()) | set(current.keys())
-            for pid in all_pids:
-                old = prev_state.get(pid)
-                new = current.get(pid)
-                if new is None and old is not None:
-                    # Removed
-                    delta_rows.append((
-                        snapshot_id, pid, 0, 0, 0, 0, 0.0, None, 1,
-                    ))
-                elif old is None and new is not None:
-                    # New directory
-                    delta_rows.append((
-                        snapshot_id, pid,
-                        new[0], new[1], new[2], new[3], new[4], new[5], 0,
-                    ))
-                elif old != new:
-                    # Changed
-                    delta_rows.append((
-                        snapshot_id, pid,
-                        new[0], new[1], new[2], new[3], new[4], new[5], 0,
-                    ))
-
-            if delta_rows:
+            if is_baseline:
+                nodes_data = []
+                for node in root.walk():
+                    path_id = path_to_id.get(node.path)
+                    if path_id is None:
+                        continue
+                    nodes_data.append(
+                        (snapshot_id, path_id, *self._node_tuple(node))
+                    )
                 self.conn.executemany(
-                    """INSERT INTO deltas
-                       (snapshot_id, path_id, size, own_size, file_count,
-                        dir_count, mtime, error, is_removed)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    delta_rows,
+                    """INSERT INTO nodes (
+                           snapshot_id, path_id, size, own_size,
+                           allocated_size, own_allocated_size,
+                           unique_allocated_size, own_unique_allocated_size,
+                           file_count, dir_count, mtime, error, is_dir
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    nodes_data,
                 )
+            else:
+                previous_id = self._get_previous_snapshot_id(
+                    snapshot.root_path, snapshot_id
+                ) or prev_baseline_id
+                prev_state = self._resolve_flat(previous_id)
 
-        self.conn.commit()
+                current: dict[int, _NodeTuple] = {}
+                for node in root.walk():
+                    path_id = path_to_id.get(node.path)
+                    if path_id is not None:
+                        current[path_id] = self._node_tuple(node)
+
+                delta_rows = []
+                for path_id in sorted(set(prev_state) | set(current)):
+                    old = prev_state.get(path_id)
+                    new = current.get(path_id)
+                    if new is None and old is not None:
+                        delta_rows.append(
+                            (
+                                snapshot_id, path_id, 0, 0, None, None,
+                                None, None, 0, 0, 0.0, None, int(old[10]), 1,
+                            )
+                        )
+                    elif new is not None and old != new:
+                        delta_rows.append(
+                            (snapshot_id, path_id, *new, 0)
+                        )
+
+                if delta_rows:
+                    self.conn.executemany(
+                        """INSERT INTO deltas (
+                               snapshot_id, path_id, size, own_size,
+                               allocated_size, own_allocated_size,
+                               unique_allocated_size, own_unique_allocated_size,
+                               file_count, dir_count, mtime, error, is_dir,
+                               is_removed
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        delta_rows,
+                    )
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         snapshot.id = snapshot_id
         snapshot.is_baseline = is_baseline
-        snapshot.baseline_id = prev_baseline_id
+        snapshot.baseline_id = None if is_baseline else prev_baseline_id
         return snapshot_id
 
     def _get_previous_snapshot_id(
@@ -397,7 +666,7 @@ class Database:
             if strict_path:
                 sql = (
                     "SELECT * FROM snapshots WHERE root_path = ?"
-                    " ORDER BY timestamp DESC"
+                    " ORDER BY timestamp DESC, id DESC"
                 )
                 params: list = [root_path]
             else:
@@ -405,7 +674,7 @@ class Database:
                     "SELECT * FROM snapshots WHERE ? = root_path"
                     " OR ? LIKE root_path || '/%'"
                     " OR root_path LIKE ? || '/%'"
-                    " ORDER BY timestamp DESC"
+                    " ORDER BY timestamp DESC, id DESC"
                 )
                 params = [root_path, root_path, root_path]
             if limit > 0:
@@ -413,7 +682,7 @@ class Database:
                 params.append(limit)
             rows = self.conn.execute(sql, params).fetchall()
         else:
-            sql = "SELECT * FROM snapshots ORDER BY timestamp DESC"
+            sql = "SELECT * FROM snapshots ORDER BY timestamp DESC, id DESC"
             params = []
             if limit > 0:
                 sql += " LIMIT ?"
@@ -444,6 +713,8 @@ class Database:
 
     def delete_snapshot(self, snapshot_id: int) -> None:
         """Delete a snapshot, promoting dependents if it's a baseline."""
+        if self.read_only:
+            raise sqlite3.OperationalError("snapshot repository is read-only")
         snap = self.get_snapshot(snapshot_id)
         if snap and snap.is_baseline:
             # Find the earliest dependent that should become the new baseline
@@ -468,10 +739,11 @@ class Database:
                 "fsmonitor once with migrations enabled).",
                 row[0],
             )
-        return Snapshot(
+        timestamp = datetime.fromisoformat(row[2])
+        snapshot = Snapshot(
             id=row[0],
             root_path=row[1],
-            timestamp=datetime.fromisoformat(row[2]),
+            timestamp=timestamp,
             total_size=row[3],
             file_count=row[4],
             dir_count=row[5],
@@ -480,6 +752,93 @@ class Database:
             is_baseline=bool(row[8]) if len(row) > 8 else False,
             baseline_id=row[9] if len(row) > 9 else None,
         )
+        try:
+            metadata = self.conn.execute(
+                """SELECT
+                       m.snapshot_format_version,
+                       m.snapshot_api_version,
+                       m.metric_semantics_version,
+                       m.logical_available,
+                       m.allocated_available,
+                       m.unique_available,
+                       m.total_allocated_size,
+                       m.total_unique_allocated_size,
+                       m.selected_metric,
+                       m.policy_json,
+                       m.exclude_patterns_json,
+                       m.scanner_version,
+                       m.platform_adapter,
+                       m.completion_status,
+                       m.partial,
+                       m.error_count,
+                       m.excluded_count,
+                       m.depth_limited_count,
+                       m.root_device_id,
+                       m.root_inode,
+                       m.root_filesystem,
+                       m.timestamp_timezone,
+                       m.capabilities_json,
+                       m.legacy,
+                       m.inference_source,
+                       m.scan_run_id,
+                       r.created_at,
+                       r.started_at,
+                       r.finished_at
+                   FROM snapshot_metadata m
+                   LEFT JOIN scan_runs r ON r.run_id = m.scan_run_id
+                   WHERE m.snapshot_id = ?""",
+                (snapshot.id,),
+            ).fetchone()
+        except sqlite3.Error:
+            metadata = None
+        if metadata is None:
+            snapshot.format_version = 1
+            snapshot.metric_semantics_version = "legacy-logical-v1"
+            snapshot.policy = None
+            snapshot.scanner_version = None
+            snapshot.completion_status = "legacy-unknown"
+            snapshot.timestamp_timezone = "legacy-local-unknown"
+            snapshot.legacy = True
+            snapshot.inference_source = "pre-v2:snapshot-columns"
+            return snapshot
+
+        policy_value = json.loads(metadata[9]) if metadata[9] else None
+        snapshot.format_version = metadata[0]
+        snapshot.api_version = metadata[1]
+        snapshot.metric_semantics_version = metadata[2]
+        snapshot.logical_available = bool(metadata[3])
+        snapshot.allocated_available = bool(metadata[4])
+        snapshot.unique_available = bool(metadata[5])
+        snapshot.total_allocated_size = metadata[6]
+        snapshot.total_unique_allocated_size = metadata[7]
+        snapshot.selected_metric = MetricId.parse(metadata[8] or "logical")
+        snapshot.policy = policy_from_dict(policy_value)
+        snapshot.exclude_patterns = tuple(json.loads(metadata[10] or "[]"))
+        snapshot.scanner_version = metadata[11]
+        snapshot.platform_adapter = metadata[12]
+        snapshot.completion_status = metadata[13] or "unknown"
+        snapshot.partial = bool(metadata[14])
+        snapshot.error_count = metadata[15]
+        snapshot.excluded_count = metadata[16]
+        snapshot.depth_limited_count = metadata[17]
+        snapshot.root_device_id = metadata[18]
+        snapshot.root_inode = metadata[19]
+        snapshot.root_filesystem = metadata[20]
+        snapshot.timestamp_timezone = metadata[21]
+        snapshot.capabilities = tuple(json.loads(metadata[22] or "[]"))
+        snapshot.legacy = bool(metadata[23])
+        snapshot.inference_source = metadata[24]
+        snapshot.scan_run_id = metadata[25]
+        snapshot.created_at = (
+            datetime.fromisoformat(metadata[26]) if metadata[26] else None
+        )
+        snapshot.started_at = (
+            datetime.fromisoformat(metadata[27]) if metadata[27] else None
+        )
+        snapshot.finished_at = (
+            datetime.fromisoformat(metadata[28]) if metadata[28] else None
+        )
+        return snapshot
 
     # ── Tree reconstruction ──
 
@@ -510,11 +869,27 @@ class Database:
             if info is None:
                 continue
             path_str, parent_id, name, depth = info
-            size, own_size, file_count, dir_count, mtime, error = vals
+            (
+                size,
+                own_size,
+                allocated_size,
+                own_allocated_size,
+                unique_allocated_size,
+                own_unique_allocated_size,
+                file_count,
+                dir_count,
+                mtime,
+                error,
+                is_dir,
+            ) = vals
             nodes_by_pid[path_id] = FSNode(
                 name=name, path=path_str, size=size, own_size=own_size,
+                allocated_size=allocated_size,
+                own_allocated_size=own_allocated_size,
+                unique_allocated_size=unique_allocated_size,
+                own_unique_allocated_size=own_unique_allocated_size,
                 file_count=file_count, dir_count=dir_count,
-                is_dir=True, mtime=mtime, depth=depth, error=error,
+                is_dir=is_dir, mtime=mtime, depth=depth, error=error,
             )
 
         # Reconstruct parent-child relationships
@@ -527,7 +902,37 @@ class Database:
                 if root is None or node.depth < root.depth:
                     root = node
 
+        for node in nodes_by_pid.values():
+            node.children.sort(key=lambda child: (child.name, child.path))
+
         return root
+
+    def load_measurements(
+        self, snapshot_id: int
+    ) -> dict[str, NodeMeasurement]:
+        """Return a persistence-neutral full path measurement map."""
+        flat = self._resolve_flat(snapshot_id)
+        path_strings = self._get_path_strings(set(flat))
+        result: dict[str, NodeMeasurement] = {}
+        for path_id, values in flat.items():
+            path = path_strings.get(path_id)
+            if path is None:
+                continue
+            result[path] = NodeMeasurement(
+                path=path,
+                is_dir=values[10],
+                logical_bytes=values[0],
+                own_logical_bytes=values[1],
+                allocated_bytes=values[2],
+                own_allocated_bytes=values[3],
+                unique_allocated_bytes=values[4],
+                own_unique_allocated_bytes=values[5],
+                file_count=values[6],
+                dir_count=values[7],
+                mtime=values[8],
+                error=values[9],
+            )
+        return result
 
     # ── Baseline promotion ──
 
@@ -544,14 +949,16 @@ class Database:
 
         # Write full node state
         nodes_data = [
-            (snapshot_id, pid, v[0], v[1], v[2], v[3], v[4], v[5])
-            for pid, v in flat.items()
+            (snapshot_id, path_id, *values)
+            for path_id, values in flat.items()
         ]
         self.conn.executemany(
-            """INSERT INTO nodes
-               (snapshot_id, path_id, size, own_size, file_count,
-                dir_count, mtime, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO nodes (
+                   snapshot_id, path_id, size, own_size,
+                   allocated_size, own_allocated_size,
+                   unique_allocated_size, own_unique_allocated_size,
+                   file_count, dir_count, mtime, error, is_dir
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             nodes_data,
         )
 
@@ -581,7 +988,11 @@ class Database:
 
     def prune_snapshots(self, root_path: str, retention_days: int) -> int:
         """Delete snapshots older than retention_days. Returns count deleted."""
-        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
+        if self.read_only:
+            raise sqlite3.OperationalError("snapshot repository is read-only")
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=retention_days)
+        ).isoformat()
 
         # Find snapshots to delete
         to_delete = self.conn.execute(
@@ -622,27 +1033,47 @@ class Database:
     def compare_snapshots(
         self, old_id: int, new_id: int, min_delta: int = 0
     ) -> list[SizeDelta]:
-        """Compare two snapshots and return size deltas for directories."""
-        old_flat = self._resolve_flat(old_id)
-        new_flat = self._resolve_flat(new_id)
-
-        all_pids = set(old_flat.keys()) | set(new_flat.keys())
-        path_strs = self._get_path_strings(all_pids)
-
-        deltas = []
-        for pid in all_pids:
-            old_size = old_flat[pid][0] if pid in old_flat else 0
-            new_size = new_flat[pid][0] if pid in new_flat else 0
-            if abs(new_size - old_size) >= min_delta:
-                deltas.append(SizeDelta(
-                    path=path_strs.get(pid, "?"),
+        """Compatibility API returning deterministic multi-metric deltas."""
+        old_measurements = self.load_measurements(old_id)
+        new_measurements = self.load_measurements(new_id)
+        deltas: list[SizeDelta] = []
+        for path in sorted(set(old_measurements) | set(new_measurements)):
+            old = old_measurements.get(path)
+            new = new_measurements.get(path)
+            old_size = old.logical_bytes if old is not None else 0
+            new_size = new.logical_bytes if new is not None else 0
+            if abs(new_size - old_size) < min_delta:
+                continue
+            deltas.append(
+                SizeDelta(
+                    path=path,
                     old_size=old_size,
                     new_size=new_size,
-                    is_new=(pid not in old_flat),
-                    is_removed=(pid not in new_flat),
-                ))
+                    is_new=old is None,
+                    is_removed=new is None,
+                    is_dir=(new or old).is_dir,
+                    old_allocated_size=(
+                        old.allocated_bytes if old is not None else 0
+                    ),
+                    new_allocated_size=(
+                        new.allocated_bytes if new is not None else 0
+                    ),
+                    old_unique_size=(
+                        old.unique_allocated_bytes if old is not None else 0
+                    ),
+                    new_unique_size=(
+                        new.unique_allocated_bytes if new is not None else 0
+                    ),
+                    old_file_count=old.file_count if old is not None else 0,
+                    new_file_count=new.file_count if new is not None else 0,
+                    old_dir_count=old.dir_count if old is not None else 0,
+                    new_dir_count=new.dir_count if new is not None else 0,
+                    old_error=old.error if old is not None else None,
+                    new_error=new.error if new is not None else None,
+                )
+            )
 
-        deltas.sort(key=lambda d: abs(d.delta), reverse=True)
+        deltas.sort(key=lambda delta: (-abs(delta.delta), delta.path))
         return deltas
 
     # ── Deletion log ──

@@ -273,7 +273,15 @@ def _database_report(
         database = database_factory()
         database.connect()
         schema_version = get_version(database.conn)
-        if database.degraded:
+        read_only = bool(getattr(database, "read_only", False))
+        if read_only:
+            status = "read-only"
+            reason = (
+                database.degraded_reason
+                or "persistent SQLite database is available read-only"
+            )
+            writable = False
+        elif database.degraded:
             status = "degraded"
             reason = database.degraded_reason or "using an in-memory database"
             writable = False
@@ -290,6 +298,11 @@ def _database_report(
             "expected_schema_version": CURRENT_VERSION,
             "writable": writable,
             "degraded": database.degraded,
+            "read_only": read_only,
+            "recovery_hint": _redact_text(
+                getattr(database, "recovery_hint", None) or "",
+                show_paths,
+            ) or None,
         }
     except Exception as exc:
         return {
@@ -303,6 +316,8 @@ def _database_report(
             "expected_schema_version": CURRENT_VERSION,
             "writable": False,
             "degraded": True,
+            "read_only": False,
+            "recovery_hint": None,
         }
     finally:
         if database is not None:

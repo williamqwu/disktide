@@ -3,9 +3,16 @@
 import sqlite3
 import tempfile
 import os
+from pathlib import Path
 
 import pytest
-from fs_monitor.storage.migrations import get_version, migrate, CURRENT_VERSION
+from fs_monitor.storage.migrations import (
+    CURRENT_VERSION,
+    MIGRATION_CALLBACKS,
+    get_version,
+    migrate,
+    migration_backup_path,
+)
 
 
 @pytest.fixture
@@ -16,6 +23,7 @@ def conn():
     yield connection
     connection.close()
     os.unlink(path)
+    migration_backup_path(path).unlink(missing_ok=True)
 
 
 class TestMigrations:
@@ -36,6 +44,9 @@ class TestMigrations:
         assert "alert_events" in table_names
         assert "deletion_log" in table_names
         assert "schema_version" in table_names
+        assert "monitored_roots" in table_names
+        assert "scan_runs" in table_names
+        assert "snapshot_metadata" in table_names
 
     def test_migrate_sets_version(self, conn):
         migrate(conn)
@@ -79,3 +90,71 @@ class TestMigrations:
             conn.execute(
                 "INSERT INTO paths (path, name, depth) VALUES ('/test', 'test', 0)"
             )
+
+    def test_v017_fixture_migrates_without_losing_snapshot_data(self, conn):
+        migrate(conn, target_version=3)
+        snapshot_id = conn.execute(
+            """INSERT INTO snapshots
+               (root_path, timestamp, total_size, file_count, dir_count,
+                scan_duration, label, is_baseline, baseline_id)
+               VALUES ('/legacy', '2026-07-01T12:00:00', 123, 1, 1,
+                       0.5, 'v0.1.7', 1, NULL)"""
+        ).lastrowid
+        path_id = conn.execute(
+            "INSERT INTO paths (path, name, depth) VALUES ('/legacy', 'legacy', 0)"
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO nodes
+               (snapshot_id, path_id, size, own_size, file_count,
+                dir_count, mtime, error)
+               VALUES (?, ?, 123, 123, 1, 1, 0.0, NULL)""",
+            (snapshot_id, path_id),
+        )
+        conn.commit()
+
+        backup = migrate(conn)
+
+        assert get_version(conn) == CURRENT_VERSION
+        assert backup == migration_backup_path(
+            Path(conn.execute("PRAGMA database_list").fetchone()[2])
+        )
+        assert backup.exists()
+        assert conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1
+        metadata = conn.execute(
+            """SELECT snapshot_format_version, legacy, inference_source
+               FROM snapshot_metadata WHERE snapshot_id = ?""",
+            (snapshot_id,),
+        ).fetchone()
+        assert metadata == (
+            1,
+            1,
+            "v0.1.7:snapshots+directory-aggregates",
+        )
+
+    def test_failed_v4_migration_rolls_back_schema_version(self, conn, monkeypatch):
+        migrate(conn, target_version=3)
+        conn.commit()
+        original = MIGRATION_CALLBACKS[4]
+
+        def fail_after_backfill(connection):
+            original(connection)
+            raise sqlite3.OperationalError("simulated disk full")
+
+        monkeypatch.setitem(MIGRATION_CALLBACKS, 4, fail_after_backfill)
+
+        with pytest.raises(sqlite3.OperationalError, match="simulated disk full"):
+            migrate(conn)
+
+        assert get_version(conn) == 3
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "snapshot_metadata" not in tables
+        database_path = Path(
+            conn.execute("PRAGMA database_list").fetchone()[2]
+        )
+        assert migration_backup_path(database_path).exists()
