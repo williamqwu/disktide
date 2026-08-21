@@ -51,7 +51,7 @@ checkouts use `uv sync --locked`; see [Contributing](docs/contributing.md).
 | Location | Contents | Typical size |
 |----------|----------|--------------|
 | `~/.config/fsmonitor-cli/config.toml` | User settings | < 1 KB |
-| `~/.local/share/fsmonitor-cli/data.db` | SQLite monitor definitions, runtime health, snapshots/deltas, pins, retention audit, and alert history | Depends on tree size and snapshot count |
+| `~/.local/share/fsmonitor-cli/data.db` | SQLite monitor definitions, snapshots/deltas, retention/alert history, and CleanupPlan/audit records | Depends on tree size and snapshot count |
 
 Snapshot data is written by `scan --snapshot`, explicit monitor runs, and active
 foreground monitor hosts. `fsmonitor compare` checks policy and root
@@ -82,7 +82,7 @@ fsmonitor
 | Key | Action |
 |-----|--------|
 | `1` / `2` / `3` | Switch mode (Explorer / Monitor / FS Overview) |
-| `c` | Switch to experimental Cleanup mode (enable it in Settings first) |
+| `c` | Switch to Cleanup mode (enable it in Settings first) |
 | `F1` / `F2` / `F3` | Switch visualization (Sunburst / Treemap / Details) |
 | `d` / `[` / `]` | Toggle Current/Diff / browse adjacent snapshot pairs |
 | `u` / `i` | Navigate up / drill into directory |
@@ -100,6 +100,12 @@ History tab uses `F1`–`F4` for Trend, Diff Map, Growth Rings, and Heatmap; `b`
 and `v` mark the highlighted snapshot as baseline/target, while `l` restores
 latest/previous. The footer keeps the mode hint visible there; press `1` to
 return to Explorer without conflicting with lowercase `e` for Edit.
+
+Cleanup is disabled by default in the TUI. After enabling it in Settings, press
+`c`, select candidates, and press `d` to review a persisted CleanupPlan. Normal
+apply uses system Trash when an atomic same-filesystem move is available and
+otherwise uses an owned quarantine directory; `u` restores the latest
+recoverable plan. Permanent deletion is a separate typed-confirmation path.
 
 ### CLI Commands
 
@@ -130,8 +136,16 @@ fsmonitor watch --all
 fsmonitor compare latest previous /path
 fsmonitor compare --since 7d /path
 
-# Find candidates and permanently delete all of them after confirmation
+# Create a read-only CleanupPlan (default; no filesystem changes)
 fsmonitor cleanup /path
+
+# Apply the saved plan using Trash/quarantine, inspect history, then undo
+fsmonitor cleanup --plan PLAN_ID --apply
+fsmonitor cleanup history
+fsmonitor cleanup undo PLAN_ID
+
+# Permanent deletion is separate and requires the exact plan-scoped token
+fsmonitor cleanup --plan PLAN_ID --permanent
 ```
 
 Each scan reports a short run id, active phase and policy, and one explicit

@@ -165,7 +165,7 @@ class TestMigrations:
         )
         assert migration_backup_path(database_path).exists()
 
-    def test_v4_database_with_snapshot_and_legacy_alert_migrates_to_v5(self, conn):
+    def test_v4_database_with_snapshot_and_legacy_alert_migrates_to_current(self, conn):
         migrate(conn, target_version=4)
         snapshot_id = conn.execute(
             """INSERT INTO snapshots
@@ -203,7 +203,7 @@ class TestMigrations:
 
         migrate(conn)
 
-        assert get_version(conn) == 5
+        assert get_version(conn) == CURRENT_VERSION
         assert conn.execute(
             "SELECT COUNT(*) FROM snapshot_metadata WHERE snapshot_id = ?",
             (snapshot_id,),
@@ -216,3 +216,10 @@ class TestMigrations:
             "SELECT new_snapshot_id, confidence FROM alert_events WHERE rule_id = ?",
             (rule_id,),
         ).fetchone() == (snapshot_id, "legacy-unknown")
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {"cleanup_plans", "cleanup_actions", "cleanup_audit"} <= tables

@@ -89,7 +89,9 @@ show_hidden = true
         config = load_config(config_file)
 
         assert not hasattr(config.scan, "exclude_patterns")
-        assert not hasattr(config, "cleanup")
+        assert config.cleanup.prefer_trash is True
+        assert config.cleanup.quarantine_retention_days == 7
+        assert config.cleanup.quarantine_max_bytes == 10 * 1024**3
         assert not hasattr(config.ui, "default_sort")
         assert not hasattr(config.ui, "show_hidden")
 
@@ -106,6 +108,20 @@ show_hidden = true
             "show_hidden",
         ):
             assert retired_key not in saved
+
+    def test_cleanup_policy_roundtrip(self, tmp_path):
+        config = AppConfig()
+        config.cleanup.prefer_trash = False
+        config.cleanup.quarantine_retention_days = 14
+        config.cleanup.quarantine_max_bytes = 512 * 1024**2
+
+        config_file = tmp_path / "cleanup.toml"
+        save_config(config, config_file)
+        loaded = load_config(config_file)
+
+        assert loaded.cleanup.prefer_trash is False
+        assert loaded.cleanup.quarantine_retention_days == 14
+        assert loaded.cleanup.quarantine_max_bytes == 512 * 1024**2
 
     def test_save_and_reload(self, tmp_path):
         config = AppConfig()

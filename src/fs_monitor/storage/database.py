@@ -1,4 +1,4 @@
-"""SQLite persistence for snapshots, nodes, alerts, and deletion logs.
+"""SQLite persistence for snapshots, monitors, cleanup plans, and audit.
 
 Uses path interning (each unique path stored once) and delta storage
 (only changed directories between consecutive snapshots) for efficiency.
@@ -20,6 +20,14 @@ from fs_monitor.domain.alerts import (
     AlertKind,
     AlertRule,
     AlertSeverity,
+)
+from fs_monitor.domain.cleanup import (
+    CleanupAuditEvent,
+    CleanupAuditKind,
+    CleanupPlan,
+    cleanup_action_to_dict,
+    cleanup_plan_from_dict,
+    cleanup_plan_to_dict,
 )
 from fs_monitor.domain.delta import NodeMeasurement, SizeDelta
 from fs_monitor.domain.metrics import MetricId
@@ -1980,6 +1988,161 @@ class Database:
                 "deleted_at": r[4], "success": bool(r[5]), "error": r[6],
             }
             for r in rows
+        ]
+
+    # ── Cleanup plans and audit ──
+
+    def save_cleanup_plan(self, plan: CleanupPlan) -> None:
+        payload = json.dumps(cleanup_plan_to_dict(plan), sort_keys=True)
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO cleanup_plans (
+                       id, version, created_at, updated_at, scan_root, status,
+                       requested_action, estimated_bytes, validated_bytes,
+                       actual_reclaimed_bytes, payload_json
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       version = excluded.version,
+                       updated_at = excluded.updated_at,
+                       scan_root = excluded.scan_root,
+                       status = excluded.status,
+                       requested_action = excluded.requested_action,
+                       estimated_bytes = excluded.estimated_bytes,
+                       validated_bytes = excluded.validated_bytes,
+                       actual_reclaimed_bytes = excluded.actual_reclaimed_bytes,
+                       payload_json = excluded.payload_json""",
+                (
+                    plan.id,
+                    plan.version,
+                    _datetime_text(plan.created_at),
+                    _datetime_text(plan.updated_at),
+                    plan.scan_root,
+                    plan.status.value,
+                    plan.requested_action.value,
+                    plan.estimated_reclaimable_bytes,
+                    plan.validated_reclaimable_bytes,
+                    plan.actual_reclaimed_bytes,
+                    payload,
+                ),
+            )
+            action_ids = []
+            for action in plan.actions:
+                action_ids.append(action.id)
+                self.conn.execute(
+                    """INSERT INTO cleanup_actions (
+                           id, plan_id, path, status, validation_status,
+                           planned_action, executed_action, estimated_bytes,
+                           actual_reclaimed_bytes, payload_json
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                           path = excluded.path,
+                           status = excluded.status,
+                           validation_status = excluded.validation_status,
+                           planned_action = excluded.planned_action,
+                           executed_action = excluded.executed_action,
+                           estimated_bytes = excluded.estimated_bytes,
+                           actual_reclaimed_bytes = excluded.actual_reclaimed_bytes,
+                           payload_json = excluded.payload_json""",
+                    (
+                        action.id,
+                        plan.id,
+                        action.path,
+                        action.execution_status.value,
+                        action.validation_status.value,
+                        action.planned_action.value,
+                        action.executed_action.value if action.executed_action else None,
+                        action.estimated_reclaimable_bytes,
+                        action.actual_reclaimed_bytes,
+                        json.dumps(cleanup_action_to_dict(action), sort_keys=True),
+                    ),
+                )
+            if action_ids:
+                placeholders = ",".join("?" for _ in action_ids)
+                self.conn.execute(
+                    f"DELETE FROM cleanup_actions WHERE plan_id = ? AND id NOT IN ({placeholders})",
+                    (plan.id, *action_ids),
+                )
+
+    def get_cleanup_plan(self, plan_id: str) -> CleanupPlan | None:
+        row = self.conn.execute(
+            "SELECT payload_json FROM cleanup_plans WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return cleanup_plan_from_dict(json.loads(row[0]))
+
+    def get_cleanup_plan_for_action(
+        self, action_id: str
+    ) -> CleanupPlan | None:
+        row = self.conn.execute(
+            "SELECT plan_id FROM cleanup_actions WHERE id = ?",
+            (action_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_cleanup_plan(str(row[0]))
+
+    def list_cleanup_plans(self, limit: int = 50) -> list[CleanupPlan]:
+        rows = self.conn.execute(
+            """SELECT payload_json FROM cleanup_plans
+               ORDER BY created_at DESC LIMIT ?""",
+            (max(1, limit),),
+        ).fetchall()
+        return [cleanup_plan_from_dict(json.loads(row[0])) for row in rows]
+
+    def append_cleanup_audit(self, event: CleanupAuditEvent) -> int:
+        cursor = self.conn.execute(
+            """INSERT INTO cleanup_audit (
+                   plan_id, action_id, event_type, created_at, success,
+                   detail_json
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                event.plan_id,
+                event.action_id,
+                event.kind.value,
+                _datetime_text(event.created_at),
+                int(event.success),
+                json.dumps(event.detail, sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def list_cleanup_audit(
+        self,
+        *,
+        plan_id: str | None = None,
+        limit: int = 100,
+    ) -> list[CleanupAuditEvent]:
+        if plan_id is None:
+            rows = self.conn.execute(
+                """SELECT id, plan_id, action_id, event_type, created_at,
+                          success, detail_json
+                   FROM cleanup_audit
+                   ORDER BY id DESC LIMIT ?""",
+                (max(1, limit),),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT id, plan_id, action_id, event_type, created_at,
+                          success, detail_json
+                   FROM cleanup_audit
+                   WHERE plan_id = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (plan_id, max(1, limit)),
+            ).fetchall()
+        return [
+            CleanupAuditEvent(
+                id=int(row[0]),
+                plan_id=str(row[1]),
+                action_id=row[2],
+                kind=CleanupAuditKind(row[3]),
+                created_at=_datetime_value(row[4]) or datetime.now(timezone.utc),
+                success=bool(row[5]),
+                detail=json.loads(row[6] or "{}"),
+            )
+            for row in rows
         ]
 
     # ── Alert rules and events ──

@@ -1477,75 +1477,266 @@ def watch(
         repository.close()
 
 
-@cli.command()
-@click.argument("path", default=".", type=click.Path(exists=True))
+@cli.command(context_settings={"allow_extra_args": False})
+@click.argument("arguments", nargs=-1, type=click.UNPROCESSED)
 @click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
-def cleanup(path: str, workers: int | None):
-    """Detect candidates and permanently delete them after confirmation."""
-    from fs_monitor.cleanup.detector import detect_targets, group_by_category, total_savings
-    from fs_monitor.cleanup.actions import delete_targets
+@click.option("--apply", "apply_safe", is_flag=True, help="Move targets to Trash/quarantine")
+@click.option("--plan", "plan_id", help="Load an existing cleanup plan")
+@click.option("--permanent", is_flag=True, help="Use the separate permanent-delete flow")
+@click.option("--confirm", help="Exact permanent-delete confirmation token")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup(
+    arguments: tuple[str, ...],
+    workers: int | None,
+    apply_safe: bool,
+    plan_id: str | None,
+    permanent: bool,
+    confirm: str | None,
+    json_output: bool,
+):
+    """Create, apply, inspect, or undo a persistent CleanupPlan.
+
+    PATH defaults to the current directory. Use ``cleanup history`` or
+    ``cleanup undo PLAN_OR_ACTION_ID`` for persisted audit operations.
+    """
+    import json
+    import humanize
+
+    from fs_monitor.cleanup.actions import QuarantineExecutor
+    from fs_monitor.cleanup.detector import detect_targets
     from fs_monitor.config import load_config
+    from fs_monitor.domain.cleanup import (
+        CleanupActionKind,
+        CleanupExecutionStatus,
+        cleanup_plan_to_dict,
+    )
     from fs_monitor.domain.metrics import MetricId
     from fs_monitor.domain.policy import ScanPolicy
     from fs_monitor.domain.scan import ScanRequest, ScanRequestError, ScanStatus
+    from fs_monitor.repositories import default_snapshot_repository
+    from fs_monitor.services.cleanup import (
+        CleanupConfirmationRequired,
+        CleanupError,
+        CleanupService,
+    )
     from fs_monitor.services.scan import ScanService
-    import humanize
 
-    path = str(Path(path).resolve())
-    click.echo(f"Scanning {path} for cleanup targets...")
+    if apply_safe and permanent:
+        raise click.UsageError("--apply and --permanent are mutually exclusive")
+    if arguments and arguments[0] == "history":
+        if len(arguments) != 1 or plan_id or apply_safe or permanent:
+            raise click.UsageError("cleanup history does not accept path/apply options")
+        operation = "history"
+        operand = None
+    elif arguments and arguments[0] == "undo":
+        if len(arguments) != 2 or plan_id or apply_safe or permanent:
+            raise click.UsageError("usage: fsmonitor cleanup undo PLAN_OR_ACTION_ID")
+        operation = "undo"
+        operand = arguments[1]
+    else:
+        if len(arguments) > 1:
+            raise click.UsageError("cleanup accepts one PATH, or history/undo")
+        operation = "plan"
+        operand = arguments[0] if arguments else None
 
     config = load_config()
-    request = ScanRequest(
-        path=path,
-        metric=MetricId.LOGICAL,
-        policy=ScanPolicy(
-            one_file_system=config.scan.one_file_system,
-            exclude_pseudo_filesystems=config.scan.exclude_pseudo_filesystems,
-            max_depth=config.scan.max_depth,
+    repository = default_snapshot_repository()
+    repository.connect()
+    service = CleanupService(
+        repository,
+        quarantine=QuarantineExecutor(
+            retention_days=config.cleanup.quarantine_retention_days,
+            max_bytes=config.cleanup.quarantine_max_bytes,
         ),
-        workers=workers,
-        source="cleanup",
     )
     try:
-        scan_run = ScanService().scan(request)
-    except ScanRequestError as exc:
-        raise click.BadParameter(str(exc), param_hint="path") from exc
-    if scan_run.status is ScanStatus.CANCELLED:
-        raise click.ClickException("Cleanup scan was cancelled")
-    if scan_run.status is ScanStatus.FAILED or scan_run.root is None:
-        detail = scan_run.error_message or "unknown scan failure"
-        raise click.ClickException(f"Cleanup scan failed: {detail}")
-    root = scan_run.root
+        if operation == "history":
+            plans = service.history(limit=100)
+            if json_output:
+                click.echo(json.dumps([cleanup_plan_to_dict(item) for item in plans]))
+            elif not plans:
+                click.echo("No cleanup plans recorded.")
+            else:
+                for item in plans:
+                    click.echo(
+                        f"{item.id}  {item.status.value:<9}  "
+                        f"{len(item.active_actions):>3} targets  "
+                        f"estimated {humanize.naturalsize(item.estimated_reclaimable_bytes, binary=True)}  "
+                        f"actual {humanize.naturalsize(item.actual_reclaimed_bytes, binary=True)}  "
+                        f"{item.scan_root}"
+                    )
+            return
 
-    targets = detect_targets(root)
-    if not targets:
-        click.echo("No cleanup targets found.")
-        return
+        if operation == "undo":
+            result = service.undo(operand or "")
+            if json_output:
+                click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
+            else:
+                restored = sum(
+                    action.execution_status is CleanupExecutionStatus.UNDONE
+                    for action in result.plan.actions
+                )
+                click.echo(
+                    f"Undo {result.plan.id}: restored {restored} item(s); "
+                    f"status {result.plan.status.value}."
+                )
+                for action in result.plan.actions:
+                    if action.error:
+                        click.echo(f"  skipped {action.path}: {action.error}")
+            return
 
-    groups = group_by_category(targets)
-    total = total_savings(targets)
+        if plan_id:
+            plan = service.get_plan(plan_id)
+            if operand is not None:
+                requested_root = str(Path(operand).expanduser().resolve())
+                if requested_root != plan.scan_root:
+                    raise click.UsageError(
+                        f"PATH does not match plan root {plan.scan_root}"
+                    )
+        else:
+            path_value = operand or "."
+            path_object = Path(path_value).expanduser()
+            if not path_object.exists():
+                raise click.BadParameter("Path does not exist", param_hint="PATH")
+            if not path_object.is_dir():
+                raise click.BadParameter("Not a directory", param_hint="PATH")
+            path = str(path_object.resolve())
+            click.echo(f"Scanning {path} for cleanup targets...")
+            request = ScanRequest(
+                path=path,
+                metric=MetricId.LOGICAL,
+                policy=ScanPolicy(
+                    one_file_system=config.scan.one_file_system,
+                    exclude_pseudo_filesystems=(
+                        config.scan.exclude_pseudo_filesystems
+                    ),
+                    max_depth=config.scan.max_depth,
+                ),
+                workers=workers,
+                source="cleanup",
+            )
+            try:
+                scan_run = ScanService().scan(request)
+            except ScanRequestError as exc:
+                raise click.BadParameter(str(exc), param_hint="PATH") from exc
+            if scan_run.status is ScanStatus.CANCELLED:
+                raise click.ClickException("Cleanup scan was cancelled")
+            if scan_run.status is ScanStatus.FAILED or scan_run.root is None:
+                detail = scan_run.error_message or "unknown scan failure"
+                raise click.ClickException(f"Cleanup scan failed: {detail}")
+            targets = detect_targets(scan_run.root)
+            if not targets:
+                click.echo("No cleanup targets found.")
+                return
+            requested = (
+                CleanupActionKind.PERMANENT
+                if permanent
+                else (
+                    CleanupActionKind.TRASH
+                    if config.cleanup.prefer_trash
+                    else CleanupActionKind.QUARANTINE
+                )
+                if apply_safe
+                else CleanupActionKind.PREVIEW
+            )
+            plan = service.create_plan(
+                path,
+                targets,
+                requested_action=requested,
+                scan_run_id=scan_run.run_id,
+                provenance="cli-scan",
+            )
 
-    click.echo(f"\nFound {len(targets)} targets ({humanize.naturalsize(total, binary=True)}):\n")
+        if json_output and not apply_safe and not permanent:
+            click.echo(json.dumps(cleanup_plan_to_dict(plan)))
+            return
+        if not json_output:
+            _render_cleanup_plan(plan, humanize)
+        if not apply_safe and not permanent:
+            if not json_output:
+                click.echo(
+                    f"Preview only; no filesystem changes made. Apply with: "
+                    f"fsmonitor cleanup --plan {plan.id} --apply"
+                )
+            return
 
-    for category, items in sorted(groups.items()):
-        cat_size = sum(t.size for t in items)
-        click.echo(f"  {category} ({len(items)} items, {humanize.naturalsize(cat_size, binary=True)}):")
-        for item in items[:5]:
-            click.echo(f"    {item.path} ({humanize.naturalsize(item.size, binary=True)})")
-        if len(items) > 5:
-            click.echo(f"    ... and {len(items) - 5} more")
-        click.echo()
-
-    if click.confirm("Permanently delete all targets?"):
-        result = delete_targets(targets)
-        click.echo(
-            f"\nDeleted {len(result.successful)} items, "
-            f"freed {humanize.naturalsize(result.total_freed, binary=True)}"
+        if permanent:
+            token = service.permanent_confirmation(plan.id)
+            if confirm is None:
+                click.echo("PERMANENT DELETE bypasses Trash and cannot be undone.")
+                confirm = click.prompt(
+                    f'Type "{token}" to continue',
+                    default="",
+                    show_default=False,
+                )
+            action_kind = CleanupActionKind.PERMANENT
+        else:
+            token = None
+            action_kind = (
+                CleanupActionKind.TRASH
+                if config.cleanup.prefer_trash
+                else CleanupActionKind.QUARANTINE
+            )
+        result = service.execute(
+            plan,
+            action=action_kind,
+            confirmation=confirm,
         )
-        if result.failed:
-            click.echo(f"Failed: {len(result.failed)} items")
-            for f in result.failed:
-                click.echo(f"  {f.path}: {f.error}")
+        if json_output:
+            click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
+        else:
+            click.echo(
+                f"Plan {result.plan.id}: {result.plan.status.value}; "
+                f"{result.plan.succeeded_count} succeeded, "
+                f"{result.plan.skipped_count} skipped, "
+                f"{result.plan.failed_count} failed."
+            )
+            click.echo(
+                "  Estimated: "
+                f"{humanize.naturalsize(result.plan.estimated_reclaimable_bytes, binary=True)}"
+            )
+            click.echo(
+                "  Validated: "
+                f"{humanize.naturalsize(result.plan.validated_reclaimable_bytes, binary=True)}"
+            )
+            click.echo(
+                "  Actual reclaimed: "
+                f"{humanize.naturalsize(result.plan.actual_reclaimed_bytes, binary=True)}"
+            )
+            if any(action.undo_available for action in result.plan.actions):
+                click.echo(f"  Undo: fsmonitor cleanup undo {result.plan.id}")
+            for item in result.plan.actions:
+                if item.error:
+                    click.echo(f"  {item.path}: {item.error}")
+    except CleanupConfirmationRequired as exc:
+        raise click.ClickException(str(exc)) from exc
+    except CleanupError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        repository.close()
+
+
+def _render_cleanup_plan(plan, humanize_module) -> None:
+    """Render a stable human-readable CleanupPlan summary."""
+    click.echo(f"\nCleanup plan {plan.id} v{plan.version}")
+    click.echo(f"  Root: {plan.scan_root}")
+    click.echo(f"  Status: {plan.status.value}")
+    click.echo(f"  Planned action: {plan.requested_action.value}")
+    click.echo(
+        "  Estimated reclaimable: "
+        f"{humanize_module.naturalsize(plan.estimated_reclaimable_bytes, binary=True)}"
+    )
+    click.echo(
+        f"  Targets: {len(plan.active_actions)} active, "
+        f"{len(plan.actions) - len(plan.active_actions)} subsumed"
+    )
+    for item in plan.actions:
+        marker = "subsumed" if item.subsumed_by else item.validation_status.value
+        click.echo(
+            f"    [{item.risk.value}/{marker}] {item.path}\n"
+            f"      {item.reason}; "
+            f"{humanize_module.naturalsize(item.estimated_reclaimable_bytes, binary=True)}"
+        )
 
 
 if __name__ == "__main__":

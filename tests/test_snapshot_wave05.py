@@ -405,9 +405,11 @@ def test_corrupted_database_degrades_without_deleting_original(tmp_path):
         assert not database.read_only
         assert database.recovery_hint
         assert path.read_bytes() == original
+        from fs_monitor.storage.migrations import CURRENT_VERSION
+
         assert database.conn.execute(
             "SELECT version FROM schema_version"
-        ).fetchone()[0] == 5
+        ).fetchone()[0] == CURRENT_VERSION
     finally:
         database.close()
 

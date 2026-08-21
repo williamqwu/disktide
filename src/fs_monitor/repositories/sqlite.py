@@ -6,6 +6,7 @@ from datetime import datetime
 from threading import RLock
 
 from fs_monitor.domain.alerts import AlertEvent, AlertRule
+from fs_monitor.domain.cleanup import CleanupAuditEvent, CleanupPlan
 from fs_monitor.domain.delta import NodeMeasurement, SizeDelta
 from fs_monitor.domain.monitor import (
     MonitorDefinition,
@@ -122,6 +123,40 @@ class SQLiteSnapshotRepository:
     def prune_snapshots(self, root_path: str, retention_days: int) -> int:
         with self._lock:
             return self._database.prune_snapshots(root_path, retention_days)
+
+    def save_cleanup_plan(self, plan: CleanupPlan) -> None:
+        with self._lock:
+            self._database.save_cleanup_plan(plan)
+
+    def get_cleanup_plan(self, plan_id: str) -> CleanupPlan | None:
+        with self._lock:
+            return self._database.get_cleanup_plan(plan_id)
+
+    def get_cleanup_plan_for_action(
+        self, action_id: str
+    ) -> CleanupPlan | None:
+        with self._lock:
+            return self._database.get_cleanup_plan_for_action(action_id)
+
+    def list_cleanup_plans(self, limit: int = 50) -> list[CleanupPlan]:
+        with self._lock:
+            return self._database.list_cleanup_plans(limit)
+
+    def append_cleanup_audit(self, event: CleanupAuditEvent) -> int:
+        with self._lock:
+            return self._database.append_cleanup_audit(event)
+
+    def list_cleanup_audit(
+        self,
+        *,
+        plan_id: str | None = None,
+        limit: int = 100,
+    ) -> list[CleanupAuditEvent]:
+        with self._lock:
+            return self._database.list_cleanup_audit(
+                plan_id=plan_id,
+                limit=limit,
+            )
 
     def create_monitor(self, definition: MonitorDefinition) -> MonitorDefinition:
         with self._lock:

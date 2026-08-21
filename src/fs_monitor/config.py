@@ -79,6 +79,13 @@ class MonitorConfig:
 
 
 @dataclass
+class CleanupConfig:
+    prefer_trash: bool = True
+    quarantine_retention_days: int = 7
+    quarantine_max_bytes: int = 10 * 1024**3
+
+
+@dataclass
 class UIConfig:
     color_theme: str = "warm"
     default_viz: str = "sunburst"
@@ -109,6 +116,7 @@ class HostPaths:
 class AppConfig:
     scan: ScanConfig = field(default_factory=ScanConfig)
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     host_paths: dict[str, HostPaths] = field(default_factory=dict)
 
@@ -192,6 +200,19 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append("auto_start_in_tui = true")
     lines.append("")
 
+    lines.append("[cleanup]")
+    if not config.cleanup.prefer_trash:
+        lines.append("prefer_trash = false")
+    lines.append(
+        "quarantine_retention_days = "
+        f"{config.cleanup.quarantine_retention_days}"
+    )
+    lines.append(
+        "quarantine_max_bytes = "
+        f"{config.cleanup.quarantine_max_bytes}"
+    )
+    lines.append("")
+
     lines.append("[ui]")
     lines.append(f'color_theme = "{config.ui.color_theme}"')
     lines.append(f'default_viz = "{config.ui.default_viz}"')
@@ -258,6 +279,16 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.monitor.auto_start_in_tui = monitor.get(
             "auto_start_in_tui", False
         )
+
+    if "cleanup" in data:
+        cleanup = data["cleanup"]
+        config.cleanup.prefer_trash = cleanup.get("prefer_trash", True)
+        config.cleanup.quarantine_retention_days = max(
+            1,
+            int(cleanup.get("quarantine_retention_days", 7)),
+        )
+        quarantine_max = cleanup.get("quarantine_max_bytes", 10 * 1024**3)
+        config.cleanup.quarantine_max_bytes = max(1, int(quarantine_max))
 
     if "ui" in data:
         ui = data["ui"]

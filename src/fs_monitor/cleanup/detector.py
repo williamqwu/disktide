@@ -42,6 +42,11 @@ def detect_targets(
                     size=node.size,
                     rule=rule,
                     file_count=node.file_count if node.is_dir else 1,
+                    mtime=node.mtime,
+                    is_dir=node.is_dir,
+                    is_symlink=node.is_symlink,
+                    device_id=node.device_id,
+                    inode=node.inode,
                 )
             )
             break  # Don't match multiple rules for same node

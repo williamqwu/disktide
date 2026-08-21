@@ -15,6 +15,7 @@ src/fs_monitor/
 
   domain/
     alerts.py            Alert rule/event contracts
+    cleanup.py           Persistent plan/action/identity/audit contracts
     delta.py             Compatibility decisions + shared delta result
     metrics.py           MetricId + StorageMeasurements semantics
     monitor.py           Definitions, status, history, retention contracts
@@ -36,6 +37,7 @@ src/fs_monitor/
 
   services/
     alerts.py            Rule CRUD + snapshot/delta evaluation
+    cleanup.py           Plan, overlap, revalidation, execution, audit, undo
     compare.py           Policy-aware snapshot selection + compare reports
     doctor.py            Human + JSON installation diagnostics
     monitor.py           Shared management and foreground host pipeline
@@ -47,6 +49,7 @@ src/fs_monitor/
 
   repositories/
     alerts.py            AlertRepository protocol
+    cleanup.py           CleanupRepository persistence contract
     monitors.py          MonitorRepository + RetentionRepository protocols
     snapshots.py         SnapshotRepository protocol + status contract
     sqlite.py            SQLite repository adapter
@@ -72,7 +75,7 @@ src/fs_monitor/
   cleanup/
     detector.py          Walk tree and match against rules
     rules.py             8 built-in cleanup rules
-    actions.py           Permanent deletion with dry-run support
+    actions.py           Trash, quarantine, restore, guarded delete primitives
 
   monitor/
     diff.py              In-memory comparison using shared SizeDelta
@@ -87,7 +90,7 @@ src/fs_monitor/
   screens/
     welcome.py           Welcome screen with path completion
     explorer.py          Tree + visualization (treemap/sunburst/details)
-    cleanup.py           Target table + deletion workflow
+    cleanup.py           Plan review, safe apply, history, and undo workflow
     monitor.py           Monitor Center management + history/alerts/retention
     fs_overview.py       Mounted filesystems, block devices, benchmark
     settings.py          Configuration editing
@@ -103,7 +106,7 @@ src/fs_monitor/
     trend_chart.py       Historical size line chart
     growth_heatmap.py    Path-by-time persistent-growth matrix
     scan_progress.py     Scan progress overlay
-    cleanup_modal.py     Deletion confirmation dialog
+    cleanup_modal.py     Plan summary + separate permanent confirmation
     confirm_modal.py     Reusable y/n confirmation dialog
 ```
 
@@ -436,6 +439,10 @@ rollup provenance, and auditable maintenance before/after counts and bytes.
 trigger/suppression audit. The legacy `deletion_log` API table and
 `schema_version` also remain.
 
+**cleanup_plans / cleanup_actions / cleanup_audit** -- Schema-v6 persistent
+plan payloads, per-action state/identity indexes, and immutable validation,
+execution, and undo events.
+
 The first snapshot for a root is a baseline; another full baseline is stored every 50 snapshots. Intermediate snapshots compare against the previously resolved state and persist only changed directory rows. When retention deletes a baseline, the earliest surviving dependent is materialized and promoted before the old baseline is removed.
 
 ### Snapshot Queries
@@ -454,11 +461,12 @@ the TUI never converts an absent subtree into a false zero.
 ### Migration and degraded behavior
 
 Before changing a non-empty on-disk database, migration writes a SQLite backup
-next to it (for schema v5: `data.db.pre-v5.bak`). All DDL, backfill, and schema
+next to it (for the current schema v6: `data.db.pre-v6.bak`). All DDL, backfill, and schema
 version changes run in one transaction; failure rolls back without advancing
 `schema_version`. Existing schema-v3/v0.1.7 snapshots are marked legacy with an
 explicit inference source rather than discarded. Schema-v5 migration also maps
-the old size/percentage alert prototype into the new rule/event audit fields.
+the old size/percentage alert prototype into the new rule/event audit fields;
+schema v6 adds CleanupPlan/audit tables without changing snapshot format v2.
 
 If migration or writes fail but the database is readable, the adapter opens the
 original read-only so list/history remain available. If the file is corrupt or
@@ -488,9 +496,40 @@ It never deletes or overwrites the user's database as an automatic repair.
 | system_junk | `.DS_Store`, `Thumbs.db`, `desktop.ini` | Safe | junk |
 | ide_caches | `.idea`, `.vscode` | Moderate | ide |
 
-### Deletion
+### Candidate → CleanupPlan
 
-`delete_targets()` is a direct, permanent filesystem action: directory symlinks are unlinked as links, real directories use `shutil.rmtree()`, and files use `os.unlink()`. A `dry_run` mode reports the result without changing the filesystem, and failed deletions are collected without aborting the batch. The current cleanup flow does not revalidate stale targets, use trash/quarantine, provide undo, or write the legacy `deletion_log` table.
+`detect_targets()` only emits candidate facts. `CleanupService.create_plan()`
+captures `lstat` identity, rule provenance, risk, age, logical reclaim estimate,
+and scan reference. It resolves ancestor/descendant overlap before persistence;
+a parent action subsumes its children so bytes and execution are counted once.
+The default CLI and TUI action is `preview`, which writes schema-v6 plan/audit
+records but does not mutate the filesystem.
+
+### Revalidation and protected paths
+
+Before each action, `CleanupService` repeats device/inode/mode/mtime/size checks,
+re-measures directory contents, and rechecks rule name, indicators, age, current
+risk, scan-root containment, mount boundaries, and application-protected paths.
+`/`, the scan root, mount roots, the database directory, and quarantine roots
+fail closed. Replacing a target with a symlink is stale; an original symlink is
+handled as the link itself and is never followed.
+
+### Safe executors and undo
+
+Normal apply first attempts an atomic same-filesystem Freedesktop Trash rename.
+If Trash is unavailable for that target, `QuarantineExecutor` creates an owned
+mode-0700 sibling directory, writes a recovery manifest, enforces capacity and
+expiry policy, and performs `os.rename()` without cross-filesystem copy/delete.
+Both paths persist undo metadata and refuse to overwrite a newly created
+original path. Isolation reports actual reclaimed bytes as zero. Permanent
+deletion remains a low-level primitive reachable only after the exact
+`DELETE <plan-id>` confirmation.
+
+Every validation, pre-execution intent, result, and undo is appended to
+`cleanup_audit`. If the pre-execution audit write fails, no filesystem action is
+attempted and the remaining batch stops. `cleanup/actions.py::delete_targets()`
+remains only as a legacy low-level compatibility helper; no CLI or TUI product
+path calls it.
 
 ## Visualization
 
@@ -617,7 +656,7 @@ fsmonitor scan <path>
 
 ### Screen Management
 
-`FSMonitorApp` installs four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings after the welcome screen completes. Screens are installed (not pushed) so they persist when switching among Explorer/Monitor/FS Overview with `1`/`2`/`3`; experimental Cleanup remains on `c`.
+`FSMonitorApp` installs four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings after the welcome screen completes. Screens are installed (not pushed) so they persist when switching among Explorer/Monitor/FS Overview with `1`/`2`/`3`; Cleanup remains on `c` because it is disabled by default and has its own plan/apply workflow.
 
 - `switch_screen()` swaps the current screen at the same stack level
 - `push_screen()` adds a screen on top (used for settings overlay)

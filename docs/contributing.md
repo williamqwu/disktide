@@ -61,13 +61,14 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - **collectors/local_scanner.py** -- the only product adapter that constructs the compatibility `ScanEngine`.
 - **scanner/** -- filesystem I/O only. No Textual imports.
 - **storage/** -- SQLite I/O only. No Textual imports.
-- **cleanup/** -- operates on FSNode trees. No Textual imports.
+- **cleanup/** -- detectors and low-level executors. No Textual imports and no product policy decisions.
+- **services/cleanup.py** -- the only product cleanup policy/execution entry point; owns plan, revalidation, audit, and undo.
 - **monitor/** -- alerting, tree diffs, scan scheduling. No Textual imports.
 - **viz/** -- rendering logic. Produces Rich Segments, no direct Textual widget deps.
 - **presentation/tui/viewmodels/** -- shared TUI vocabulary and formatting; no repository access.
 - **screens/** and **widgets/** -- Textual UI layer. Can import everything above.
 
-This layering means the scanner, storage, cleanup, and viz modules are testable without a running Textual app.
+This layering means the scanner, storage, cleanup, and viz modules are testable without a running Textual app. CLI and TUI must never call `delete_targets()` or permanent filesystem primitives directly.
 
 ### Scan Service and Consumers
 
@@ -133,7 +134,7 @@ CleanupRule(
 )
 ```
 
-2. Add test cases in `tests/test_rules.py` and `tests/test_cleanup.py`.
+2. Add detector cases in `tests/test_rules.py` / `tests/test_cleanup.py` and plan revalidation cases in `tests/test_cleanup_wave08.py`.
 
 ## Adding a New Screen
 

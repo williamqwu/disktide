@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -327,6 +327,48 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE alert_events ADD COLUMN severity TEXT",
         "ALTER TABLE alert_events ADD COLUMN kind TEXT",
         "CREATE INDEX idx_alert_events_monitor ON alert_events(monitor_id, triggered_at)",
+    ],
+    6: [
+        """CREATE TABLE cleanup_plans (
+            id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            scan_root TEXT NOT NULL,
+            status TEXT NOT NULL,
+            requested_action TEXT NOT NULL,
+            estimated_bytes INTEGER NOT NULL DEFAULT 0,
+            validated_bytes INTEGER NOT NULL DEFAULT 0,
+            actual_reclaimed_bytes INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL
+        )""",
+        "CREATE INDEX idx_cleanup_plans_created ON cleanup_plans(created_at DESC)",
+        """CREATE TABLE cleanup_actions (
+            id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            status TEXT NOT NULL,
+            validation_status TEXT NOT NULL,
+            planned_action TEXT NOT NULL,
+            executed_action TEXT,
+            estimated_bytes INTEGER NOT NULL DEFAULT 0,
+            actual_reclaimed_bytes INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL,
+            FOREIGN KEY (plan_id) REFERENCES cleanup_plans(id) ON DELETE CASCADE
+        )""",
+        "CREATE INDEX idx_cleanup_actions_plan ON cleanup_actions(plan_id, path)",
+        """CREATE TABLE cleanup_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id TEXT NOT NULL,
+            action_id TEXT,
+            event_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY (plan_id) REFERENCES cleanup_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY (action_id) REFERENCES cleanup_actions(id) ON DELETE SET NULL
+        )""",
+        "CREATE INDEX idx_cleanup_audit_plan ON cleanup_audit(plan_id, created_at)",
     ],
 }
 

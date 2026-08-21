@@ -165,13 +165,26 @@ Press `Enter` on a filesystem or block-device row to open its details. Press `b`
 
 Pseudo-filesystems (`proc`, `sysfs`, `tmpfs`, etc.) are automatically filtered out. Press `r` to refresh.
 
-### Cleanup (c) — experimental
+### Cleanup (c)
 
 Detects pattern-matched candidates such as dependency directories (`node_modules`), build outputs, bytecode files, old logs, OS junk files, and IDE directories. These rules are heuristics, not a guarantee that a path is safe to remove.
 
 Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in the Settings screen (`?`). Once enabled, press `c` to switch to it.
 
-Review every selected path before acting. **Delete is permanent**: the current implementation uses direct filesystem deletion and has no trash/quarantine, undo, stale-target revalidation, or persistent audit trail. The confirmation dialog also offers **Dry Run**, which reports what would be deleted without changing the filesystem.
+Review every selected path before acting. Press `d` to create and inspect a
+persistent CleanupPlan; this is read-only until an explicit action is chosen.
+**Apply Safely** moves each revalidated target to system Trash when an atomic
+same-filesystem move is available, otherwise to an owned mode-0700 quarantine
+directory next to the target. Press `u` to restore the latest recoverable plan
+and `h` to inspect the latest plan summary. Permanent deletion is a separate red
+action and requires typing the exact plan-scoped `DELETE <plan-id>` token.
+
+Before every action, fsmonitor repeats `lstat`, identity, rule, age, directory
+content, mount-boundary, and protected-path checks. Changed, missing, replaced,
+or no-longer-matching targets are skipped with a specific audit reason. Parent
+targets subsume matching children so estimated bytes and execution are not
+double counted. Trash/quarantine isolates data but reports actual reclaimed
+bytes as zero until the data is purged.
 
 ### Key Binding Reference
 
@@ -194,9 +207,11 @@ Review every selected path before acting. **Delete is permanent**: the current i
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
 | `b` | FS Overview | Confirm and benchmark the highlighted mount |
 | Enter | FS Overview | Open filesystem or block-device details |
-| `d` | Cleanup | Delete selected |
+| `d` | Cleanup | Create and review a CleanupPlan for selected rows |
 | `a` | Cleanup | Select all |
 | Space | Cleanup | Toggle row selection |
+| `u` | Cleanup | Undo the latest recoverable plan |
+| `h` | Cleanup | Show the latest persisted plan summary |
 
 ## CLI Commands
 
@@ -367,13 +382,30 @@ loginctl enable-linger $USER
 
 ### cleanup
 
-Interactive CLI cleanup with a confirmation prompt:
+Cleanup defaults to a persistent, read-only preview:
 
 ```bash
 fsmonitor cleanup /path
+fsmonitor cleanup --plan PLAN_ID --apply
+fsmonitor cleanup history
+fsmonitor cleanup undo PLAN_OR_ACTION_ID
 ```
 
-The command summarizes all detected candidates (showing up to five paths per category), then offers to **permanently delete all of them**, including candidates hidden behind an “and more” summary. It does not move items to trash and does not provide undo or revalidation; cancel the prompt unless every detected candidate may be removed.
+The first command scans, resolves parent/child overlap, saves the plan, and makes
+no filesystem changes. `--apply` revalidates each target and uses Trash with
+same-filesystem quarantine fallback. `history` distinguishes estimated,
+validated, isolated, and actually reclaimed bytes; `undo` refuses to overwrite
+a newly created original path. Plans and per-action audit events survive process
+restart in schema v6.
+
+Permanent deletion is intentionally separate:
+
+```bash
+fsmonitor cleanup --plan PLAN_ID --permanent
+```
+
+The command prints the irreversible warning and requires the exact
+`DELETE <plan-id>` token. `--apply` can never select permanent deletion.
 
 ## Configuration
 
@@ -393,6 +425,11 @@ database_soft_budget = 2147483648        # 2 GiB; trigger maintenance
 database_hard_budget = 3221225472        # 3 GiB; block new snapshots after maintenance
 # auto_start_in_tui = true              # default false; host enabled monitors on launch
 
+[cleanup]
+# prefer_trash = false                   # default true; false uses quarantine directly
+quarantine_retention_days = 7
+quarantine_max_bytes = 10737418240        # 10 GiB capacity policy
+
 [ui]
 color_theme = "warm"                     # default, cold, warm, vivid, mono
 default_viz = "sunburst"                 # treemap, sunburst, details
@@ -408,6 +445,9 @@ pins, and alerts live only in the SQLite repository. Manage them through
 Monitor Center or the `monitor`/`alerts` commands. The `[monitor]` config section
 contains global defaults, database budgets, the foreground watch cap, and the
 TUI auto-start preference.
+
+The `[cleanup]` section controls safe executor preference plus quarantine expiry
+and capacity. It never enables permanent deletion as a default action.
 
 The **Live scan rendering** setting (`live_scan_render`) controls whether the active visualization tab redraws as the scan progresses. `auto` (the default) enables it on terminals at least 80 columns by 24 rows with at least 4 CPUs, and stays off on smaller / lower-resource setups where the per-frame redraw cost would compete with the scan. Set to `on` to force it regardless of terminal size, or `off` to wait for the scan to finish and render once.
 

@@ -115,7 +115,7 @@ SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant;
 | Create dir | `os.makedirs(db_dir, exist_ok=True)` |
 | Open/create DB | `sqlite3.connect(path)` |
 | Open read-only recovery | SQLite URI with `mode=ro`, then `PRAGMA query_only=ON` |
-| Pre-migration backup | SQLite backup API to `data.db.pre-v5.bak` |
+| Pre-migration backup | SQLite backup API to `data.db.pre-v6.bak` |
 | Integrity probe | `PRAGMA quick_check` |
 | Budget measurement | `Path.stat()` on the database, WAL, and shared-memory files |
 | Retention compaction | `PRAGMA wal_checkpoint(TRUNCATE)` followed by `VACUUM` |
@@ -154,9 +154,11 @@ persisted snapshot measurements and make no extra filesystem calls.
 | Read | `open(config_file, "rb")` + `tomllib.load()` |
 | Write | `Path.write_text()` |
 
-### Cleanup -- `cleanup/actions.py`, `cleanup/detector.py`, `models/patterns.py`
+### Cleanup -- `services/cleanup.py`, `cleanup/actions.py`, `cleanup/detector.py`
 
-Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator rules perform live existence checks, and deletion performs direct filesystem operations:
+Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator
+rules perform live existence checks. Creating a plan additionally captures live
+identity without modifying the target:
 
 **Parent indicator checks** (`patterns.py`):
 ```python
@@ -164,16 +166,26 @@ Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator ru
 ```
 This checks whether files like `package.json` or `Cargo.toml` exist next to a candidate target.
 
-**Deletion** (`actions.py`):
+**Revalidation and isolation** (`services/cleanup.py`, `actions.py`):
 ```python
-os.path.isdir(target.path)      # directory or file?
-os.path.islink(target.path)     # unlink a symlink itself, never its target
-shutil.rmtree(target.path)      # recursive directory delete
-os.path.exists(target.path)     # existence check
-os.unlink(target.path)          # single file delete
+os.lstat(target.path)           # device/inode/type/mtime/size; never follows links
+os.scandir(target.path)         # re-measure directory contents before action
+os.path.ismount(target.path)    # root/mount protection
+os.rename(source, trash_path)   # same-filesystem system Trash move
+os.rename(source, quarantine)   # atomic quarantine fallback
+Path.write_text(...)            # .trashinfo or quarantine recovery manifest
 ```
 
-Deletion is permanent and does not use trash/quarantine, undo, persistent audit logging, or stale-target revalidation. The action checks whether the current path is a symlink before directory detection, so a directory symlink is unlinked without touching its target. A dry-run path exercises result reporting without making these calls.
+Quarantine directories must be owned by the current user, mode `0700`, and on
+the same device as the target. The executor never substitutes copy+delete for an
+atomic rename. Undo uses `os.rename()` back to the original path only when that
+path is absent and the isolated inode still matches the plan identity.
+
+Permanent deletion is not the default executor. It is available only after a
+plan-scoped typed confirmation and then uses `os.unlink()` for files/symlinks or
+`shutil.rmtree()` for real directories. Product CLI/TUI code cannot call this
+primitive without `CleanupService` revalidation and a successful pre-action
+audit write.
 
 ### Welcome Screen -- `screens/welcome.py`
 

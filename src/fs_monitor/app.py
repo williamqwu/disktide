@@ -10,15 +10,18 @@ from textual.app import App
 from textual.binding import Binding
 
 from fs_monitor import APP_NAME
+from fs_monitor.cleanup.actions import QuarantineExecutor
 from fs_monitor.config import (
     AppConfig, load_config, save_config,
     get_effective_paths, set_effective_paths,
 )
 from fs_monitor.domain.monitor import MonitorDefinition
+from fs_monitor.domain.cleanup import CleanupActionKind
 from fs_monitor.rendering import set_safe_rendering
 from fs_monitor.repositories import default_snapshot_repository
 from fs_monitor.repositories.snapshots import SnapshotRepository
 from fs_monitor.services.scan import ScanService
+from fs_monitor.services.cleanup import CleanupService
 from fs_monitor.services.monitor import MonitorService
 from fs_monitor.services.visualization import VisualizationService
 from fs_monitor.viz.colors import set_color_scheme
@@ -79,6 +82,20 @@ class FSMonitorApp(App):
         )
         self._visualization_service = VisualizationService(
             self._snapshot_repository
+        )
+        self._cleanup_safe_action = (
+            CleanupActionKind.TRASH
+            if self._config.cleanup.prefer_trash
+            else CleanupActionKind.QUARANTINE
+        )
+        self._cleanup_service = CleanupService(
+            self._snapshot_repository,
+            quarantine=QuarantineExecutor(
+                retention_days=(
+                    self._config.cleanup.quarantine_retention_days
+                ),
+                max_bytes=self._config.cleanup.quarantine_max_bytes,
+            ),
         )
         self._show_welcome = show_welcome
         # Ensures the "running without persistence" warning is only shown
@@ -197,7 +214,10 @@ class FSMonitorApp(App):
             scan_service=self._scan_service,
             visualization_service=self._visualization_service,
         )
-        self._cleanup = CleanupScreen()
+        self._cleanup = CleanupScreen(
+            service=self._cleanup_service,
+            safe_action=self._cleanup_safe_action,
+        )
         self._monitor = MonitorScreen(
             service=self._monitor_service,
             config=self._config,

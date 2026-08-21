@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.7
+
+**CleanupPlan and safe execution**
+
+- **plan-first cleanup** Replaced CLI/TUI detector-to-delete product paths with one persistent `CleanupService`. Cleanup now defaults to a read-only versioned plan containing rule provenance, risk, identity, estimated bytes, file count, age, planned action, and parent/child overlap resolution.
+- **revalidation/safety** Added fail-closed device/inode/type/mtime/size and directory-content revalidation plus rule, age, risk, mount-boundary, scan-root, filesystem-root, database, and quarantine protections. Missing, replaced, modified, symlink-swapped, or no-longer-matching targets are skipped with explicit validation state.
+- **trash/quarantine/undo** Added same-filesystem Freedesktop Trash moves with `.trashinfo`, owned mode-0700 quarantine fallback with manifests, capacity/expiry policy, restart-safe undo metadata, and collision refusal. Isolation reports zero actual reclaimed bytes until purge instead of presenting estimates as reclaimed space.
+- **audit/persistence** Added schema v6 `cleanup_plans`, `cleanup_actions`, and `cleanup_audit` tables. Validation, pre-execution intent, result, fallback, and undo survive restart; a pre-action audit write failure stops the batch before filesystem mutation.
+- **CLI/TUI** `fsmonitor cleanup PATH` now previews only; `--plan ID --apply`, `cleanup history`, and `cleanup undo ID` expose the safe lifecycle. Permanent deletion uses a separate `--permanent` or red TUI path and requires the exact `DELETE <plan-id>` token. CleanupScreen reviews plans and supports safe apply/history/undo without calling the legacy direct-delete helper.
+
 ## v0.2.6
 
 **Space-time visualization**

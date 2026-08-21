@@ -149,11 +149,18 @@ class PlatformAdapter:
         return logical, allocated, unique
 
     def trash_capability(self) -> Capability:
+        if os.name == "posix":
+            return Capability(
+                CapabilityId.TRASH,
+                CapabilityStatus.AVAILABLE,
+                "same-filesystem XDG Trash moves are available with quarantine fallback",
+                "Cross-filesystem targets use an owned 0700 quarantine directory.",
+            )
         return Capability(
             CapabilityId.TRASH,
-            CapabilityStatus.UNAVAILABLE,
-            "trash/quarantine execution is not implemented in the 0.2 core",
-            "Cleanup remains explicit permanent deletion until the safe-cleanup wave.",
+            CapabilityStatus.DEGRADED,
+            "system Trash integration is unavailable; atomic quarantine remains available",
+            "Review the CleanupPlan action column before applying.",
         )
 
     def filesystem_events_capability(self) -> Capability:

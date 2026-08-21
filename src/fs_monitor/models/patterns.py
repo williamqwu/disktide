@@ -53,6 +53,12 @@ class CleanupTarget:
     size: int
     rule: CleanupRule
     file_count: int = 0
+    mtime: float = 0.0
+    is_dir: bool = False
+    is_symlink: bool = False
+    device_id: int | None = None
+    inode: int | None = None
+    provenance: str = "detector"
 
     @property
     def risk(self) -> RiskLevel:

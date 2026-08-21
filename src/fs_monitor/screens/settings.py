@@ -137,10 +137,10 @@ class SettingsScreen(Screen):
             yield Static("")
             yield Static("Cleanup Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
-                yield Label("Show Cleanup mode (experimental)", classes="setting-label")
+                yield Label("Show Cleanup mode", classes="setting-label")
                 yield Switch(value=self._config.ui.show_cleanup, id="show-cleanup")
             yield Static(
-                "  Cleanup permanently deletes selected paths. Enable only when needed.",
+                "  Cleanup defaults to plan preview and recoverable Trash/quarantine.",
                 classes="sysinfo-value",
             )
 
