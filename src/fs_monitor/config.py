@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
 import tomllib
 from dataclasses import dataclass, field
@@ -11,6 +12,17 @@ from pathlib import Path
 from fs_monitor import LEGACY_STORAGE_NAMESPACE
 
 _DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_SIZE_MULTIPLIERS = {
+    "b": 1,
+    "kb": 1000,
+    "mb": 1000**2,
+    "gb": 1000**3,
+    "tb": 1000**4,
+    "kib": 1024,
+    "mib": 1024**2,
+    "gib": 1024**3,
+    "tib": 1024**4,
+}
 
 
 def parse_duration(value: str) -> int:
@@ -35,6 +47,20 @@ def format_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def parse_size(value: str) -> int:
+    """Parse byte sizes such as ``4MiB``, ``10GB``, or plain integers."""
+    match = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?b)?\s*",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        raise ValueError(f"invalid size: {value}")
+    number = float(match.group(1))
+    unit = (match.group(2) or "b").lower()
+    return int(number * _SIZE_MULTIPLIERS[unit])
+
+
 @dataclass
 class ScanConfig:
     max_depth: int | None = None
@@ -46,9 +72,10 @@ class ScanConfig:
 @dataclass
 class MonitorConfig:
     default_interval: int = 21600  # 6 hours in seconds
-    snapshot_retention: int = 30  # days
     max_watch_time: int | None = None  # seconds, None = unlimited
-    strict_path: bool = False  # True = exact path match only
+    database_soft_budget: int | None = 2 * 1024**3
+    database_hard_budget: int | None = 3 * 1024**3
+    auto_start_in_tui: bool = False
 
 
 @dataclass
@@ -151,11 +178,18 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
 
     lines.append("[monitor]")
     lines.append(f"default_interval = {config.monitor.default_interval}")
-    lines.append(f"snapshot_retention = {config.monitor.snapshot_retention}")
     if config.monitor.max_watch_time is not None:
         lines.append(f"max_watch_time = {config.monitor.max_watch_time}")
-    if config.monitor.strict_path:
-        lines.append("strict_path = true")
+    lines.append(
+        "database_soft_budget = "
+        f"{config.monitor.database_soft_budget or 0}"
+    )
+    lines.append(
+        "database_hard_budget = "
+        f"{config.monitor.database_hard_budget or 0}"
+    )
+    if config.monitor.auto_start_in_tui:
+        lines.append("auto_start_in_tui = true")
     lines.append("")
 
     lines.append("[ui]")
@@ -212,9 +246,18 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     if "monitor" in data:
         monitor = data["monitor"]
         config.monitor.default_interval = monitor.get("default_interval", 21600)
-        config.monitor.snapshot_retention = monitor.get("snapshot_retention", 30)
         config.monitor.max_watch_time = monitor.get("max_watch_time")
-        config.monitor.strict_path = monitor.get("strict_path", False)
+        soft_budget = monitor.get("database_soft_budget", 2 * 1024**3)
+        hard_budget = monitor.get("database_hard_budget", 3 * 1024**3)
+        config.monitor.database_soft_budget = (
+            None if soft_budget is None or soft_budget <= 0 else soft_budget
+        )
+        config.monitor.database_hard_budget = (
+            None if hard_budget is None or hard_budget <= 0 else hard_budget
+        )
+        config.monitor.auto_start_in_tui = monitor.get(
+            "auto_start_in_tui", False
+        )
 
     if "ui" in data:
         ui = data["ui"]

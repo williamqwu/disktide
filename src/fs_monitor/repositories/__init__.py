@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from fs_monitor.repositories.snapshots import SnapshotRepository
+from fs_monitor.repositories.alerts import AlertRepository
+from fs_monitor.repositories.monitors import MonitorRepository, RetentionRepository
 
 
 def default_snapshot_repository() -> SnapshotRepository:
@@ -11,4 +13,10 @@ def default_snapshot_repository() -> SnapshotRepository:
     return SQLiteSnapshotRepository()
 
 
-__all__ = ["SnapshotRepository", "default_snapshot_repository"]
+__all__ = [
+    "AlertRepository",
+    "MonitorRepository",
+    "RetentionRepository",
+    "SnapshotRepository",
+    "default_snapshot_repository",
+]

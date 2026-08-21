@@ -1,9 +1,7 @@
-"""Tests for monitoring module."""
+"""Tests for the legacy in-memory tree comparison helper."""
 
-import pytest
 from fs_monitor.models.tree import FSNode
 from fs_monitor.monitor.diff import compare_trees
-from fs_monitor.monitor.alerts import AlertRule, check_alerts
 
 
 def make_tree(root_size, child_sizes):
@@ -60,38 +58,3 @@ class TestDiff:
         deltas = compare_trees(old, new, min_delta=100)
         # Small changes should be filtered out
         assert len(deltas) == 0
-
-
-class TestAlerts:
-    def test_size_threshold(self):
-        tree = make_tree(2000, [1000, 500, 500])
-        rules = [AlertRule(path="/root", max_size=1500)]
-        events = check_alerts(rules, tree)
-        assert len(events) == 1
-        assert "exceeds" in events[0].message
-
-    def test_size_under_threshold(self):
-        tree = make_tree(1000, [500, 300, 200])
-        rules = [AlertRule(path="/root", max_size=2000)]
-        events = check_alerts(rules, tree)
-        assert len(events) == 0
-
-    def test_growth_threshold(self):
-        old = make_tree(1000, [500, 300, 200])
-        new = make_tree(2000, [1000, 600, 400])
-        rules = [AlertRule(path="/root", max_growth_percent=50)]
-        events = check_alerts(rules, new, old)
-        assert len(events) == 1
-        assert "grew" in events[0].message
-
-    def test_disabled_rule(self):
-        tree = make_tree(2000, [1000, 500, 500])
-        rules = [AlertRule(path="/root", max_size=100, enabled=False)]
-        events = check_alerts(rules, tree)
-        assert len(events) == 0
-
-    def test_nonexistent_path(self):
-        tree = make_tree(1000, [500, 300, 200])
-        rules = [AlertRule(path="/nonexistent", max_size=100)]
-        events = check_alerts(rules, tree)
-        assert len(events) == 0

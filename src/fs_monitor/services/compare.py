@@ -7,6 +7,7 @@ from pathlib import Path
 
 import humanize
 
+from fs_monitor import __version__
 from fs_monitor.domain.delta import (
     CompareResult,
     CompatibilityDecision,
@@ -240,7 +241,7 @@ def assess_compatibility(
             f"v{target.format_version}{' legacy' if target.legacy else ''}",
             CompatibilitySeverity.INCOMPATIBLE,
             "legacy metadata cannot prove scan-policy equivalence",
-            "take two new snapshots with fsmonitor 0.2.4 or use --raw",
+            f"take two new snapshots with fsmonitor {__version__} or use --raw",
         )
     if (
         baseline.format_version > SNAPSHOT_FORMAT_VERSION

@@ -48,15 +48,22 @@ class ExplorerScreen(Screen):
 
     BINDINGS = [
         # Viz-switch keys are surfaced on the tab labels themselves
-        # ("Sunburst [1]" / "Treemap [2]" / "Details [3]") so they don't
+        # ("Sunburst [F1]" / "Treemap [F2]" / "Details [F3]") so they don't
         # need to eat space in the footer too.
-        Binding("1", "switch_viz('sunburst')", "Sunburst", show=False),
-        Binding("2", "switch_viz('treemap')", "Treemap", show=False),
-        Binding("3", "switch_viz('details')", "Details", show=False),
+        Binding("f1", "switch_viz('sunburst')", "Sunburst", show=False),
+        Binding("f2", "switch_viz('treemap')", "Treemap", show=False),
+        Binding("f3", "switch_viz('details')", "Details", show=False),
         Binding("u", "go_up", "[U]p [I]nto", show=True, key_display="Nav"),
         Binding("i", "go_into", "Into", show=False),
         Binding("s", "cycle_sort", "[S]ort [R]escan", show=True, key_display="Action"),
         Binding("r", "rescan", "Rescan", show=False),
+        Binding(
+            "shift+m",
+            "setup_monitor",
+            "Setup monitor",
+            show=True,
+            key_display="M",
+        ),
         # QoL: yank the highlighted path, and toggle what the tree bar measures.
         Binding("y", "copy_path", "[Y]ank path", show=True, key_display="Copy"),
         Binding("t", "toggle_metric", "[T]oggle metric", show=True, key_display="Bar"),
@@ -159,11 +166,11 @@ class ExplorerScreen(Screen):
                     # the footer. The opening bracket is markup-escaped
                     # (\\[) so Textual's Content parser keeps it literal
                     # instead of trying to open a style tag.
-                    with TabPane("Sunburst \\[1]", id="tab-sunburst"):
+                    with TabPane("Sunburst \\[F1]", id="tab-sunburst"):
                         yield SunburstView(id="sunburst-view")
-                    with TabPane("Treemap \\[2]", id="tab-treemap"):
+                    with TabPane("Treemap \\[F2]", id="tab-treemap"):
                         yield TreemapView(id="treemap-view")
-                    with TabPane("Details \\[3]", id="tab-details"):
+                    with TabPane("Details \\[F3]", id="tab-details"):
                         yield InfoPanel(id="info-panel")
         yield Footer()
 
@@ -685,6 +692,22 @@ class ExplorerScreen(Screen):
         path = node.data.path
         self.app.copy_to_clipboard(path)
         self.app.notify(path, title="Copied path", timeout=4)
+
+    def action_setup_monitor(self) -> None:
+        """Create a persistent monitor for the highlighted directory."""
+        tree = self.query_one("#size-tree", SizeTree)
+        node = tree.cursor_node
+        if node is None or node.data is None:
+            return
+        path = Path(node.data.path)
+        if not path.is_dir():
+            self.app.notify(
+                "Select a directory before setting up a monitor.",
+                severity="warning",
+                timeout=4,
+            )
+            return
+        self.app.open_monitor_setup(str(path))
 
     def action_toggle_metric(self) -> None:
         """Cycle one normalized metric across every explorer view."""

@@ -475,7 +475,7 @@ def test_treemap_recomputes_in_count_mode_after_toggle(tmp_path):
         )
         async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_explorer(pilot, app)
-            await pilot.press("2")   # switch to the treemap tab
+            await pilot.press("f2")   # switch to the treemap tab
             await pilot.pause()
             await pilot.press("t", "t", "t")   # cycle to file count
             await pilot.pause()

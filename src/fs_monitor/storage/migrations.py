@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-CURRENT_VERSION = 4
+CURRENT_VERSION = 5
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -207,6 +207,127 @@ MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX idx_snapshot_metadata_root ON snapshot_metadata(root_id)",
         "CREATE INDEX idx_scan_runs_root_finished ON scan_runs(root_id, finished_at)",
     ],
+    5: [
+        """CREATE TABLE monitor_definitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            desired_state TEXT NOT NULL DEFAULT 'enabled',
+            interval_seconds INTEGER NOT NULL,
+            selected_metric TEXT NOT NULL,
+            policy_json TEXT NOT NULL,
+            workers INTEGER,
+            retention_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT
+        )""",
+        """CREATE UNIQUE INDEX idx_monitor_active_root
+           ON monitor_definitions(root_path)
+           WHERE desired_state <> 'archived'""",
+        "CREATE INDEX idx_monitor_desired_state ON monitor_definitions(desired_state)",
+        """CREATE TABLE monitor_status (
+            monitor_id INTEGER PRIMARY KEY,
+            activity_state TEXT NOT NULL DEFAULT 'no-host',
+            health_state TEXT NOT NULL DEFAULT 'unknown',
+            host_id TEXT,
+            host_type TEXT,
+            lease_expires_at TEXT,
+            next_due_at TEXT,
+            last_attempt_at TEXT,
+            last_success_at TEXT,
+            last_failure_at TEXT,
+            last_duration REAL,
+            active_run_id TEXT,
+            active_phase TEXT,
+            progress_percent REAL NOT NULL DEFAULT 0.0,
+            current_path TEXT,
+            rerun_pending INTEGER NOT NULL DEFAULT 0,
+            latest_snapshot_id INTEGER,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            blocked_reason TEXT,
+            last_retention_at TEXT,
+            last_retention_summary TEXT,
+            FOREIGN KEY (monitor_id) REFERENCES monitor_definitions(id) ON DELETE CASCADE,
+            FOREIGN KEY (latest_snapshot_id) REFERENCES snapshots(id) ON DELETE SET NULL
+        )""",
+        """CREATE TABLE monitor_leases (
+            monitor_id INTEGER PRIMARY KEY,
+            host_id TEXT NOT NULL,
+            host_type TEXT NOT NULL,
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (monitor_id) REFERENCES monitor_definitions(id) ON DELETE CASCADE
+        )""",
+        "CREATE INDEX idx_monitor_leases_expiry ON monitor_leases(expires_at)",
+        """CREATE TABLE snapshot_pins (
+            snapshot_id INTEGER PRIMARY KEY,
+            pinned_at TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+        )""",
+        """CREATE TABLE snapshot_rollups (
+            snapshot_id INTEGER PRIMARY KEY,
+            rollup_kind TEXT NOT NULL,
+            source_start TEXT NOT NULL,
+            source_end TEXT NOT NULL,
+            source_count INTEGER NOT NULL,
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+        )""",
+        """CREATE TABLE retention_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            monitor_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL,
+            before_bytes INTEGER NOT NULL,
+            after_bytes INTEGER NOT NULL,
+            kept_count INTEGER NOT NULL,
+            pruned_count INTEGER NOT NULL,
+            rolled_up_count INTEGER NOT NULL,
+            pinned_count INTEGER NOT NULL,
+            policy_version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL,
+            error TEXT,
+            FOREIGN KEY (monitor_id) REFERENCES monitor_definitions(id) ON DELETE CASCADE
+        )""",
+        "CREATE INDEX idx_retention_runs_monitor ON retention_runs(monitor_id, finished_at)",
+        "ALTER TABLE scan_runs ADD COLUMN monitor_id INTEGER REFERENCES monitor_definitions(id)",
+        "ALTER TABLE scan_runs ADD COLUMN monitor_revision INTEGER",
+        "ALTER TABLE scan_runs ADD COLUMN trigger TEXT",
+        "ALTER TABLE scan_runs ADD COLUMN scheduled_for TEXT",
+        "ALTER TABLE scan_runs ADD COLUMN host_id TEXT",
+        "ALTER TABLE scan_runs ADD COLUMN snapshot_id INTEGER REFERENCES snapshots(id) ON DELETE SET NULL",
+        "CREATE INDEX idx_scan_runs_monitor_finished ON scan_runs(monitor_id, finished_at)",
+        "ALTER TABLE snapshot_metadata ADD COLUMN monitor_id INTEGER REFERENCES monitor_definitions(id)",
+        "ALTER TABLE snapshot_metadata ADD COLUMN monitor_revision INTEGER",
+        "ALTER TABLE snapshot_metadata ADD COLUMN rollup_kind TEXT",
+        "CREATE INDEX idx_snapshot_metadata_monitor ON snapshot_metadata(monitor_id, snapshot_id)",
+        "ALTER TABLE alert_rules ADD COLUMN monitor_id INTEGER REFERENCES monitor_definitions(id)",
+        "ALTER TABLE alert_rules ADD COLUMN kind TEXT",
+        "ALTER TABLE alert_rules ADD COLUMN metric TEXT",
+        "ALTER TABLE alert_rules ADD COLUMN threshold_value REAL",
+        "ALTER TABLE alert_rules ADD COLUMN window_seconds INTEGER",
+        "ALTER TABLE alert_rules ADD COLUMN severity TEXT",
+        "ALTER TABLE alert_rules ADD COLUMN cooldown_seconds INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE alert_rules ADD COLUMN created_at TEXT",
+        "ALTER TABLE alert_rules ADD COLUMN updated_at TEXT",
+        "ALTER TABLE alert_rules ADD COLUMN deleted_at TEXT",
+        "CREATE INDEX idx_alert_rules_monitor ON alert_rules(monitor_id, enabled)",
+        "ALTER TABLE alert_events ADD COLUMN monitor_id INTEGER REFERENCES monitor_definitions(id)",
+        "ALTER TABLE alert_events ADD COLUMN old_snapshot_id INTEGER REFERENCES snapshots(id) ON DELETE SET NULL",
+        "ALTER TABLE alert_events ADD COLUMN new_snapshot_id INTEGER REFERENCES snapshots(id) ON DELETE SET NULL",
+        "ALTER TABLE alert_events ADD COLUMN observed_value REAL",
+        "ALTER TABLE alert_events ADD COLUMN threshold_value REAL",
+        "ALTER TABLE alert_events ADD COLUMN confidence TEXT",
+        "ALTER TABLE alert_events ADD COLUMN suppressed INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE alert_events ADD COLUMN suppression_reason TEXT",
+        "ALTER TABLE alert_events ADD COLUMN severity TEXT",
+        "ALTER TABLE alert_events ADD COLUMN kind TEXT",
+        "CREATE INDEX idx_alert_events_monitor ON alert_events(monitor_id, triggered_at)",
+    ],
 }
 
 
@@ -220,7 +341,7 @@ def _backfill_v4(conn: sqlite3.Connection) -> None:
            GROUP BY root_path"""
     )
     conn.execute(
-        """INSERT INTO snapshot_metadata (
+        """INSERT OR IGNORE INTO snapshot_metadata (
                snapshot_id,
                snapshot_format_version,
                snapshot_api_version,
@@ -254,8 +375,41 @@ def _backfill_v4(conn: sqlite3.Connection) -> None:
     )
 
 
+def _backfill_v5(conn: sqlite3.Connection) -> None:
+    """Normalize legacy alert prototypes into the Wave06 alert contract."""
+    now = "1970-01-01T00:00:00+00:00"
+    conn.execute(
+        """UPDATE alert_rules
+           SET kind = CASE
+                   WHEN max_growth_percent IS NOT NULL THEN 'percentage-growth'
+                   ELSE 'absolute-size'
+               END,
+               metric = 'logical',
+               threshold_value = CASE
+                   WHEN max_growth_percent IS NOT NULL THEN max_growth_percent
+                   ELSE max_size
+               END,
+               severity = 'warning',
+               created_at = COALESCE(created_at, ?),
+               updated_at = COALESCE(updated_at, ?)""",
+        (now, now),
+    )
+    conn.execute(
+        """UPDATE alert_events
+           SET new_snapshot_id = snapshot_id,
+               confidence = COALESCE(confidence, 'legacy-unknown'),
+               severity = COALESCE(severity, 'warning'),
+               kind = COALESCE(
+                   kind,
+                   (SELECT kind FROM alert_rules WHERE alert_rules.id = alert_events.rule_id),
+                   'absolute-size'
+               )"""
+    )
+
+
 MIGRATION_CALLBACKS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _backfill_v4,
+    5: _backfill_v5,
 }
 
 

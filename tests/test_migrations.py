@@ -47,6 +47,12 @@ class TestMigrations:
         assert "monitored_roots" in table_names
         assert "scan_runs" in table_names
         assert "snapshot_metadata" in table_names
+        assert "monitor_definitions" in table_names
+        assert "monitor_status" in table_names
+        assert "monitor_leases" in table_names
+        assert "snapshot_pins" in table_names
+        assert "snapshot_rollups" in table_names
+        assert "retention_runs" in table_names
 
     def test_migrate_sets_version(self, conn):
         migrate(conn)
@@ -158,3 +164,55 @@ class TestMigrations:
             conn.execute("PRAGMA database_list").fetchone()[2]
         )
         assert migration_backup_path(database_path).exists()
+
+    def test_v4_database_with_snapshot_and_legacy_alert_migrates_to_v5(self, conn):
+        migrate(conn, target_version=4)
+        snapshot_id = conn.execute(
+            """INSERT INTO snapshots
+               (root_path, timestamp, total_size, file_count, dir_count,
+                scan_duration, label, is_baseline, baseline_id)
+               VALUES ('/v4', '2026-08-01T12:00:00+00:00', 12, 1, 1,
+                       0.1, '', 1, NULL)"""
+        ).lastrowid
+        root_id = conn.execute(
+            """INSERT INTO monitored_roots (root_path, last_seen_at)
+               VALUES ('/v4', '2026-08-01T12:00:00+00:00')"""
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO snapshot_metadata (
+                   snapshot_id, snapshot_format_version, snapshot_api_version,
+                   metric_semantics_version, logical_available,
+                   allocated_available, unique_available, selected_metric,
+                   completion_status, timestamp_timezone, legacy,
+                   inference_source, root_id
+               ) VALUES (?, 2, 1, '1', 1, 0, 0, 'logical', 'completed',
+                         'UTC', 0, 'native-v2', ?)""",
+            (snapshot_id, root_id),
+        )
+        rule_id = conn.execute(
+            """INSERT INTO alert_rules (path, max_size, enabled)
+               VALUES ('/v4', 10, 1)"""
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO alert_events
+               (rule_id, snapshot_id, triggered_at, message)
+               VALUES (?, ?, '2026-08-01T12:00:00+00:00', 'legacy')""",
+            (rule_id, snapshot_id),
+        )
+        conn.commit()
+
+        migrate(conn)
+
+        assert get_version(conn) == 5
+        assert conn.execute(
+            "SELECT COUNT(*) FROM snapshot_metadata WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT kind, threshold_value FROM alert_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone() == ("absolute-size", 10.0)
+        assert conn.execute(
+            "SELECT new_snapshot_id, confidence FROM alert_events WHERE rule_id = ?",
+            (rule_id,),
+        ).fetchone() == (snapshot_id, "legacy-unknown")

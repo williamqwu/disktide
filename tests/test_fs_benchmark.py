@@ -37,7 +37,7 @@ def _new_app(tmp_path) -> FSMonitorApp:
 
 
 async def _wait_for_overview(pilot, app) -> FSOverviewScreen:
-    await pilot.press("f")
+    await pilot.press("3")
     for _ in range(40):
         await pilot.pause(delay=0.1)
         if isinstance(app.screen, FSOverviewScreen) and app.screen._entries:

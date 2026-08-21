@@ -276,6 +276,7 @@ class ScanService:
         self._cancel_reasons: dict[str, str] = {}
         self._cancel_requested_at: dict[str, datetime] = {}
         self._lock = threading.RLock()
+        self._execution_gate = threading.Lock()
 
     def create_run(self, request: ScanRequest) -> ScanRun:
         normalized = self._normalize_request(request)
@@ -303,6 +304,15 @@ class ScanService:
         return self.execute(self.create_run(request), consumers=consumers)
 
     def execute(
+        self,
+        run: ScanRun,
+        *,
+        consumers: Iterable[ScanEventConsumer] = (),
+    ) -> ScanRun:
+        with self._execution_gate:
+            return self._execute_serial(run, consumers=consumers)
+
+    def _execute_serial(
         self,
         run: ScanRun,
         *,

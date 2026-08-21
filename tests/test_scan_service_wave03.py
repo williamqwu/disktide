@@ -488,7 +488,7 @@ def test_product_sources_do_not_construct_scan_engine_directly():
     product_sources = (
         repo / "src/fs_monitor/screens/explorer.py",
         repo / "src/fs_monitor/__main__.py",
-        repo / "src/fs_monitor/monitor/scheduler.py",
+        repo / "src/fs_monitor/services/monitor.py",
     )
 
     for source in product_sources:

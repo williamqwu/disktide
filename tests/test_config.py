@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from fs_monitor.config import (
     load_config, save_config, AppConfig, HostPaths,
-    get_effective_paths, set_effective_paths,
+    get_effective_paths, parse_size, set_effective_paths,
 )
 
 
@@ -17,6 +17,14 @@ class TestConfig:
         assert config.scan.one_file_system is False
         assert config.scan.exclude_pseudo_filesystems is True
         assert config.monitor.default_interval == 21600
+        assert config.monitor.database_soft_budget == 2 * 1024**3
+        assert config.monitor.database_hard_budget == 3 * 1024**3
+        assert config.monitor.auto_start_in_tui is False
+
+    def test_parse_size(self):
+        assert parse_size("4MiB") == 4 * 1024**2
+        assert parse_size("1.5 GB") == 1_500_000_000
+        assert parse_size("42") == 42
 
     def test_load_from_toml(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -69,6 +77,10 @@ enabled_rules = ["old_logs"]
 disabled_rules = ["ide_caches"]
 require_confirm_dangerous = false
 
+[monitor]
+snapshot_retention = 30
+strict_path = true
+
 [ui]
 default_sort = "name"
 show_hidden = true
@@ -88,6 +100,8 @@ show_hidden = true
             "enabled_rules",
             "disabled_rules",
             "require_confirm_dangerous",
+            "snapshot_retention",
+            "strict_path",
             "default_sort",
             "show_hidden",
         ):
@@ -116,6 +130,21 @@ show_hidden = true
         assert loaded.ui.color_theme == "dark"
         assert loaded.ui.default_viz == "sunburst"
         assert loaded.ui.safe_rendering is True
+
+    def test_monitor_budget_roundtrip(self, tmp_path):
+        config = AppConfig()
+        config.monitor.database_soft_budget = 512 * 1024**2
+        config.monitor.database_hard_budget = None
+        config.monitor.auto_start_in_tui = True
+
+        config_file = tmp_path / "monitor.toml"
+        save_config(config, config_file)
+
+        loaded = load_config(config_file)
+        assert loaded.monitor.database_soft_budget == 512 * 1024**2
+        assert loaded.monitor.database_hard_budget is None
+        assert loaded.monitor.auto_start_in_tui is True
+        assert "database_hard_budget = 0" in config_file.read_text()
 
     def test_save_creates_parent_dirs(self, tmp_path):
         config = AppConfig()

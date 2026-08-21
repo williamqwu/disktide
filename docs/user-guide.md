@@ -29,15 +29,19 @@ Check "Save as default path" to remember the current path as your default for ne
 
 ## TUI
 
-The interactive TUI has four modes, switched with the `E`, `C`, `M`, and `F` keys. Cleanup is experimental and disabled by default, so `C` becomes available only after enabling it in Settings.
+The interactive TUI uses `1`, `2`, and `3` for Explorer, Monitor, and FS
+Overview. Cleanup remains on lowercase `c`. Screen-local actions can therefore
+use mnemonic letters without shadowing mode navigation; uppercase `M` in
+Explorer sets up monitoring for the highlighted directory. Cleanup is
+experimental and disabled by default.
 
-### Explorer (E)
+### Explorer (1)
 
 The main view. A file tree on the left shows directories sorted by the active metric, with inline proportional bars. The right panel shows one of three visualizations:
 
-- **Sunburst** (`1`) -- Concentric rings radiating outward by depth. Each arc's angle represents its share of the parent.
-- **Treemap** (`2`) -- Rectangles sized proportionally to disk usage. Drill into directories by clicking or selecting them.
-- **Details** (`3`) -- Text panel with metadata about the selected file or directory.
+- **Sunburst** (`F1`) -- Concentric rings radiating outward by depth. Each arc's angle represents its share of the parent.
+- **Treemap** (`F2`) -- Rectangles sized proportionally to disk usage. Drill into directories by clicking or selecting them.
+- **Details** (`F3`) -- Text panel with metadata about the selected file or directory.
 
 Navigation:
 
@@ -50,6 +54,7 @@ Navigation:
 | `i` | Drill into the selected directory, or a symlinked directory (rescans) |
 | `s` | Cycle sort order: size, name, modified |
 | `r` | Rescan the current directory (prompts y/n first) |
+| `M` | Set up a persistent monitor for the highlighted directory |
 | `y` | Copy the highlighted item's absolute path to the clipboard |
 | `t` | Cycle Logical, Allocated, Unique, Files across all views |
 
@@ -69,19 +74,45 @@ late partial update cannot overwrite the final view from the current run.
 
 Symbolic links are shown as `name → target` and never counted toward folder sizes (only the link's own size). When a link points to a directory, `i` resolves it and rescans from the real location, so linked folders stay navigable without the scan ever traversing the link. Broken links and links to files are marked and cannot be entered.
 
-### Monitor (M)
+### Monitor (2)
 
-Shows historical snapshots and size trends. The monitor displays data from the `watch` command or any scans saved with `--snapshot`.
+Monitor Center is the shared setup and management surface for persistent
+monitors. Its list/detail layout shows desired state, current host activity,
+health, next due time, snapshot count, global database usage, and active alerts.
+The detail side has Overview, History, Alerts, and Retention tabs. Terminals
+narrower than 90 columns use a list-first view; press **Enter** for details and
+**Escape** to return.
 
-The top half shows a snapshot table and a trend chart. The bottom half shows the largest changes between the two most recent snapshots.
+| Key | Action |
+|-----|--------|
+| `n` | Create a monitor; optionally capture the first snapshot now |
+| `e` | Edit path, interval, metric, scan policy, workers, or retention preset |
+| `p` | Pause or resume the selected definition |
+| `R` | Run the selected monitor now |
+| `s` | Start or stop this TUI's foreground monitoring session |
+| `d` | Archive the monitor after confirmation; history remains |
+| `i` | Pin or unpin the selected History snapshot |
+| `a` / `A` | Add or edit an alert rule in the Alerts tab |
+| `x` / Backspace | Enable/disable or remove the selected alert rule |
+| `t` | Run retention maintenance from the Retention tab |
+| `r` | Refresh all monitor data |
+| `1` | Return to Explorer; lowercase `e` remains Edit |
 
-Press `r` to refresh data. The monitor also refreshes automatically each time you switch to it.
+Changing the root, selected metric, or scan policy creates a new monitor
+revision. Older history remains visible, but incompatible revision segments are
+not joined into a trusted trend. Explorer passes its root and selected subtree
+to Monitor Center, so History can show both the monitor root and the selected
+path with explicit present, missing, removed, partial, pinned, and rollup state.
 
-By default, path matching is bidirectional: exploring `/data` surfaces watches at `/data/logs`, and exploring `/data/logs` surfaces watches at `/data`. Set `strict_path = true` under `[monitor]` in config to restrict to exact path matches only.
+Definitions are persistent; execution is not. `enabled · no-host` means the
+definition is ready but no process currently owns it. Press `s` in the TUI or
+run `fsmonitor watch --monitor/--all` to host scans. Leaving Monitor Center for
+Explorer keeps the TUI session alive, while quitting the app stops it and
+releases its lease. Wave 06 does not install a daemon.
 
-### FS Overview (F)
+### FS Overview (3)
 
-Shows all mounted real filesystems at a glance. Press `f` to open.
+Shows all mounted real filesystems at a glance. Press `3` to open.
 
 The top bar summarises total mounted space and usage percentage. Aggregate capacity is de-duplicated by backing device so bind mounts and btrfs subvolumes do not inflate the total. The table still lists every mountpoint:
 
@@ -105,7 +136,7 @@ Press `Enter` on a filesystem or block-device row to open its details. Press `b`
 
 Pseudo-filesystems (`proc`, `sysfs`, `tmpfs`, etc.) are automatically filtered out. Press `r` to refresh.
 
-### Cleanup (C) — experimental
+### Cleanup (c) — experimental
 
 Detects pattern-matched candidates such as dependency directories (`node_modules`), build outputs, bytecode files, old logs, OS junk files, and IDE directories. These rules are heuristics, not a guarantee that a path is safe to remove.
 
@@ -117,15 +148,16 @@ Review every selected path before acting. **Delete is permanent**: the current i
 
 | Key | Scope | Action |
 |-----|-------|--------|
-| `e` | Global | Switch to Explorer |
-| `m` | Global | Switch to Monitor |
-| `f` | Global | Switch to FS Overview |
+| `1` | Global | Switch to Explorer |
+| `2` | Global | Switch to Monitor |
+| `3` | Global | Switch to FS Overview |
 | `c` | Global | Switch to Cleanup (must be enabled in Settings) |
 | `?` | Global | Open settings |
 | `q` | Global | Quit (prompts y/n first) |
-| `1` / `2` / `3` | Explorer | Sunburst / Treemap / Details |
+| `F1` / `F2` / `F3` | Explorer | Sunburst / Treemap / Details |
 | `u` / `i` | Explorer | Navigate up / drill into directory |
 | `s` | Explorer | Cycle sort order |
+| `M` | Explorer | Set up monitoring for the highlighted directory |
 | `y` | Explorer | Copy highlighted path to clipboard |
 | `t` | Explorer | Cycle Logical / Allocated / Unique / Files across all views |
 | Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
@@ -204,38 +236,96 @@ incompatible comparison exits with status 2 and does not present a trusted
 growth result. `--raw` explicitly requests an untrusted diagnostic diff and
 keeps every incompatibility visible in the output.
 
-### watch
+### monitor
 
-Periodic scanning with automatic snapshots. Runs until interrupted or `--max-time` is reached:
+Create and manage the same persistent definitions used by Monitor Center:
 
 ```bash
-fsmonitor watch /path                   # default interval from config (6h)
-fsmonitor watch /path --interval 1h     # scan every hour
-fsmonitor watch /path -i 30m -t 12h    # every 30 min, stop after 12 hours
+fsmonitor monitor add /data --label data --interval 6h --capture-now
+fsmonitor monitor list
+fsmonitor monitor status 1
+fsmonitor monitor edit 1 --interval 1h --metric allocated
+fsmonitor monitor pause 1
+fsmonitor monitor resume 1
+fsmonitor monitor run 1
+fsmonitor monitor retention 1          # preview
+fsmonitor monitor retention 1 --apply  # run maintenance
+fsmonitor monitor pin 42 --label release
+fsmonitor monitor unpin 42
+fsmonitor monitor remove 1             # archive; keep history
+```
+
+Monitor identifiers may be numeric ids or labels where the command accepts an
+identifier. `monitor list/status --json` provide scripting output. A saved
+definition records its own interval, metric, scan policy, workers, revision,
+desired state, and retention policy in SQLite; editing Settings does not rewrite
+existing definitions.
+
+### alerts
+
+Alert rules belong to one monitor and share the same repository/service path as
+the TUI Alerts tab:
+
+```bash
+fsmonitor alerts add 1 /data --size 500GiB
+fsmonitor alerts add 1 /data/logs --growth 10GiB --window 24h
+fsmonitor alerts add 1 /data --percent 20 --cooldown 6h
+fsmonitor alerts add 1 /data --free-space 50GiB --severity critical
+fsmonitor alerts add 1 /data --inode-free 100000
+fsmonitor alerts add 1 /data/incoming --new-large 4GiB
+fsmonitor alerts list 1
+fsmonitor alerts check 1
+fsmonitor alerts disable RULE_ID
+fsmonitor alerts enable RULE_ID
+fsmonitor alerts remove RULE_ID
+```
+
+Rules can evaluate logical, allocated, unique, or file-count measurements.
+Events retain old/new snapshot ids, observed value, threshold, severity,
+confidence, cooldown suppression, and suppression reason. `alerts check` exits
+with status 2 for an unsuppressed trigger, 3 when events exist but all are
+suppressed, and 0 when nothing triggers.
+
+### watch
+
+Run the shared monitor host in the foreground until interrupted or
+`--max-time` is reached:
+
+```bash
+fsmonitor watch /path                   # transient definition; default 6h
+fsmonitor watch /path --interval 1h
+fsmonitor watch /path -i 30m -t 12h
+fsmonitor watch --monitor 1             # host one saved definition
+fsmonitor watch --all                   # host all enabled definitions
 ```
 
 Each interval is a distinct scan run and prints its run id, policy, terminal
 status, duration, and snapshot result. Snapshots are saved to the database and
-visible in the Monitor tab. Old snapshots are pruned automatically based on the
-`snapshot_retention` setting (default: 30 days).
+visible in Monitor Center. `watch PATH` does not silently create a persistent
+definition; saved monitors use their stored retention policy, alerts, revision,
+and schedule. A repository lease prevents a TUI and CLI host from running the
+same monitor concurrently.
 
-Since `watch` runs in the foreground, use tmux or nohup for persistent monitoring:
+Since `watch` runs in the foreground, use tmux or another external supervisor
+when it must outlive the current shell:
 
 ```bash
 # tmux (recommended -- reattach later with `tmux attach -t fsmon`)
 tmux new -s fsmon
 fsmonitor watch /path --interval 6h
 
-# nohup (background, no reattach)
-nohup fsmonitor watch /path --interval 6h > /dev/null 2>&1 &
+# nohup (background, no reattach; host every enabled saved monitor)
+nohup fsmonitor watch --all > /dev/null 2>&1 &
 ```
 
-For a systemd user service that survives reboots:
+An external systemd user unit can supervise the foreground host, but Wave 06
+does not install or manage that unit; native daemon/user-service integration is
+reserved for a later wave:
 
 ```ini
 # ~/.config/systemd/user/fsmonitor.service
 [Service]
-ExecStart=%h/.local/bin/fsmonitor watch /path --interval 6h
+ExecStart=%h/.local/bin/fsmonitor watch --all
 
 [Install]
 WantedBy=default.target
@@ -269,9 +359,10 @@ workers = 4                              # omit for auto-detect
 
 [monitor]
 default_interval = 21600                 # 6 hours, in seconds
-snapshot_retention = 30                  # days
 # max_watch_time = 86400                # optional cap in seconds
-# strict_path = true                    # only show exact path matches in Monitor
+database_soft_budget = 2147483648        # 2 GiB; trigger maintenance
+database_hard_budget = 3221225472        # 3 GiB; block new snapshots after maintenance
+# auto_start_in_tui = true              # default false; host enabled monitors on launch
 
 [ui]
 color_theme = "warm"                     # default, cold, warm, vivid, mono
@@ -282,6 +373,12 @@ default_viz = "sunburst"                 # treemap, sunburst, details
 # default_scan_path = "/home/user/data" # pre-fill welcome screen
 # hostname_aware_paths = false           # store paths per hostname (default: true)
 ```
+
+Per-monitor paths, schedules, scan policy, desired state, revisions, retention,
+pins, and alerts live only in the SQLite repository. Manage them through
+Monitor Center or the `monitor`/`alerts` commands. The `[monitor]` config section
+contains global defaults, database budgets, the foreground watch cap, and the
+TUI auto-start preference.
 
 The **Live scan rendering** setting (`live_scan_render`) controls whether the active visualization tab redraws as the scan progresses. `auto` (the default) enables it on terminals at least 80 columns by 24 rows with at least 4 CPUs, and stays off on smaller / lower-resource setups where the per-frame redraw cost would compete with the scan. Set to `on` to force it regardless of terminal size, or `off` to wait for the scan to finish and render once.
 

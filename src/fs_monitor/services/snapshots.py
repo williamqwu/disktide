@@ -11,8 +11,20 @@ class SnapshotService:
     def __init__(self, repository: SnapshotRepository):
         self._repository = repository
 
-    def save_run(self, run: ScanRun, *, label: str = "") -> Snapshot:
-        snapshot = Snapshot.from_scan_run(run, label=label)
+    def save_run(
+        self,
+        run: ScanRun,
+        *,
+        label: str = "",
+        monitor_id: int | None = None,
+        monitor_revision: int | None = None,
+    ) -> Snapshot:
+        snapshot = Snapshot.from_scan_run(
+            run,
+            label=label,
+            monitor_id=monitor_id,
+            monitor_revision=monitor_revision,
+        )
         root = run.root
         if root is None:
             raise ValueError("scan run has no final tree")

@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.5
+
+**Monitor Center, retention, and alerts**
+
+- **feat** Rebuilt the TUI Monitor screen as Monitor Center with list/detail and narrow-terminal flows for create/edit, pause/resume, run-now, archive, foreground session control, history pins, alert CRUD, retention preview/maintenance, and Explorer selected-subtree continuity.
+- **qol/fix** Moved Explorer, Monitor, and FS Overview mode navigation to `1`/`2`/`3`, keeping the mode hint visible without shadowing screen-local actions. Explorer visualization tabs moved to `F1`/`F2`/`F3`, and uppercase `M` opens monitor setup prefilled with the highlighted directory.
+- **feat** Added persistent `MonitorDefinition`, status, lease, run, history, and event contracts plus one `MonitorService` shared by CLI and TUI. `watch PATH`, `watch --monitor`, `watch --all`, and the TUI session now use the same no-overlap scan → snapshot → alerts → retention pipeline; the old interval scheduler and alert evaluator were removed.
+- **feat** Added `fsmonitor monitor ...` and `fsmonitor alerts ...` command groups with JSON status/list output, foreground host semantics, audited alert checks, and stable alert exit codes.
+- **storage** Added schema v5 for monitor definitions/status/leases, monitor-linked scan and snapshot metadata, pins, rollup provenance, retention audit, and alert rules/events v2. Migration remains transactional with a `data.db.pre-v5.bak` recovery backup and backfills legacy alert prototypes without discarding history.
+- **retention** Added versioned dense/hourly/daily/weekly retention buckets, revision/latest protection, baseline promotion, explicit pins, maintenance audit, database compaction, and configurable global soft/hard budgets. A hard-budget block prevents only snapshot persistence; scans and Explorer remain available.
+- **alerts/history** Added absolute size/growth, percentage growth, free-space, free-inode, and new-large-item rules with metric selection, windows, severity, cooldown, confidence, suppression reason, and immutable events. Subtree history now distinguishes present, missing, removed, partial, incompatible, pinned, and rolled-up points instead of plotting absent data as zero.
+- **safety/tests** Kept enabled definitions distinct from active hosts, added expiring repository leases and safe TUI shutdown, serialized full scans shared with Explorer, preserved read-only/degraded history access, and added Wave 06 service, CLI, TUI, retention, alert, budget, migration, race, and 80×24 coverage; the full suite passes with 691 tests.
+
 ## v0.2.4
 
 **Snapshot v2 and policy-aware compare**

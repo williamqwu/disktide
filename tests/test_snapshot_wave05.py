@@ -407,7 +407,7 @@ def test_corrupted_database_degrades_without_deleting_original(tmp_path):
         assert path.read_bytes() == original
         assert database.conn.execute(
             "SELECT version FROM schema_version"
-        ).fetchone()[0] == 4
+        ).fetchone()[0] == 5
     finally:
         database.close()
 

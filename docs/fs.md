@@ -105,7 +105,7 @@ A `PermissionError` on the directory itself (`os.scandir()` fails) records the e
 
 Errors are stored in `FSNode.error` and displayed in the TUI details panel.
 
-### Snapshot repository -- `repositories/sqlite.py`, `storage/database.py`
+### Monitor and snapshot repository -- `repositories/sqlite.py`, `storage/database.py`
 
 SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant; the legacy directory name is retained for upgrade compatibility).
 
@@ -115,14 +115,18 @@ SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant;
 | Create dir | `os.makedirs(db_dir, exist_ok=True)` |
 | Open/create DB | `sqlite3.connect(path)` |
 | Open read-only recovery | SQLite URI with `mode=ro`, then `PRAGMA query_only=ON` |
-| Pre-migration backup | SQLite backup API to `data.db.pre-v4.bak` |
+| Pre-migration backup | SQLite backup API to `data.db.pre-v5.bak` |
 | Integrity probe | `PRAGMA quick_check` |
+| Budget measurement | `Path.stat()` on the database, WAL, and shared-memory files |
+| Retention compaction | `PRAGMA wal_checkpoint(TRUNCATE)` followed by `VACUUM` |
 
-Snapshot roots are stored as absolute strings in `snapshots.root_path`; file and
+Monitor definitions and snapshot roots are stored as absolute strings;
+definition paths are normalized with `Path.expanduser().resolve()`. File and
 directory paths are interned in `paths.path` and referenced by integer IDs from
 baseline and delta rows. Query filtering uses exact or ancestor/descendant
-string comparison. No additional normalization is applied at the database
-layer -- CLI roots are stored after `Path.resolve()`.
+string comparison. The repository also stores monitor leases/status, pins,
+rollup provenance, retention audits, and alert rule/event history; none of
+those tables causes an additional filesystem walk.
 
 SQLite pragmas: `journal_mode=WAL` (allows concurrent readers with one writer), `foreign_keys=ON`.
 
@@ -132,6 +136,13 @@ an in-memory degraded repository. The original database is never automatically
 deleted or overwritten.
 
 On network filesystems, placing the database on the network share would be slow. The default XDG path puts it on the local filesystem, which is correct.
+
+### Capacity alerts -- `services/alerts.py`
+
+Free-space and free-inode alert rules call `os.statvfs(rule.path)` after a
+monitor snapshot is saved. They read filesystem capacity metadata only; they do
+not traverse the rule path. Size, growth, and new-large-item rules evaluate the
+persisted snapshot measurements and make no extra filesystem calls.
 
 ### Configuration -- `config.py`
 

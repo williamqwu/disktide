@@ -51,13 +51,16 @@ checkouts use `uv sync --locked`; see [Contributing](docs/contributing.md).
 | Location | Contents | Typical size |
 |----------|----------|--------------|
 | `~/.config/fsmonitor-cli/config.toml` | User settings | < 1 KB |
-| `~/.local/share/fsmonitor-cli/data.db` | SQLite snapshot store (policy metadata plus file/directory baselines and deltas) | Depends on tree size and snapshot count |
+| `~/.local/share/fsmonitor-cli/data.db` | SQLite monitor definitions, runtime health, snapshots/deltas, pins, retention audit, and alert history | Depends on tree size and snapshot count |
 
-Snapshot data is written by the CLI commands `scan --snapshot` and `watch`.
-`fsmonitor compare` checks policy and root compatibility before reporting
-growth. The TUI opens the repository for recent paths and Monitor mode but does
-not save snapshots. Old snapshots are pruned automatically based on retention
-settings (default: 30 days).
+Snapshot data is written by `scan --snapshot`, explicit monitor runs, and active
+foreground monitor hosts. `fsmonitor compare` checks policy and root
+compatibility before reporting growth. Monitor Center in the TUI can create,
+edit, pause, run, archive, pin, and manage alerts for the same persistent
+definitions exposed by the CLI. Definitions do not install a daemon: scans run
+only while the current TUI monitoring session or `fsmonitor watch` foreground
+host is active. Versioned retention policies roll older history into time
+buckets, preserve pinned snapshots, and enforce configurable database budgets.
 
 Paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME` if set. Settings can also be edited by pressing `?` inside the TUI. See the [User Guide](docs/user-guide.md) for the full configuration reference.
 
@@ -76,16 +79,22 @@ fsmonitor
 
 | Key | Action |
 |-----|--------|
-| `e` / `m` / `f` | Switch mode (Explorer / Monitor / FS Overview) |
+| `1` / `2` / `3` | Switch mode (Explorer / Monitor / FS Overview) |
 | `c` | Switch to experimental Cleanup mode (enable it in Settings first) |
-| `1` / `2` / `3` | Switch visualization (Sunburst / Treemap / Details) |
+| `F1` / `F2` / `F3` | Switch visualization (Sunburst / Treemap / Details) |
 | `u` / `i` | Navigate up / drill into directory |
 | `s` | Cycle sort (Size / Name / Modified) |
+| `M` | Set up monitoring for the highlighted Explorer directory |
 | `y` / `t` | Copy highlighted path / cycle Logical, Allocated, Unique, Files |
 | `r` | Rescan / refresh |
 | `b` | Benchmark the highlighted mount in FS Overview (after confirmation) |
 | `?` | Settings |
 | `q` | Quit |
+
+Inside Monitor Center, use `n` to create a monitor, `e` to edit it, `p` to
+pause/resume, `R` to run now, and `s` to start/stop the current TUI host. The
+footer keeps the mode hint visible there; press `1` to return to Explorer
+without conflicting with lowercase `e` for Edit.
 
 ### CLI Commands
 
@@ -100,8 +109,17 @@ fsmonitor scan /path --metric allocated --snapshot
 # Stay on one filesystem and skip pseudo-filesystem mounts
 fsmonitor scan / --metric unique --one-file-system --exclude-pseudo
 
-# Watch for changes over time
+# Create a saved monitor and capture its first snapshot
+fsmonitor monitor add /path --interval 6h --capture-now
+fsmonitor monitor list
+
+# Add an audited growth alert to monitor 1
+fsmonitor alerts add 1 /path --growth 10GiB --window 24h
+
+# Watch a transient path, one saved monitor, or every enabled monitor
 fsmonitor watch /path --interval 6h
+fsmonitor watch --monitor 1
+fsmonitor watch --all
 
 # Explain growth between snapshots (target first, baseline second)
 fsmonitor compare latest previous /path
@@ -121,5 +139,5 @@ one-shot CLI, and periodic watch use the same scan service and result semantics.
 - **[Architecture](docs/architecture.md)** -- Internals: scanner threading, database schema, visualization algorithms, screen management
 - **[Filesystem Compatibility](docs/fs.md)** -- Supported filesystems, every syscall the tool makes, platform-specific behavior
 - **[Release Process](docs/release-process.md)** -- Locked builds, clean-wheel smoke tests, checksums, SBOM, provenance, and PyPI publishing
-- **[Delivery Waves](docs/waves/README.md)** -- Interactive Wave 01–05 feature, architecture, and validation briefs
+- **[Delivery Waves](docs/waves/README.md)** -- Interactive Wave 01–06 feature, architecture, and validation briefs
 - **[Contributing](docs/contributing.md)** -- Dev setup, testing, how to add rules/screens/visualizations

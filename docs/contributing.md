@@ -150,7 +150,7 @@ CleanupRule(
 1. Create the layout/rendering logic in `viz/my_viz.py`. It should produce Rich `Segment` objects or use the braille canvas.
 2. Create a Textual widget in `widgets/my_viz_view.py` that calls the renderer.
 3. Add a `TabPane` in `screens/explorer.py` `compose()`.
-4. Add a key binding (e.g., `4`) in `ExplorerScreen.BINDINGS` and handle it in `action_switch_viz()`.
+4. Add a key binding (e.g., `F4`) in `ExplorerScreen.BINDINGS` and handle it in `action_switch_viz()`.
 
 ## Testing Tips
 

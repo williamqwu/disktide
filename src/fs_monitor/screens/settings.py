@@ -8,7 +8,14 @@ from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 
-from fs_monitor.config import AppConfig, save_config, parse_duration, format_duration, current_hostname
+from fs_monitor.config import (
+    AppConfig,
+    current_hostname,
+    format_duration,
+    parse_duration,
+    parse_size,
+    save_config,
+)
 from fs_monitor.scanner.sysinfo import storage_class
 from fs_monitor.repositories.snapshots import SnapshotRepository
 from fs_monitor.viz.colors import SCHEMES, set_color_scheme
@@ -140,15 +147,6 @@ class SettingsScreen(Screen):
             yield Static("")
             yield Static("Monitor Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
-                yield Label("Snapshot retention (days)", classes="setting-label")
-                yield Input(
-                    value=str(self._config.monitor.snapshot_retention),
-                    id="retention-input",
-                    classes="setting-input",
-                )
-                yield Label("(default: 30)", classes="input-hint")
-
-            with Horizontal(classes="setting-row"):
                 yield Label("Default interval", classes="setting-label")
                 yield Input(
                     value=format_duration(self._config.monitor.default_interval),
@@ -167,11 +165,44 @@ class SettingsScreen(Screen):
                 yield Label("(e.g., 2h, 1d; blank = unlimited)", classes="input-hint")
 
             with Horizontal(classes="setting-row"):
-                yield Label("Strict path matching", classes="setting-label")
-                yield Switch(
-                    value=self._config.monitor.strict_path,
-                    id="strict-path",
+                yield Label("Database soft budget", classes="setting-label")
+                yield Input(
+                    value=(
+                        str(self._config.monitor.database_soft_budget)
+                        if self._config.monitor.database_soft_budget is not None
+                        else ""
+                    ),
+                    placeholder="unlimited",
+                    id="monitor-soft-budget",
+                    classes="setting-input",
                 )
+                yield Label("(bytes or 2GiB)", classes="input-hint")
+
+            with Horizontal(classes="setting-row"):
+                yield Label("Database hard budget", classes="setting-label")
+                yield Input(
+                    value=(
+                        str(self._config.monitor.database_hard_budget)
+                        if self._config.monitor.database_hard_budget is not None
+                        else ""
+                    ),
+                    placeholder="unlimited",
+                    id="monitor-hard-budget",
+                    classes="setting-input",
+                )
+                yield Label("(blocks new snapshots)", classes="input-hint")
+
+            with Horizontal(classes="setting-row"):
+                yield Label("Auto-start TUI session", classes="setting-label")
+                yield Switch(
+                    value=self._config.monitor.auto_start_in_tui,
+                    id="monitor-auto-start",
+                )
+            yield Static(
+                "  Per-monitor paths, schedules, policies, retention, pins, "
+                "and alerts are managed in Monitor Center (2).",
+                classes="sysinfo-value",
+            )
 
             yield Static("")
             yield Static("UI Settings", classes="section-title")
@@ -392,8 +423,8 @@ class SettingsScreen(Screen):
             self._config.scan.one_file_system = event.value
         elif event.switch.id == "exclude-pseudo-filesystems":
             self._config.scan.exclude_pseudo_filesystems = event.value
-        elif event.switch.id == "strict-path":
-            self._config.monitor.strict_path = event.value
+        elif event.switch.id == "monitor-auto-start":
+            self._config.monitor.auto_start_in_tui = event.value
         elif event.switch.id == "hostname-aware-paths":
             self._config.ui.hostname_aware_paths = event.value
         elif event.switch.id == "safe-rendering":
@@ -437,13 +468,6 @@ class SettingsScreen(Screen):
                         self._config.scan.max_depth = parsed
                 except ValueError:
                     pass
-        elif event.input.id == "retention-input":
-            try:
-                parsed = int(value)
-                if parsed > 0:
-                    self._config.monitor.snapshot_retention = parsed
-            except ValueError:
-                pass
         elif event.input.id == "interval-input":
             try:
                 parsed = parse_duration(value)
@@ -460,4 +484,20 @@ class SettingsScreen(Screen):
                     if parsed > 0:
                         self._config.monitor.max_watch_time = parsed
                 except (ValueError, IndexError):
+                    pass
+        elif event.input.id == "monitor-soft-budget":
+            if value == "":
+                self._config.monitor.database_soft_budget = None
+            else:
+                try:
+                    self._config.monitor.database_soft_budget = parse_size(value)
+                except ValueError:
+                    pass
+        elif event.input.id == "monitor-hard-budget":
+            if value == "":
+                self._config.monitor.database_hard_budget = None
+            else:
+                try:
+                    self._config.monitor.database_hard_budget = parse_size(value)
+                except ValueError:
                     pass

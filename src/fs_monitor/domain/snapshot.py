@@ -98,6 +98,9 @@ class Snapshot:
     capabilities: tuple[str, ...] = ()
     legacy: bool = False
     inference_source: str = "native-v2"
+    monitor_id: int | None = None
+    monitor_revision: int | None = None
+    rollup_kind: str | None = None
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -116,7 +119,14 @@ class Snapshot:
         )
 
     @classmethod
-    def from_scan_run(cls, run: ScanRun, *, label: str = "") -> Snapshot:
+    def from_scan_run(
+        cls,
+        run: ScanRun,
+        *,
+        label: str = "",
+        monitor_id: int | None = None,
+        monitor_revision: int | None = None,
+    ) -> Snapshot:
         """Create canonical v2 metadata from a successful terminal scan run."""
         root = run.root
         if not run.succeeded or root is None:
@@ -152,6 +162,8 @@ class Snapshot:
             root_inode=root.inode,
             root_filesystem=root.filesystem_type,
             capabilities=tuple(run.capability_warnings),
+            monitor_id=monitor_id,
+            monitor_revision=monitor_revision,
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,

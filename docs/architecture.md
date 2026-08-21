@@ -14,8 +14,10 @@ src/fs_monitor/
   rendering.py           Process-wide safe-rendering state
 
   domain/
+    alerts.py            Alert rule/event contracts
     delta.py             Compatibility decisions + shared delta result
     metrics.py           MetricId + StorageMeasurements semantics
+    monitor.py           Definitions, status, history, retention contracts
     policy.py            Explicit ScanPolicy metadata
     scan.py              ScanRequest/ScanRun/status/event contracts
     snapshot.py          Snapshot format v2 metadata
@@ -32,13 +34,18 @@ src/fs_monitor/
     capabilities.py      CapabilityId/status/reason public vocabulary
 
   services/
+    alerts.py            Rule CRUD + snapshot/delta evaluation
     compare.py           Policy-aware snapshot selection + compare reports
     doctor.py            Human + JSON installation diagnostics
+    monitor.py           Shared management and foreground host pipeline
+    retention.py         Rollup planning, pins, budget maintenance
     scan.py              Run lifecycle, cancellation, event dispatch
     scan_consumers.py    Progress/tree view models and event replay
     snapshots.py         Persist successful ScanRun results
 
   repositories/
+    alerts.py            AlertRepository protocol
+    monitors.py          MonitorRepository + RetentionRepository protocols
     snapshots.py         SnapshotRepository protocol + status contract
     sqlite.py            SQLite repository adapter
 
@@ -66,9 +73,7 @@ src/fs_monitor/
     actions.py           Permanent deletion with dry-run support
 
   monitor/
-    alerts.py            Threshold alert rules and event checking
     diff.py              In-memory comparison using shared SizeDelta
-    scheduler.py         Interval-based periodic scan scheduling
 
   viz/
     treemap.py           Squarified treemap layout + rendering
@@ -80,14 +85,16 @@ src/fs_monitor/
     welcome.py           Welcome screen with path completion
     explorer.py          Tree + visualization (treemap/sunburst/details)
     cleanup.py           Target table + deletion workflow
-    monitor.py           Snapshot history + trend chart
+    monitor.py           Monitor Center management + history/alerts/retention
     fs_overview.py       Mounted filesystems, block devices, benchmark
     settings.py          Configuration editing
 
   widgets/
     size_tree.py         Tree[FSNode] with size bars, lazy loading
     breadcrumb.py        Path breadcrumb navigation
+    alert_editor.py      Alert rule create/edit modal
     info_panel.py        Details for selected node
+    monitor_editor.py    Monitor definition create/edit modal
     treemap_view.py      Treemap Textual widget
     sunburst_view.py     Sunburst Textual widget
     trend_chart.py       Historical size line chart
@@ -112,7 +119,7 @@ the user's scan tree.
 ## Scan Service and Event Protocol
 
 `ScanService` is the product entry point for CLI scans, Explorer scans, cleanup
-discovery, periodic watch scans, and the monitor scheduler. It validates a
+discovery, and foreground monitor hosts. It validates a
 `ScanRequest`, resolves the active platform adapter and metric capability,
 creates a stable `ScanRun` id, owns cancellation, and returns one normalized
 terminal status: `completed`, `partial`, `cancelled`, or `failed`.
@@ -335,26 +342,80 @@ xdev, pseudo-filesystem, max-depth, symlink, hardlink, exclude, and partial
 coverage metadata before loading measurements. Incompatible comparisons are
 blocked unless the caller explicitly requests a raw/untrusted diff.
 
+## Monitor Service and Foreground Hosts
+
+`MonitorService` is the command/query boundary shared by Click commands and the
+Textual Monitor Center. Presentation code submits create/update/pause/resume,
+run-now, host-session, archive, pin, retention, and alert intents; it does not
+write SQLite or construct a second scheduler. Persistent definitions live in
+the repository, while `config.toml` contains only global defaults, database
+budgets, and the TUI auto-start preference.
+
+Three state dimensions remain separate:
+
+- desired state: `enabled`, `paused`, or `archived`;
+- activity: `no-host`, `waiting`, `queued`, `scanning`, or `stopping`;
+- health: `unknown`, `healthy`, `warning`, `failed`, or `blocked`.
+
+An enabled definition does not imply background execution. Wave 06 hosts are
+the current TUI process or `fsmonitor watch --monitor/--all`; both acquire the
+same expiring repository lease and heartbeat it. Start-to-start UTC due times
+are persisted, process waits use a monotonic clock, one monitor never overlaps
+itself, and repeated run-now requests coalesce to one pending rerun. Native
+daemon or user-service installation remains outside this release.
+
+Every hosted run uses one pipeline: scan, persist snapshot, evaluate alerts,
+apply retention when needed, record run/status, and publish monitor events.
+`ScanService` serializes full scans shared by Explorer and Monitor so competing
+product surfaces do not start simultaneous tree walks.
+
+Retention keeps recent snapshots densely, promotes older history into
+hourly/daily/weekly representatives, preserves pinned snapshots and the newest
+snapshot in every monitor revision, and records source range/count provenance.
+Deleting a required baseline first materializes and promotes the earliest
+survivor. The global soft budget triggers maintenance; the hard budget attempts
+maintenance and then blocks only snapshot persistence, not the in-memory scan.
+
+Alert rules are persisted per monitor and evaluated from canonical snapshot
+measurements. Supported rules cover absolute size/growth, percentage growth,
+free bytes, free inodes, and newly appearing large items. Events record old/new
+snapshot ids, observed and threshold values, severity, confidence, cooldown
+suppression, and suppression reason. Partial snapshots create suppressed audit
+events instead of presenting low-confidence triggers as definitive.
+
+See `docs/adr/0005-monitor-service-retention-and-alerts.md` for the accepted
+host, scheduling, retention, alert, and schema boundaries.
+
 ## Database
 
 SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects `XDG_DATA_HOME`; the legacy directory name is retained for upgrade compatibility).
 
 ### Schema
 
-Database schema v4 remains distinct from snapshot format v2 and the public
+Database schema v5 remains distinct from snapshot format v2 and the public
 snapshot API version.
+
+**monitor_definitions** -- Canonical path, label, revision, desired state,
+start-to-start interval, selected metric, serialized scan policy, workers, and
+versioned retention policy.
+
+**monitor_status / monitor_leases** -- Activity/health projection, next due and
+last run details, active phase/progress, failure state, retention summary, and
+the current foreground host lease/heartbeat.
 
 **monitored_roots** -- Stable root path plus observed device, inode, filesystem,
 and last-seen timestamp.
 
 **scan_runs** -- Run id, lifecycle timestamps/status, duration, adapter/version,
-selected metric, serialized policy, and coverage counts.
+selected metric, serialized policy, coverage counts, monitor/revision, trigger,
+scheduled time, host, and resulting snapshot.
 
 **snapshots** -- Stable legacy-compatible totals plus baseline/delta links.
 
 **snapshot_metadata** -- Snapshot format/API versions, metric semantics and
 availability, policy, scanner/run/root identity, completion/coverage fields,
-timezone rule, capabilities, and legacy inference source.
+timezone rule, capabilities, legacy inference source, monitor/revision, and
+rollup kind.
 
 **paths** -- Interned file and directory paths with parent, basename, and depth.
 
@@ -364,8 +425,12 @@ allocated, unique, own measurements, counts, mtime, error, and node kind.
 **deltas** -- Changed, added, or removed file/directory state for non-baseline
 snapshots, using the same measurements plus `is_removed`.
 
-**Other tables:** `alert_rules`, `alert_events`, the legacy `deletion_log` API
-table, and `schema_version`.
+**snapshot_pins / snapshot_rollups / retention_runs** -- Explicit protection,
+rollup provenance, and auditable maintenance before/after counts and bytes.
+
+**alert_rules / alert_events** -- Version-two rule configuration and immutable
+trigger/suppression audit. The legacy `deletion_log` API table and
+`schema_version` also remain.
 
 The first snapshot for a root is a baseline; another full baseline is stored every 50 snapshots. Intermediate snapshots compare against the previously resolved state and persist only changed directory rows. When retention deletes a baseline, the earliest surviving dependent is materialized and promoted before the old baseline is removed.
 
@@ -377,15 +442,19 @@ The first snapshot for a root is a baseline; another full baseline is stored eve
 requested state by loading its baseline and applying ordered deltas. File paths
 are retained, so reports can name `b/new.bin` rather than only its parent.
 
-`get_size_history(path)` combines baseline rows and deltas, then forward-fills unchanged snapshots to return `(timestamp, size)` pairs.
+`get_size_history(path)` combines baseline rows and deltas, then forward-fills
+unchanged snapshots to return `(timestamp, size)` pairs. Monitor history queries
+add revision, pin, rollup, partial, missing, removed, and incompatible state so
+the TUI never converts an absent subtree into a false zero.
 
 ### Migration and degraded behavior
 
 Before changing a non-empty on-disk database, migration writes a SQLite backup
-next to it (for schema v4: `data.db.pre-v4.bak`). All DDL, backfill, and schema
+next to it (for schema v5: `data.db.pre-v5.bak`). All DDL, backfill, and schema
 version changes run in one transaction; failure rolls back without advancing
 `schema_version`. Existing schema-v3/v0.1.7 snapshots are marked legacy with an
-explicit inference source rather than discarded.
+explicit inference source rather than discarded. Schema-v5 migration also maps
+the old size/percentage alert prototype into the new rule/event audit fields.
 
 If migration or writes fail but the database is readable, the adapter opens the
 original read-only so list/history remain available. If the file is corrupt or
@@ -505,7 +574,7 @@ fsmonitor scan <path>
 
 ### Screen Management
 
-`FSMonitorApp` installs four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings after the welcome screen completes. Screens are installed (not pushed) so they persist when switching modes with `E`/`C`/`M`/`F`.
+`FSMonitorApp` installs four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings after the welcome screen completes. Screens are installed (not pushed) so they persist when switching among Explorer/Monitor/FS Overview with `1`/`2`/`3`; experimental Cleanup remains on `c`.
 
 - `switch_screen()` swaps the current screen at the same stack level
 - `push_screen()` adds a screen on top (used for settings overlay)

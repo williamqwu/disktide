@@ -14,9 +14,28 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from fs_monitor import LEGACY_STORAGE_NAMESPACE
+from fs_monitor import LEGACY_STORAGE_NAMESPACE, __version__
+from fs_monitor.domain.alerts import (
+    AlertEvent,
+    AlertKind,
+    AlertRule,
+    AlertSeverity,
+)
 from fs_monitor.domain.delta import NodeMeasurement, SizeDelta
 from fs_monitor.domain.metrics import MetricId
+from fs_monitor.domain.monitor import (
+    HistoryPointState,
+    MonitorActivityState,
+    MonitorDefinition,
+    MonitorDesiredState,
+    MonitorHealthState,
+    MonitorHistoryPoint,
+    MonitorStatus,
+    RetentionPolicy,
+    RetentionSnapshot,
+    RetentionResult,
+)
+from fs_monitor.domain.policy import ScanPolicy
 from fs_monitor.domain.snapshot import (
     Snapshot,
     policy_from_dict,
@@ -50,6 +69,63 @@ _NodeTuple = tuple[
     str | None,
     bool,
 ]
+
+
+def _datetime_text(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _datetime_value(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _measurement_value(
+    measurement: NodeMeasurement, metric: MetricId | str
+) -> int | None:
+    selected = MetricId.parse(metric)
+    if selected is MetricId.LOGICAL:
+        return measurement.logical_bytes
+    if selected is MetricId.ALLOCATED:
+        return measurement.allocated_bytes
+    if selected is MetricId.UNIQUE:
+        return measurement.unique_allocated_bytes
+    return measurement.file_count
+
+
+def _retention_to_dict(policy: RetentionPolicy) -> dict[str, object]:
+    return {
+        "version": policy.version,
+        "keep_all_seconds": policy.keep_all_seconds,
+        "keep_hourly_seconds": policy.keep_hourly_seconds,
+        "keep_daily_seconds": policy.keep_daily_seconds,
+        "minimum_snapshots": policy.minimum_snapshots,
+        "automatic": policy.automatic,
+    }
+
+
+def _retention_from_dict(value: dict[str, object] | None) -> RetentionPolicy:
+    data = value or {}
+    return RetentionPolicy(
+        version=int(data.get("version", 1)),
+        keep_all_seconds=int(data.get("keep_all_seconds", 24 * 60 * 60)),
+        keep_hourly_seconds=int(
+            data.get("keep_hourly_seconds", 30 * 24 * 60 * 60)
+        ),
+        keep_daily_seconds=int(
+            data.get("keep_daily_seconds", 365 * 24 * 60 * 60)
+        ),
+        minimum_snapshots=int(data.get("minimum_snapshots", 2)),
+        automatic=bool(data.get("automatic", True)),
+    )
 
 
 def _default_db_path() -> str:
@@ -117,10 +193,11 @@ class Database:
         )
         if read_only and path != ":memory:":
             uri = f"file:{quote(str(Path(path).resolve()))}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True)
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         else:
-            conn = sqlite3.connect(path)
+            conn = sqlite3.connect(path, check_same_thread=False)
         try:
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA foreign_keys=ON")
             if read_only:
                 conn.execute("PRAGMA query_only=ON")
@@ -241,6 +318,13 @@ class Database:
         if self._conn is None:
             self.connect()
         return self._conn
+
+    def _table_exists(self, name: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
     def __enter__(self):
         self.connect()
@@ -441,8 +525,10 @@ class Database:
                        run_id, root_id, created_at, started_at, finished_at,
                        status, duration, platform_adapter, scanner_version,
                        selected_metric, policy_json, partial, error_count,
-                       excluded_count, depth_limited_count
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       excluded_count, depth_limited_count, monitor_id,
+                       monitor_revision, snapshot_id
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                             ?, ?, ?)
                    ON CONFLICT(run_id) DO UPDATE SET
                        root_id = excluded.root_id,
                        finished_at = excluded.finished_at,
@@ -451,7 +537,12 @@ class Database:
                        partial = excluded.partial,
                        error_count = excluded.error_count,
                        excluded_count = excluded.excluded_count,
-                       depth_limited_count = excluded.depth_limited_count""",
+                       depth_limited_count = excluded.depth_limited_count,
+                       monitor_id = COALESCE(excluded.monitor_id, scan_runs.monitor_id),
+                       monitor_revision = COALESCE(
+                           excluded.monitor_revision, scan_runs.monitor_revision
+                       ),
+                       snapshot_id = excluded.snapshot_id""",
                 (
                     snapshot.scan_run_id,
                     root_id,
@@ -468,6 +559,9 @@ class Database:
                     snapshot.error_count,
                     snapshot.excluded_count,
                     snapshot.depth_limited_count,
+                    snapshot.monitor_id,
+                    snapshot.monitor_revision,
+                    snapshot_id,
                 ),
             )
         self.conn.execute(
@@ -481,9 +575,10 @@ class Database:
                    partial, error_count, excluded_count, depth_limited_count,
                    root_device_id, root_inode, root_filesystem,
                    timestamp_timezone, capabilities_json, legacy,
-                   inference_source, scan_run_id, root_id
+                   inference_source, scan_run_id, root_id, monitor_id,
+                   monitor_revision, rollup_kind
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 snapshot_id,
                 snapshot.format_version,
@@ -513,6 +608,9 @@ class Database:
                 snapshot.inference_source,
                 snapshot.scan_run_id,
                 root_id,
+                snapshot.monitor_id,
+                snapshot.monitor_revision,
+                snapshot.rollup_kind,
             ),
         )
 
@@ -753,8 +851,25 @@ class Database:
             baseline_id=row[9] if len(row) > 9 else None,
         )
         try:
+            metadata_columns = {
+                item[1]
+                for item in self.conn.execute(
+                    "PRAGMA table_info(snapshot_metadata)"
+                ).fetchall()
+            }
+            monitor_id_expr = (
+                "m.monitor_id" if "monitor_id" in metadata_columns else "NULL"
+            )
+            monitor_revision_expr = (
+                "m.monitor_revision"
+                if "monitor_revision" in metadata_columns
+                else "NULL"
+            )
+            rollup_kind_expr = (
+                "m.rollup_kind" if "rollup_kind" in metadata_columns else "NULL"
+            )
             metadata = self.conn.execute(
-                """SELECT
+                f"""SELECT
                        m.snapshot_format_version,
                        m.snapshot_api_version,
                        m.metric_semantics_version,
@@ -781,6 +896,9 @@ class Database:
                        m.legacy,
                        m.inference_source,
                        m.scan_run_id,
+                       {monitor_id_expr},
+                       {monitor_revision_expr},
+                       {rollup_kind_expr},
                        r.created_at,
                        r.started_at,
                        r.finished_at
@@ -829,14 +947,17 @@ class Database:
         snapshot.legacy = bool(metadata[23])
         snapshot.inference_source = metadata[24]
         snapshot.scan_run_id = metadata[25]
+        snapshot.monitor_id = metadata[26]
+        snapshot.monitor_revision = metadata[27]
+        snapshot.rollup_kind = metadata[28]
         snapshot.created_at = (
-            datetime.fromisoformat(metadata[26]) if metadata[26] else None
+            datetime.fromisoformat(metadata[29]) if metadata[29] else None
         )
         snapshot.started_at = (
-            datetime.fromisoformat(metadata[27]) if metadata[27] else None
+            datetime.fromisoformat(metadata[30]) if metadata[30] else None
         )
         snapshot.finished_at = (
-            datetime.fromisoformat(metadata[28]) if metadata[28] else None
+            datetime.fromisoformat(metadata[31]) if metadata[31] else None
         )
         return snapshot
 
@@ -1076,6 +1197,767 @@ class Database:
         deltas.sort(key=lambda delta: (-abs(delta.delta), delta.path))
         return deltas
 
+    # ── Monitor definitions and runtime state ──
+
+    @staticmethod
+    def _row_to_monitor(row) -> MonitorDefinition:
+        return MonitorDefinition(
+            id=row[0],
+            label=row[1],
+            root_path=row[2],
+            revision=row[3],
+            desired_state=MonitorDesiredState(row[4]),
+            interval_seconds=row[5],
+            metric=MetricId.parse(row[6]),
+            policy=policy_from_dict(json.loads(row[7])) or ScanPolicy(),
+            workers=row[8],
+            retention=_retention_from_dict(json.loads(row[9])),
+            created_at=_datetime_value(row[10]) or datetime.now(timezone.utc),
+            updated_at=_datetime_value(row[11]) or datetime.now(timezone.utc),
+            archived_at=_datetime_value(row[12]),
+        )
+
+    @staticmethod
+    def _monitor_columns() -> str:
+        return (
+            "id, label, root_path, revision, desired_state, interval_seconds, "
+            "selected_metric, policy_json, workers, retention_json, "
+            "created_at, updated_at, archived_at"
+        )
+
+    def create_monitor(self, definition: MonitorDefinition) -> MonitorDefinition:
+        if self.read_only:
+            raise sqlite3.OperationalError("monitor repository is read-only")
+        item = definition.normalized()
+        now = datetime.now(timezone.utc)
+        cursor = self.conn.execute(
+            """INSERT INTO monitor_definitions (
+                   label, root_path, revision, desired_state, interval_seconds,
+                   selected_metric, policy_json, workers, retention_json,
+                   created_at, updated_at, archived_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                item.label,
+                item.root_path,
+                item.revision,
+                item.desired_state.value,
+                item.interval_seconds,
+                item.metric.value,
+                json.dumps(policy_to_dict(item.policy), sort_keys=True),
+                item.workers,
+                json.dumps(_retention_to_dict(item.retention), sort_keys=True),
+                _datetime_text(now),
+                _datetime_text(now),
+                _datetime_text(item.archived_at),
+            ),
+        )
+        monitor_id = int(cursor.lastrowid)
+        self.conn.execute(
+            """INSERT INTO monitor_status
+               (monitor_id, activity_state, health_state)
+               VALUES (?, 'no-host', 'unknown')""",
+            (monitor_id,),
+        )
+        self.conn.commit()
+        created = self.get_monitor(monitor_id)
+        if created is None:
+            raise sqlite3.DatabaseError("created monitor could not be loaded")
+        return created
+
+    def update_monitor(
+        self, definition: MonitorDefinition, *, expected_revision: int
+    ) -> MonitorDefinition:
+        if self.read_only:
+            raise sqlite3.OperationalError("monitor repository is read-only")
+        if definition.id is None:
+            raise ValueError("monitor id is required")
+        current = self.get_monitor(definition.id)
+        if current is None:
+            raise KeyError(f"monitor {definition.id} does not exist")
+        if current.revision != expected_revision:
+            raise ValueError(
+                f"monitor revision changed: expected {expected_revision}, "
+                f"found {current.revision}"
+            )
+        item = definition.normalized()
+        compatibility_changed = (
+            current.root_path != item.root_path
+            or current.metric != item.metric
+            or current.policy != item.policy
+        )
+        revision = current.revision + 1 if compatibility_changed else current.revision
+        cursor = self.conn.execute(
+            """UPDATE monitor_definitions
+               SET label = ?, root_path = ?, revision = ?, desired_state = ?,
+                   interval_seconds = ?, selected_metric = ?, policy_json = ?,
+                   workers = ?, retention_json = ?, updated_at = ?, archived_at = ?
+               WHERE id = ? AND revision = ?""",
+            (
+                item.label,
+                item.root_path,
+                revision,
+                item.desired_state.value,
+                item.interval_seconds,
+                item.metric.value,
+                json.dumps(policy_to_dict(item.policy), sort_keys=True),
+                item.workers,
+                json.dumps(_retention_to_dict(item.retention), sort_keys=True),
+                _datetime_text(datetime.now(timezone.utc)),
+                _datetime_text(item.archived_at),
+                item.id,
+                expected_revision,
+            ),
+        )
+        if cursor.rowcount != 1:
+            self.conn.rollback()
+            raise ValueError("monitor update lost an optimistic-lock race")
+        self.conn.commit()
+        updated = self.get_monitor(item.id)
+        if updated is None:
+            raise sqlite3.DatabaseError("updated monitor could not be loaded")
+        return updated
+
+    def get_monitor(self, identifier: int | str) -> MonitorDefinition | None:
+        if not self._table_exists("monitor_definitions"):
+            return None
+        columns = self._monitor_columns()
+        if isinstance(identifier, int) or str(identifier).isdigit():
+            row = self.conn.execute(
+                f"SELECT {columns} FROM monitor_definitions WHERE id = ?",
+                (int(identifier),),
+            ).fetchone()
+        else:
+            raw = str(identifier)
+            resolved = str(Path(raw).expanduser().resolve())
+            row = self.conn.execute(
+                f"""SELECT {columns} FROM monitor_definitions
+                    WHERE root_path = ? OR label = ?
+                    ORDER BY desired_state = 'archived', id DESC LIMIT 1""",
+                (resolved, raw),
+            ).fetchone()
+        return self._row_to_monitor(row) if row else None
+
+    def list_monitors(
+        self, *, include_archived: bool = False
+    ) -> list[MonitorDefinition]:
+        if not self._table_exists("monitor_definitions"):
+            return []
+        columns = self._monitor_columns()
+        if include_archived:
+            rows = self.conn.execute(
+                f"SELECT {columns} FROM monitor_definitions ORDER BY label, id"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                f"""SELECT {columns} FROM monitor_definitions
+                    WHERE desired_state <> 'archived' ORDER BY label, id"""
+            ).fetchall()
+        return [self._row_to_monitor(row) for row in rows]
+
+    def set_monitor_desired_state(self, monitor_id: int, state: str) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("monitor repository is read-only")
+        desired = MonitorDesiredState(state)
+        archived_at = (
+            _datetime_text(datetime.now(timezone.utc))
+            if desired is MonitorDesiredState.ARCHIVED
+            else None
+        )
+        self.conn.execute(
+            """UPDATE monitor_definitions
+               SET desired_state = ?, archived_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (
+                desired.value,
+                archived_at,
+                _datetime_text(datetime.now(timezone.utc)),
+                monitor_id,
+            ),
+        )
+        self.conn.commit()
+
+    def archive_monitor(self, monitor_id: int) -> None:
+        self.set_monitor_desired_state(
+            monitor_id, MonitorDesiredState.ARCHIVED.value
+        )
+
+    @staticmethod
+    def _row_to_monitor_status(row, monitor_id: int) -> MonitorStatus:
+        if row is None:
+            return MonitorStatus(monitor_id=monitor_id)
+        return MonitorStatus(
+            monitor_id=monitor_id,
+            activity=MonitorActivityState(row[0]),
+            health=MonitorHealthState(row[1]),
+            host_id=row[2],
+            host_type=row[3],
+            lease_expires_at=_datetime_value(row[4]),
+            next_due_at=_datetime_value(row[5]),
+            last_attempt_at=_datetime_value(row[6]),
+            last_success_at=_datetime_value(row[7]),
+            last_failure_at=_datetime_value(row[8]),
+            last_duration_seconds=row[9],
+            active_run_id=row[10],
+            active_phase=row[11],
+            progress_percent=float(row[12] or 0.0),
+            current_path=row[13],
+            rerun_pending=bool(row[14]),
+            latest_snapshot_id=row[15],
+            consecutive_failures=row[16],
+            last_error=row[17],
+            blocked_reason=row[18],
+            last_retention_at=_datetime_value(row[19]),
+            last_retention_summary=row[20],
+        )
+
+    def get_monitor_status(self, monitor_id: int) -> MonitorStatus:
+        if not self._table_exists("monitor_status"):
+            return MonitorStatus(monitor_id=monitor_id)
+        row = self.conn.execute(
+            """SELECT activity_state, health_state, host_id, host_type,
+                      lease_expires_at, next_due_at, last_attempt_at,
+                      last_success_at, last_failure_at, last_duration,
+                      active_run_id, active_phase, progress_percent,
+                      current_path, rerun_pending, latest_snapshot_id,
+                      consecutive_failures, last_error, blocked_reason,
+                      last_retention_at, last_retention_summary
+               FROM monitor_status WHERE monitor_id = ?""",
+            (monitor_id,),
+        ).fetchone()
+        return self._row_to_monitor_status(row, monitor_id)
+
+    def save_monitor_status(self, status: MonitorStatus) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("monitor repository is read-only")
+        self.conn.execute(
+            """INSERT INTO monitor_status (
+                   monitor_id, activity_state, health_state, host_id, host_type,
+                   lease_expires_at, next_due_at, last_attempt_at,
+                   last_success_at, last_failure_at, last_duration,
+                   active_run_id, active_phase, progress_percent, current_path,
+                   rerun_pending, latest_snapshot_id, consecutive_failures,
+                   last_error, blocked_reason, last_retention_at,
+                   last_retention_summary
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         ?, ?, ?, ?)
+               ON CONFLICT(monitor_id) DO UPDATE SET
+                   activity_state = excluded.activity_state,
+                   health_state = excluded.health_state,
+                   host_id = excluded.host_id,
+                   host_type = excluded.host_type,
+                   lease_expires_at = excluded.lease_expires_at,
+                   next_due_at = excluded.next_due_at,
+                   last_attempt_at = excluded.last_attempt_at,
+                   last_success_at = excluded.last_success_at,
+                   last_failure_at = excluded.last_failure_at,
+                   last_duration = excluded.last_duration,
+                   active_run_id = excluded.active_run_id,
+                   active_phase = excluded.active_phase,
+                   progress_percent = excluded.progress_percent,
+                   current_path = excluded.current_path,
+                   rerun_pending = excluded.rerun_pending,
+                   latest_snapshot_id = excluded.latest_snapshot_id,
+                   consecutive_failures = excluded.consecutive_failures,
+                   last_error = excluded.last_error,
+                   blocked_reason = excluded.blocked_reason,
+                   last_retention_at = excluded.last_retention_at,
+                   last_retention_summary = excluded.last_retention_summary""",
+            (
+                status.monitor_id,
+                status.activity.value,
+                status.health.value,
+                status.host_id,
+                status.host_type,
+                _datetime_text(status.lease_expires_at),
+                _datetime_text(status.next_due_at),
+                _datetime_text(status.last_attempt_at),
+                _datetime_text(status.last_success_at),
+                _datetime_text(status.last_failure_at),
+                status.last_duration_seconds,
+                status.active_run_id,
+                status.active_phase,
+                status.progress_percent,
+                status.current_path,
+                int(status.rerun_pending),
+                status.latest_snapshot_id,
+                status.consecutive_failures,
+                status.last_error,
+                status.blocked_reason,
+                _datetime_text(status.last_retention_at),
+                status.last_retention_summary,
+            ),
+        )
+        self.conn.commit()
+
+    def acquire_monitor_lease(
+        self,
+        monitor_id: int,
+        *,
+        host_id: str,
+        host_type: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        if self.read_only:
+            return False
+        cursor = self.conn.execute(
+            """INSERT INTO monitor_leases (
+                   monitor_id, host_id, host_type, acquired_at,
+                   heartbeat_at, expires_at
+               ) VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(monitor_id) DO UPDATE SET
+                   host_id = excluded.host_id,
+                   host_type = excluded.host_type,
+                   acquired_at = excluded.acquired_at,
+                   heartbeat_at = excluded.heartbeat_at,
+                   expires_at = excluded.expires_at
+               WHERE monitor_leases.expires_at <= ?
+                  OR monitor_leases.host_id = excluded.host_id""",
+            (
+                monitor_id,
+                host_id,
+                host_type,
+                _datetime_text(now),
+                _datetime_text(now),
+                _datetime_text(expires_at),
+                _datetime_text(now),
+            ),
+        )
+        acquired = cursor.rowcount == 1
+        self.conn.commit()
+        return acquired
+
+    def heartbeat_monitor_lease(
+        self,
+        monitor_id: int,
+        *,
+        host_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        if self.read_only:
+            return False
+        cursor = self.conn.execute(
+            """UPDATE monitor_leases
+               SET heartbeat_at = ?, expires_at = ?
+               WHERE monitor_id = ? AND host_id = ?""",
+            (
+                _datetime_text(now),
+                _datetime_text(expires_at),
+                monitor_id,
+                host_id,
+            ),
+        )
+        self.conn.commit()
+        return cursor.rowcount == 1
+
+    def release_monitor_lease(self, monitor_id: int, *, host_id: str) -> None:
+        if self.read_only:
+            return
+        self.conn.execute(
+            "DELETE FROM monitor_leases WHERE monitor_id = ? AND host_id = ?",
+            (monitor_id, host_id),
+        )
+        self.conn.execute(
+            """UPDATE monitor_status
+               SET activity_state = 'no-host', host_id = NULL,
+                   host_type = NULL, lease_expires_at = NULL,
+                   active_run_id = NULL
+               WHERE monitor_id = ? AND host_id = ?""",
+            (monitor_id, host_id),
+        )
+        self.conn.commit()
+
+    def record_monitor_run(
+        self,
+        run,
+        *,
+        monitor_id: int | None,
+        monitor_revision: int | None,
+        trigger: str,
+        scheduled_for: datetime | None,
+        host_id: str | None,
+        snapshot_id: int | None = None,
+    ) -> None:
+        if self.read_only:
+            return
+        root = run.root
+        root_device_id = root.device_id if root is not None else None
+        root_inode = root.inode if root is not None else None
+        root_filesystem = root.filesystem_type if root is not None else None
+        seen_at = run.finished_at or run.started_at or run.created_at
+        self.conn.execute(
+            """INSERT INTO monitored_roots
+               (root_path, device_id, inode, filesystem_type, last_seen_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(root_path) DO UPDATE SET
+                   device_id = COALESCE(excluded.device_id, monitored_roots.device_id),
+                   inode = COALESCE(excluded.inode, monitored_roots.inode),
+                   filesystem_type = COALESCE(
+                       excluded.filesystem_type, monitored_roots.filesystem_type
+                   ),
+                   last_seen_at = excluded.last_seen_at""",
+            (
+                run.request.path,
+                root_device_id,
+                root_inode,
+                root_filesystem,
+                _datetime_text(seen_at),
+            ),
+        )
+        root_id = self.conn.execute(
+            "SELECT id FROM monitored_roots WHERE root_path = ?",
+            (run.request.path,),
+        ).fetchone()[0]
+        error_count = 0
+        excluded_count = 0
+        depth_limited_count = 0
+        if root is not None:
+            error_count = root.inaccessible_subtree_count + int(root.error is not None)
+            excluded_count = root.excluded_subtree_count + int(root.excluded)
+            depth_limited_count = (
+                root.depth_limited_subtree_count + int(root.depth_limited)
+            )
+        self.conn.execute(
+            """INSERT INTO scan_runs (
+                   run_id, root_id, created_at, started_at, finished_at, status,
+                   duration, platform_adapter, scanner_version, selected_metric,
+                   policy_json, error_type, error_message, partial, error_count,
+                   excluded_count, depth_limited_count, monitor_id,
+                   monitor_revision, trigger, scheduled_for, host_id, snapshot_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(run_id) DO UPDATE SET
+                   root_id = excluded.root_id,
+                   started_at = excluded.started_at,
+                   finished_at = excluded.finished_at,
+                   status = excluded.status,
+                   duration = excluded.duration,
+                   error_type = excluded.error_type,
+                   error_message = excluded.error_message,
+                   partial = excluded.partial,
+                   error_count = excluded.error_count,
+                   excluded_count = excluded.excluded_count,
+                   depth_limited_count = excluded.depth_limited_count,
+                   monitor_id = excluded.monitor_id,
+                   monitor_revision = excluded.monitor_revision,
+                   trigger = excluded.trigger,
+                   scheduled_for = excluded.scheduled_for,
+                   host_id = excluded.host_id,
+                   snapshot_id = excluded.snapshot_id""",
+            (
+                run.run_id,
+                root_id,
+                _datetime_text(run.created_at),
+                _datetime_text(run.started_at),
+                _datetime_text(run.finished_at),
+                run.status.value,
+                run.duration_seconds,
+                run.platform_adapter,
+                __version__,
+                run.request.metric.value,
+                json.dumps(policy_to_dict(run.policy), sort_keys=True),
+                run.error_type,
+                run.error_message,
+                int(run.partial),
+                error_count,
+                excluded_count,
+                depth_limited_count,
+                monitor_id,
+                monitor_revision,
+                trigger,
+                _datetime_text(scheduled_for),
+                host_id,
+                snapshot_id,
+            ),
+        )
+        self.conn.commit()
+
+    def monitor_snapshot_count(self, monitor_id: int) -> int:
+        if not self._table_exists("snapshot_metadata"):
+            return 0
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM snapshot_metadata WHERE monitor_id = ?",
+            (monitor_id,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def get_monitor_history_points(
+        self, monitor_id: int, path: str
+    ) -> list[MonitorHistoryPoint]:
+        if not self._table_exists("monitor_definitions"):
+            return []
+        monitor = self.get_monitor(monitor_id)
+        if monitor is None:
+            return []
+        rows = self.conn.execute(
+            """SELECT s.id, s.timestamp, m.partial, m.monitor_revision,
+                      COALESCE(r.rollup_kind, m.rollup_kind),
+                      CASE WHEN p.snapshot_id IS NULL THEN 0 ELSE 1 END
+               FROM snapshots s
+               JOIN snapshot_metadata m ON m.snapshot_id = s.id
+               LEFT JOIN snapshot_rollups r ON r.snapshot_id = s.id
+               LEFT JOIN snapshot_pins p ON p.snapshot_id = s.id
+               WHERE m.monitor_id = ?
+               ORDER BY s.timestamp ASC, s.id ASC""",
+            (monitor_id,),
+        ).fetchall()
+        points: list[MonitorHistoryPoint] = []
+        ever_seen = False
+        for row in rows:
+            snapshot_id = int(row[0])
+            revision = row[3]
+            measurements = self.load_measurements(snapshot_id)
+            measurement = measurements.get(path)
+            compatible = revision == monitor.revision
+            if not compatible:
+                state = HistoryPointState.INCOMPATIBLE
+                value = (
+                    _measurement_value(measurement, monitor.metric)
+                    if measurement is not None
+                    else None
+                )
+            elif measurement is None:
+                state = (
+                    HistoryPointState.REMOVED
+                    if ever_seen
+                    else HistoryPointState.MISSING
+                )
+                value = None
+            else:
+                state = HistoryPointState.PRESENT
+                value = _measurement_value(measurement, monitor.metric)
+                ever_seen = True
+            points.append(
+                MonitorHistoryPoint(
+                    snapshot_id=snapshot_id,
+                    timestamp=_datetime_value(row[1]) or datetime.now(timezone.utc),
+                    value=value,
+                    state=state,
+                    partial=bool(row[2]),
+                    compatible=compatible,
+                    pinned=bool(row[5]),
+                    rollup_kind=row[4],
+                    monitor_revision=revision,
+                )
+            )
+        return points
+
+    def database_size(self) -> int:
+        if self._path == ":memory:":
+            return 0
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += Path(f"{self._path}{suffix}").stat().st_size
+            except OSError:
+                pass
+        return total
+
+    # ── Retention, rollups, and pins ──
+
+    def pin_snapshot(self, snapshot_id: int, *, label: str = "") -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("snapshot repository is read-only")
+        self.conn.execute(
+            """INSERT INTO snapshot_pins (snapshot_id, pinned_at, label)
+               VALUES (?, ?, ?)
+               ON CONFLICT(snapshot_id) DO UPDATE SET label = excluded.label""",
+            (snapshot_id, _datetime_text(datetime.now(timezone.utc)), label),
+        )
+        self.conn.commit()
+
+    def unpin_snapshot(self, snapshot_id: int) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("snapshot repository is read-only")
+        self.conn.execute(
+            "DELETE FROM snapshot_pins WHERE snapshot_id = ?", (snapshot_id,)
+        )
+        self.conn.commit()
+
+    def pinned_snapshot_ids(self, monitor_id: int | None = None) -> set[int]:
+        if not self._table_exists("snapshot_pins"):
+            return set()
+        if monitor_id is None:
+            rows = self.conn.execute(
+                "SELECT snapshot_id FROM snapshot_pins"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT p.snapshot_id
+                   FROM snapshot_pins p
+                   JOIN snapshot_metadata m ON m.snapshot_id = p.snapshot_id
+                   WHERE m.monitor_id = ?""",
+                (monitor_id,),
+            ).fetchall()
+        return {int(row[0]) for row in rows}
+
+    def list_retention_snapshots(
+        self, monitor_id: int
+    ) -> list[RetentionSnapshot]:
+        if not self._table_exists("snapshot_pins"):
+            return []
+        rows = self.conn.execute(
+            """SELECT s.id, s.timestamp, s.is_baseline, m.monitor_revision,
+                      CASE WHEN p.snapshot_id IS NULL THEN 0 ELSE 1 END,
+                      COALESCE(r.rollup_kind, m.rollup_kind)
+               FROM snapshots s
+               JOIN snapshot_metadata m ON m.snapshot_id = s.id
+               LEFT JOIN snapshot_pins p ON p.snapshot_id = s.id
+               LEFT JOIN snapshot_rollups r ON r.snapshot_id = s.id
+               WHERE m.monitor_id = ?
+               ORDER BY s.timestamp ASC, s.id ASC""",
+            (monitor_id,),
+        ).fetchall()
+        return [
+            RetentionSnapshot(
+                snapshot_id=int(row[0]),
+                timestamp=_datetime_value(row[1]) or datetime.now(timezone.utc),
+                is_baseline=bool(row[2]),
+                monitor_revision=row[3],
+                pinned=bool(row[4]),
+                rollup_kind=row[5],
+            )
+            for row in rows
+        ]
+
+    def delete_retention_snapshots(
+        self, monitor_id: int, snapshot_ids: tuple[int, ...]
+    ) -> int:
+        if self.read_only:
+            raise sqlite3.OperationalError("snapshot repository is read-only")
+        if not snapshot_ids:
+            return 0
+        protected = self.pinned_snapshot_ids(monitor_id)
+        status = self.get_monitor_status(monitor_id)
+        if status.latest_snapshot_id is not None:
+            protected.add(status.latest_snapshot_id)
+        latest = self.conn.execute(
+            """SELECT s.id
+               FROM snapshots s
+               JOIN snapshot_metadata m ON m.snapshot_id = s.id
+               WHERE m.monitor_id = ?
+               ORDER BY s.timestamp DESC, s.id DESC LIMIT 1""",
+            (monitor_id,),
+        ).fetchone()
+        if latest is not None:
+            protected.add(int(latest[0]))
+        deleted = 0
+        for snapshot_id in snapshot_ids:
+            if snapshot_id in protected:
+                continue
+            belongs = self.conn.execute(
+                """SELECT 1 FROM snapshot_metadata
+                   WHERE snapshot_id = ? AND monitor_id = ?""",
+                (snapshot_id, monitor_id),
+            ).fetchone()
+            if belongs is None:
+                continue
+            self.delete_snapshot(snapshot_id)
+            deleted += 1
+        return deleted
+
+    def mark_snapshot_rollup(
+        self,
+        snapshot_id: int,
+        *,
+        kind: str,
+        source_start: datetime,
+        source_end: datetime,
+        source_count: int,
+    ) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("snapshot repository is read-only")
+        self.conn.execute(
+            """INSERT INTO snapshot_rollups (
+                   snapshot_id, rollup_kind, source_start, source_end, source_count
+               ) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(snapshot_id) DO UPDATE SET
+                   rollup_kind = excluded.rollup_kind,
+                   source_start = excluded.source_start,
+                   source_end = excluded.source_end,
+                   source_count = excluded.source_count""",
+            (
+                snapshot_id,
+                kind,
+                _datetime_text(source_start),
+                _datetime_text(source_end),
+                source_count,
+            ),
+        )
+        self.conn.execute(
+            "UPDATE snapshot_metadata SET rollup_kind = ? WHERE snapshot_id = ?",
+            (kind, snapshot_id),
+        )
+        self.conn.commit()
+
+    def record_retention_result(self, result: RetentionResult) -> None:
+        if self.read_only:
+            return
+        self.conn.execute(
+            """INSERT INTO retention_runs (
+                   monitor_id, started_at, finished_at, before_bytes,
+                   after_bytes, kept_count, pruned_count, rolled_up_count,
+                   pinned_count, policy_version, status, error
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                result.monitor_id,
+                _datetime_text(result.started_at),
+                _datetime_text(result.finished_at),
+                result.before_bytes,
+                result.after_bytes,
+                result.kept,
+                result.pruned,
+                result.rolled_up,
+                result.pinned,
+                result.policy_version,
+                result.status,
+                result.error,
+            ),
+        )
+        self.conn.commit()
+
+    def latest_retention_result(
+        self, monitor_id: int
+    ) -> RetentionResult | None:
+        if not self._table_exists("retention_runs"):
+            return None
+        row = self.conn.execute(
+            """SELECT kept_count, pruned_count, rolled_up_count,
+                      before_bytes, after_bytes, pinned_count, status, error,
+                      policy_version, started_at, finished_at
+               FROM retention_runs
+               WHERE monitor_id = ?
+               ORDER BY finished_at DESC, id DESC LIMIT 1""",
+            (monitor_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return RetentionResult(
+            monitor_id=monitor_id,
+            kept=int(row[0]),
+            pruned=int(row[1]),
+            rolled_up=int(row[2]),
+            before_bytes=int(row[3]),
+            after_bytes=int(row[4]),
+            pinned=int(row[5]),
+            status=row[6],
+            error=row[7],
+            policy_version=int(row[8]),
+            started_at=_datetime_value(row[9]) or datetime.now(timezone.utc),
+            finished_at=_datetime_value(row[10]) or datetime.now(timezone.utc),
+        )
+
+    def compact_database(self) -> None:
+        if self.read_only or self._path == ":memory:":
+            return
+        self.conn.commit()
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.conn.execute("VACUUM")
+        except sqlite3.Error:
+            log.debug("database compaction skipped", exc_info=True)
+
     # ── Deletion log ──
 
     def log_deletion(
@@ -1100,32 +1982,337 @@ class Database:
             for r in rows
         ]
 
-    # ── Alert rules ──
+    # ── Alert rules and events ──
 
-    def save_alert_rule(self, path: str, max_size: int | None = None, max_growth_percent: float | None = None) -> int:
+    @staticmethod
+    def _row_to_alert_rule(row) -> AlertRule:
+        return AlertRule(
+            id=int(row[0]),
+            monitor_id=row[1],
+            path=row[2],
+            kind=AlertKind(row[3] or AlertKind.ABSOLUTE_SIZE.value),
+            metric=MetricId.parse(row[4] or MetricId.LOGICAL.value),
+            threshold=float(row[5] or 0.0),
+            window_seconds=row[6],
+            severity=AlertSeverity(row[7] or AlertSeverity.WARNING.value),
+            cooldown_seconds=int(row[8] or 0),
+            enabled=bool(row[9]),
+            created_at=_datetime_value(row[10]) or datetime.now(timezone.utc),
+            updated_at=_datetime_value(row[11]) or datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _alert_rule_columns() -> str:
+        return (
+            "id, monitor_id, path, kind, metric, threshold_value, "
+            "window_seconds, severity, cooldown_seconds, enabled, "
+            "created_at, updated_at"
+        )
+
+    def create_alert_rule(self, rule: AlertRule) -> AlertRule:
+        if self.read_only:
+            raise sqlite3.OperationalError("alert repository is read-only")
+        now = datetime.now(timezone.utc)
+        path = str(Path(rule.path).expanduser().resolve())
+        max_size = (
+            int(rule.threshold)
+            if rule.kind is AlertKind.ABSOLUTE_SIZE
+            else None
+        )
+        max_growth_percent = (
+            float(rule.threshold)
+            if rule.kind is AlertKind.PERCENTAGE_GROWTH
+            else None
+        )
         cursor = self.conn.execute(
-            "INSERT INTO alert_rules (path, max_size, max_growth_percent) VALUES (?, ?, ?)",
-            (path, max_size, max_growth_percent),
+            """INSERT INTO alert_rules (
+                   path, max_size, max_growth_percent, enabled, monitor_id,
+                   kind, metric, threshold_value, window_seconds, severity,
+                   cooldown_seconds, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                path,
+                max_size,
+                max_growth_percent,
+                int(rule.enabled),
+                rule.monitor_id,
+                rule.kind.value,
+                rule.metric.value,
+                float(rule.threshold),
+                rule.window_seconds,
+                rule.severity.value,
+                max(0, int(rule.cooldown_seconds)),
+                _datetime_text(now),
+                _datetime_text(now),
+            ),
         )
         self.conn.commit()
-        return cursor.lastrowid
+        created = self.get_alert_rule(int(cursor.lastrowid))
+        if created is None:
+            raise sqlite3.DatabaseError("created alert rule could not be loaded")
+        return created
+
+    def update_alert_rule(self, rule: AlertRule) -> AlertRule:
+        if self.read_only:
+            raise sqlite3.OperationalError("alert repository is read-only")
+        if rule.id is None:
+            raise ValueError("alert rule id is required")
+        path = str(Path(rule.path).expanduser().resolve())
+        max_size = (
+            int(rule.threshold)
+            if rule.kind is AlertKind.ABSOLUTE_SIZE
+            else None
+        )
+        max_growth_percent = (
+            float(rule.threshold)
+            if rule.kind is AlertKind.PERCENTAGE_GROWTH
+            else None
+        )
+        cursor = self.conn.execute(
+            """UPDATE alert_rules
+               SET monitor_id = ?, path = ?, kind = ?, metric = ?,
+                   threshold_value = ?, window_seconds = ?, severity = ?,
+                   cooldown_seconds = ?, enabled = ?, max_size = ?,
+                   max_growth_percent = ?, updated_at = ?
+               WHERE id = ?""",
+            (
+                rule.monitor_id,
+                path,
+                rule.kind.value,
+                rule.metric.value,
+                float(rule.threshold),
+                rule.window_seconds,
+                rule.severity.value,
+                max(0, int(rule.cooldown_seconds)),
+                int(rule.enabled),
+                max_size,
+                max_growth_percent,
+                _datetime_text(datetime.now(timezone.utc)),
+                rule.id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            self.conn.rollback()
+            raise KeyError(f"alert rule {rule.id} does not exist")
+        self.conn.commit()
+        updated = self.get_alert_rule(rule.id)
+        if updated is None:
+            raise sqlite3.DatabaseError("updated alert rule could not be loaded")
+        return updated
+
+    def get_alert_rule(self, rule_id: int) -> AlertRule | None:
+        if not self._table_exists("alert_rules"):
+            return None
+        row = self.conn.execute(
+            f"SELECT {self._alert_rule_columns()} FROM alert_rules "
+            "WHERE id = ? AND deleted_at IS NULL",
+            (rule_id,),
+        ).fetchone()
+        return self._row_to_alert_rule(row) if row else None
+
+    def list_alert_rules(
+        self, monitor_id: int | None = None, *, include_disabled: bool = True
+    ) -> list[AlertRule]:
+        if not self._table_exists("alert_rules"):
+            return []
+        conditions: list[str] = []
+        params: list[object] = []
+        if monitor_id is not None:
+            conditions.append("monitor_id = ?")
+            params.append(monitor_id)
+        conditions.append("deleted_at IS NULL")
+        if not include_disabled:
+            conditions.append("enabled = 1")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            f"SELECT {self._alert_rule_columns()} FROM alert_rules"
+            f"{where} ORDER BY severity DESC, path, id",
+            params,
+        ).fetchall()
+        return [self._row_to_alert_rule(row) for row in rows]
+
+    def set_alert_rule_enabled(self, rule_id: int, enabled: bool) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("alert repository is read-only")
+        cursor = self.conn.execute(
+            "UPDATE alert_rules SET enabled = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), _datetime_text(datetime.now(timezone.utc)), rule_id),
+        )
+        if cursor.rowcount != 1:
+            self.conn.rollback()
+            raise KeyError(f"alert rule {rule_id} does not exist")
+        self.conn.commit()
+
+    def delete_alert_rule(self, rule_id: int) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("alert repository is read-only")
+        self.conn.execute(
+            """UPDATE alert_rules
+               SET enabled = 0, deleted_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (
+                _datetime_text(datetime.now(timezone.utc)),
+                _datetime_text(datetime.now(timezone.utc)),
+                rule_id,
+            ),
+        )
+        self.conn.commit()
+
+    @staticmethod
+    def _row_to_alert_event(row) -> AlertEvent:
+        return AlertEvent(
+            id=int(row[0]),
+            rule_id=row[1],
+            monitor_id=row[2],
+            old_snapshot_id=row[3],
+            new_snapshot_id=row[4],
+            triggered_at=_datetime_value(row[5]) or datetime.now(timezone.utc),
+            message=row[6],
+            observed_value=row[7],
+            threshold=row[8],
+            confidence=row[9] or "unknown",
+            suppressed=bool(row[10]),
+            suppression_reason=row[11],
+            severity=AlertSeverity(row[12] or AlertSeverity.WARNING.value),
+            kind=AlertKind(row[13] or AlertKind.ABSOLUTE_SIZE.value),
+        )
+
+    @staticmethod
+    def _alert_event_columns() -> str:
+        return (
+            "id, rule_id, monitor_id, old_snapshot_id, new_snapshot_id, "
+            "triggered_at, message, observed_value, threshold_value, "
+            "confidence, suppressed, suppression_reason, severity, kind"
+        )
+
+    def save_alert_event(self, event: AlertEvent) -> AlertEvent:
+        if self.read_only:
+            raise sqlite3.OperationalError("alert repository is read-only")
+        snapshot_id = event.new_snapshot_id or event.old_snapshot_id
+        if snapshot_id is None:
+            raise ValueError("alert event requires a snapshot id")
+        if event.rule_id is None:
+            raise ValueError("alert event requires a rule id")
+        cursor = self.conn.execute(
+            """INSERT INTO alert_events (
+                   rule_id, snapshot_id, triggered_at, message, monitor_id,
+                   old_snapshot_id, new_snapshot_id, observed_value,
+                   threshold_value, confidence, suppressed, suppression_reason,
+                   severity, kind
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event.rule_id,
+                snapshot_id,
+                _datetime_text(event.triggered_at),
+                event.message,
+                event.monitor_id,
+                event.old_snapshot_id,
+                event.new_snapshot_id,
+                event.observed_value,
+                event.threshold,
+                event.confidence,
+                int(event.suppressed),
+                event.suppression_reason,
+                event.severity.value,
+                event.kind.value,
+            ),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            f"SELECT {self._alert_event_columns()} FROM alert_events WHERE id = ?",
+            (int(cursor.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise sqlite3.DatabaseError("created alert event could not be loaded")
+        return self._row_to_alert_event(row)
+
+    def list_alert_events(
+        self, monitor_id: int | None = None, *, limit: int = 100
+    ) -> list[AlertEvent]:
+        if not self._table_exists("alert_events"):
+            return []
+        if monitor_id is None:
+            rows = self.conn.execute(
+                f"SELECT {self._alert_event_columns()} FROM alert_events "
+                "ORDER BY triggered_at DESC, id DESC LIMIT ?",
+                (max(0, limit),),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                f"SELECT {self._alert_event_columns()} FROM alert_events "
+                "WHERE monitor_id = ? ORDER BY triggered_at DESC, id DESC LIMIT ?",
+                (monitor_id, max(0, limit)),
+            ).fetchall()
+        return [self._row_to_alert_event(row) for row in rows]
+
+    def latest_alert_event(self, rule_id: int) -> AlertEvent | None:
+        if not self._table_exists("alert_events"):
+            return None
+        row = self.conn.execute(
+            f"SELECT {self._alert_event_columns()} FROM alert_events "
+            "WHERE rule_id = ? AND suppressed = 0 "
+            "ORDER BY triggered_at DESC, id DESC LIMIT 1",
+            (rule_id,),
+        ).fetchone()
+        return self._row_to_alert_event(row) if row else None
+
+    def save_alert_rule(
+        self,
+        path: str,
+        max_size: int | None = None,
+        max_growth_percent: float | None = None,
+    ) -> int:
+        kind = (
+            AlertKind.PERCENTAGE_GROWTH
+            if max_growth_percent is not None
+            else AlertKind.ABSOLUTE_SIZE
+        )
+        threshold = (
+            float(max_growth_percent)
+            if max_growth_percent is not None
+            else float(max_size or 0)
+        )
+        created = self.create_alert_rule(
+            AlertRule(path=path, kind=kind, threshold=threshold)
+        )
+        assert created.id is not None
+        return created.id
 
     def get_alert_rules(self) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT * FROM alert_rules WHERE enabled = 1"
-        ).fetchall()
+        rules = self.list_alert_rules(include_disabled=False)
         return [
-            {"id": r[0], "path": r[1], "max_size": r[2], "max_growth_percent": r[3]}
-            for r in rows
+            {
+                "id": rule.id,
+                "path": rule.path,
+                "max_size": (
+                    int(rule.threshold)
+                    if rule.kind is AlertKind.ABSOLUTE_SIZE
+                    else None
+                ),
+                "max_growth_percent": (
+                    rule.threshold
+                    if rule.kind is AlertKind.PERCENTAGE_GROWTH
+                    else None
+                ),
+            }
+            for rule in rules
         ]
 
-    def log_alert_event(self, rule_id: int, snapshot_id: int, message: str) -> None:
-        self.conn.execute(
-            """INSERT INTO alert_events (rule_id, snapshot_id, triggered_at, message)
-               VALUES (?, ?, ?, ?)""",
-            (rule_id, snapshot_id, datetime.now().isoformat(), message),
+    def log_alert_event(
+        self, rule_id: int, snapshot_id: int, message: str
+    ) -> None:
+        rule = self.get_alert_rule(rule_id)
+        self.save_alert_event(
+            AlertEvent(
+                rule_id=rule_id,
+                monitor_id=rule.monitor_id if rule else None,
+                new_snapshot_id=snapshot_id,
+                message=message,
+                threshold=rule.threshold if rule else None,
+                severity=rule.severity if rule else AlertSeverity.WARNING,
+                kind=rule.kind if rule else AlertKind.ABSOLUTE_SIZE,
+            )
         )
-        self.conn.commit()
 
     # ── Size history for trends ──
 
