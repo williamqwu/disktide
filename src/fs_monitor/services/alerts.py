@@ -11,6 +11,7 @@ from fs_monitor.domain.delta import NodeMeasurement
 from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.snapshot import Snapshot
 from fs_monitor.repositories.alerts import AlertRepository
+from fs_monitor.repositories.cleanup import CleanupRepository
 from fs_monitor.repositories.monitors import RetentionRepository
 from fs_monitor.repositories.snapshots import SnapshotRepository
 
@@ -42,12 +43,14 @@ class AlertService:
         snapshots: SnapshotRepository,
         retention: RetentionRepository,
         *,
+        cleanup: CleanupRepository | None = None,
         now: Callable[[], datetime] = _utc_now,
         statvfs: Callable[[str], os.statvfs_result] = os.statvfs,
     ):
         self._repository = repository
         self._snapshots = snapshots
         self._retention = retention
+        self._cleanup = cleanup
         self._now = now
         self._statvfs = statvfs
 
@@ -190,6 +193,8 @@ class AlertService:
         new_measurements: dict[str, NodeMeasurement],
         old_measurements: dict[str, NodeMeasurement],
     ) -> AlertEvent | None:
+        if rule.kind is AlertKind.CLEANUP_OPPORTUNITY:
+            return self._evaluate_cleanup_opportunity(rule, new_snapshot)
         new_value = _measurement_value(new_measurements.get(rule.path), rule.metric)
         old_value = _measurement_value(old_measurements.get(rule.path), rule.metric)
         observed: float | None = None
@@ -264,6 +269,58 @@ class AlertService:
             kind=rule.kind,
         )
 
+    def _evaluate_cleanup_opportunity(
+        self,
+        rule: AlertRule,
+        snapshot: Snapshot,
+    ) -> AlertEvent | None:
+        """Notify from a persisted plan summary; never create or execute a plan."""
+        if self._cleanup is None:
+            return None
+        plans = self._cleanup.list_cleanup_plans(limit=100)
+        plan = next(
+            (
+                item
+                for item in plans
+                if _paths_overlap(item.scan_root, rule.path)
+                and item.estimated_reclaimable_bytes >= rule.threshold
+            ),
+            None,
+        )
+        if plan is None:
+            return None
+        categories: dict[str, int] = {}
+        for action in plan.active_actions:
+            categories[action.category] = (
+                categories.get(action.category, 0)
+                + action.estimated_reclaimable_bytes
+            )
+        top = ", ".join(
+            category
+            for category, _ in sorted(
+                categories.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:3]
+        ) or "uncategorized"
+        confidence = plan.confidence
+        estimated = plan.estimated_reclaimable_bytes
+        return AlertEvent(
+            rule_id=rule.id,
+            monitor_id=rule.monitor_id,
+            new_snapshot_id=snapshot.id,
+            triggered_at=self._now(),
+            message=(
+                f"cleanup opportunity {estimated:g} bytes; top categories: {top}; "
+                f"confidence {confidence:.0%}; preview with: "
+                f"fsmonitor cleanup {rule.path}"
+            ),
+            observed_value=float(estimated),
+            threshold=rule.threshold,
+            confidence=f"{confidence:.0%}",
+            severity=rule.severity,
+            kind=rule.kind,
+        )
+
     def _apply_confidence_and_cooldown(
         self, event: AlertEvent, snapshot: Snapshot
     ) -> AlertEvent:
@@ -272,7 +329,8 @@ class AlertService:
             event.suppressed = True
             event.suppression_reason = "partial snapshot coverage"
             return event
-        event.confidence = "full"
+        if event.kind is not AlertKind.CLEANUP_OPPORTUNITY:
+            event.confidence = "full"
         if event.rule_id is None:
             return event
         rule = self._repository.get_alert_rule(event.rule_id)
@@ -286,3 +344,13 @@ class AlertService:
             event.suppressed = True
             event.suppression_reason = "cooldown active"
         return event
+
+
+def _paths_overlap(first: str, second: str) -> bool:
+    left = os.path.abspath(first)
+    right = os.path.abspath(second)
+    try:
+        common = os.path.commonpath((left, right))
+    except ValueError:
+        return False
+    return common in {left, right}

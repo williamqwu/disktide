@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 from uuid import uuid4
 
 from fs_monitor.cleanup.actions import (
@@ -26,11 +27,14 @@ from fs_monitor.domain.cleanup import (
     CleanupExecutionStatus,
     CleanupPlan,
     CleanupPlanStatus,
+    CleanupSavingsPoint,
+    CleanupSavingsSummary,
     CleanupValidationStatus,
     FileIdentity,
     utc_now,
 )
 from fs_monitor.domain.metrics import MetricId
+from fs_monitor.models.patterns import CleanupRule, CleanupRuleActionPolicy
 from fs_monitor.models.patterns import CleanupTarget
 from fs_monitor.models.patterns import RiskLevel
 from fs_monitor.repositories.cleanup import CleanupRepository
@@ -55,7 +59,7 @@ class CleanupConfirmationRequired(CleanupError):
 class CleanupService:
     """The only product-level entry point for cleanup filesystem changes."""
 
-    PLAN_VERSION = 1
+    PLAN_VERSION = 2
 
     def __init__(
         self,
@@ -64,10 +68,12 @@ class CleanupService:
         trash: XDGTrashAdapter | None = None,
         quarantine: QuarantineExecutor | None = None,
         protected_paths: Iterable[str | Path] = (),
+        rule_provider: Callable[[str], CleanupRule | None] | None = None,
     ):
         self._repository = repository
         self._trash = trash or XDGTrashAdapter()
         self._quarantine = quarantine or QuarantineExecutor()
+        self._rule_provider = rule_provider or get_rule_by_name
         self._protected_paths = {
             self._normalize(path) for path in protected_paths
         }
@@ -118,21 +124,36 @@ class CleanupService:
                 rule_name=target.rule.name,
                 reason=target.rule.description,
                 provenance=(
-                    f"{provenance}:{scan_run_id}"
+                    f"{provenance}:{scan_run_id}|{target.rule.provenance}"
                     if scan_run_id
-                    else provenance
+                    else f"{provenance}|{target.rule.provenance}"
                 ),
                 risk=target.risk,
                 category=target.category,
                 metric=MetricId.parse(metric),
                 estimated_reclaimable_bytes=max(0, int(target.size)),
                 file_count=max(0, int(target.file_count)),
-                age_days=age_days,
-                rebuild_hint=target.rule.description or None,
+                age_days=max(age_days, target.age_days),
+                rebuild_hint=target.rule.rebuild_hint,
                 rule_patterns=tuple(target.rule.patterns),
                 parent_indicators=tuple(target.rule.parent_indicators),
+                path_context=tuple(target.rule.path_context),
                 min_age_days=max(0, int(target.rule.min_age_days)),
-                planned_action=requested_action,
+                rule_pack=target.rule.pack_name,
+                rule_pack_version=target.rule.pack_version,
+                rule_schema_version=target.rule.schema_version,
+                rule_source=target.rule.source,
+                rule_confidence=target.rule.confidence,
+                rule_action_policy=target.rule.default_action,
+                score=target.score,
+                confidence=target.confidence,
+                coverage_partial=target.coverage_partial,
+                planned_action=(
+                    requested_action
+                    if target.rule.default_action
+                    is CleanupRuleActionPolicy.SAFE
+                    else CleanupActionKind.PREVIEW
+                ),
             )
             reason = self._danger_reason(path, root)
             if reason:
@@ -148,6 +169,7 @@ class CleanupService:
         actions.sort(
             key=lambda item: (
                 item.subsumed_by is not None,
+                -item.score,
                 -item.estimated_reclaimable_bytes,
                 item.path,
             )
@@ -183,6 +205,10 @@ class CleanupService:
                     "target_count": len(plan.active_actions),
                     "subsumed_count": len(plan.actions) - len(plan.active_actions),
                     "estimated_bytes": plan.estimated_reclaimable_bytes,
+                    "confidence": plan.confidence,
+                    "rule_packs": sorted(
+                        {action.rule_pack for action in plan.active_actions}
+                    ),
                 },
             )
         )
@@ -207,6 +233,138 @@ class CleanupService:
             plan_id=plan_id,
             limit=limit,
         )
+
+    def savings_points(self, limit: int = 1000) -> list[CleanupSavingsPoint]:
+        """Build a time series without conflating isolation and reclamation."""
+        plans = self.history(limit=max(1, limit))
+        actions = {
+            action.id: action
+            for plan in plans
+            for action in plan.active_actions
+        }
+        points = [
+            CleanupSavingsPoint(
+                timestamp=plan.created_at,
+                plan_id=plan.id,
+                action_id=action.id,
+                path=action.path,
+                category=action.category,
+                rule_pack=action.rule_pack,
+                estimated_bytes=action.estimated_reclaimable_bytes,
+            )
+            for plan in plans
+            for action in plan.active_actions
+        ]
+        for event in reversed(self.audit(limit=max(1, limit * 8))):
+            if not event.success or event.action_id is None:
+                continue
+            action = actions.get(event.action_id)
+            if action is None:
+                continue
+            isolated = purged = actual = undone = 0
+            if event.kind is CleanupAuditKind.EXECUTION_RESULT:
+                executed = event.detail.get("executed_action")
+                if executed in {
+                    CleanupActionKind.TRASH.value,
+                    CleanupActionKind.QUARANTINE.value,
+                }:
+                    isolated = int(
+                        event.detail.get(
+                            "isolated_bytes",
+                            action.estimated_reclaimable_bytes,
+                        )
+                    )
+                elif executed == CleanupActionKind.PERMANENT.value:
+                    purged = int(
+                        event.detail.get(
+                            "purged_bytes",
+                            action.estimated_reclaimable_bytes,
+                        )
+                    )
+                actual = int(event.detail.get("actual_reclaimed_bytes", 0))
+            elif event.kind is CleanupAuditKind.PURGE_RESULT:
+                purged = int(event.detail.get("purged_bytes", 0))
+                actual = int(event.detail.get("actual_reclaimed_bytes", 0))
+            elif event.kind is CleanupAuditKind.UNDO_RESULT:
+                undone = int(
+                    event.detail.get(
+                        "undone_bytes",
+                        action.estimated_reclaimable_bytes,
+                    )
+                )
+            else:
+                continue
+            points.append(
+                CleanupSavingsPoint(
+                    timestamp=event.created_at,
+                    plan_id=event.plan_id,
+                    action_id=action.id,
+                    path=action.path,
+                    category=action.category,
+                    rule_pack=action.rule_pack,
+                    isolated_bytes=isolated,
+                    purged_bytes=purged,
+                    actual_reclaimed_bytes=actual,
+                    undone_bytes=undone,
+                )
+            )
+        points.sort(key=lambda point: (point.timestamp, point.action_id))
+        return points
+
+    def savings_history(
+        self,
+        *,
+        group_by: str = "category",
+        limit: int = 1000,
+    ) -> list[CleanupSavingsSummary]:
+        if group_by not in {"category", "pack", "path"}:
+            raise ValueError("group_by must be category, pack, or path")
+        totals: dict[str, dict[str, int | set[str]]] = defaultdict(
+            lambda: {
+                "actions": set(),
+                "estimated": 0,
+                "isolated": 0,
+                "purged": 0,
+                "actual": 0,
+                "undone": 0,
+            }
+        )
+        for point in self.savings_points(limit=limit):
+            key = {
+                "category": point.category,
+                "pack": point.rule_pack,
+                "path": point.path,
+            }[group_by]
+            bucket = totals[key]
+            actions = bucket["actions"]
+            assert isinstance(actions, set)
+            actions.add(point.action_id)
+            bucket["estimated"] = int(bucket["estimated"]) + point.estimated_bytes
+            bucket["isolated"] = int(bucket["isolated"]) + point.isolated_bytes
+            bucket["purged"] = int(bucket["purged"]) + point.purged_bytes
+            bucket["actual"] = int(bucket["actual"]) + point.actual_reclaimed_bytes
+            bucket["undone"] = int(bucket["undone"]) + point.undone_bytes
+        summaries = [
+            CleanupSavingsSummary(
+                key=key,
+                action_count=len(values["actions"]),
+                estimated_bytes=int(values["estimated"]),
+                isolated_bytes=int(values["isolated"]),
+                purged_bytes=int(values["purged"]),
+                actual_reclaimed_bytes=int(values["actual"]),
+                undone_bytes=int(values["undone"]),
+            )
+            for key, values in totals.items()
+        ]
+        summaries.sort(
+            key=lambda item: (
+                -item.actual_reclaimed_bytes,
+                -item.isolated_bytes,
+                -item.estimated_bytes,
+                item.key,
+            )
+        )
+        return summaries
 
     def execute(
         self,
@@ -239,7 +397,15 @@ class CleanupService:
                 CleanupExecutionStatus.UNDONE,
             }:
                 continue
-            item.planned_action = action
+            if item.detection_only:
+                item.planned_action = CleanupActionKind.PREVIEW
+                item.validation_status = CleanupValidationStatus.BLOCKED
+                item.validation_detail = (
+                    "matched rule pack is detection-only; execution is disabled"
+                )
+                item.execution_status = CleanupExecutionStatus.SKIPPED
+            else:
+                item.planned_action = action
             if item.validation_status is CleanupValidationStatus.BLOCKED:
                 item.execution_status = CleanupExecutionStatus.SKIPPED
         self._repository.save_cleanup_plan(plan)
@@ -304,18 +470,22 @@ class CleanupService:
                     permanent_delete(item.path)
                     after = available_bytes(item.path)
                     item.executed_action = CleanupActionKind.PERMANENT
+                    item.purged_bytes = item.estimated_reclaimable_bytes
                     item.actual_reclaimed_bytes = max(0, after - before)
                 elif action is CleanupActionKind.QUARANTINE:
                     item.undo = self._quarantine.move(item)
                     item.executed_action = CleanupActionKind.QUARANTINE
+                    item.isolated_bytes = item.estimated_reclaimable_bytes
                 else:
                     try:
                         item.undo = self._trash.move(item)
                         item.executed_action = CleanupActionKind.TRASH
+                        item.isolated_bytes = item.estimated_reclaimable_bytes
                     except CleanupExecutionError as exc:
                         fallback_reason = str(exc)
                         item.undo = self._quarantine.move(item)
                         item.executed_action = CleanupActionKind.QUARANTINE
+                        item.isolated_bytes = item.estimated_reclaimable_bytes
                 item.execution_status = CleanupExecutionStatus.SUCCEEDED
                 item.error = None
             except (CleanupExecutionError, OSError) as exc:
@@ -342,6 +512,11 @@ class CleanupService:
                             else None
                         ),
                         "actual_reclaimed_bytes": item.actual_reclaimed_bytes,
+                        "isolated_bytes": item.isolated_bytes,
+                        "purged_bytes": item.purged_bytes,
+                        "category": item.category,
+                        "rule_pack": item.rule_pack,
+                        "confidence": item.confidence,
                         "fallback_reason": fallback_reason,
                         "error": item.error,
                     },
@@ -396,7 +571,12 @@ class CleanupService:
                     CleanupValidationStatus.STALE,
                     "directory contents changed after planning",
                 )
-        current_rule = get_rule_by_name(action.rule_name)
+        current_rule = self._rule_provider(action.rule_name)
+        if current_rule is None and action.rule_pack != "legacy":
+            return (
+                CleanupValidationStatus.RULE_MISMATCH,
+                "matched cleanup rule pack is disabled or unavailable",
+            )
         if current_rule is not None:
             if not current_rule.enabled:
                 return (
@@ -407,6 +587,11 @@ class CleanupService:
                 return (
                     CleanupValidationStatus.BLOCKED,
                     "cleanup rule risk increased after planning",
+                )
+            if current_rule.detection_only:
+                return (
+                    CleanupValidationStatus.BLOCKED,
+                    "matched cleanup rule is detection-only",
                 )
         if not self._rule_matches(action, current):
             return (
@@ -475,10 +660,19 @@ class CleanupService:
                     id=None,
                     plan_id=plan.id,
                     action_id=action.id,
-                    kind=CleanupAuditKind.UNDO_RESULT,
+                        kind=CleanupAuditKind.UNDO_RESULT,
                     created_at=utc_now(),
                     success=success,
-                    detail={"error": action.error},
+                        detail={
+                            "error": action.error,
+                            "undone_bytes": (
+                                action.estimated_reclaimable_bytes
+                                if success
+                                else 0
+                            ),
+                            "category": action.category,
+                            "rule_pack": action.rule_pack,
+                        },
                 )
             )
         if candidates and all(
@@ -492,9 +686,107 @@ class CleanupService:
         self._repository.save_cleanup_plan(plan)
         return CleanupExecutionResult(plan)
 
+    def purge(
+        self,
+        identifier: str,
+        *,
+        confirmation: str | None = None,
+    ) -> CleanupExecutionResult:
+        """Permanently remove only previously quarantined, reverified items."""
+        self._require_writable_repository()
+        plan = self._repository.get_cleanup_plan(identifier)
+        selected_action_id: str | None = None
+        if plan is None:
+            plan = self._repository.get_cleanup_plan_for_action(identifier)
+            selected_action_id = identifier
+        if plan is None:
+            raise CleanupPlanNotFound(
+                f"cleanup plan or action '{identifier}' does not exist"
+            )
+        expected = self.purge_confirmation(plan.id)
+        if confirmation != expected:
+            raise CleanupConfirmationRequired(
+                f'quarantine purge requires exact confirmation: "{expected}"'
+            )
+        candidates = [
+            action
+            for action in plan.active_actions
+            if action.undo is not None
+            and action.undo.strategy is CleanupActionKind.QUARANTINE
+            and action.execution_status is CleanupExecutionStatus.SUCCEEDED
+            and (selected_action_id is None or action.id == selected_action_id)
+        ]
+        if not candidates:
+            raise CleanupError("no quarantined cleanup action is eligible for purge")
+        for action in candidates:
+            assert action.undo is not None
+            success = False
+            try:
+                isolated_identity = identity_from_path(action.undo.isolated_path)
+                if action.identity is None or not action.identity.matches(
+                    isolated_identity
+                ):
+                    raise CleanupExecutionError(
+                        "isolated target identity changed; purge refused"
+                    )
+                self._append_audit(
+                    CleanupAuditEvent(
+                        id=None,
+                        plan_id=plan.id,
+                        action_id=action.id,
+                        kind=CleanupAuditKind.PURGE_STARTED,
+                        created_at=utc_now(),
+                        success=True,
+                        detail={"strategy": action.undo.strategy.value},
+                    )
+                )
+                before = available_bytes(action.undo.isolated_path)
+                permanent_delete(action.undo.isolated_path)
+                after = available_bytes(action.undo.isolated_path)
+                if action.undo.metadata_path:
+                    Path(action.undo.metadata_path).unlink(missing_ok=True)
+                action.purged_bytes = action.estimated_reclaimable_bytes
+                action.actual_reclaimed_bytes += max(0, after - before)
+                action.execution_status = CleanupExecutionStatus.PURGED
+                action.purged_at = utc_now()
+                action.undo = None
+                action.error = None
+                success = True
+            except (CleanupExecutionError, OSError) as exc:
+                action.error = str(exc)
+            action.updated_at = utc_now()
+            plan.updated_at = action.updated_at
+            self._repository.save_cleanup_plan(plan)
+            self._append_audit(
+                CleanupAuditEvent(
+                    id=None,
+                    plan_id=plan.id,
+                    action_id=action.id,
+                    kind=CleanupAuditKind.PURGE_RESULT,
+                    created_at=utc_now(),
+                    success=success,
+                    detail={
+                        "purged_bytes": action.purged_bytes if success else 0,
+                        "actual_reclaimed_bytes": (
+                            action.actual_reclaimed_bytes if success else 0
+                        ),
+                        "category": action.category,
+                        "rule_pack": action.rule_pack,
+                        "error": action.error,
+                    },
+                )
+            )
+        self._finalize_plan(plan)
+        self._repository.save_cleanup_plan(plan)
+        return CleanupExecutionResult(plan)
+
     @staticmethod
     def permanent_confirmation(plan_id: str) -> str:
         return f"DELETE {plan_id}"
+
+    @staticmethod
+    def purge_confirmation(plan_id: str) -> str:
+        return f"PURGE {plan_id}"
 
     def _danger_reason(self, path: Path, scan_root: Path) -> str | None:
         if path == Path(path.anchor):
@@ -541,6 +833,8 @@ class CleanupService:
                 action.validation_status = CleanupValidationStatus.SUBSUMED
                 action.validation_detail = f"covered by parent target {parent.path}"
                 action.execution_status = CleanupExecutionStatus.SUBSUMED
+                action.score = 0.0
+                action.confidence = round(action.confidence * 0.75, 3)
             elif action.execution_status is CleanupExecutionStatus.PLANNED:
                 parents.append(action)
 
@@ -554,6 +848,11 @@ class CleanupService:
         if action.parent_indicators and not any(
             (Path(action.path).parent / indicator).exists()
             for indicator in action.parent_indicators
+        ):
+            return False
+        if action.path_context and not any(
+            _context_matches(action.path, pattern)
+            for pattern in action.path_context
         ):
             return False
         if action.min_age_days > 0:
@@ -613,6 +912,15 @@ def _pattern_matches(name: str, pattern: str) -> bool:
     if pattern.startswith("*."):
         return name.endswith(pattern[1:])
     return name == pattern.rstrip("/")
+
+
+def _context_matches(path: str, pattern: str) -> bool:
+    from fnmatch import fnmatch
+
+    value = Path(path)
+    return fnmatch(value.as_posix(), pattern) or any(
+        fnmatch(part, pattern) for part in value.parts
+    )
 
 
 def _measure_directory(path: Path) -> tuple[int, int]:

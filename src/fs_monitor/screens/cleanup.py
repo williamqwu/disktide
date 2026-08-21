@@ -4,20 +4,28 @@ from __future__ import annotations
 
 import humanize
 from rich.text import Text
-from textual import work
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Static
 
 from fs_monitor.cleanup.detector import detect_targets, total_savings
+from fs_monitor.cleanup.rules import get_rule_catalog
+from fs_monitor.config import AppConfig, cleanup_rule_directory
 from fs_monitor.domain.cleanup import (
     CleanupActionKind,
     CleanupExecutionResult,
 )
-from fs_monitor.models.patterns import CleanupTarget, RiskLevel
+from fs_monitor.models.patterns import (
+    CleanupRuleActionPolicy,
+    CleanupTarget,
+    RiskLevel,
+)
 from fs_monitor.models.tree import FSNode
 from fs_monitor.services.cleanup import CleanupError, CleanupService
+from fs_monitor.widgets.cleanup_map import CleanupMap
+from fs_monitor.widgets.cleanup_history import CleanupHistoryModal
 from fs_monitor.widgets.cleanup_modal import CleanupModal, CleanupModalResult
 
 
@@ -31,6 +39,7 @@ class CleanupScreen(Screen):
         Binding("r", "refresh_targets", "Refresh", show=True),
         Binding("u", "undo_last", "Undo Last", show=True),
         Binding("h", "show_history", "History", show=True),
+        Binding("m", "focus_map", "Age/Size Map", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -39,7 +48,7 @@ class CleanupScreen(Screen):
     }
 
     #cleanup-summary {
-        height: 4;
+        height: 5;
         padding: 0 1;
         background: $surface;
     }
@@ -55,27 +64,37 @@ class CleanupScreen(Screen):
         *,
         service: CleanupService | None = None,
         safe_action: CleanupActionKind = CleanupActionKind.TRASH,
+        config: AppConfig | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._root = root
         self._service = service
         self._safe_action = safe_action
+        self._config = config or AppConfig()
         self._targets: list[CleanupTarget] = []
         self._selected: set[str] = set()
         self._current_plan_id: str | None = None
+        self._rule_issue_count = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("", id="cleanup-summary")
+        yield CleanupMap(
+            max_points=self._config.cleanup.map_max_points,
+            id="cleanup-map",
+        )
         table = DataTable(id="cleanup-table")
         table.cursor_type = "row"
         table.add_columns(
             "  ",
+            "Pack",
             "Category",
             "Path",
             "Estimated",
-            "Files",
+            "Age",
+            "Score",
+            "Confidence",
             "Risk",
             "Default action",
         )
@@ -95,7 +114,12 @@ class CleanupScreen(Screen):
     def _scan_targets(self) -> None:
         if self._root is None:
             return
-        self._targets = detect_targets(self._root)
+        catalog = get_rule_catalog(
+            disabled_packs=self._config.cleanup.disabled_rule_packs,
+            user_directory=cleanup_rule_directory(),
+        )
+        self._rule_issue_count = len(catalog.issues)
+        self._targets = detect_targets(self._root, rules=list(catalog.rules))
         self._selected.clear()
         self._update_table()
         self._update_summary()
@@ -103,7 +127,7 @@ class CleanupScreen(Screen):
     def _update_table(self) -> None:
         table = self.query_one("#cleanup-table", DataTable)
         table.clear()
-        action_label = (
+        safe_action_label = (
             "quarantine"
             if self._safe_action is CleanupActionKind.QUARANTINE
             else "Trash → quarantine"
@@ -115,16 +139,27 @@ class CleanupScreen(Screen):
                 RiskLevel.MODERATE: "yellow",
                 RiskLevel.DANGEROUS: "bold red",
             }[target.risk]
+            action_label = (
+                "Detection only"
+                if target.detection_only
+                else "Preview first"
+                if target.rule.default_action is CleanupRuleActionPolicy.PREVIEW
+                else safe_action_label
+            )
             table.add_row(
                 selected,
+                f"{target.pack_name}@{target.rule.pack_version}",
                 target.category,
                 _truncate_path(target.path, 48),
                 humanize.naturalsize(target.size, binary=True),
-                str(target.file_count),
+                f"{target.age_days:.1f}d",
+                f"{target.score:.1f}",
+                f"{target.confidence:.0%}",
                 Text(target.risk.value, style=risk_style),
                 action_label,
                 key=target.path,
             )
+        self.query_one("#cleanup-map", CleanupMap).set_targets(self._targets)
 
     def _update_summary(self) -> None:
         summary = self.query_one("#cleanup-summary", Static)
@@ -139,14 +174,46 @@ class CleanupScreen(Screen):
             if self._current_plan_id
             else ""
         )
+        top = self._targets[0] if self._targets else None
+        top_text = (
+            f" | Top: {top.pack_name}/{top.category} score {top.score:.1f} "
+            f"({top.confidence:.0%})"
+            if top is not None
+            else ""
+        )
+        issue_text = (
+            f" | {self._rule_issue_count} isolated rule-pack error(s)"
+            if self._rule_issue_count
+            else ""
+        )
         summary.update(
             f"  {len(self._targets)} candidate(s) | Raw estimate: "
             f"{humanize.naturalsize(total, binary=True)} | Selected: "
             f"{humanize.naturalsize(selected_size, binary=True)} "
-            f"({len(self._selected)}){plan_text}\n"
-            "  [d] creates a persisted plan first; normal apply never "
-            "permanently deletes."
+            f"({len(self._selected)}){plan_text}{top_text}{issue_text}\n"
+            "  Score only ranks opportunities; plan revalidation decides safety. "
+            "[m] focuses the Age/Size map."
         )
+
+    @on(DataTable.RowHighlighted, "#cleanup-table")
+    def on_cleanup_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        path = str(event.row_key.value or "")
+        if path:
+            self.query_one("#cleanup-map", CleanupMap).set_selected_path(path)
+
+    @on(CleanupMap.PathSelected)
+    def on_cleanup_map_path_selected(self, event: CleanupMap.PathSelected) -> None:
+        keys = self._get_row_keys()
+        try:
+            row = keys.index(event.path)
+        except ValueError:
+            return
+        table = self.query_one("#cleanup-table", DataTable)
+        table.move_cursor(row=row)
+        table.focus()
+
+    def action_focus_map(self) -> None:
+        self.query_one("#cleanup-map", CleanupMap).focus()
 
     def action_toggle_select(self) -> None:
         table = self.query_one("#cleanup-table", DataTable)
@@ -309,16 +376,11 @@ class CleanupScreen(Screen):
     def action_show_history(self) -> None:
         if self._service is None:
             return
-        plans = self._service.history(limit=5)
-        if not plans:
+        summaries = self._service.savings_history(group_by="category")
+        if not summaries:
             self.notify("No cleanup history recorded")
             return
-        latest = plans[0]
-        self.notify(
-            f"Latest plan {latest.id[:12]} · {latest.status.value} · "
-            f"{len(latest.active_actions)} target(s) · estimated "
-            f"{humanize.naturalsize(latest.estimated_reclaimable_bytes, binary=True)}"
-        )
+        self.app.push_screen(CleanupHistoryModal(summaries))
 
     def action_refresh_targets(self) -> None:
         self._scan_targets()

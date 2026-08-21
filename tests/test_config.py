@@ -114,6 +114,8 @@ show_hidden = true
         config.cleanup.prefer_trash = False
         config.cleanup.quarantine_retention_days = 14
         config.cleanup.quarantine_max_bytes = 512 * 1024**2
+        config.cleanup.disabled_rule_packs = ["node", "containers"]
+        config.cleanup.map_max_points = 120
 
         config_file = tmp_path / "cleanup.toml"
         save_config(config, config_file)
@@ -122,6 +124,8 @@ show_hidden = true
         assert loaded.cleanup.prefer_trash is False
         assert loaded.cleanup.quarantine_retention_days == 14
         assert loaded.cleanup.quarantine_max_bytes == 512 * 1024**2
+        assert loaded.cleanup.disabled_rule_packs == ["containers", "node"]
+        assert loaded.cleanup.map_max_points == 120
 
     def test_save_and_reload(self, tmp_path):
         config = AppConfig()

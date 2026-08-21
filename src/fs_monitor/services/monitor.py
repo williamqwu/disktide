@@ -143,6 +143,7 @@ class MonitorService:
             repository,
             repository,
             repository,
+            cleanup=repository,
             now=now,
         )
         self._host_id = host_id or uuid.uuid4().hex

@@ -46,11 +46,12 @@ The Python distribution is still named `fsmonitor-cli` for package-index compati
 The core wheel is pure Python and has no compiler requirement. Development
 checkouts use `uv sync --locked`; see [Contributing](docs/contributing.md).
 
-**Stored data.** The app follows XDG conventions and writes to two persistent locations. Deleting either is safe for the filesystem, but resets the corresponding settings or snapshot history. The existing `fsmonitor-cli` directory names are intentionally retained so upgrades keep current data:
+**Stored data.** The app follows XDG conventions and writes below two persistent roots. Deleting either root is safe for the filesystem, but resets the corresponding settings, custom cleanup policy, or snapshot history. The existing `fsmonitor-cli` directory names are intentionally retained so upgrades keep current data:
 
 | Location | Contents | Typical size |
 |----------|----------|--------------|
 | `~/.config/fsmonitor-cli/config.toml` | User settings | < 1 KB |
+| `~/.config/fsmonitor-cli/cleanup-rules/*.toml` | Optional schema-v1 declarative cleanup rule packs | User-defined |
 | `~/.local/share/fsmonitor-cli/data.db` | SQLite monitor definitions, snapshots/deltas, retention/alert history, and CleanupPlan/audit records | Depends on tree size and snapshot count |
 
 Snapshot data is written by `scan --snapshot`, explicit monitor runs, and active
@@ -102,10 +103,14 @@ latest/previous. The footer keeps the mode hint visible there; press `1` to
 return to Explorer without conflicting with lowercase `e` for Edit.
 
 Cleanup is disabled by default in the TUI. After enabling it in Settings, press
-`c`, select candidates, and press `d` to review a persisted CleanupPlan. Normal
-apply uses system Trash when an atomic same-filesystem move is available and
-otherwise uses an owned quarantine directory; `u` restores the latest
-recoverable plan. Permanent deletion is a separate typed-confirmation path.
+`c` to review candidates from versioned Python, Node, Rust, general, IDE, and
+container rule packs. The Age/Size Map ranks opportunities without treating a
+score as proof of safety; press `m` to focus it and `h` for grouped savings
+history. Select candidates and press `d` to review a persisted CleanupPlan.
+Normal apply uses system Trash when an atomic same-filesystem move is available
+and otherwise uses an owned quarantine directory; `u` restores the latest
+recoverable plan. Detection-only provider caches cannot be applied through the
+generic executor. Permanent deletion is a separate typed-confirmation path.
 
 ### CLI Commands
 
@@ -141,8 +146,17 @@ fsmonitor cleanup /path
 
 # Apply the saved plan using Trash/quarantine, inspect history, then undo
 fsmonitor cleanup --plan PLAN_ID --apply
-fsmonitor cleanup history
+fsmonitor cleanup history --by category
 fsmonitor cleanup undo PLAN_ID
+
+# Inspect, validate, or toggle declarative rule packs
+fsmonitor cleanup rules list
+fsmonitor cleanup rules validate ./my-cleanup-rules.toml
+fsmonitor cleanup rules disable node
+fsmonitor cleanup rules enable node
+
+# Revalidate and purge owned quarantine content (never system Trash)
+fsmonitor cleanup purge PLAN_OR_ACTION_ID
 
 # Permanent deletion is separate and requires the exact plan-scoped token
 fsmonitor cleanup --plan PLAN_ID --permanent

@@ -1,0 +1,38 @@
+schema_version = 1
+name = "node"
+version = "1.0.0"
+description = "Node.js dependencies, framework builds, and tool caches"
+default_enabled = true
+
+[[rules]]
+name = "node_modules"
+description = "Node.js project dependencies"
+patterns = ["node_modules"]
+parent_indicators = ["package.json"]
+risk = "safe"
+category = "dependencies"
+rebuild_hint = "Run npm install, npm ci, yarn install, or pnpm install"
+confidence = 0.96
+default_action = "safe"
+
+[[rules]]
+name = "build_outputs"
+description = "Node.js or frontend build output"
+patterns = ["build", "dist", ".next"]
+parent_indicators = ["package.json", "next.config.js", "next.config.mjs"]
+risk = "moderate"
+category = "build"
+rebuild_hint = "Run the project's build command"
+confidence = 0.88
+default_action = "safe"
+
+[[rules]]
+name = "node_tool_cache"
+description = "Project-local Node.js tool cache"
+patterns = [".parcel-cache", ".turbo", ".eslintcache"]
+parent_indicators = ["package.json"]
+risk = "safe"
+category = "cache"
+rebuild_hint = "Rerun the corresponding Node.js build or lint command"
+confidence = 0.94
+default_action = "safe"

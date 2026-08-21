@@ -154,11 +154,14 @@ persisted snapshot measurements and make no extra filesystem calls.
 | Read | `open(config_file, "rb")` + `tomllib.load()` |
 | Write | `Path.write_text()` |
 
-### Cleanup -- `services/cleanup.py`, `cleanup/actions.py`, `cleanup/detector.py`
+### Cleanup -- `services/cleanup.py`, `cleanup/actions.py`, `cleanup/detector.py`, `extensions/cleanup_rules.py`
 
 Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator
-rules perform live existence checks. Creating a plan additionally captures live
-identity without modifying the target:
+rules perform live existence checks. Built-in declarative rule packs are read
+through `importlib.resources`; user packs are parsed with `tomllib` from
+`~/.config/fsmonitor-cli/cleanup-rules/*.toml`. Validation reads policy only:
+the schema has no shell, Python, or executor hook. Creating a plan additionally
+captures live identity without modifying the target:
 
 **Parent indicator checks** (`patterns.py`):
 ```python
@@ -181,11 +184,17 @@ the same device as the target. The executor never substitutes copy+delete for an
 atomic rename. Undo uses `os.rename()` back to the original path only when that
 path is absent and the isolated inode still matches the plan identity.
 
+Owned quarantine purge repeats manifest and identity checks, then removes only
+the isolated quarantine object after the exact `PURGE <plan-id>` confirmation.
+It does not enumerate or remove system Trash. The audit/history model records
+isolated, purged, actual reclaimed, and undone bytes separately.
+
 Permanent deletion is not the default executor. It is available only after a
 plan-scoped typed confirmation and then uses `os.unlink()` for files/symlinks or
 `shutil.rmtree()` for real directories. Product CLI/TUI code cannot call this
 primitive without `CleanupService` revalidation and a successful pre-action
-audit write.
+audit write. Rules marked detection-only cannot reach either safe or permanent
+filesystem primitives.
 
 ### Welcome Screen -- `screens/welcome.py`
 

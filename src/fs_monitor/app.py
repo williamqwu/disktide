@@ -11,8 +11,9 @@ from textual.binding import Binding
 
 from fs_monitor import APP_NAME
 from fs_monitor.cleanup.actions import QuarantineExecutor
+from fs_monitor.cleanup.rules import get_rule_by_name
 from fs_monitor.config import (
-    AppConfig, load_config, save_config,
+    AppConfig, cleanup_rule_directory, load_config, save_config,
     get_effective_paths, set_effective_paths,
 )
 from fs_monitor.domain.monitor import MonitorDefinition
@@ -95,6 +96,11 @@ class FSMonitorApp(App):
                     self._config.cleanup.quarantine_retention_days
                 ),
                 max_bytes=self._config.cleanup.quarantine_max_bytes,
+            ),
+            rule_provider=lambda name: get_rule_by_name(
+                name,
+                disabled_packs=self._config.cleanup.disabled_rule_packs,
+                user_directory=cleanup_rule_directory(),
             ),
         )
         self._show_welcome = show_welcome
@@ -217,6 +223,7 @@ class FSMonitorApp(App):
         self._cleanup = CleanupScreen(
             service=self._cleanup_service,
             safe_action=self._cleanup_safe_action,
+            config=self._config,
         )
         self._monitor = MonitorScreen(
             service=self._monitor_service,

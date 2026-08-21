@@ -230,6 +230,8 @@ class TrendChart(Widget):
 
     @staticmethod
     def _marker(point: TrendPoint) -> str | None:
+        if point.cleanup:
+            return "c"
         if point.alert or point.anomaly:
             return "*"
         if point.state is VisualState.PARTIAL:

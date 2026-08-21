@@ -34,6 +34,7 @@ src/fs_monitor/
 
   extensions/
     capabilities.py      CapabilityId/status/reason public vocabulary
+    cleanup_rules.py     Strict TOML rule-pack schema and isolated loader
 
   services/
     alerts.py            Rule CRUD + snapshot/delta evaluation
@@ -74,7 +75,9 @@ src/fs_monitor/
 
   cleanup/
     detector.py          Walk tree and match against rules
-    rules.py             8 built-in cleanup rules
+    rules.py             Rule-catalog compatibility accessors
+    scoring.py           Deterministic opportunity score/confidence
+    rulepacks/           Packaged schema-v1 TOML policy
     actions.py           Trash, quarantine, restore, guarded delete primitives
 
   monitor/
@@ -107,6 +110,8 @@ src/fs_monitor/
     growth_heatmap.py    Path-by-time persistent-growth matrix
     scan_progress.py     Scan progress overlay
     cleanup_modal.py     Plan summary + separate permanent confirmation
+    cleanup_map.py       Bounded synchronized Age/Size opportunity map
+    cleanup_history.py   Estimated/isolated/purged/actual/undone history
     confirm_modal.py     Reusable y/n confirmation dialog
 ```
 
@@ -477,33 +482,49 @@ It never deletes or overwrites the user's database as an automatic repair.
 
 ### Rule Matching
 
-`detect_targets(root)` walks the FSNode tree and tests each node against the rule list. A rule matches when:
+`extensions/cleanup_rules.py` validates schema-v1 TOML and builds one catalog
+from packaged and user-owned packs. Pack loading fails independently: malformed
+TOML, unknown fields, unsupported versions, invalid identifiers/types, and name
+collisions become doctor-visible issues without hiding valid packs. The schema
+contains no executor or arbitrary code field. User policy loads from
+`~/.config/fsmonitor-cli/cleanup-rules/*.toml`; disabled pack names come from
+`cleanup.disabled_rule_packs` and are shared by CLI and TUI.
+
+`detect_targets(root)` walks the FSNode tree and tests each node against the enabled rule list. A rule matches when:
 
 1. The node's name matches one of the rule's glob patterns
 2. If `parent_indicators` is set, at least one indicator file exists in the node's parent directory
-3. If `min_age_days` is set, the node's mtime is older than the threshold
+3. If `path_context` is set, the candidate path matches that contextual glob
+4. If `min_age_days` is set, the node's mtime is older than the threshold
 
-### Built-in Rules
+### Built-in Rule Packs
 
-| Rule | Patterns | Risk | Category |
-|------|----------|------|----------|
-| node_modules | `node_modules` | Safe | dependencies |
-| python_cache | `__pycache__`, `.pytest_cache`, `.mypy_cache` | Safe | cache |
-| python_bytecode | `*.pyc`, `*.pyo` | Safe | cache |
-| build_outputs | `build`, `dist`, `.next` | Moderate | build |
-| rust_target | `target` | Moderate | build |
-| old_logs | `*.log` (>30 days) | Safe | logs |
-| system_junk | `.DS_Store`, `Thumbs.db`, `desktop.ini` | Safe | junk |
-| ide_caches | `.idea`, `.vscode` | Moderate | ide |
+| Pack | Main coverage | Default policy |
+|------|---------------|----------------|
+| `python` | bytecode/tool caches, virtualenvs, package builds | safe/preview by rule |
+| `node` | dependencies, frontend builds, project tool caches | safe |
+| `rust` | Cargo `target` with `Cargo.toml` indicator | safe |
+| `general` | aged logs/temp and OS metadata | safe |
+| `ide` | `.idea` / `.vscode` project metadata | preview |
+| `containers` | project-local Docker/BuildKit-style cache paths | detection-only |
+
+`cleanup/scoring.py` ranks candidates with a documented 0–100 formula: 35%
+logarithmic size, 25% age, 20% inverse risk, 10% rebuildability, and 10% rule
+confidence. Partial, inaccessible, and overlapping evidence only lowers the
+separate confidence value. Score never authorizes an action.
 
 ### Candidate → CleanupPlan
 
 `detect_targets()` only emits candidate facts. `CleanupService.create_plan()`
-captures `lstat` identity, rule provenance, risk, age, logical reclaim estimate,
-and scan reference. It resolves ancestor/descendant overlap before persistence;
-a parent action subsumes its children so bytes and execution are counted once.
-The default CLI and TUI action is `preview`, which writes schema-v6 plan/audit
-records but does not mutate the filesystem.
+captures `lstat` identity, rule and pack provenance, pack/schema versions,
+source, path context, rule policy, risk, age, score, confidence/coverage,
+logical reclaim estimate, and scan reference. It resolves ancestor/descendant
+overlap before persistence; a parent action subsumes its children so bytes and
+execution are counted once. CleanupPlan JSON payload v2 is stored in the
+existing schema-v6 plan/action tables, so Wave 09 adds no database migration.
+Legacy plan payloads remain readable. The default CLI and TUI action is
+`preview`, which persists the plan/audit records but does not mutate the
+filesystem.
 
 ### Revalidation and protected paths
 
@@ -523,13 +544,29 @@ expiry policy, and performs `os.rename()` without cross-filesystem copy/delete.
 Both paths persist undo metadata and refuse to overwrite a newly created
 original path. Isolation reports actual reclaimed bytes as zero. Permanent
 deletion remains a low-level primitive reachable only after the exact
-`DELETE <plan-id>` confirmation.
+`DELETE <plan-id>` confirmation. Detection-only rules are blocked by every
+generic safe/permanent execution path.
 
 Every validation, pre-execution intent, result, and undo is appended to
 `cleanup_audit`. If the pre-execution audit write fails, no filesystem action is
 attempted and the remaining batch stops. `cleanup/actions.py::delete_targets()`
 remains only as a legacy low-level compatibility helper; no CLI or TUI product
 path calls it.
+
+### Map, savings history, purge, and alerts
+
+`widgets/cleanup_map.py` builds a deterministic top-N Age/Size model, caches it
+by candidate set and dimensions, and synchronizes selected paths with the
+Cleanup table. Narrow or safe-rendering terminals receive a bounded fallback
+list. `cleanup.map_max_points` constrains the model to 10–500 points.
+
+Savings history is derived from persisted plans/actions and keeps estimated,
+isolated, purged, actual reclaimed, and undone bytes separate. Quarantine purge
+revalidates the manifest/identity and requires `PURGE <plan-id>`; system Trash
+is outside the purge contract. Cleanup-opportunity alerts read a persisted plan
+summary, include top categories/estimate/confidence plus a preview command, and
+only notify. They never create or execute a plan and use a distinct Trend
+marker.
 
 ## Visualization
 

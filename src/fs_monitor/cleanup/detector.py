@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 
+from fs_monitor.cleanup.scoring import score_cleanup_candidate
 from fs_monitor.models.tree import FSNode
 from fs_monitor.models.patterns import CleanupRule, CleanupTarget
 from fs_monitor.cleanup.rules import get_rules
@@ -30,11 +31,33 @@ def detect_targets(
             if not rule.has_parent_indicator(node.parent_path):
                 continue
 
+            if not rule.matches_path_context(node.path):
+                continue
+
             # Check age requirement
+            age_days = max(0.0, (now - node.mtime) / 86400)
             if rule.min_age_days > 0:
-                age_days = (now - node.mtime) / 86400
                 if age_days < rule.min_age_days:
                     continue
+
+            coverage_partial = (
+                node.error is not None
+                or node.is_partial
+                or node.has_hidden_descendants
+                or node.has_policy_omissions
+            )
+            score = score_cleanup_candidate(
+                size=node.size,
+                age_days=age_days,
+                risk=rule.risk,
+                rebuild_hint=rule.rebuild_hint,
+                rule_confidence=rule.confidence,
+                partial=coverage_partial,
+                inaccessible=(
+                    node.error is not None
+                    or node.inaccessible_subtree_count > 0
+                ),
+            )
 
             targets.append(
                 CleanupTarget(
@@ -47,12 +70,16 @@ def detect_targets(
                     is_symlink=node.is_symlink,
                     device_id=node.device_id,
                     inode=node.inode,
+                    provenance=rule.provenance,
+                    age_days=age_days,
+                    score=score.score,
+                    confidence=score.confidence,
+                    coverage_partial=coverage_partial,
                 )
             )
             break  # Don't match multiple rules for same node
 
-    # Sort by size descending
-    targets.sort(key=lambda t: t.size, reverse=True)
+    targets.sort(key=lambda target: (-target.score, -target.size, target.path))
     return targets
 
 

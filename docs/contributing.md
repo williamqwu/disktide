@@ -25,7 +25,12 @@ uv run pytest tests/test_scanner.py -v
 uv run pytest tests/ --cov=fs_monitor
 ```
 
-The test suite covers the scanner and tree model, configuration, snapshot/database storage, cleanup detection and actions, visualizations, TUI navigation and modals, FS Overview/block devices/benchmarking, progress reporting, system detection, welcome flow, and migrations.
+The test suite covers the scanner and tree model, configuration,
+snapshot/database storage, cleanup rule-pack validation/scoring/plans/actions,
+visualizations, TUI navigation and modals, FS Overview/block
+devices/benchmarking, progress reporting, system detection, welcome flow, and
+migrations. Wave-specific cleanup contracts live in
+`tests/test_cleanup_wave08.py` and `tests/test_cleanup_wave09.py`.
 
 `PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app tests instead wrap an async helper with `asyncio.run(...)` and use `app.run_test()`; follow the style of the nearby tests.
 
@@ -37,7 +42,7 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - `tests/` -- test suite (no subdirectories, flat layout)
 - `assets/` -- TCSS stylesheets
 - `src/fs_monitor/collectors/platform/` -- isolated OS/procfs/sysfs/command probes
-- `src/fs_monitor/extensions/` -- typed capability contracts
+- `src/fs_monitor/extensions/` -- typed capability contracts and strict declarative policy loaders
 - `src/fs_monitor/repositories/` -- persistence-neutral protocols and adapters
 - `src/fs_monitor/services/` -- CLI/TUI-neutral application services such as doctor and scan orchestration
 - `tool/` -- development utilities (e.g., `gen_activity` for generating test data)
@@ -61,7 +66,7 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - **collectors/local_scanner.py** -- the only product adapter that constructs the compatibility `ScanEngine`.
 - **scanner/** -- filesystem I/O only. No Textual imports.
 - **storage/** -- SQLite I/O only. No Textual imports.
-- **cleanup/** -- detectors and low-level executors. No Textual imports and no product policy decisions.
+- **cleanup/** -- detectors, explainable scoring, packaged TOML rule packs, and low-level executors. No Textual imports and no product policy decisions.
 - **services/cleanup.py** -- the only product cleanup policy/execution entry point; owns plan, revalidation, audit, and undo.
 - **monitor/** -- alerting, tree diffs, scan scheduling. No Textual imports.
 - **viz/** -- rendering logic. Produces Rich Segments, no direct Textual widget deps.
@@ -69,6 +74,10 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - **screens/** and **widgets/** -- Textual UI layer. Can import everything above.
 
 This layering means the scanner, storage, cleanup, and viz modules are testable without a running Textual app. CLI and TUI must never call `delete_targets()` or permanent filesystem primitives directly.
+
+Declarative policy loaders must never execute user-authored content. Treat rule
+scores as ordering metadata; every filesystem action still passes through
+`CleanupService` identity/boundary revalidation and audit.
 
 ### Scan Service and Consumers
 
@@ -120,21 +129,38 @@ repair strategy.
 
 ## Adding a New Cleanup Rule
 
-1. Add a `CleanupRule` entry in `cleanup/rules.py`:
+1. Add the rule to the appropriate schema-v1 TOML file under
+   `cleanup/rulepacks/`, or add a new pack with unique lowercase identifiers:
 
-```python
-CleanupRule(
-    name="my_rule",
-    description="What this cleans up",
-    patterns=["pattern1", "pattern2"],
-    risk=RiskLevel.SAFE,           # SAFE, MODERATE, or DANGEROUS
-    parent_indicators=["marker"],  # optional: parent must contain this file
-    min_age_days=0,                # optional: minimum age in days
-    category="my_category",
-)
+```toml
+schema_version = 1
+name = "my-pack"
+version = "1.0.0"
+description = "Project-local rebuildable artifacts"
+default_enabled = true
+
+[[rules]]
+name = "my_rule"
+description = "What this detects"
+patterns = ["pattern1", "pattern2"]
+parent_indicators = ["marker"]
+path_context = ["*project*"]
+min_age_days = 7
+risk = "safe"
+category = "my_category"
+rebuild_hint = "Run the project rebuild command"
+confidence = 0.9
+default_action = "safe"
 ```
 
-2. Add detector cases in `tests/test_rules.py` / `tests/test_cleanup.py` and plan revalidation cases in `tests/test_cleanup_wave08.py`.
+2. Do not add command, import, hook, script, or arbitrary executor fields. Use
+   `default_action = "detection-only"` when generic filesystem execution is not
+   the correct provider boundary.
+3. Add positive, negative, parent-indicator/path-context, age-boundary, invalid
+   schema, scoring, and detection-only cases in `tests/test_cleanup_wave09.py`,
+   plus Wave08 revalidation coverage when the safety contract changes.
+4. Preserve old CleanupPlan payload readers when adding plan metadata. Database
+   schema v6 and CleanupPlan payload v2 are independent version numbers.
 
 ## Adding a New Screen
 

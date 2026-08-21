@@ -1484,6 +1484,12 @@ def watch(
 @click.option("--plan", "plan_id", help="Load an existing cleanup plan")
 @click.option("--permanent", is_flag=True, help="Use the separate permanent-delete flow")
 @click.option("--confirm", help="Exact permanent-delete confirmation token")
+@click.option(
+    "--by",
+    "history_group",
+    type=click.Choice(["category", "pack", "path"]),
+    help="Group cleanup savings history",
+)
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 def cleanup(
     arguments: tuple[str, ...],
@@ -1492,6 +1498,7 @@ def cleanup(
     plan_id: str | None,
     permanent: bool,
     confirm: str | None,
+    history_group: str | None,
     json_output: bool,
 ):
     """Create, apply, inspect, or undo a persistent CleanupPlan.
@@ -1504,7 +1511,12 @@ def cleanup(
 
     from fs_monitor.cleanup.actions import QuarantineExecutor
     from fs_monitor.cleanup.detector import detect_targets
-    from fs_monitor.config import load_config
+    from fs_monitor.cleanup.rules import get_rule_by_name, get_rule_catalog
+    from fs_monitor.config import (
+        cleanup_rule_directory,
+        load_config,
+        save_config,
+    )
     from fs_monitor.domain.cleanup import (
         CleanupActionKind,
         CleanupExecutionStatus,
@@ -1514,6 +1526,10 @@ def cleanup(
     from fs_monitor.domain.policy import ScanPolicy
     from fs_monitor.domain.scan import ScanRequest, ScanRequestError, ScanStatus
     from fs_monitor.repositories import default_snapshot_repository
+    from fs_monitor.extensions.cleanup_rules import (
+        RulePackValidationError,
+        validate_rule_pack,
+    )
     from fs_monitor.services.cleanup import (
         CleanupConfirmationRequired,
         CleanupError,
@@ -1523,7 +1539,29 @@ def cleanup(
 
     if apply_safe and permanent:
         raise click.UsageError("--apply and --permanent are mutually exclusive")
-    if arguments and arguments[0] == "history":
+    if arguments and arguments[0] == "rules":
+        if plan_id or apply_safe or permanent or history_group:
+            raise click.UsageError("cleanup rules does not accept plan/apply/history options")
+        if len(arguments) < 2 or arguments[1] not in {
+            "list",
+            "validate",
+            "enable",
+            "disable",
+        }:
+            raise click.UsageError(
+                "usage: fsmonitor cleanup rules "
+                "list|validate PATH|enable PACK|disable PACK"
+            )
+        rule_operation = arguments[1]
+        expected = 2 if rule_operation == "list" else 3
+        if len(arguments) != expected:
+            raise click.UsageError(
+                f"cleanup rules {rule_operation} expects "
+                + ("no operand" if expected == 2 else "one operand")
+            )
+        operation = f"rules-{rule_operation}"
+        operand = arguments[2] if expected == 3 else None
+    elif arguments and arguments[0] == "history":
         if len(arguments) != 1 or plan_id or apply_safe or permanent:
             raise click.UsageError("cleanup history does not accept path/apply options")
         operation = "history"
@@ -1533,13 +1571,108 @@ def cleanup(
             raise click.UsageError("usage: fsmonitor cleanup undo PLAN_OR_ACTION_ID")
         operation = "undo"
         operand = arguments[1]
+    elif arguments and arguments[0] == "purge":
+        if len(arguments) != 2 or plan_id or apply_safe or permanent or history_group:
+            raise click.UsageError("usage: fsmonitor cleanup purge PLAN_OR_ACTION_ID")
+        operation = "purge"
+        operand = arguments[1]
     else:
+        if history_group is not None:
+            raise click.UsageError("--by is only valid with cleanup history")
         if len(arguments) > 1:
-            raise click.UsageError("cleanup accepts one PATH, or history/undo")
+            raise click.UsageError(
+                "cleanup accepts one PATH, or history/undo/purge/rules"
+            )
         operation = "plan"
         operand = arguments[0] if arguments else None
 
     config = load_config()
+    rule_directory = cleanup_rule_directory()
+    catalog = get_rule_catalog(
+        disabled_packs=config.cleanup.disabled_rule_packs,
+        user_directory=rule_directory,
+    )
+    if operation.startswith("rules-"):
+        rule_operation = operation.removeprefix("rules-")
+        if rule_operation == "validate":
+            try:
+                pack = validate_rule_pack(operand or "")
+            except RulePackValidationError as exc:
+                raise click.ClickException(str(exc)) from exc
+            payload = {
+                "name": pack.name,
+                "version": pack.version,
+                "schema_version": pack.schema_version,
+                "source": pack.source,
+                "enabled": pack.enabled,
+                "rule_count": len(pack.rules),
+            }
+            if json_output:
+                click.echo(json.dumps(payload, sort_keys=True))
+            else:
+                click.echo(
+                    f"VALID {pack.name} v{pack.version} · schema "
+                    f"{pack.schema_version} · {len(pack.rules)} rule(s)"
+                )
+            return
+        if rule_operation in {"enable", "disable"}:
+            pack_name = operand or ""
+            known_pack = catalog.get_pack(pack_name)
+            if known_pack is None and not any(
+                issue.pack_name == pack_name for issue in catalog.issues
+            ):
+                raise click.ClickException(f"unknown cleanup rule pack: {pack_name}")
+            disabled = set(config.cleanup.disabled_rule_packs)
+            if rule_operation == "enable":
+                disabled.discard(pack_name)
+            else:
+                disabled.add(pack_name)
+            config.cleanup.disabled_rule_packs = sorted(disabled)
+            save_config(config)
+            state = "enabled" if rule_operation == "enable" else "disabled"
+            click.echo(f"Cleanup rule pack '{pack_name}' {state}.")
+            return
+        payload = {
+            "schema_version": 1,
+            "packs": [
+                {
+                    "name": pack.name,
+                    "version": pack.version,
+                    "schema_version": pack.schema_version,
+                    "description": pack.description,
+                    "source": pack.source,
+                    "enabled": pack.enabled,
+                    "rule_count": len(pack.rules),
+                    "rules": [rule.name for rule in pack.rules],
+                }
+                for pack in catalog.packs
+            ],
+            "issues": [
+                {
+                    "pack": issue.pack_name,
+                    "source": issue.source,
+                    "path": issue.path,
+                    "error": issue.error,
+                }
+                for issue in catalog.issues
+            ],
+        }
+        if json_output:
+            click.echo(json.dumps(payload, sort_keys=True))
+        else:
+            for pack in catalog.packs:
+                state = "enabled" if pack.enabled else "disabled"
+                click.echo(
+                    f"{pack.name:<12} {state:<8} v{pack.version:<8} "
+                    f"{pack.source:<7} {len(pack.rules):>2} rule(s)"
+                )
+            for issue in catalog.issues:
+                click.echo(
+                    f"INVALID      isolated {issue.path}: {issue.error}",
+                    err=True,
+                )
+        return
+
     repository = default_snapshot_repository()
     repository.connect()
     service = CleanupService(
@@ -1548,9 +1681,39 @@ def cleanup(
             retention_days=config.cleanup.quarantine_retention_days,
             max_bytes=config.cleanup.quarantine_max_bytes,
         ),
+        rule_provider=lambda name: get_rule_by_name(
+            name,
+            disabled_packs=config.cleanup.disabled_rule_packs,
+            user_directory=rule_directory,
+        ),
     )
     try:
         if operation == "history":
+            if history_group is not None:
+                summaries = service.savings_history(group_by=history_group)
+                if json_output:
+                    click.echo(
+                        json.dumps(
+                            [item.to_dict() for item in summaries],
+                            sort_keys=True,
+                        )
+                    )
+                elif not summaries:
+                    click.echo("No cleanup savings history recorded.")
+                else:
+                    click.echo(
+                        f"Cleanup savings history grouped by {history_group}:"
+                    )
+                    for item in summaries:
+                        click.echo(
+                            f"{item.key:<28} {item.action_count:>3} actions  "
+                            f"estimated {humanize.naturalsize(item.estimated_bytes, binary=True):>9}  "
+                            f"isolated {humanize.naturalsize(item.isolated_bytes, binary=True):>9}  "
+                            f"purged {humanize.naturalsize(item.purged_bytes, binary=True):>9}  "
+                            f"actual {humanize.naturalsize(item.actual_reclaimed_bytes, binary=True):>9}  "
+                            f"undone {humanize.naturalsize(item.undone_bytes, binary=True):>9}"
+                        )
+                return
             plans = service.history(limit=100)
             if json_output:
                 click.echo(json.dumps([cleanup_plan_to_dict(item) for item in plans]))
@@ -1565,6 +1728,35 @@ def cleanup(
                         f"actual {humanize.naturalsize(item.actual_reclaimed_bytes, binary=True)}  "
                         f"{item.scan_root}"
                     )
+            return
+
+        if operation == "purge":
+            plan = repository.get_cleanup_plan(operand or "")
+            if plan is None:
+                plan = repository.get_cleanup_plan_for_action(operand or "")
+            if plan is None:
+                raise click.ClickException(
+                    f"cleanup plan or action '{operand}' does not exist"
+                )
+            token = service.purge_confirmation(plan.id)
+            if confirm is None:
+                click.echo(
+                    "PURGE permanently removes quarantined content and cannot be undone."
+                )
+                confirm = click.prompt(
+                    f'Type "{token}" to continue',
+                    default="",
+                    show_default=False,
+                )
+            result = service.purge(operand or "", confirmation=confirm)
+            if json_output:
+                click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
+            else:
+                click.echo(
+                    f"Purge {result.plan.id}: {result.plan.purged_count} purged; "
+                    f"actual reclaimed "
+                    f"{humanize.naturalsize(result.plan.actual_reclaimed_bytes, binary=True)}."
+                )
             return
 
         if operation == "undo":
@@ -1624,7 +1816,12 @@ def cleanup(
             if scan_run.status is ScanStatus.FAILED or scan_run.root is None:
                 detail = scan_run.error_message or "unknown scan failure"
                 raise click.ClickException(f"Cleanup scan failed: {detail}")
-            targets = detect_targets(scan_run.root)
+            targets = detect_targets(scan_run.root, rules=list(catalog.rules))
+            for issue in catalog.issues:
+                click.echo(
+                    f"Rule pack isolated ({issue.path}): {issue.error}",
+                    err=True,
+                )
             if not targets:
                 click.echo("No cleanup targets found.")
                 return
@@ -1730,12 +1927,22 @@ def _render_cleanup_plan(plan, humanize_module) -> None:
         f"  Targets: {len(plan.active_actions)} active, "
         f"{len(plan.actions) - len(plan.active_actions)} subsumed"
     )
+    click.echo(f"  Confidence: {plan.confidence:.0%}")
     for item in plan.actions:
         marker = "subsumed" if item.subsumed_by else item.validation_status.value
+        action_policy = (
+            "detection-only"
+            if item.detection_only
+            else item.rule_action_policy.value
+        )
         click.echo(
             f"    [{item.risk.value}/{marker}] {item.path}\n"
+            f"      {item.rule_pack}@{item.rule_pack_version} · "
+            f"{item.category} · age {item.age_days:.1f}d · score {item.score:.1f} · "
+            f"confidence {item.confidence:.0%} · {action_policy}\n"
             f"      {item.reason}; "
             f"{humanize_module.naturalsize(item.estimated_reclaimable_bytes, binary=True)}"
+            + (f"; rebuild: {item.rebuild_hint}" if item.rebuild_hint else "")
         )
 
 

@@ -1,0 +1,37 @@
+schema_version = 1
+name = "general"
+version = "1.0.0"
+description = "Conservative logs, temporary files, and OS metadata"
+default_enabled = true
+
+[[rules]]
+name = "old_logs"
+description = "Log file older than 30 days"
+patterns = ["*.log"]
+min_age_days = 30
+risk = "safe"
+category = "logs"
+rebuild_hint = "Not rebuildable; review retention requirements before applying"
+confidence = 0.78
+default_action = "safe"
+
+[[rules]]
+name = "temp_files"
+description = "Temporary file older than seven days"
+patterns = ["*.tmp", "*.temp"]
+min_age_days = 7
+risk = "safe"
+category = "temp"
+rebuild_hint = "The creating application can regenerate this temporary file"
+confidence = 0.76
+default_action = "safe"
+
+[[rules]]
+name = "system_junk"
+description = "OS-generated metadata file"
+patterns = [".DS_Store", "Thumbs.db", "desktop.ini"]
+risk = "safe"
+category = "junk"
+rebuild_hint = "The operating system may recreate this metadata"
+confidence = 0.99
+default_action = "safe"

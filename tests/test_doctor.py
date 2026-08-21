@@ -45,6 +45,7 @@ def test_doctor_json_has_versioned_schema_and_expected_sections(tmp_path, monkey
         "capabilities",
         "optional_extras",
         "scan_policy",
+        "cleanup_rules",
     }
     assert payload["platform"]["adapter"] == "macos-portable"
     assert payload["metrics"]["logical"]["status"] == "available"

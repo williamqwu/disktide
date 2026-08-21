@@ -167,17 +167,29 @@ Pseudo-filesystems (`proc`, `sysfs`, `tmpfs`, etc.) are automatically filtered o
 
 ### Cleanup (c)
 
-Detects pattern-matched candidates such as dependency directories (`node_modules`), build outputs, bytecode files, old logs, OS junk files, and IDE directories. These rules are heuristics, not a guarantee that a path is safe to remove.
+Detects pattern-matched candidates through versioned declarative rule packs for
+Python, Node, Rust, general logs/temp, IDE metadata, and container/build caches.
+Every row exposes pack/version, category, reason, age, score, confidence, risk,
+default action policy, and rebuild guidance. These rules and scores are
+heuristics, not a guarantee that a path is safe to remove.
 
 Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in the Settings screen (`?`). Once enabled, press `c` to switch to it.
 
+The Age/Size Map places age on the vertical axis and size on the horizontal
+axis, with glyph/color conveying risk and the selected point synchronized with
+the table. Press `m` to focus the map and use its arrow keys plus Enter to move
+the table cursor. On small or safe-rendering terminals it becomes a bounded
+score/age/confidence list instead of dropping information.
+
 Review every selected path before acting. Press `d` to create and inspect a
-persistent CleanupPlan; this is read-only until an explicit action is chosen.
+persistent CleanupPlan v2; this is read-only until an explicit action is chosen.
 **Apply Safely** moves each revalidated target to system Trash when an atomic
 same-filesystem move is available, otherwise to an owned mode-0700 quarantine
 directory next to the target. Press `u` to restore the latest recoverable plan
-and `h` to inspect the latest plan summary. Permanent deletion is a separate red
-action and requires typing the exact plan-scoped `DELETE <plan-id>` token.
+and `h` to inspect savings history grouped by category. Permanent deletion is a
+separate red action and requires typing the exact plan-scoped
+`DELETE <plan-id>` token. Detection-only rules remain visible but cannot enter
+safe apply, permanent deletion, or purge.
 
 Before every action, fsmonitor repeats `lstat`, identity, rule, age, directory
 content, mount-boundary, and protected-path checks. Changed, missing, replaced,
@@ -211,7 +223,8 @@ bytes as zero until the data is purged.
 | `a` | Cleanup | Select all |
 | Space | Cleanup | Toggle row selection |
 | `u` | Cleanup | Undo the latest recoverable plan |
-| `h` | Cleanup | Show the latest persisted plan summary |
+| `h` | Cleanup | Show persisted savings history by category |
+| `m` | Cleanup | Focus the synchronized Age/Size Map |
 
 ## CLI Commands
 
@@ -387,16 +400,38 @@ Cleanup defaults to a persistent, read-only preview:
 ```bash
 fsmonitor cleanup /path
 fsmonitor cleanup --plan PLAN_ID --apply
-fsmonitor cleanup history
+fsmonitor cleanup history --by category
 fsmonitor cleanup undo PLAN_OR_ACTION_ID
+fsmonitor cleanup purge PLAN_OR_ACTION_ID
 ```
 
 The first command scans, resolves parent/child overlap, saves the plan, and makes
 no filesystem changes. `--apply` revalidates each target and uses Trash with
 same-filesystem quarantine fallback. `history` distinguishes estimated,
-validated, isolated, and actually reclaimed bytes; `undo` refuses to overwrite
-a newly created original path. Plans and per-action audit events survive process
-restart in schema v6.
+isolated, purged, actually reclaimed, and undone bytes; `undo` refuses to
+overwrite a newly created original path. Plans and per-action audit events
+survive process restart. The database schema remains v6 while the versioned
+CleanupPlan JSON payload is v2.
+
+`history` can group those values by `category`, `pack`, or `path`. `purge` only owns
+revalidated quarantine content and requires the exact `PURGE <plan-id>` token;
+it never purges system Trash.
+
+Manage declarative rule packs from the same configuration used by the TUI:
+
+```bash
+fsmonitor cleanup rules list
+fsmonitor cleanup rules validate /path/to/pack.toml
+fsmonitor cleanup rules disable node
+fsmonitor cleanup rules enable node
+```
+
+Built-in packs are packaged with the application. Optional user packs load from
+`~/.config/fsmonitor-cli/cleanup-rules/*.toml` (respecting `XDG_CONFIG_HOME`).
+Validation is strict: unknown fields, unsupported schema versions, invalid
+identifiers/types, duplicate names, and executable hook fields are rejected.
+One bad pack is isolated and reported by `fsmonitor doctor`; valid packs remain
+available.
 
 Permanent deletion is intentionally separate:
 
@@ -429,6 +464,8 @@ database_hard_budget = 3221225472        # 3 GiB; block new snapshots after main
 # prefer_trash = false                   # default true; false uses quarantine directly
 quarantine_retention_days = 7
 quarantine_max_bytes = 10737418240        # 10 GiB capacity policy
+# disabled_rule_packs = ["node"]          # shared by CLI and TUI
+map_max_points = 80                       # bounded Age/Size Map (10–500)
 
 [ui]
 color_theme = "warm"                     # default, cold, warm, vivid, mono
@@ -446,8 +483,10 @@ Monitor Center or the `monitor`/`alerts` commands. The `[monitor]` config sectio
 contains global defaults, database budgets, the foreground watch cap, and the
 TUI auto-start preference.
 
-The `[cleanup]` section controls safe executor preference plus quarantine expiry
-and capacity. It never enables permanent deletion as a default action.
+The `[cleanup]` section controls safe executor preference, quarantine expiry and
+capacity, disabled declarative packs, and the Age/Size Map point budget. It
+never enables permanent deletion as a default action. Settings presents the
+same pack switches with source, rule count, and maximum risk.
 
 The **Live scan rendering** setting (`live_scan_render`) controls whether the active visualization tab redraws as the scan progresses. `auto` (the default) enables it on terminals at least 80 columns by 24 rows with at least 4 CPUs, and stays off on smaller / lower-resource setups where the per-frame redraw cost would compete with the scan. Set to `on` to force it regardless of terminal size, or `off` to wait for the scan to finish and render once.
 

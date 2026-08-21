@@ -10,12 +10,15 @@ from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
 
 from fs_monitor.config import (
     AppConfig,
+    cleanup_rule_directory,
     current_hostname,
     format_duration,
     parse_duration,
     parse_size,
     save_config,
 )
+from fs_monitor.cleanup.rules import get_rule_catalog
+from fs_monitor.models.patterns import RiskLevel
 from fs_monitor.scanner.sysinfo import storage_class
 from fs_monitor.repositories.snapshots import SnapshotRepository
 from fs_monitor.viz.colors import SCHEMES, set_color_scheme
@@ -85,6 +88,10 @@ class SettingsScreen(Screen):
         self._repository = repository
         self._scan_path = scan_path
         self._system_info = None
+        self._rule_catalog = get_rule_catalog(
+            disabled_packs=self._config.cleanup.disabled_rule_packs,
+            user_directory=cleanup_rule_directory(),
+        )
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -143,6 +150,40 @@ class SettingsScreen(Screen):
                 "  Cleanup defaults to plan preview and recoverable Trash/quarantine.",
                 classes="sysinfo-value",
             )
+            yield Static("  Declarative rule packs", classes="sysinfo-value")
+            risk_order = {
+                RiskLevel.SAFE: 0,
+                RiskLevel.MODERATE: 1,
+                RiskLevel.DANGEROUS: 2,
+            }
+            for pack in self._rule_catalog.packs:
+                maximum = max(
+                    (rule.risk for rule in pack.rules),
+                    key=lambda risk: risk_order[risk],
+                    default=RiskLevel.SAFE,
+                )
+                with Horizontal(classes="setting-row"):
+                    yield Label(
+                        f"{pack.name} v{pack.version}",
+                        classes="setting-label",
+                    )
+                    yield Switch(
+                        value=pack.enabled,
+                        id=f"cleanup-pack-{pack.name}",
+                    )
+                    yield Label(
+                        f"{len(pack.rules)} rules · {pack.source} · max {maximum.value}",
+                        classes="input-hint",
+                    )
+            if self._rule_catalog.issues:
+                yield Static(
+                    "  "
+                    + "; ".join(
+                        f"isolated {issue.path}: {issue.error}"
+                        for issue in self._rule_catalog.issues
+                    ),
+                    classes="sysinfo-value",
+                )
 
             yield Static("")
             yield Static("Monitor Settings", classes="section-title")
@@ -419,6 +460,14 @@ class SettingsScreen(Screen):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "show-cleanup":
             self._config.ui.show_cleanup = event.value
+        elif event.switch.id and event.switch.id.startswith("cleanup-pack-"):
+            pack = event.switch.id.removeprefix("cleanup-pack-")
+            disabled = set(self._config.cleanup.disabled_rule_packs)
+            if event.value:
+                disabled.discard(pack)
+            else:
+                disabled.add(pack)
+            self._config.cleanup.disabled_rule_packs = sorted(disabled)
         elif event.switch.id == "one-file-system":
             self._config.scan.one_file_system = event.value
         elif event.switch.id == "exclude-pseudo-filesystems":

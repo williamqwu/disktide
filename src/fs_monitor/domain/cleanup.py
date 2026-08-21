@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any
 
 from fs_monitor.domain.metrics import MetricId
-from fs_monitor.models.patterns import RiskLevel
+from fs_monitor.models.patterns import CleanupRuleActionPolicy, RiskLevel
 
 
 def utc_now() -> datetime:
@@ -49,6 +49,7 @@ class CleanupExecutionStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     UNDONE = "undone"
+    PURGED = "purged"
 
 
 class CleanupAuditKind(StrEnum):
@@ -59,6 +60,8 @@ class CleanupAuditKind(StrEnum):
     EXECUTION_RESULT = "execution-result"
     UNDO_STARTED = "undo-started"
     UNDO_RESULT = "undo-result"
+    PURGE_STARTED = "purge-started"
+    PURGE_RESULT = "purge-result"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,14 +113,27 @@ class CleanupAction:
     rebuild_hint: str | None
     rule_patterns: tuple[str, ...]
     parent_indicators: tuple[str, ...]
+    path_context: tuple[str, ...]
     min_age_days: int
+    rule_pack: str
+    rule_pack_version: str
+    rule_schema_version: int
+    rule_source: str
+    rule_confidence: float
+    rule_action_policy: CleanupRuleActionPolicy
+    score: float
+    confidence: float
+    coverage_partial: bool
     planned_action: CleanupActionKind
     validation_status: CleanupValidationStatus = CleanupValidationStatus.PENDING
     execution_status: CleanupExecutionStatus = CleanupExecutionStatus.PLANNED
     validation_detail: str | None = None
     subsumed_by: str | None = None
     executed_action: CleanupActionKind | None = None
+    isolated_bytes: int = 0
+    purged_bytes: int = 0
     actual_reclaimed_bytes: int = 0
+    purged_at: datetime | None = None
     error: str | None = None
     undo: CleanupUndo | None = None
     updated_at: datetime = field(default_factory=utc_now)
@@ -132,6 +148,10 @@ class CleanupAction:
             self.undo is not None
             and self.execution_status is CleanupExecutionStatus.SUCCEEDED
         )
+
+    @property
+    def detection_only(self) -> bool:
+        return self.rule_action_policy is CleanupRuleActionPolicy.DETECTION_ONLY
 
 
 @dataclass(slots=True)
@@ -171,9 +191,37 @@ class CleanupPlan:
         return sum(action.actual_reclaimed_bytes for action in self.active_actions)
 
     @property
+    def isolated_bytes(self) -> int:
+        return sum(action.isolated_bytes for action in self.active_actions)
+
+    @property
+    def purged_bytes(self) -> int:
+        return sum(action.purged_bytes for action in self.active_actions)
+
+    @property
+    def confidence(self) -> float:
+        weighted = sum(
+            action.confidence * max(1, action.estimated_reclaimable_bytes)
+            for action in self.active_actions
+        )
+        weight = sum(
+            max(1, action.estimated_reclaimable_bytes)
+            for action in self.active_actions
+        )
+        return weighted / weight if weight else 0.0
+
+    @property
     def succeeded_count(self) -> int:
         return sum(
-            action.execution_status is CleanupExecutionStatus.SUCCEEDED
+            action.execution_status
+            in {CleanupExecutionStatus.SUCCEEDED, CleanupExecutionStatus.PURGED}
+            for action in self.active_actions
+        )
+
+    @property
+    def purged_count(self) -> int:
+        return sum(
+            action.execution_status is CleanupExecutionStatus.PURGED
             for action in self.active_actions
         )
 
@@ -212,7 +260,8 @@ class CleanupExecutionResult:
         return [
             action
             for action in self.plan.actions
-            if action.execution_status is CleanupExecutionStatus.SUCCEEDED
+            if action.execution_status
+            in {CleanupExecutionStatus.SUCCEEDED, CleanupExecutionStatus.PURGED}
         ]
 
     @property
@@ -230,6 +279,43 @@ class CleanupExecutionResult:
             for action in self.plan.actions
             if action.execution_status is CleanupExecutionStatus.SKIPPED
         ]
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupSavingsPoint:
+    timestamp: datetime
+    plan_id: str
+    action_id: str
+    path: str
+    category: str
+    rule_pack: str
+    estimated_bytes: int = 0
+    isolated_bytes: int = 0
+    purged_bytes: int = 0
+    actual_reclaimed_bytes: int = 0
+    undone_bytes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupSavingsSummary:
+    key: str
+    action_count: int
+    estimated_bytes: int
+    isolated_bytes: int
+    purged_bytes: int
+    actual_reclaimed_bytes: int
+    undone_bytes: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "action_count": self.action_count,
+            "estimated_bytes": self.estimated_bytes,
+            "isolated_bytes": self.isolated_bytes,
+            "purged_bytes": self.purged_bytes,
+            "actual_reclaimed_bytes": self.actual_reclaimed_bytes,
+            "undone_bytes": self.undone_bytes,
+        }
 
 
 def cleanup_plan_to_dict(plan: CleanupPlan) -> dict[str, Any]:
@@ -282,7 +368,17 @@ def cleanup_action_to_dict(action: CleanupAction) -> dict[str, Any]:
         "rebuild_hint": action.rebuild_hint,
         "rule_patterns": list(action.rule_patterns),
         "parent_indicators": list(action.parent_indicators),
+        "path_context": list(action.path_context),
         "min_age_days": action.min_age_days,
+        "rule_pack": action.rule_pack,
+        "rule_pack_version": action.rule_pack_version,
+        "rule_schema_version": action.rule_schema_version,
+        "rule_source": action.rule_source,
+        "rule_confidence": action.rule_confidence,
+        "rule_action_policy": action.rule_action_policy.value,
+        "score": action.score,
+        "confidence": action.confidence,
+        "coverage_partial": action.coverage_partial,
         "planned_action": action.planned_action.value,
         "validation_status": action.validation_status.value,
         "execution_status": action.execution_status.value,
@@ -291,7 +387,10 @@ def cleanup_action_to_dict(action: CleanupAction) -> dict[str, Any]:
         "executed_action": (
             action.executed_action.value if action.executed_action else None
         ),
+        "isolated_bytes": action.isolated_bytes,
+        "purged_bytes": action.purged_bytes,
         "actual_reclaimed_bytes": action.actual_reclaimed_bytes,
+        "purged_at": action.purged_at.isoformat() if action.purged_at else None,
         "error": action.error,
         "undo": _undo_to_dict(action.undo),
         "updated_at": action.updated_at.isoformat(),
@@ -319,7 +418,19 @@ def cleanup_action_from_dict(data: dict[str, Any]) -> CleanupAction:
         rebuild_hint=data.get("rebuild_hint"),
         rule_patterns=tuple(data.get("rule_patterns", ())),
         parent_indicators=tuple(data.get("parent_indicators", ())),
+        path_context=tuple(data.get("path_context", ())),
         min_age_days=int(data.get("min_age_days", 0)),
+        rule_pack=str(data.get("rule_pack", "legacy")),
+        rule_pack_version=str(data.get("rule_pack_version", "0")),
+        rule_schema_version=int(data.get("rule_schema_version", 0)),
+        rule_source=str(data.get("rule_source", "legacy")),
+        rule_confidence=float(data.get("rule_confidence", 0.8)),
+        rule_action_policy=CleanupRuleActionPolicy(
+            data.get("rule_action_policy", CleanupRuleActionPolicy.SAFE.value)
+        ),
+        score=float(data.get("score", 0.0)),
+        confidence=float(data.get("confidence", data.get("rule_confidence", 0.8))),
+        coverage_partial=bool(data.get("coverage_partial", False)),
         planned_action=CleanupActionKind(data.get("planned_action", "preview")),
         validation_status=CleanupValidationStatus(
             data.get("validation_status", "pending")
@@ -330,7 +441,14 @@ def cleanup_action_from_dict(data: dict[str, Any]) -> CleanupAction:
         validation_detail=data.get("validation_detail"),
         subsumed_by=data.get("subsumed_by"),
         executed_action=CleanupActionKind(executed) if executed else None,
+        isolated_bytes=int(data.get("isolated_bytes", 0)),
+        purged_bytes=int(data.get("purged_bytes", 0)),
         actual_reclaimed_bytes=int(data.get("actual_reclaimed_bytes", 0)),
+        purged_at=(
+            _datetime(data["purged_at"])
+            if data.get("purged_at")
+            else None
+        ),
         error=data.get("error"),
         undo=_undo_from_dict(data.get("undo")),
         updated_at=_datetime(data.get("updated_at") or utc_now().isoformat()),

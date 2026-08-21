@@ -6,6 +6,7 @@ import os
 import re
 import socket
 import tomllib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,6 +84,8 @@ class CleanupConfig:
     prefer_trash: bool = True
     quarantine_retention_days: int = 7
     quarantine_max_bytes: int = 10 * 1024**3
+    disabled_rule_packs: list[str] = field(default_factory=list)
+    map_max_points: int = 80
 
 
 @dataclass
@@ -166,6 +169,11 @@ def config_path() -> Path:
     return _config_path()
 
 
+def cleanup_rule_directory() -> Path:
+    """Return the user declarative rule-pack directory without creating it."""
+    return _config_path().parent / "cleanup-rules"
+
+
 def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     """Save configuration to TOML file."""
     config_file = Path(path) if path else _config_path()
@@ -211,6 +219,13 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         "quarantine_max_bytes = "
         f"{config.cleanup.quarantine_max_bytes}"
     )
+    if config.cleanup.disabled_rule_packs:
+        values = ", ".join(
+            json.dumps(name)
+            for name in sorted(set(config.cleanup.disabled_rule_packs))
+        )
+        lines.append(f"disabled_rule_packs = [{values}]")
+    lines.append(f"map_max_points = {config.cleanup.map_max_points}")
     lines.append("")
 
     lines.append("[ui]")
@@ -289,6 +304,19 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         )
         quarantine_max = cleanup.get("quarantine_max_bytes", 10 * 1024**3)
         config.cleanup.quarantine_max_bytes = max(1, int(quarantine_max))
+        disabled = cleanup.get("disabled_rule_packs", [])
+        if isinstance(disabled, list):
+            config.cleanup.disabled_rule_packs = sorted(
+                {
+                    str(name)
+                    for name in disabled
+                    if isinstance(name, str) and name
+                }
+            )
+        config.cleanup.map_max_points = min(
+            500,
+            max(10, int(cleanup.get("map_max_points", 80))),
+        )
 
     if "ui" in data:
         ui = data["ui"]

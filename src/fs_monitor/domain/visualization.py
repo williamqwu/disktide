@@ -10,7 +10,7 @@ from pathlib import Path
 from statistics import median
 from typing import Mapping, Sequence
 
-from fs_monitor.domain.alerts import AlertEvent
+from fs_monitor.domain.alerts import AlertEvent, AlertKind
 from fs_monitor.domain.delta import CompareResult, SizeDelta
 from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.monitor import HistoryPointState, MonitorHistory, MonitorHistoryPoint
@@ -94,6 +94,7 @@ class TrendPoint:
     rollup_kind: str | None = None
     scan_duration: float = 0.0
     alert: bool = False
+    cleanup: bool = False
     anomaly: bool = False
 
 
@@ -338,12 +339,20 @@ def build_trend_model(
         for event in alerts
         if event.new_snapshot_id is not None and not event.suppressed
     }
+    cleanup_ids = {
+        event.new_snapshot_id
+        for event in alerts
+        if event.kind is AlertKind.CLEANUP_OPPORTUNITY
+        and event.new_snapshot_id is not None
+        and not event.suppressed
+    }
     series = [
         _trend_series(
             history.root_path,
             history.root_points,
             snapshots=snapshot_map,
             alert_ids=alert_ids,
+            cleanup_ids=cleanup_ids,
         )
     ]
     if history.selected_path and history.selected_points:
@@ -353,6 +362,7 @@ def build_trend_model(
                 history.selected_points,
                 snapshots=snapshot_map,
                 alert_ids=alert_ids,
+                cleanup_ids=cleanup_ids,
             )
         )
     return TrendModel(metric=history.monitor.metric, series=tuple(series))
@@ -549,6 +559,7 @@ def _trend_series(
     *,
     snapshots: Mapping[int, Snapshot],
     alert_ids: set[int],
+    cleanup_ids: set[int],
 ) -> TrendSeries:
     built = []
     for point in points:
@@ -564,6 +575,7 @@ def _trend_series(
                 rollup_kind=point.rollup_kind,
                 scan_duration=snapshot.scan_duration if snapshot is not None else 0.0,
                 alert=point.snapshot_id in alert_ids,
+                cleanup=point.snapshot_id in cleanup_ids,
             )
         )
     return TrendSeries(path=path, points=_mark_anomalies(tuple(built)))

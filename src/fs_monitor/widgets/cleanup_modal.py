@@ -37,7 +37,8 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
     }
 
     #cleanup-dialog {
-        width: 92;
+        width: 118;
+        max-width: 98%;
         max-height: 44;
         background: $surface;
         border: thick $primary;
@@ -69,6 +70,9 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
         super().__init__(**kwargs)
         self._plan = plan
         self._confirmation = CleanupService.permanent_confirmation(plan.id)
+        self._has_executable_actions = any(
+            not action.detection_only for action in plan.active_actions
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="cleanup-dialog"):
@@ -83,13 +87,24 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
                 "possible, otherwise same-filesystem quarantine."
             )
             table = DataTable(id="cleanup-table")
-            table.add_columns("Category", "Items", "Estimated", "Max risk", "Action")
+            table.add_columns(
+                "Pack",
+                "Category",
+                "Path",
+                "Age",
+                "Estimated",
+                "Score",
+                "Confidence",
+                "Risk",
+                "Policy",
+            )
             yield table
             yield Static(
                 Text(
                     "Estimated reclaimable: "
                     f"{humanize.naturalsize(self._plan.estimated_reclaimable_bytes, binary=True)} "
                     f"across {len(self._plan.active_actions)} action(s); "
+                    f"confidence {self._plan.confidence:.0%}; "
                     f"{len(self._plan.actions) - len(self._plan.active_actions)} subsumed.",
                     style="bold green",
                 )
@@ -108,36 +123,43 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
                 )
             with Horizontal(classes="button-row"):
                 yield Button("Save Preview", variant="primary", id="btn-preview")
-                yield Button("Apply Safely", variant="success", id="btn-apply")
-                yield Button("Permanent Delete", variant="error", id="btn-permanent")
+                yield Button(
+                    "Apply Safe Candidates",
+                    variant="success",
+                    id="btn-apply",
+                    disabled=not self._has_executable_actions,
+                )
+                yield Button(
+                    "Permanent Delete",
+                    variant="error",
+                    id="btn-permanent",
+                    disabled=not self._has_executable_actions,
+                )
                 yield Button("Cancel", variant="default", id="btn-cancel")
 
     def on_mount(self) -> None:
         table = self.query_one("#cleanup-table", DataTable)
-        groups: dict[str, list] = {}
         for action in self._plan.active_actions:
-            groups.setdefault(action.category, []).append(action)
-        risk_order = {
-            RiskLevel.SAFE: 0,
-            RiskLevel.MODERATE: 1,
-            RiskLevel.DANGEROUS: 2,
-        }
-        for category, actions in sorted(groups.items()):
-            maximum = max(actions, key=lambda item: risk_order[item.risk]).risk
             risk_style = {
                 RiskLevel.SAFE: "green",
                 RiskLevel.MODERATE: "yellow",
                 RiskLevel.DANGEROUS: "bold red",
-            }[maximum]
+            }[action.risk]
             table.add_row(
-                category,
-                str(len(actions)),
+                f"{action.rule_pack}@{action.rule_pack_version}",
+                action.category,
+                _truncate(action.path, 34),
+                f"{action.age_days:.1f}d",
                 humanize.naturalsize(
-                    sum(item.estimated_reclaimable_bytes for item in actions),
+                    action.estimated_reclaimable_bytes,
                     binary=True,
                 ),
-                Text(maximum.value, style=risk_style),
-                "Trash → quarantine",
+                f"{action.score:.1f}",
+                f"{action.confidence:.0%}",
+                Text(action.risk.value, style=risk_style),
+                "detection-only"
+                if action.detection_only
+                else action.rule_action_policy.value,
             )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -159,3 +181,9 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
                     confirmation=value,
                 )
             )
+
+
+def _truncate(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    return "..." + value[-(width - 3):]

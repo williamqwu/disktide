@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.8
+
+**Cleanup intelligence and rule packs**
+
+- **declarative rules** Replaced the Python-owned cleanup catalog with strict TOML schema-v1 packs for Python, Node, Rust, general logs/temp, IDE metadata, and detection-only container/build caches. User packs load from `~/.config/fsmonitor-cli/cleanup-rules`, malformed packs are isolated and reported by doctor, and the schema cannot execute shell or Python code.
+- **ranking/explanation** Added deterministic opportunity scoring (35% size, 25% age, 20% inverse risk, 10% rebuildability, 10% rule confidence), explicit confidence/coverage handling, pack provenance, path context, action policy, and rebuild hints. Partial or inaccessible evidence lowers confidence instead of pretending estimates are exact.
+- **CleanupPlan v2** Persisted the rule-pack snapshot, score, confidence, coverage, and policy in the existing JSON payload while retaining readers for legacy plans. The SQLite schema remains v6; no migration or snapshot-format change is required.
+- **TUI/CLI management** Added a bounded, cached Age/Size Cleanup Map synchronized with the candidate table, a savings-history modal, Settings switches for every pack, and `cleanup rules list|validate|enable|disable`. Small and safe-rendering terminals use a deterministic fallback list.
+- **history/purge/alerts** Separated estimated, isolated, purged, actual reclaimed, and undone bytes with `cleanup history --by category|pack|path`. Quarantine purge requires revalidation plus `PURGE <plan-id>` and never manages system Trash. Cleanup-opportunity alerts now read persisted plan summaries, include preview guidance, add a distinct Trend marker, and remain notification-only.
+- **safety** Detection-only rules can be discovered and planned but are blocked from safe apply, permanent deletion, and purge. Opportunity score remains an ordering aid and never bypasses Wave 08 identity, boundary, audit, or confirmation checks.
+
 ## v0.2.7
 
 **CleanupPlan and safe execution**

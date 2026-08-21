@@ -13,6 +13,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from fs_monitor import APP_NAME, LEGACY_STORAGE_NAMESPACE, __version__
+from fs_monitor.cleanup.rules import get_rule_catalog
 from fs_monitor.collectors.platform import get_platform_adapter
 from fs_monitor.collectors.platform.base import PlatformAdapter
 from fs_monitor.config import AppConfig, load_config
@@ -26,7 +27,7 @@ from fs_monitor.storage.database import Database
 from fs_monitor.storage.migrations import CURRENT_VERSION, get_version
 
 
-DOCTOR_SCHEMA_VERSION = 1
+DOCTOR_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +43,7 @@ class DoctorReport:
     capabilities: dict[str, object]
     optional_extras: dict[str, object]
     scan_policy: dict[str, object]
+    cleanup_rules: dict[str, object]
     schema_version: int = DOCTOR_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, object]:
@@ -56,6 +58,7 @@ class DoctorReport:
             "capabilities": self.capabilities,
             "optional_extras": self.optional_extras,
             "scan_policy": self.scan_policy,
+            "cleanup_rules": self.cleanup_rules,
         }
 
     def to_json(self) -> str:
@@ -93,6 +96,36 @@ def build_doctor_report(
         database_factory,
         show_paths=show_paths,
     )
+    catalog = get_rule_catalog(
+        disabled_packs=config.cleanup.disabled_rule_packs,
+        user_directory=config_path.parent / "cleanup-rules",
+    )
+    cleanup_rules = {
+        "schema_version": 1,
+        "pack_count": len(catalog.packs),
+        "enabled_pack_count": sum(pack.enabled for pack in catalog.packs),
+        "rule_count": len(catalog.rules),
+        "packs": [
+            {
+                "name": pack.name,
+                "version": pack.version,
+                "schema_version": pack.schema_version,
+                "source": pack.source,
+                "enabled": pack.enabled,
+                "rule_count": len(pack.rules),
+            }
+            for pack in catalog.packs
+        ],
+        "issues": [
+            {
+                "pack": issue.pack_name,
+                "source": issue.source,
+                "path": _redact_text(issue.path, show_paths),
+                "error": _redact_text(issue.error, show_paths),
+            }
+            for issue in catalog.issues
+        ],
+    }
 
     metric_items = {
         "logical": capabilities.get(CapabilityId.LOGICAL_METRIC).to_dict(),
@@ -160,6 +193,7 @@ def build_doctor_report(
             "symlinks": "never-follow",
             "hardlinks": "lexical-owner",
         },
+        cleanup_rules=cleanup_rules,
     )
 
 
@@ -213,6 +247,27 @@ def render_doctor_report(report: DoctorReport) -> str:
     lines.extend(_render_capability_group(payload["capabilities"]))
     lines.extend(["", "Optional extras"])
     lines.extend(_render_capability_group(payload["optional_extras"]))
+
+    cleanup_rules = payload["cleanup_rules"]
+    lines.extend([
+        "",
+        "Cleanup rule packs",
+        (
+            f"  Packs: {cleanup_rules['enabled_pack_count']} enabled / "
+            f"{cleanup_rules['pack_count']} loaded"
+        ),
+        f"  Active rules: {cleanup_rules['rule_count']}",
+    ])
+    for pack in cleanup_rules["packs"]:
+        state = "ON" if pack["enabled"] else "OFF"
+        lines.append(
+            f"  [{state}] {pack['name']} v{pack['version']} · "
+            f"{pack['rule_count']} rules · {pack['source']}"
+        )
+    for issue in cleanup_rules["issues"]:
+        lines.append(
+            f"  [INVALID] {issue['path']}: {issue['error']}"
+        )
 
     policy = payload["scan_policy"]
     lines.extend([
