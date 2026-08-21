@@ -32,15 +32,21 @@ from fs_monitor.domain.monitor import (
     MonitorHistory,
     RetentionPreview,
 )
+from fs_monitor.domain.visualization import MonitorSpaceTime
 from fs_monitor.services.monitor import (
     MonitorEvent,
     MonitorEventKind,
     MonitorService,
 )
+from fs_monitor.services.visualization import VisualizationService
 from fs_monitor.widgets.alert_editor import AlertEditor
 from fs_monitor.widgets.confirm_modal import ConfirmModal
 from fs_monitor.widgets.monitor_editor import MonitorEditor, MonitorEditorResult
+from fs_monitor.widgets.growth_heatmap import GrowthHeatmap
+from fs_monitor.widgets.sunburst_view import SunburstView
+from fs_monitor.widgets.treemap_view import TreemapView
 from fs_monitor.widgets.trend_chart import TrendChart
+from fs_monitor.presentation.tui.viewmodels.visualization import legend_text
 
 
 class MonitorScreen(Screen):
@@ -62,6 +68,16 @@ class MonitorScreen(Screen):
         Binding("r", "refresh", "Refresh", show=True),
         Binding("enter", "open_detail", "Details", show=False),
         Binding("escape", "back_to_list", "Back", show=False),
+        Binding("f1", "switch_history_viz('trend')", "Trend", show=False),
+        Binding("f2", "switch_history_viz('treemap')", "Diff map", show=False),
+        Binding("f3", "switch_history_viz('sunburst')", "Growth rings", show=False),
+        Binding("f4", "switch_history_viz('heatmap')", "Heatmap", show=False),
+        Binding("z", "cycle_trend_zoom", "Trend zoom", show=False),
+        Binding("shift+left", "pan_trend(1)", "Trend older", show=False),
+        Binding("shift+right", "pan_trend(-1)", "Trend newer", show=False),
+        Binding("b", "set_diff_baseline", "Set baseline", show=False),
+        Binding("v", "set_diff_target", "Set target", show=False),
+        Binding("l", "use_latest_pair", "Latest/previous", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -120,7 +136,13 @@ class MonitorScreen(Screen):
         padding: 1 2;
     }
 
-    #monitor-history-chart {
+    #monitor-history-summary {
+        height: 3;
+        padding: 0 1;
+        color: $text-muted;
+    }
+
+    #monitor-history-viz-tabs {
         height: 55%;
         min-height: 8;
     }
@@ -165,12 +187,14 @@ class MonitorScreen(Screen):
         *,
         service: MonitorService,
         config: AppConfig,
+        visualization_service: VisualizationService | None = None,
         root_path: str = "",
         selected_path: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._service = service
+        self._visualization_service = visualization_service
         self._config = config
         self._root_path = root_path
         self._selected_path = selected_path
@@ -183,6 +207,10 @@ class MonitorScreen(Screen):
         self._selected_snapshot_id: int | None = None
         self._selected_rule_id: int | None = None
         self._loading = False
+        self._space_time: MonitorSpaceTime | None = None
+        self._space_time_error: str | None = None
+        self._baseline_snapshot_id: int | None = None
+        self._target_snapshot_id: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -202,7 +230,16 @@ class MonitorScreen(Screen):
                     with TabPane("Overview", id="monitor-overview-tab"):
                         yield Static("", id="monitor-overview")
                     with TabPane("History", id="monitor-history-tab"):
-                        yield TrendChart(id="monitor-history-chart")
+                        yield Static("", id="monitor-history-summary")
+                        with TabbedContent(id="monitor-history-viz-tabs"):
+                            with TabPane("Trend \\[F1]", id="monitor-trend-tab"):
+                                yield TrendChart(id="monitor-history-chart")
+                            with TabPane("Diff Map \\[F2]", id="monitor-diff-tab"):
+                                yield TreemapView(id="monitor-diff-treemap")
+                            with TabPane("Growth Rings \\[F3]", id="monitor-rings-tab"):
+                                yield SunburstView(id="monitor-growth-sunburst")
+                            with TabPane("Heatmap \\[F4]", id="monitor-heatmap-tab"):
+                                yield GrowthHeatmap(id="monitor-growth-heatmap")
                         history_table = DataTable(id="monitor-history-table")
                         history_table.cursor_type = "row"
                         history_table.add_columns(
@@ -277,6 +314,8 @@ class MonitorScreen(Screen):
             rules: list[AlertRule] = []
             alert_events = []
             retention = None
+            space_time = None
+            space_time_error = None
             if selected_id is not None:
                 history = self._service.history(
                     selected_id,
@@ -287,6 +326,16 @@ class MonitorScreen(Screen):
                     selected_id, limit=50
                 )
                 retention = self._service.retention_preview(selected_id)
+                if self._visualization_service is not None and history is not None:
+                    try:
+                        space_time = self._visualization_service.monitor(
+                            history,
+                            alerts=alert_events,
+                            baseline_id=self._baseline_snapshot_id,
+                            target_id=self._target_snapshot_id,
+                        )
+                    except Exception as exc:
+                        space_time_error = f"{type(exc).__name__}: {exc}"
             self.app.call_from_thread(
                 self._populate,
                 dashboard,
@@ -295,6 +344,8 @@ class MonitorScreen(Screen):
                 rules,
                 alert_events,
                 retention,
+                space_time,
+                space_time_error,
             )
         except Exception as exc:
             self.app.call_from_thread(
@@ -312,6 +363,8 @@ class MonitorScreen(Screen):
         rules: list[AlertRule],
         alert_events: list,
         retention: RetentionPreview | None,
+        space_time: MonitorSpaceTime | None,
+        space_time_error: str | None,
     ) -> None:
         if not self.is_mounted:
             return
@@ -321,6 +374,8 @@ class MonitorScreen(Screen):
         self._rules = rules
         self._events = alert_events
         self._retention = retention
+        self._space_time = space_time
+        self._space_time_error = space_time_error
         self._render_banner()
         self._render_monitor_list()
         if selected_id is None:
@@ -341,7 +396,7 @@ class MonitorScreen(Screen):
             f"{summary.definition.label} · {summary.definition.root_path}"
         )
         self._render_overview(summary)
-        self._render_history(history)
+        self._render_history(history, space_time)
         self._render_alerts(rules, alert_events)
         self._render_retention(summary, history, retention)
 
@@ -442,27 +497,71 @@ class MonitorScreen(Screen):
             f"  Problem: {problem}"
         )
 
-    def _render_history(self, history: MonitorHistory | None) -> None:
+    def _render_history(
+        self,
+        history: MonitorHistory | None,
+        space_time: MonitorSpaceTime | None,
+    ) -> None:
         table = self.query_one("#monitor-history-table", DataTable)
         table.clear()
         self._selected_snapshot_id = None
         if history is None:
-            self.query_one("#monitor-history-chart", TrendChart).set_data({})
+            self.query_one("#monitor-history-chart", TrendChart).set_model(None)
+            self.query_one("#monitor-diff-treemap", TreemapView).set_diff(None)
+            self.query_one("#monitor-growth-sunburst", SunburstView).set_diff(None)
+            self.query_one("#monitor-growth-heatmap", GrowthHeatmap).set_model(None)
+            self.query_one("#monitor-history-summary", Static).update(
+                "No compatible history yet."
+            )
             return
-        chart_data: dict[str, list[tuple[str, int]]] = {}
-        root_values = [
-            (point.timestamp.isoformat(), point.value)
-            for point in history.root_points
-            if point.state is HistoryPointState.PRESENT and point.value is not None
-        ]
-        chart_data[history.root_path] = root_values
-        if history.selected_path and history.selected_points:
-            chart_data[history.selected_path] = [
+
+        trend = self.query_one("#monitor-history-chart", TrendChart)
+        diff_treemap = self.query_one("#monitor-diff-treemap", TreemapView)
+        growth_sunburst = self.query_one("#monitor-growth-sunburst", SunburstView)
+        heatmap = self.query_one("#monitor-growth-heatmap", GrowthHeatmap)
+        if space_time is not None:
+            trend.set_model(space_time.trend)
+            diff_treemap.set_diff(space_time.diff)
+            growth_sunburst.set_diff(space_time.diff)
+            heatmap.set_model(space_time.heatmap)
+            heatmap.set_selected_path(history.selected_path)
+            pair = (
+                f"#{space_time.baseline_id} → #{space_time.target_id}"
+                if space_time.baseline_id and space_time.target_id
+                else "waiting for two compatible snapshots"
+            )
+            confidence = (
+                "partial confidence"
+                if space_time.diff is not None and space_time.diff.partial
+                else "full confidence"
+            )
+            problem = (
+                f" · {space_time.diff_error}" if space_time.diff_error else ""
+            )
+            self.query_one("#monitor-history-summary", Static).update(
+                f"Pair {pair} · {confidence}{problem}\n"
+                f"{legend_text()} · b/v set pair · l latest · z zoom · Shift+←/→ pan"
+            )
+        else:
+            chart_data: dict[str, list[tuple[str, int]]] = {}
+            chart_data[history.root_path] = [
                 (point.timestamp.isoformat(), point.value)
-                for point in history.selected_points
+                for point in history.root_points
                 if point.state is HistoryPointState.PRESENT and point.value is not None
             ]
-        self.query_one("#monitor-history-chart", TrendChart).set_data(chart_data)
+            if history.selected_path and history.selected_points:
+                chart_data[history.selected_path] = [
+                    (point.timestamp.isoformat(), point.value)
+                    for point in history.selected_points
+                    if point.state is HistoryPointState.PRESENT
+                    and point.value is not None
+                ]
+            trend.set_data(chart_data)
+            diff_treemap.set_diff(None)
+            growth_sunburst.set_diff(None)
+            heatmap.set_model(None)
+            message = self._space_time_error or "Space-time visual service unavailable"
+            self.query_one("#monitor-history-summary", Static).update(message)
 
         paths = [(history.root_path, history.root_points)]
         if history.selected_path and history.selected_points:
@@ -568,7 +667,11 @@ class MonitorScreen(Screen):
         self.query_one("#monitor-alert-rules", DataTable).clear()
         self.query_one("#monitor-alert-events", DataTable).clear()
         self.query_one("#monitor-retention-table", DataTable).clear()
-        self.query_one("#monitor-history-chart", TrendChart).set_data({})
+        self.query_one("#monitor-history-chart", TrendChart).set_model(None)
+        self.query_one("#monitor-diff-treemap", TreemapView).set_diff(None)
+        self.query_one("#monitor-growth-sunburst", SunburstView).set_diff(None)
+        self.query_one("#monitor-growth-heatmap", GrowthHeatmap).set_model(None)
+        self.query_one("#monitor-history-summary", Static).update("")
         self.query_one("#monitor-alert-summary", Static).update("")
         self.query_one("#monitor-retention-summary", Static).update("")
 
@@ -577,6 +680,8 @@ class MonitorScreen(Screen):
         if event.row_key.value is None:
             return
         self._selected_monitor_id = int(str(event.row_key.value))
+        self._baseline_snapshot_id = None
+        self._target_snapshot_id = None
         if self.has_class("narrow"):
             self.add_class("detail")
         self._load_data()
@@ -595,6 +700,54 @@ class MonitorScreen(Screen):
             self._selected_snapshot_id = int(value.rsplit(":", 1)[1])
         except (IndexError, ValueError):
             self._selected_snapshot_id = None
+
+    @on(GrowthHeatmap.PathSelected)
+    def on_heatmap_path_selected(self, event: GrowthHeatmap.PathSelected) -> None:
+        self._selected_path = event.path
+        self._baseline_snapshot_id = None
+        self._target_snapshot_id = None
+        self._load_data()
+
+    def action_switch_history_viz(self, viz: str) -> None:
+        tabs = self.query_one("#monitor-history-viz-tabs", TabbedContent)
+        tab_map = {
+            "trend": "monitor-trend-tab",
+            "treemap": "monitor-diff-tab",
+            "sunburst": "monitor-rings-tab",
+            "heatmap": "monitor-heatmap-tab",
+        }
+        target = tab_map.get(viz)
+        if target is not None:
+            tabs.active = target
+
+    def action_cycle_trend_zoom(self) -> None:
+        self.query_one("#monitor-history-chart", TrendChart).cycle_zoom()
+
+    def action_pan_trend(self, direction: int) -> None:
+        self.query_one("#monitor-history-chart", TrendChart).pan(direction)
+
+    def action_set_diff_baseline(self) -> None:
+        if self._selected_snapshot_id is None:
+            self.app.notify("Highlight a History row first.", severity="warning")
+            return
+        self._baseline_snapshot_id = self._selected_snapshot_id
+        if self._target_snapshot_id == self._baseline_snapshot_id:
+            self._target_snapshot_id = None
+        self._load_data()
+
+    def action_set_diff_target(self) -> None:
+        if self._selected_snapshot_id is None:
+            self.app.notify("Highlight a History row first.", severity="warning")
+            return
+        self._target_snapshot_id = self._selected_snapshot_id
+        if self._baseline_snapshot_id == self._target_snapshot_id:
+            self._baseline_snapshot_id = None
+        self._load_data()
+
+    def action_use_latest_pair(self) -> None:
+        self._baseline_snapshot_id = None
+        self._target_snapshot_id = None
+        self._load_data()
 
     @on(DataTable.RowSelected, "#monitor-alert-rules")
     def on_alert_selected(self, event: DataTable.RowSelected) -> None:

@@ -17,6 +17,12 @@ from fs_monitor.metrics import (
     normalize_metric,
 )
 from fs_monitor.models.tree import FSNode
+from fs_monitor.domain.visualization import VisualDelta
+from fs_monitor.presentation.tui.viewmodels.visualization import (
+    format_visual_delta,
+    sparkline,
+    visual_token,
+)
 from fs_monitor.rendering import bar_chars, denied_glyph, link_arrow, partial_glyph
 
 
@@ -44,6 +50,9 @@ class SizeTree(Tree[FSNode]):
         self._fs_root = root_node
         self._tree_nodes: dict[str, TreeNode[FSNode]] = {}
         self._live_update_count = 0
+        self._visuals: dict[str, VisualDelta] = {}
+        self._mini_trends: dict[str, tuple[int | None, ...]] = {}
+        self._diff_mode = False
         if root_node is not None:
             self._tree_nodes[root_node.path] = self.root
         if root_node:
@@ -57,8 +66,9 @@ class SizeTree(Tree[FSNode]):
     def sort_key(self, value: str) -> None:
         self._sort_key = value
         if self._fs_root:
+            selected_path = self.selected_path
             self._fs_root.invalidate_sort()
-            self.reload(self._fs_root)
+            self.reload(self._fs_root, selected_path=selected_path)
 
     @property
     def metric(self) -> str:
@@ -76,12 +86,13 @@ class SizeTree(Tree[FSNode]):
         # order to take effect. For name/mtime sorts only the labels change,
         # so refresh them in place to keep the cursor where it was.
         if self._sort_key not in ("name", "mtime") and self._fs_root is not None:
-            self.reload(self._fs_root)
+            self.reload(self._fs_root, selected_path=self.selected_path)
         else:
             self._refresh_labels()
 
-    def reload(self, root_node: FSNode) -> None:
+    def reload(self, root_node: FSNode, *, selected_path: str | None = None) -> None:
         """Reload the tree with a new root node."""
+        restore_path = selected_path
         self._fs_root = root_node
         self.clear()
         self._tree_nodes = {root_node.path: self.root}
@@ -95,6 +106,73 @@ class SizeTree(Tree[FSNode]):
         # instead of a frozen or invisible one. (Focus is restored by the
         # screen after a scan completes; see ExplorerScreen._on_scan_complete.)
         self.cursor_line = 0
+        if restore_path and restore_path != root_node.path:
+            self.select_path(restore_path)
+
+    @property
+    def selected_path(self) -> str | None:
+        node = self.cursor_node
+        if node is None or node.data is None:
+            return None
+        return node.data.path
+
+    @property
+    def diff_mode(self) -> bool:
+        return self._diff_mode
+
+    def set_visual_context(
+        self,
+        visuals: dict[str, VisualDelta] | None = None,
+        mini_trends: dict[str, tuple[int | None, ...]] | None = None,
+        *,
+        diff_mode: bool = False,
+    ) -> None:
+        """Apply precomputed delta and trend labels without querying storage."""
+        self._visuals = visuals or {}
+        self._mini_trends = mini_trends or {}
+        self._diff_mode = diff_mode
+        self._refresh_labels()
+
+    def set_path_trend(self, path: str, values: tuple[int | None, ...]) -> None:
+        self._mini_trends[path] = values
+        tree_node = self._tree_nodes.get(path)
+        if tree_node is not None and tree_node.data is not None:
+            tree_node.set_label(self._make_label(tree_node.data))
+            self.refresh()
+
+    def select_path(self, path: str) -> bool:
+        """Expand the path ancestry and restore the cursor by stable identity."""
+        root = self._fs_root
+        if root is None or root.find(path) is None:
+            return False
+        if path == root.path:
+            self.select_node(self.root)
+            return True
+
+        current_fs = root
+        current_tree = self.root
+        try:
+            relative = Path(path).relative_to(Path(root.path)).parts
+        except ValueError:
+            return False
+        for part in relative:
+            if not current_tree.children:
+                self._populate_children(current_tree, current_fs)
+            child_fs = next(
+                (child for child in current_fs.children if child.name == part),
+                None,
+            )
+            if child_fs is None:
+                return False
+            child_tree = self._tree_nodes.get(child_fs.path)
+            if child_tree is None:
+                return False
+            if child_fs.is_dir:
+                current_tree.expand()
+            current_fs = child_fs
+            current_tree = child_tree
+        self.select_node(current_tree)
+        return True
 
     @property
     def live_update_count(self) -> int:
@@ -258,6 +336,18 @@ class SizeTree(Tree[FSNode]):
 
         value = metric_text(node, self._metric)
         text.append(f"  {value}", style="dim")
+
+        visual = self._visuals.get(node.path) if self._diff_mode else None
+        if visual is not None:
+            token = visual_token(visual.state)
+            text.append(
+                f"  {format_visual_delta(visual, self._metric)}",
+                style=token.color,
+            )
+
+        trend = self._mini_trends.get(node.path)
+        if trend:
+            text.append(f"  {sparkline(trend)}", style="dim cyan")
 
         if node.is_hardlink:
             if node.is_hardlink_duplicate and node.hardlink_owner_path:

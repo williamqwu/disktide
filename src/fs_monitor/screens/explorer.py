@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from textual import on, work
@@ -29,11 +30,13 @@ from fs_monitor.domain.scan import (
     ScanStarted,
     ScanStatus,
 )
+from fs_monitor.domain.visualization import ExplorerSpaceTime, VisualizationBlocked
 from fs_monitor.metrics import METRIC_EXPLANATIONS, METRIC_NAMES, metric_text
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.walker import classify_symlink
 from fs_monitor.services.scan import ScanService
+from fs_monitor.services.visualization import VisualizationService
 from fs_monitor.widgets.size_tree import SizeTree
 from fs_monitor.widgets.breadcrumb import Breadcrumb
 from fs_monitor.widgets.confirm_modal import ConfirmModal
@@ -57,6 +60,19 @@ class ExplorerScreen(Screen):
         Binding("i", "go_into", "Into", show=False),
         Binding("s", "cycle_sort", "[S]ort [R]escan", show=True, key_display="Action"),
         Binding("r", "rescan", "Rescan", show=False),
+        Binding("d", "toggle_diff", "Current/Diff", show=True, key_display="D"),
+        Binding(
+            "left_square_bracket",
+            "browse_snapshot_pair(-1)",
+            "Newer snapshot pair",
+            show=False,
+        ),
+        Binding(
+            "right_square_bracket",
+            "browse_snapshot_pair(1)",
+            "Older snapshot pair",
+            show=False,
+        ),
         Binding(
             "shift+m",
             "setup_monitor",
@@ -127,12 +143,14 @@ class ExplorerScreen(Screen):
         scan_path: str,
         config: AppConfig | None = None,
         scan_service: ScanService | None = None,
+        visualization_service: VisualizationService | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._scan_path = scan_path
         self._config = config
         self._scan_service = scan_service or ScanService()
+        self._visualization_service = visualization_service
         self._root: FSNode | None = None
         self._current: FSNode | None = None
         self._live_snapshot: FSNode | None = None
@@ -149,6 +167,21 @@ class ExplorerScreen(Screen):
         # belt-and-suspenders, but the wire-level disable is the engine
         # never being asked). Final render path is unchanged either way.
         self._live_render = False
+        self._space_time: ExplorerSpaceTime | None = None
+        self._space_time_error: str | None = None
+        self._diff_mode = False
+        self._pair_index = 0
+
+    @property
+    def selected_path(self) -> str:
+        """Stable cursor-highlighted path used for cross-screen navigation."""
+        if self.is_mounted:
+            selected = self.query_one("#size-tree", SizeTree).selected_path
+            if selected:
+                return selected
+        if self._current is not None:
+            return self._current.path
+        return self._scan_path
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -188,6 +221,11 @@ class ExplorerScreen(Screen):
             if not force:
                 return
             self._scan_service.cancel(self._active_run.run_id)
+
+        self._diff_mode = False
+        self._space_time = None
+        self._space_time_error = None
+        self._pair_index = 0
 
         setting = (
             self._config.ui.live_scan_render
@@ -410,6 +448,90 @@ class ExplorerScreen(Screen):
         # Update only the active viz tab
         self._update_active_viz(root)
         self._update_status()
+        self._request_space_time_context()
+
+    def _request_space_time_context(self) -> None:
+        service = self._visualization_service
+        if service is None or self._root is None or not self.is_mounted:
+            return
+        tree = self.query_one("#size-tree", SizeTree)
+        self._load_space_time_context(
+            self._root.path,
+            self._pair_index,
+            tree.metric,
+            tree.selected_path or self._root.path,
+        )
+
+    @work(thread=True, exclusive=True, group="explorer-space-time")
+    def _load_space_time_context(
+        self,
+        root_path: str,
+        pair_index: int,
+        metric: str,
+        selected_path: str,
+    ) -> None:
+        service = self._visualization_service
+        if service is None:
+            return
+        try:
+            context = service.explorer(
+                root_path,
+                pair_index=pair_index,
+                metric=metric,
+                selected_path=selected_path,
+            )
+        except (VisualizationBlocked, ValueError) as exc:
+            self.app.call_from_thread(self._apply_space_time_context, None, str(exc))
+            return
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self.app.call_from_thread(self._apply_space_time_context, None, message)
+            return
+        self.app.call_from_thread(self._apply_space_time_context, context, None)
+
+    def _apply_space_time_context(
+        self,
+        context: ExplorerSpaceTime | None,
+        error: str | None,
+    ) -> None:
+        if not self.is_mounted:
+            return
+        self._space_time = context
+        self._space_time_error = error
+        if context is not None:
+            self._pair_index = context.pair_index
+        if self._diff_mode and context is None:
+            self._diff_mode = False
+        self._apply_visual_mode()
+
+    def _apply_visual_mode(self) -> None:
+        if not self.is_mounted or self._root is None:
+            return
+        tree = self.query_one("#size-tree", SizeTree)
+        selected_path = tree.selected_path
+        if selected_path is None:
+            selected_path = self._current.path if self._current else self._root.path
+        context = self._space_time
+        if self._diff_mode and context is not None:
+            frame = replace(context.frame, selected_path=selected_path)
+            self._space_time = replace(context, frame=frame)
+            tree.reload(frame.visual_root, selected_path=selected_path)
+            tree.set_visual_context(
+                dict(frame.visuals),
+                dict(context.mini_trends),
+                diff_mode=True,
+            )
+        else:
+            current = self._current or self._root
+            tree.reload(current, selected_path=selected_path)
+            tree.set_visual_context(
+                mini_trends=(
+                    dict(context.mini_trends) if context is not None else None
+                ),
+                diff_mode=False,
+            )
+        self._update_active_viz(self._current or self._root)
+        self._update_tree_indicator()
 
     def _on_scan_cancelled(self, event: ScanCancelled) -> None:
         """Reset live UI state without presenting a partial tree as final."""
@@ -492,9 +614,17 @@ class ExplorerScreen(Screen):
 
         selected_visual = visual_node or node
         if active == "tab-treemap":
-            self.query_one("#treemap-view", TreemapView).set_node(selected_visual)
+            view = self.query_one("#treemap-view", TreemapView)
+            if self._diff_mode and self._space_time is not None:
+                view.set_diff(self._space_time.frame)
+            else:
+                view.set_node(selected_visual)
         elif active == "tab-sunburst":
-            self.query_one("#sunburst-view", SunburstView).set_node(selected_visual)
+            view = self.query_one("#sunburst-view", SunburstView)
+            if self._diff_mode and self._space_time is not None:
+                view.set_diff(self._space_time.frame)
+            else:
+                view.set_node(selected_visual)
         elif active == "tab-details":
             self.query_one("#info-panel", InfoPanel).update_node(node)
 
@@ -549,8 +679,15 @@ class ExplorerScreen(Screen):
         else:
             sort_label = self._SORT_DISPLAY.get(tree.sort_key, tree.sort_key)
         self.query_one("#sort-indicator", Static).update(
-            f"Sort: {sort_label}  Bar: {metric_label}"
+            f"Sort: {sort_label}  Bar: {metric_label}  {self._visual_mode_label()}"
         )
+
+    def _visual_mode_label(self) -> str:
+        if self._diff_mode and self._space_time is not None:
+            return f"Diff {self._space_time.frame.title}  [ / ] pairs"
+        if self._space_time_error:
+            return "Current · diff unavailable"
+        return "Current"
 
     @on(Tree.NodeHighlighted)
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[FSNode]) -> None:
@@ -560,6 +697,42 @@ class ExplorerScreen(Screen):
         node = event.node.data
         info = self.query_one("#info-panel", InfoPanel)
         info.update_node(node)
+        if self._space_time is not None:
+            frame = replace(self._space_time.frame, selected_path=node.path)
+            self._space_time = replace(self._space_time, frame=frame)
+            if self._diff_mode:
+                self._update_active_viz(self._current or self._root or node)
+            if node.path not in self._space_time.mini_trends:
+                snapshot_ids = tuple(
+                    snapshot.id
+                    for snapshot in reversed(
+                        self._space_time.snapshots[
+                            self._pair_index : self._pair_index + 6
+                        ]
+                    )
+                    if snapshot.id is not None
+                )
+                self._load_selected_trend(node.path, snapshot_ids, frame.metric.value)
+
+    @work(thread=True, exclusive=True, group="explorer-path-trend")
+    def _load_selected_trend(
+        self, path: str, snapshot_ids: tuple[int, ...], metric: str
+    ) -> None:
+        service = self._visualization_service
+        if service is None:
+            return
+        values = service.path_trend(path, snapshot_ids, metric)
+        self.app.call_from_thread(self._apply_selected_trend, path, values)
+
+    def _apply_selected_trend(
+        self, path: str, values: tuple[int | None, ...]
+    ) -> None:
+        if not self.is_mounted or self._space_time is None:
+            return
+        trends = dict(self._space_time.mini_trends)
+        trends[path] = values
+        self._space_time = replace(self._space_time, mini_trends=trends)
+        self.query_one("#size-tree", SizeTree).set_path_trend(path, values)
 
     @on(Tree.NodeSelected)
     def on_tree_node_selected(self, event: Tree.NodeSelected[FSNode]) -> None:
@@ -574,7 +747,17 @@ class ExplorerScreen(Screen):
                 timeout=3,
             )
             return
-        self._drill_into(event.node.data)
+        selected = event.node.data
+        if self._diff_mode and self._root is not None:
+            current = self._root.find(selected.path)
+            if current is None:
+                self.app.notify(
+                    "That path was removed; switch to Current or choose another path.",
+                    severity="warning",
+                )
+                return
+            selected = current
+        self._drill_into(selected)
 
     @on(TabbedContent.TabActivated)
     def on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
@@ -679,6 +862,29 @@ class ExplorerScreen(Screen):
         tree.cycle_sort()
         self._update_tree_indicator()
 
+    def action_toggle_diff(self) -> None:
+        """Toggle current scan and latest compatible snapshot delta views."""
+        if self._space_time is None:
+            self.app.notify(
+                self._space_time_error or "Take at least two snapshots to use Diff view.",
+                severity="warning",
+                timeout=5,
+            )
+            return
+        self._diff_mode = not self._diff_mode
+        self._apply_visual_mode()
+
+    def action_browse_snapshot_pair(self, direction: int) -> None:
+        """Move through bounded adjacent snapshot pairs without losing path."""
+        context = self._space_time
+        if context is None:
+            return
+        new_index = max(0, min(len(context.snapshots) - 2, self._pair_index + direction))
+        if new_index == self._pair_index:
+            return
+        self._pair_index = new_index
+        self._request_space_time_context()
+
     def action_copy_path(self) -> None:
         """Copy the highlighted node's absolute path to the system clipboard.
 
@@ -716,6 +922,8 @@ class ExplorerScreen(Screen):
         self.query_one("#treemap-view", TreemapView).set_metric(metric)
         self.query_one("#sunburst-view", SunburstView).set_metric(metric)
         self.query_one("#info-panel", InfoPanel).set_metric(metric)
+        if self._space_time is not None:
+            self._request_space_time_context()
         self._update_status()
         label = METRIC_NAMES.get(metric, metric)
         explanation = METRIC_EXPLANATIONS.get(metric, "")

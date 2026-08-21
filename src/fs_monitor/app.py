@@ -20,6 +20,7 @@ from fs_monitor.repositories import default_snapshot_repository
 from fs_monitor.repositories.snapshots import SnapshotRepository
 from fs_monitor.services.scan import ScanService
 from fs_monitor.services.monitor import MonitorService
+from fs_monitor.services.visualization import VisualizationService
 from fs_monitor.viz.colors import set_color_scheme
 from fs_monitor.screens.explorer import ExplorerScreen
 from fs_monitor.screens.cleanup import CleanupScreen
@@ -75,6 +76,9 @@ class FSMonitorApp(App):
             host_type="tui",
             soft_budget_bytes=self._config.monitor.database_soft_budget,
             hard_budget_bytes=self._config.monitor.database_hard_budget,
+        )
+        self._visualization_service = VisualizationService(
+            self._snapshot_repository
         )
         self._show_welcome = show_welcome
         # Ensures the "running without persistence" warning is only shown
@@ -191,11 +195,13 @@ class FSMonitorApp(App):
             self._scan_path,
             config=self._config,
             scan_service=self._scan_service,
+            visualization_service=self._visualization_service,
         )
         self._cleanup = CleanupScreen()
         self._monitor = MonitorScreen(
             service=self._monitor_service,
             config=self._config,
+            visualization_service=self._visualization_service,
             root_path=self._scan_path,
             selected_path=self._scan_path,
         )
@@ -319,11 +325,7 @@ class FSMonitorApp(App):
                 if self._explorer._root is not None
                 else self._explorer._scan_path
             )
-            selected_path = (
-                self._explorer._current.path
-                if self._explorer._current is not None
-                else root_path
-            )
+            selected_path = self._explorer.selected_path
             self._monitor.set_navigation_context(root_path, selected_path)
             self.switch_screen("monitor")
         elif mode == "fs_overview":

@@ -16,6 +16,8 @@ from fs_monitor.metrics import (
     normalize_metric,
 )
 from fs_monitor.models.tree import FSNode
+from fs_monitor.domain.visualization import DiffFrame
+from fs_monitor.presentation.tui.viewmodels.visualization import legend_text
 from fs_monitor.viz.sunburst import SunburstLayout, compute_sunburst, render_sunburst_line
 
 
@@ -44,14 +46,31 @@ class SunburstView(Widget):
         self._stale = True
         self._live_mode = False
         self._live_update_count = 0
+        self._diff: DiffFrame | None = None
 
     def set_node(self, node: FSNode | LiveViewNode | None) -> None:
         """Set the root node. Layout recomputed on next render."""
         self._node = node
+        self._diff = None
         if self._live_mode and node is not None:
             self._live_update_count += 1
         self._stale = True
         self.refresh()
+
+    def set_diff(self, frame: DiffFrame | None) -> None:
+        """Render a stable-path growth overlay from a precomputed frame."""
+        self._diff = frame
+        if frame is not None:
+            self._node = frame.visual_root
+            self._metric = frame.metric.value
+        else:
+            self._node = None
+        self._stale = True
+        self.refresh()
+
+    @property
+    def diff_mode(self) -> bool:
+        return self._diff is not None
 
     @property
     def live_update_count(self) -> int:
@@ -99,9 +118,32 @@ class SunburstView(Widget):
             self.size.height,
             max_depth=max_depth,
             metric=self._metric,
+            weights=self._diff.weights if self._diff is not None else None,
+            visuals=self._diff.visuals if self._diff is not None else None,
+            selected_path=(
+                self._diff.selected_path if self._diff is not None else None
+            ),
         )
 
     def render_line(self, y: int) -> Strip:
+        if self.size.width < 40 or self.size.height < 12:
+            if y == max(0, self.size.height // 2 - 1):
+                message = "Sunburst needs >=40x12; use Tree/Treemap"
+                return Strip([
+                    Segment(
+                        message[: self.size.width].center(self.size.width),
+                        Style(dim=True),
+                    )
+                ])
+            if self._diff is not None and y == self.size.height // 2:
+                message = legend_text()
+                return Strip([
+                    Segment(
+                        message[: self.size.width].center(self.size.width),
+                        Style(dim=True),
+                    )
+                ])
+            return Strip.blank(self.size.width)
         if self._node is not None and not metric_available(self._node, self._metric):
             if y == self.size.height // 2:
                 label = METRIC_NAMES.get(self._metric, self._metric)

@@ -21,6 +21,7 @@ src/fs_monitor/
     policy.py            Explicit ScanPolicy metadata
     scan.py              ScanRequest/ScanRun/status/event contracts
     snapshot.py          Snapshot format v2 metadata
+    visualization.py     Shared delta/trend/heatmap visual contracts
 
   collectors/
     local_scanner.py     ScanEngine adapter used by ScanService
@@ -42,6 +43,7 @@ src/fs_monitor/
     scan.py              Run lifecycle, cancellation, event dispatch
     scan_consumers.py    Progress/tree view models and event replay
     snapshots.py         Persist successful ScanRun results
+    visualization.py     Bounded Compare/Monitor query + view-model cache
 
   repositories/
     alerts.py            AlertRepository protocol
@@ -76,6 +78,7 @@ src/fs_monitor/
     diff.py              In-memory comparison using shared SizeDelta
 
   viz/
+    layout.py            Viewport-bounded top-N + aggregate remainder
     treemap.py           Squarified treemap layout + rendering
     sunburst.py          Ring chart via braille canvas
     braille.py           ColorBrailleCanvas -- per-cell color voting
@@ -98,6 +101,7 @@ src/fs_monitor/
     treemap_view.py      Treemap Textual widget
     sunburst_view.py     Sunburst Textual widget
     trend_chart.py       Historical size line chart
+    growth_heatmap.py    Path-by-time persistent-growth matrix
     scan_progress.py     Scan progress overlay
     cleanup_modal.py     Deletion confirmation dialog
     confirm_modal.py     Reusable y/n confirmation dialog
@@ -490,6 +494,27 @@ It never deletes or overwrites the user's database as an automatic repair.
 
 ## Visualization
 
+### Space-Time Contracts
+
+`domain/visualization.py` is the only semantic classifier used by Wave 07.
+`VisualState` distinguishes new, removed, growth, shrink, unchanged, partial,
+incompatible, and missing data. `DiffFrame`, typed Trend points/series, and
+Growth Heatmap intervals retain path identity, metric, confidence, and snapshot
+ids. Widgets never compare snapshots or query SQLite.
+
+`VisualizationService` consumes `CompareService`, `MonitorHistory`, and the
+`SnapshotRepository` protocol. It blocks incompatible pairs before tree load,
+caches reconstructed diff frames and measurement maps, and builds Heatmap
+intervals from changed-path deltas without cloning every historical tree.
+Explorer requests latest/previous or an adjacent pair only after scan
+stabilization; Monitor loads all four History views in its existing background
+worker. Redraw, resize, tab, theme, and cursor events consume cached models.
+
+The presentation vocabulary in `presentation/tui/viewmodels/visualization.py`
+owns shared labels, glyphs, delta formatting, sparklines, and legends. Safe
+rendering substitutes ASCII glyphs; `NO_COLOR` uses grayscale backgrounds while
+preserving the same state tokens.
+
 Both spatial charts size their areas by a selectable *metric*: total bytes (the default) or file count. `compute_layout` and `compute_sunburst` take a `metric` argument, and the size tree, treemap, sunburst, and Details panel all read it so a toggle (`t` in the explorer) keeps every view consistent. `fs_monitor/metrics.py` centralises the vocabulary: `metric_value()` selects the FSNode field and `metric_text()` formats it. Both fields are aggregated bottom-up during the scan, so switching is a re-layout of in-memory data with no extra filesystem work.
 
 ### Treemap
@@ -501,6 +526,8 @@ Uses the `squarify` library for squarified layout. Key implementation details:
 - **Depth limiting**: Typically 3 levels deep to prevent visual clutter.
 - **Minimum cell size**: Rectangles that collapse below 1x1 are still rendered as a single cell rather than disappearing.
 - **Coloring**: File-type category determines hue (from the active color scheme), depth modulates luminance (deeper = darker), and directories get distinct border colors.
+- **Diff mode**: Area uses the target/current metric, while the shared diverging palette uses normalized delta. Removed paths receive bounded tombstone weight.
+- **Large trees**: Each viewport lays out at most a bounded top-N plus one aggregate remainder. The cursor-selected branch is retained even when it is tiny.
 
 ### Sunburst
 
@@ -510,6 +537,22 @@ Ring chart where each concentric ring represents a depth level, and arc angles a
 - **Arc rendering**: `ColorBrailleCanvas.fill_arc()` fills ring segments densely by sampling many radii per arc.
 - **Labels**: Arcs wider than 30 degrees at depth 1 get labeled. A collision detection pass prevents overlaps.
 - **Legend**: Bottom-left shows file-type categories with their colors.
+- **Growth overlay**: Diff frames replace category hue with shared delta state while preserving path/ring identity. Selected branches remain in the arc model below the normal tiny-arc cutoff.
+- **Narrow fallback**: Canvases below 40x12 render a readable summary and legend instead of a clipped ring chart.
+
+### Trend and Growth Heatmap
+
+`TrendChart` accepts typed series, splits lines at missing/removed/incompatible
+points, overlays root and selected subtree, and exposes cached zoom/pan windows.
+Markers identify partial confidence, alert/anomaly events, pins, rollups, and
+scan duration without converting absent values into zero.
+
+`GrowthHeatmap` receives at most 16 intervals and 18 ranked paths by default.
+Consistency (positive intervals / compatible intervals) and longest streak sort
+before peak magnitude, so repeated small growth outranks one isolated spike.
+Lifecycle inference treats absent changed rows as unchanged while the path
+exists, and as missing before creation or after removal. Narrow/safe/no-color
+rendering uses a text summary and state glyphs.
 
 ### Braille Canvas
 
@@ -578,7 +621,7 @@ fsmonitor scan <path>
 
 - `switch_screen()` swaps the current screen at the same stack level
 - `push_screen()` adds a screen on top (used for settings overlay)
-- Data flows between screens: explorer's scanned root node is passed to cleanup when switching modes
+- Data flows between screens: Explorer passes its scanned root to Cleanup and its cursor-highlighted path to Monitor; visualization actions only change path/snapshot navigation context and never mutate monitor definitions.
 
 ### Monitor Refresh
 

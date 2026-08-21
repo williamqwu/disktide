@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.6
+
+**Space-time visualization**
+
+- **visual vocabulary** Added one `VisualState`/`VisualDelta` contract for new, removed, growth, shrink, unchanged, partial, incompatible, and missing paths. Tree, Treemap, Sunburst, Trend, and Heatmap now consume the same Compare/Monitor results instead of independently inferring change semantics.
+- **explorer diff** Added Current/Diff switching with `d`, adjacent snapshot-pair browsing with `[`/`]`, stable cursor path across modes/metrics/pairs, delta columns, bounded inline mini trends, removed-path tombstones, and highlighted-path continuity when entering Monitor with `2`.
+- **monitor history** Rebuilt the History visual area as Trend (`F1`), Diff Map (`F2`), Growth Rings (`F3`), and Growth Heatmap (`F4`). History supports explicit baseline/target selection, latest/previous reset, root/subtree overlays, time zoom/pan, alert/anomaly/partial/pin/rollup/scan-duration markers, and path navigation from persistent-growth rows.
+- **rendering/performance** Added viewport-bounded top-N layout with an aggregate remainder and selected-path protection. A 100,000-node synthetic tree no longer creates 100,000 rectangles/arcs per interaction. Sunburst uses a readable narrow-terminal summary, Heatmap has an 80x24 summary mode, and `NO_COLOR`/safe rendering preserve state through glyphs and grayscale intensity.
+- **safety** Incompatible pairs are blocked before layout; partial data is presented as partial confidence; missing and removed Trend points create gaps rather than false zeroes. Diff/measurement caches prevent repeated tree reconstruction or database reads during redraws.
+
 ## v0.2.5
 
 **Monitor Center, retention, and alerts**

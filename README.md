@@ -57,7 +57,9 @@ Snapshot data is written by `scan --snapshot`, explicit monitor runs, and active
 foreground monitor hosts. `fsmonitor compare` checks policy and root
 compatibility before reporting growth. Monitor Center in the TUI can create,
 edit, pause, run, archive, pin, and manage alerts for the same persistent
-definitions exposed by the CLI. Definitions do not install a daemon: scans run
+definitions exposed by the CLI. Its History tab shares one space-time
+vocabulary across Trend, Diff Treemap, growth-overlay Sunburst, and
+persistent-growth Heatmap views. Definitions do not install a daemon: scans run
 only while the current TUI monitoring session or `fsmonitor watch` foreground
 host is active. Versioned retention policies roll older history into time
 buckets, preserve pinned snapshots, and enforce configurable database budgets.
@@ -82,6 +84,7 @@ fsmonitor
 | `1` / `2` / `3` | Switch mode (Explorer / Monitor / FS Overview) |
 | `c` | Switch to experimental Cleanup mode (enable it in Settings first) |
 | `F1` / `F2` / `F3` | Switch visualization (Sunburst / Treemap / Details) |
+| `d` / `[` / `]` | Toggle Current/Diff / browse adjacent snapshot pairs |
 | `u` / `i` | Navigate up / drill into directory |
 | `s` | Cycle sort (Size / Name / Modified) |
 | `M` | Set up monitoring for the highlighted Explorer directory |
@@ -93,8 +96,10 @@ fsmonitor
 
 Inside Monitor Center, use `n` to create a monitor, `e` to edit it, `p` to
 pause/resume, `R` to run now, and `s` to start/stop the current TUI host. The
-footer keeps the mode hint visible there; press `1` to return to Explorer
-without conflicting with lowercase `e` for Edit.
+History tab uses `F1`–`F4` for Trend, Diff Map, Growth Rings, and Heatmap; `b`
+and `v` mark the highlighted snapshot as baseline/target, while `l` restores
+latest/previous. The footer keeps the mode hint visible there; press `1` to
+return to Explorer without conflicting with lowercase `e` for Edit.
 
 ### CLI Commands
 
@@ -139,5 +144,5 @@ one-shot CLI, and periodic watch use the same scan service and result semantics.
 - **[Architecture](docs/architecture.md)** -- Internals: scanner threading, database schema, visualization algorithms, screen management
 - **[Filesystem Compatibility](docs/fs.md)** -- Supported filesystems, every syscall the tool makes, platform-specific behavior
 - **[Release Process](docs/release-process.md)** -- Locked builds, clean-wheel smoke tests, checksums, SBOM, provenance, and PyPI publishing
-- **[Delivery Waves](docs/waves/README.md)** -- Interactive Wave 01–06 feature, architecture, and validation briefs
+- **[Delivery Waves](docs/waves/README.md)** -- Interactive Wave 01–07 feature, architecture, and validation briefs
 - **[Contributing](docs/contributing.md)** -- Dev setup, testing, how to add rules/screens/visualizations

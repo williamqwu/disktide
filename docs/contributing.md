@@ -55,7 +55,7 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 
 - **models/** -- legacy-compatible pure data structures; new snapshot contracts live in `domain/`.
 - **collectors/platform/** -- all platform-specific probes; callers consume structured results rather than `/proc`, `/sys`, or commands directly.
-- **domain/** -- framework-independent metric, policy, scan, snapshot, compatibility, and delta contracts.
+- **domain/** -- framework-independent metric, policy, scan, snapshot, compatibility, delta, and visualization contracts.
 - **services/** -- application orchestration with no Textual dependency.
 - **repositories/** -- persistence-neutral protocols plus concrete adapters; product entry points use factories/protocols rather than importing SQLite.
 - **collectors/local_scanner.py** -- the only product adapter that constructs the compatibility `ScanEngine`.
@@ -64,6 +64,7 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 - **cleanup/** -- operates on FSNode trees. No Textual imports.
 - **monitor/** -- alerting, tree diffs, scan scheduling. No Textual imports.
 - **viz/** -- rendering logic. Produces Rich Segments, no direct Textual widget deps.
+- **presentation/tui/viewmodels/** -- shared TUI vocabulary and formatting; no repository access.
 - **screens/** and **widgets/** -- Textual UI layer. Can import everything above.
 
 This layering means the scanner, storage, cleanup, and viz modules are testable without a running Textual app.
@@ -148,9 +149,10 @@ CleanupRule(
 ## Adding a New Visualization
 
 1. Create the layout/rendering logic in `viz/my_viz.py`. It should produce Rich `Segment` objects or use the braille canvas.
-2. Create a Textual widget in `widgets/my_viz_view.py` that calls the renderer.
-3. Add a `TabPane` in `screens/explorer.py` `compose()`.
-4. Add a key binding (e.g., `F4`) in `ExplorerScreen.BINDINGS` and handle it in `action_switch_viz()`.
+2. Reuse `VisualState`/`VisualDelta` and the shared presentation vocabulary for snapshot-time semantics; do not classify growth independently in the widget.
+3. Create a Textual widget in `widgets/my_viz_view.py` that calls the renderer and consumes a prebuilt model rather than a repository.
+4. Add a `TabPane` in the relevant screen and a screen-local key binding.
+5. Add current, diff, partial/incompatible, safe/no-color, narrow, resize, and bounded-large-tree tests.
 
 ## Testing Tips
 
@@ -158,7 +160,7 @@ CleanupRule(
 - **Scan service tests**: Cover complete, partial, cancelled, and failed terminals; assert no events follow a terminal event and replay reconstructs the same view model.
 - **Database tests**: Use in-memory SQLite (`:memory:`) or `tmp_path` for the db file. The `db` fixture in `tests/test_storage.py` provides a connected, migrated database.
 - **Async tests**: Use `@pytest.mark.asyncio` for focused coroutine tests. For Textual app flows, use the established `asyncio.run(go())` + `app.run_test()` pattern.
-- **Visualization tests**: Test layout computation separately from rendering. Verify rectangle coordinates, arc angles, etc. numerically.
+- **Visualization tests**: Test layout computation separately from rendering. Verify shared state classification, rectangle coordinates, arc angles, gap handling, selected-path identity, 80x24/safe/no-color fallback, and the 100k-node performance bound.
 
 ## Dev Utilities
 

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from rich.color import Color
+
+from fs_monitor.domain.visualization import VisualState
 
 
 # ---------------------------------------------------------------------------
@@ -299,3 +302,29 @@ def darken_rgb(color: str, factor: float = 0.4) -> str:
             b = int(int(parts[2]) * factor)
             return f"rgb({r},{g},{b})"
     return color
+
+
+_DELTA_BACKGROUNDS: dict[VisualState, tuple[int, int, int]] = {
+    VisualState.NEW: (135, 85, 25),
+    VisualState.REMOVED: (45, 70, 125),
+    VisualState.GROWTH: (145, 45, 45),
+    VisualState.SHRINK: (30, 115, 75),
+    VisualState.UNCHANGED: (68, 68, 68),
+    VisualState.PARTIAL: (135, 105, 25),
+    VisualState.INCOMPATIBLE: (120, 45, 115),
+    VisualState.MISSING: (45, 45, 45),
+}
+
+
+def delta_background(state: VisualState, intensity: int = 4) -> str:
+    """Return the shared diverging background for a semantic delta state."""
+    red, green, blue = _DELTA_BACKGROUNDS[state]
+    strength = max(1, min(4, intensity)) / 4
+    if "NO_COLOR" in os.environ:
+        gray = int(38 + strength * 34)
+        return f"rgb({gray},{gray},{gray})"
+    base = 44
+    red = int(base + (red - base) * strength)
+    green = int(base + (green - base) * strength)
+    blue = int(base + (blue - base) * strength)
+    return f"rgb({red},{green},{blue})"

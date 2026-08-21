@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Mapping
 
 from rich.segment import Segment
 from rich.style import Style
@@ -11,15 +12,22 @@ from rich.style import Style
 from fs_monitor.glyphs import visible_width
 from fs_monitor.metrics import metric_text, metric_value, metric_value_or_zero
 from fs_monitor.models.tree import FSNode
+from fs_monitor.domain.visualization import VisualDelta, VisualState
+from fs_monitor.presentation.tui.viewmodels.visualization import (
+    format_visual_delta,
+    visual_token,
+)
 from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.viz.braille import ColorBrailleCanvas
 from fs_monitor.viz.colors import (
     darken_rgb,
+    delta_background,
     file_category,
     file_type_color,
     get_color_scheme,
     hsl_to_rgb,
 )
+from fs_monitor.viz.layout import bounded_children
 
 
 @dataclass
@@ -31,6 +39,8 @@ class ArcSegment:
     angle_end: float
     r_inner: int
     r_outer: int
+    visual: VisualDelta | None = None
+    selected: bool = False
 
     @property
     def angle_mid(self) -> float:
@@ -61,6 +71,7 @@ class SunburstLayout:
     labels: list[_Label] = field(default_factory=list)
     legend_lines: list[list[tuple[str, str]]] = field(default_factory=list)
     legend_start_y: int = 0
+    diff_mode: bool = False
     _rows_cache: list[list[tuple[str, str]]] | None = field(
         default=None, repr=False
     )
@@ -79,6 +90,9 @@ def compute_sunburst(
     char_height: int,
     max_depth: int = 4,
     metric: str = "logical",
+    weights: Mapping[str, int] | None = None,
+    visuals: Mapping[str, VisualDelta] | None = None,
+    selected_path: str | None = None,
 ) -> SunburstLayout:
     """Compute and render a sunburst chart.
 
@@ -88,9 +102,13 @@ def compute_sunburst(
 
     `metric` selects what arc angles encode.
     """
-    layout = SunburstLayout(char_width=char_width, char_height=char_height)
+    layout = SunburstLayout(
+        char_width=char_width,
+        char_height=char_height,
+        diff_mode=visuals is not None,
+    )
 
-    root_value = metric_value(node, metric)
+    root_value = _layout_value(node, metric, weights)
     if (
         char_width <= 0
         or char_height <= 0
@@ -119,6 +137,10 @@ def compute_sunburst(
         ring_width=ring_width,
         arcs=layout.arcs,
         metric=metric,
+        weights=weights,
+        visuals=visuals,
+        selected_path=selected_path,
+        child_limit=max(24, min(128, char_width * 2)),
     )
 
     # Render arcs to canvas with file-type coloring
@@ -133,7 +155,7 @@ def compute_sunburst(
         )
 
     # Compute labels
-    _compute_labels(layout, node, cx, cy, metric)
+    _compute_labels(layout, node, cx, cy, metric, visuals)
 
     # Compute legend
     _compute_legend(layout)
@@ -143,6 +165,9 @@ def compute_sunburst(
 
 def _arc_color(arc: ArcSegment) -> str:
     """Determine color for an arc segment based on file type."""
+    if arc.visual is not None:
+        intensity = 4 if arc.selected else _delta_intensity(arc.visual)
+        return delta_background(arc.visual.state, intensity)
     node = arc.node
     depth = arc.depth
     if node.is_dir:
@@ -183,13 +208,24 @@ def _build_arcs(
     ring_width: int,
     arcs: list[ArcSegment],
     metric: str,
+    weights: Mapping[str, int] | None,
+    visuals: Mapping[str, VisualDelta] | None,
+    selected_path: str | None,
+    child_limit: int,
 ) -> None:
     """Recursively build arc segments."""
     if depth > max_depth:
         return
 
     span = angle_end - angle_start
-    if span < math.radians(0.5):
+    selected_branch = bool(
+        selected_path
+        and (
+            selected_path == node.path
+            or selected_path.startswith(node.path.rstrip("/") + "/")
+        )
+    )
+    if span < math.radians(0.5) and not selected_branch:
         return
 
     r_inner = depth * ring_width + 2
@@ -202,27 +238,72 @@ def _build_arcs(
         angle_end=angle_end,
         r_inner=r_inner,
         r_outer=r_outer,
+        visual=visuals.get(node.path) if visuals is not None else None,
+        selected=node.path == selected_path,
     ))
 
-    children = node.children
-    sized = sorted(
-        (c for c in children if metric_value_or_zero(c, metric) > 0),
-        key=lambda c: (-metric_value_or_zero(c, metric), c.name),
+    sized = bounded_children(
+        node,
+        metric=metric,
+        value=lambda child: _layout_value(child, metric, weights),
+        limit=child_limit,
+        selected_path=selected_path,
     )
     if not sized:
         return
 
-    total = sum(metric_value_or_zero(c, metric) for c in sized)
+    total = sum(_layout_value(c, metric, weights) for c in sized)
     if total <= 0:
         return
 
+    selected_child = next(
+        (
+            child
+            for child in sized
+            if selected_path
+            and (
+                selected_path == child.path
+                or selected_path.startswith(child.path.rstrip("/") + "/")
+            )
+        ),
+        None,
+    )
+    selected_min_span = math.radians(0.75)
+    reserve_selected = (
+        selected_child is not None
+        and (_layout_value(selected_child, metric, weights) / total) * span
+        < selected_min_span
+        and span > selected_min_span
+    )
+    remaining_total = (
+        total - _layout_value(selected_child, metric, weights)
+        if reserve_selected and selected_child is not None
+        else total
+    )
+    remaining_span = span - selected_min_span if reserve_selected else span
+
     current_angle = angle_start
     for child in sized:
-        child_span = (metric_value_or_zero(child, metric) / total) * span
+        if reserve_selected and child is selected_child:
+            child_span = selected_min_span
+        elif reserve_selected and remaining_total > 0:
+            child_span = (
+                _layout_value(child, metric, weights) / remaining_total
+            ) * remaining_span
+        else:
+            child_span = (_layout_value(child, metric, weights) / total) * span
         child_end = current_angle + child_span
         _build_arcs(
             child, current_angle, child_end,
-            depth + 1, max_depth, ring_width, arcs, metric,
+            depth + 1,
+            max_depth,
+            ring_width,
+            arcs,
+            metric,
+            weights,
+            visuals,
+            selected_path,
+            child_limit,
         )
         current_angle = child_end
 
@@ -232,6 +313,7 @@ def _compute_labels(
     root: FSNode,
     cx: int, cy: int,
     metric: str,
+    visuals: Mapping[str, VisualDelta] | None,
 ) -> None:
     """Compute text labels for center and large arcs."""
     labels = layout.labels
@@ -241,7 +323,12 @@ def _compute_labels(
     center_cx = layout.char_width // 2
     center_cy = layout.char_height // 2
     root_name = root.name
-    size_text = metric_text(root, metric)
+    root_visual = visuals.get(root.path) if visuals is not None else None
+    size_text = (
+        format_visual_delta(root_visual, metric)
+        if root_visual is not None
+        else metric_text(root, metric)
+    )
 
     center_bg = "rgb(30,30,30)"
     _place_label(labels, occupied, center_cx, center_cy, root_name, "white", center_bg)
@@ -264,6 +351,8 @@ def _compute_labels(
         char_y = int(py / 4)
 
         name = arc.node.name
+        if arc.visual is not None:
+            name = f"{visual_token(arc.visual.state).glyph} {name}"
         # Suffix glyph marking inaccessibility: denied / partial / none
         if arc.node.error is not None:
             name = f"{name} {denied_glyph()}"
@@ -301,6 +390,33 @@ def _compute_legend(layout: SunburstLayout) -> None:
     if layout.char_height <= 10:
         return
 
+    if layout.diff_mode:
+        states = {arc.visual.state for arc in layout.arcs if arc.visual is not None}
+        present = [
+            state
+            for state in (
+                VisualState.GROWTH,
+                VisualState.SHRINK,
+                VisualState.NEW,
+                VisualState.REMOVED,
+                VisualState.PARTIAL,
+                VisualState.INCOMPATIBLE,
+            )
+            if state in states
+        ]
+        lines: list[list[tuple[str, str]]] = []
+        for index in range(0, len(present), 2):
+            row = []
+            for state in present[index : index + 2]:
+                token = visual_token(state)
+                row.append(
+                    (f"{token.glyph} {token.label:<11}", delta_background(state))
+                )
+            lines.append(row)
+        layout.legend_lines = lines
+        layout.legend_start_y = layout.char_height - len(lines)
+        return
+
     categories: set[str] = set()
     for arc in layout.arcs:
         if not arc.node.is_dir:
@@ -331,6 +447,27 @@ def _compute_legend(layout: SunburstLayout) -> None:
 
     layout.legend_lines = lines
     layout.legend_start_y = layout.char_height - len(lines)
+
+
+def _layout_value(
+    node: FSNode,
+    metric: str,
+    weights: Mapping[str, int] | None,
+) -> int:
+    if weights is not None and node.path in weights:
+        return max(0, int(weights[node.path]))
+    return metric_value_or_zero(node, metric)
+
+
+def _delta_intensity(visual: VisualDelta) -> int:
+    percent = abs(visual.percent or 0.0)
+    if percent >= 100:
+        return 4
+    if percent >= 25:
+        return 3
+    if percent > 0:
+        return 2
+    return 1
 
 
 def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:

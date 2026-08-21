@@ -54,6 +54,8 @@ Navigation:
 | `i` | Drill into the selected directory, or a symlinked directory (rescans) |
 | `s` | Cycle sort order: size, name, modified |
 | `r` | Rescan the current directory (prompts y/n first) |
+| `d` | Toggle the current scan and selected snapshot Diff view |
+| `[` / `]` | Browse newer / older adjacent snapshot pairs |
 | `M` | Set up a persistent monitor for the highlighted directory |
 | `y` | Copy the highlighted item's absolute path to the clipboard |
 | `t` | Cycle Logical, Allocated, Unique, Files across all views |
@@ -66,6 +68,15 @@ The indicator line above the tree shows the current sort order and metric. Press
 - **Files** -- regular-file and symlink entry count.
 
 The tree, sunburst, treemap, Details rankings, and header change together. Unique hardlink ownership is finalized after the full scan, so a live in-progress view can temporarily show Unique as unavailable. Platforms without `st_blocks` show Allocated/Unique as `Unavailable`; they are never shown as zero. Press `y` to copy the highlighted item's absolute path to the system clipboard; it uses the terminal's OSC 52 escape, so it works over SSH and in web-based shells where there is no local clipboard tool.
+
+When at least two compatible snapshots exist for the scan root, `d` switches to
+Diff mode. Rectangle/ring area continues to represent the target snapshot's
+selected metric; color and glyphs represent growth, shrink, new, removed,
+partial, or incompatible state. Removed paths remain visible as bounded
+tombstones. The highlighted path survives Current/Diff, metric, visualization,
+and snapshot-pair changes. Tree rows add an absolute/percentage delta and a
+short cached history sparkline. `[`/`]` move through adjacent pairs without
+querying SQLite on every repaint.
 
 During a scan, the progress panel shows the scan run id, current phase, active
 policy, current path, counts, Logical bytes, and rate. Rescan and quit cancel by
@@ -98,11 +109,29 @@ narrower than 90 columns use a list-first view; press **Enter** for details and
 | `r` | Refresh all monitor data |
 | `1` | Return to Explorer; lowercase `e` remains Edit |
 
+The History tab has four visual surfaces:
+
+- **Trend (`F1`)** overlays monitor root and Explorer-selected subtree. Missing,
+  removed, and incompatible points create gaps; partial, alert/anomaly, pin,
+  rollup, and scan-duration points use markers. Press `z` to cycle time zoom and
+  `Shift+Left`/`Shift+Right` to pan.
+- **Diff Map (`F2`)** compares latest/previous by default. Highlight a History
+  row and press `b` or `v` to choose baseline or target; `l` restores
+  latest/previous.
+- **Growth Rings (`F3`)** keeps stable path/ring identity while separating
+  current area from the growth overlay. Narrow terminals display a Tree/Treemap
+  fallback summary instead of an unreadable circle.
+- **Heatmap (`F4`)** ranks paths by repeated positive intervals before one-time
+  spikes. Rows are paths, columns are bounded snapshot intervals, and Enter on a
+  row changes the selected subtree context. At 80x24 it switches to a concise
+  persistent-growth summary.
+
 Changing the root, selected metric, or scan policy creates a new monitor
 revision. Older history remains visible, but incompatible revision segments are
-not joined into a trusted trend. Explorer passes its root and selected subtree
-to Monitor Center, so History can show both the monitor root and the selected
-path with explicit present, missing, removed, partial, pinned, and rollup state.
+not joined into a trusted trend. Explorer passes its root and actual
+cursor-highlighted path to Monitor Center, so History can show both the monitor
+root and the selected path with explicit present, missing, removed, partial,
+pinned, and rollup state.
 
 Definitions are persistent; execution is not. `enabled · no-host` means the
 definition is ready but no process currently owns it. Press `s` in the TUI or

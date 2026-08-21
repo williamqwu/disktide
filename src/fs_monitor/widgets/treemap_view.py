@@ -16,6 +16,7 @@ from fs_monitor.metrics import (
     normalize_metric,
 )
 from fs_monitor.models.tree import FSNode
+from fs_monitor.domain.visualization import DiffFrame
 from fs_monitor.viz.treemap import TreemapLayout, compute_layout, render_line
 
 
@@ -43,14 +44,31 @@ class TreemapView(Widget):
         self._stale = True
         self._live_mode = False
         self._live_update_count = 0
+        self._diff: DiffFrame | None = None
 
     def set_node(self, node: FSNode | LiveViewNode | None) -> None:
         """Set the root node. Layout recomputed on next render."""
         self._node = node
+        self._diff = None
         if self._live_mode and node is not None:
             self._live_update_count += 1
         self._stale = True
         self.refresh()
+
+    def set_diff(self, frame: DiffFrame | None) -> None:
+        """Render a precomputed diff frame without storage access."""
+        self._diff = frame
+        if frame is not None:
+            self._node = frame.visual_root
+            self._metric = frame.metric.value
+        else:
+            self._node = None
+        self._stale = True
+        self.refresh()
+
+    @property
+    def diff_mode(self) -> bool:
+        return self._diff is not None
 
     @property
     def live_update_count(self) -> int:
@@ -94,6 +112,11 @@ class TreemapView(Widget):
             self.size.height,
             max_depth=max_depth,
             metric=self._metric,
+            weights=self._diff.weights if self._diff is not None else None,
+            visuals=self._diff.visuals if self._diff is not None else None,
+            selected_path=(
+                self._diff.selected_path if self._diff is not None else None
+            ),
         )
 
     def render_line(self, y: int) -> Strip:

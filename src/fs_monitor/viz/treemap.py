@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Mapping
 
 import squarify
 from rich.segment import Segment
@@ -11,12 +12,30 @@ from rich.style import Style
 from fs_monitor.glyphs import visible_width
 from fs_monitor.metrics import metric_text, metric_value, metric_value_or_zero
 from fs_monitor.models.tree import FSNode
+from fs_monitor.domain.visualization import VisualDelta
+from fs_monitor.presentation.tui.viewmodels.visualization import (
+    format_visual_delta,
+    visual_token,
+)
 from fs_monitor.rendering import denied_glyph, partial_glyph
-from fs_monitor.viz.colors import file_category, get_color_scheme, hsl_to_rgb
+from fs_monitor.viz.colors import (
+    delta_background,
+    file_category,
+    get_color_scheme,
+    hsl_to_rgb,
+)
+from fs_monitor.viz.layout import bounded_children
 
 
-def _rect_bg(node: FSNode, depth: int, is_leaf: bool) -> str:
+def _rect_bg(
+    node: FSNode,
+    depth: int,
+    is_leaf: bool,
+    visual: VisualDelta | None = None,
+) -> str:
     """Background color based on file-type category and depth."""
+    if visual is not None:
+        return delta_background(visual.state, _delta_intensity(visual))
     scheme = get_color_scheme()
     if not is_leaf:
         return scheme.border_bg
@@ -62,6 +81,8 @@ class TreemapRect:
     label: str = ""
     size_label: str = ""
     is_leaf: bool = False
+    visual: VisualDelta | None = None
+    selected: bool = False
 
 
 @dataclass
@@ -98,6 +119,9 @@ def compute_layout(
     height: int,
     max_depth: int = 3,
     metric: str = "logical",
+    weights: Mapping[str, int] | None = None,
+    visuals: Mapping[str, VisualDelta] | None = None,
+    selected_path: str | None = None,
 ) -> TreemapLayout:
     """Compute a squarified treemap layout for the given node.
 
@@ -105,12 +129,25 @@ def compute_layout(
     """
     layout = TreemapLayout(width=width, height=height)
 
-    root_value = metric_value(node, metric)
+    root_value = _layout_value(node, metric, weights)
     if width <= 0 or height <= 0 or root_value is None or root_value <= 0:
         layout.build_grid()
         return layout
 
-    _layout_node(node, 0, 0, width, height, 0, max_depth, layout.rects, metric)
+    _layout_node(
+        node,
+        0,
+        0,
+        width,
+        height,
+        0,
+        max_depth,
+        layout.rects,
+        metric,
+        weights,
+        visuals,
+        selected_path,
+    )
     layout.build_grid()
     return layout
 
@@ -155,15 +192,20 @@ def _layout_node(
     depth: int, max_depth: int,
     rects: list[TreemapRect],
     metric: str,
+    weights: Mapping[str, int] | None,
+    visuals: Mapping[str, VisualDelta] | None,
+    selected_path: str | None,
 ) -> None:
     """Recursively lay out a node and its children."""
+    visual = visuals.get(node.path) if visuals is not None else None
+    selected = node.path == selected_path
     if w < 1 or h < 1:
         # Too small to subdivide but still claim whatever cells we overlap
         # so the area doesn't show as parent-border bleed.
         rects.append(TreemapRect(
             x=x, y=y, w=w, h=h, node=node,
             depth=depth, label="", size_label="",
-            is_leaf=True,
+            is_leaf=True, visual=visual, selected=selected,
         ))
         return
 
@@ -175,11 +217,18 @@ def _layout_node(
         # Budget by visible width (glyph + VS-15 is 2 codepoints but 1 cell)
         if label and glyph and w >= visible_width(label) + 2:
             label = f"{label} {glyph}"
-        size_label = metric_text(node, metric) if h >= 3 and w >= 6 else ""
+        if visual is not None and h >= 3 and w >= 6:
+            size_label = format_visual_delta(visual, metric)
+        else:
+            size_label = metric_text(node, metric) if h >= 3 and w >= 6 else ""
+        if visual is not None and label:
+            token = visual_token(visual.state)
+            if w >= visible_width(label) + 3:
+                label = f"{token.glyph} {label}"
         rects.append(TreemapRect(
             x=x, y=y, w=w, h=h, node=node,
             depth=depth, label=label, size_label=size_label,
-            is_leaf=True,
+            is_leaf=True, visual=visual, selected=selected,
         ))
         return
 
@@ -197,22 +246,28 @@ def _layout_node(
     glyph = _access_glyph(node)
     if dir_label and glyph and w >= visible_width(dir_label) + 4:
         dir_label = f"{dir_label} {glyph}"
+    if visual is not None and dir_label:
+        token = visual_token(visual.state)
+        if w >= visible_width(dir_label) + 3:
+            dir_label = f"{token.glyph} {dir_label}"
     rects.append(TreemapRect(
         x=x, y=y, w=w, h=h, node=node,
         depth=depth, label=dir_label, is_leaf=False,
+        visual=visual, selected=selected,
     ))
 
-    # Children with a positive metric value, largest first (squarify wants
-    # descending input, and "largest" depends on the active metric).
-    sized = sorted(
-        (c for c in children if metric_value_or_zero(c, metric) > 0),
-        key=lambda c: (-metric_value_or_zero(c, metric), c.name),
+    sized = bounded_children(
+        node,
+        metric=metric,
+        value=lambda child: _layout_value(child, metric, weights),
+        limit=max(16, min(160, max(1, inner_w * inner_h // 6))),
+        selected_path=selected_path,
     )
     if not sized:
         return
 
     # Compute sub-rectangles using squarify
-    sizes = [metric_value_or_zero(c, metric) for c in sized]
+    sizes = [_layout_value(c, metric, weights) for c in sized]
     total = sum(sizes)
     if total <= 0:
         return
@@ -229,7 +284,13 @@ def _layout_node(
         _layout_node(
             child,
             sr["x"], sr["y"], sw, sh,
-            depth + 1, max_depth, rects, metric,
+            depth + 1,
+            max_depth,
+            rects,
+            metric,
+            weights,
+            visuals,
+            selected_path,
         )
 
 
@@ -253,9 +314,14 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
         while x + run < layout.width and layout.rect_at(x + run, y) is rect:
             run += 1
 
-        bg = _rect_bg(rect.node, rect.depth, rect.is_leaf)
+        bg = _rect_bg(rect.node, rect.depth, rect.is_leaf, rect.visual)
         fg = _label_fg(rect.depth)
-        style = Style(bgcolor=bg, color=fg)
+        style = Style(
+            bgcolor=bg,
+            color=fg,
+            bold=rect.selected,
+            underline=rect.selected,
+        )
 
         rel_y = y - int(rect.y)
         rect_h = max(1, int(rect.h))
@@ -265,7 +331,17 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
             lw = visible_width(rect.label)
             if rel_y == 0 and run >= lw + 2:
                 text = " " + rect.label + " " * (run - lw - 1)
-                segments.append(Segment(text, Style(bgcolor=get_color_scheme().border_bg, color="white", bold=True)))
+                segments.append(
+                    Segment(
+                        text,
+                        Style(
+                            bgcolor=bg,
+                            color="white",
+                            bold=True,
+                            underline=rect.selected,
+                        ),
+                    )
+                )
                 x += run
                 continue
 
@@ -290,3 +366,24 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
         x += run
 
     return segments
+
+
+def _layout_value(
+    node: FSNode,
+    metric: str,
+    weights: Mapping[str, int] | None,
+) -> int:
+    if weights is not None and node.path in weights:
+        return max(0, int(weights[node.path]))
+    return metric_value_or_zero(node, metric)
+
+
+def _delta_intensity(visual: VisualDelta) -> int:
+    percent = abs(visual.percent or 0.0)
+    if percent >= 100:
+        return 4
+    if percent >= 25:
+        return 3
+    if percent > 0:
+        return 2
+    return 1
