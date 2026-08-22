@@ -121,7 +121,7 @@ def test_deep_live_snapshots_are_copy_on_write(tmp_path, monkeypatch):
     first_only = snapshots[0].find(str(only))
     assert first_only is not None
     assert first_only.size == 0
-    assert first_only.children == []
+    first_children = tuple(first_only.children)
 
     partial = next(
         snapshot
@@ -134,7 +134,7 @@ def test_deep_live_snapshots_are_copy_on_write(tmp_path, monkeypatch):
 
     # Later task completions must not mutate an already-published frame.
     assert first_only.size == 0
-    assert first_only.children == []
+    assert tuple(first_only.children) == first_children
 
 
 def test_scheduler_matches_recursive_walker_totals(tmp_path):

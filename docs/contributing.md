@@ -33,7 +33,9 @@ migrations. Wave-specific cleanup contracts live in
 `tests/test_cleanup_wave08.py` and `tests/test_cleanup_wave09.py`.
 Filesystem-event normalization, dirty coalescing, overflow recovery, optional
 dependency fallback, and MonitorService integration live in
-`tests/test_watch_wave10.py`.
+`tests/test_watch_wave10.py`. Adaptive worker selection, giant-directory chunk
+checkpoints, resource queue cancellation, and Monitor queue projection live in
+`tests/test_scan_wave13.py`.
 
 `PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app tests instead wrap an async helper with `asyncio.run(...)` and use `app.run_test()`; follow the style of the nearby tests.
 
@@ -91,6 +93,9 @@ scores as ordering metadata; every filesystem action still passes through
 - Use `ScanEventRecorder` plus `ProgressViewModel`/`TreeViewModel` for replay tests. Journals must have one run id, contiguous sequences, and one final terminal event.
 - Keep high-frequency event payloads coalescible. Do not bypass the bounded run mailbox with direct presentation callbacks.
 - Directory workers scan direct entries only; descendants must return through `TreeScanScheduler` rather than recursively occupying a worker.
+- Keep one owner per `scandir` cursor. Direct entries cross the worker/coordinator boundary only through bounded chunks.
+- Automatic worker selection must remain explainable and path-aware; explicit `workers` is an exact override.
+- All product scans must acquire `ScanResourcePolicy` slots so queue state and cancellation remain observable.
 - Keep `ScanEngine().scan(path)` compatibility for `tool/bench_scan.py` and `tool/diag_scan.py` until the compatibility facade is intentionally retired.
 
 ### Filesystem Event Backends
@@ -111,6 +116,7 @@ scores as ordering metadata; every filesystem action still passes through
 ```bash
 uv build
 uv run python tool/verify_distribution.py
+uv run python tool/benchmark_wave13.py --output /tmp/wave-13-benchmark.json
 ```
 
 The CI minimal-install job installs the wheel into a fresh environment, runs

@@ -8,7 +8,7 @@ from typing import Callable
 
 from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.policy import ScanPolicy
-from fs_monitor.domain.scan import ScanTreeUpdate
+from fs_monitor.domain.scan import ScanTreeUpdate, ScanWorkerSelection
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.accounting import finalize_unique_allocated
 from fs_monitor.scanner.policy import discover_pseudo_mounts
@@ -39,16 +39,23 @@ class ScanEngine:
         exclude_pseudo_filesystems: bool = True,
         scheduler_submission_limit: int | None = None,
         scheduler_queue_capacity: int | None = None,
+        entry_chunk_size: int = 256,
+        entry_chunk_queue_capacity: int | None = None,
         tree_update_callback: Callable[[ScanTreeUpdate], None] | None = None,
         metric: MetricId | str = MetricId.LOGICAL,
+        worker_selection: ScanWorkerSelection | None = None,
     ):
-        if workers is not None:
-            self._workers = workers
-        else:
-            from fs_monitor.scanner.sysinfo import detect_system_info
+        from fs_monitor.scanner.sysinfo import select_scan_workers
 
-            info = detect_system_info(scan_path or "/")
-            self._workers = info.recommended_workers
+        self._requested_workers = workers
+        self._worker_selection = worker_selection
+        if self._worker_selection is None and workers is not None:
+            self._worker_selection = select_scan_workers(scan_path or "/", workers)
+        self._workers = (
+            self._worker_selection.effective_workers
+            if self._worker_selection is not None
+            else 1
+        )
         self._cancel_event = threading.Event()
         self._metric = MetricId.parse(metric)
         self._policy = ScanPolicy(
@@ -65,6 +72,8 @@ class ScanEngine:
         self._tree_callback_interval = tree_callback_interval
         self._scheduler_submission_limit = scheduler_submission_limit
         self._scheduler_queue_capacity = scheduler_queue_capacity
+        self._entry_chunk_size = entry_chunk_size
+        self._entry_chunk_queue_capacity = entry_chunk_queue_capacity
         self._scheduler_stats: SchedulerStats | None = None
 
     def cancel(self) -> None:
@@ -78,13 +87,28 @@ class ScanEngine:
     def scheduler_stats(self) -> SchedulerStats | None:
         return self._scheduler_stats
 
+    @property
+    def workers(self) -> int:
+        return self._workers
+
+    @property
+    def worker_selection(self) -> ScanWorkerSelection | None:
+        return self._worker_selection
+
     def scan(self, path: str) -> FSNode:
         """Scan a directory tree while preserving ``ScanEngine().scan()``."""
 
         path = os.path.abspath(path)
-        self._cancel_event.clear()
         if not os.path.isdir(path):
             raise ValueError(f"Not a directory: {path}")
+        if self._worker_selection is None:
+            from fs_monitor.scanner.sysinfo import select_scan_workers
+
+            self._worker_selection = select_scan_workers(
+                path,
+                self._requested_workers,
+            )
+            self._workers = self._worker_selection.effective_workers
 
         excluded_mounts = (
             discover_pseudo_mounts(path)
@@ -107,6 +131,8 @@ class ScanEngine:
             tree_callback_interval=self._tree_callback_interval,
             submission_limit=self._scheduler_submission_limit,
             queue_capacity=self._scheduler_queue_capacity,
+            entry_chunk_size=self._entry_chunk_size,
+            entry_chunk_queue_capacity=self._entry_chunk_queue_capacity,
         )
 
         scheduled: ScheduledTree = scheduler.scan(path)

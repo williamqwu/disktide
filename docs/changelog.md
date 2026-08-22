@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.12
+
+**Adaptive live scan engine**
+
+- **adaptive workers** Replaced the CPU-oriented default with a path-aware, explainable worker selection that samples at most 64 metadata entries for 75 ms, defaults warm local storage to one worker, retains bounded parallelism for rotational/network/high-latency paths, and preserves exact explicit overrides.
+- **giant-directory streaming** Kept one owner per `scandir` cursor while streaming direct entries through a bounded chunk queue, updating aggregates incrementally, publishing geometric live checkpoints, and sorting only when a directory settles.
+- **resource scheduling** Replaced the implicit global scan lock with a FIFO `ScanResourcePolicy` that defaults to one active run per filesystem device, supports queued cancellation before collector creation, and exposes queue reason, slot, wait time, and effective worker diagnostics through CLI/TUI/Monitor.
+- **observability** Upgraded Monitor status persistence to schema v8, added machine-readable `bench_scan.py --json`, and added the Wave 13 correctness/performance benchmark.
+
 ## v0.2.11
 
 **Scalable space-time data plane**

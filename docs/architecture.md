@@ -144,7 +144,7 @@ The domain contract in `domain/scan.py` has no Click, Textual, or SQLite imports
 Every event carries the same `run_id`, a contiguous `sequence`, and a `phase`.
 The current protocol includes:
 
-- `ScanStarted` and `ScanPhaseChanged`
+- `ScanQueued`, `ScanStarted`, and `ScanPhaseChanged`
 - `DirectoryQueued`, `ScanProgressUpdated`, and `DirectoryCompleted`
 - `NodeAggregateUpdated` for live/final tree handoff
 - `AccessError` for explicit partial coverage
@@ -163,31 +163,34 @@ completed-directory, and non-final tree events coalesce; terminal events do not.
 The dispatcher drains pending items in batches and assigns sequence numbers only
 at delivery, so journals remain contiguous after coalescing. `ScanRun` records
 time-to-first-event, batch/coalesced counts, mailbox high-water mark, scheduler
-queue bounds, time-to-first-visual, and cancellation latency. The Explorer
+and entry-chunk queue bounds, time-to-first-visual, cancellation latency,
+resource wait, and requested/effective worker selection. The Explorer
 consumer only schedules `app.call_from_thread()`, so scanner and dispatcher
 threads never mutate Textual widgets or view models.
 
-See `docs/adr/0002-scan-service-event-protocol.md` and
-`docs/adr/0003-all-tree-scheduler-and-event-backpressure.md` for the accepted
-contracts.
+See `docs/adr/0002-scan-service-event-protocol.md`,
+`docs/adr/0003-all-tree-scheduler-and-event-backpressure.md`, and
+`docs/adr/0012-adaptive-live-scan-engine.md` for the accepted contracts.
 
 ## Scanner
 
 ### Threading Model
 
 `collectors/local_scanner.py` adapts `ScanService` requests to `ScanEngine`, which
-is now a compatibility facade over `TreeScanScheduler`. Every directory is one
-non-recursive task: a worker scans direct entries and the coordinator lazily
-materializes child-directory jobs across the whole tree. Executor submissions
-are capped at two times the worker count by default. The coordinator pending
-frontier has its own capacity and parent cursors create jobs only as slots open,
-so neither the executor queue nor the coordinator deque can hold the full tree.
+is a compatibility facade over `TreeScanScheduler`. Every directory is one
+non-recursive task. One worker owns its `scandir` cursor and streams direct
+entries to the coordinator in bounded chunks (256 entries by default). The
+chunk queue defaults to two times the worker count, executor submissions are
+capped at two times the worker count, and the coordinator frontier has its own
+capacity. Child-directory jobs are materialized only as slots open, so no queue
+needs to hold a giant directory or the full tree.
 
-Direct scan completion installs zero-valued child-directory placeholders.
-Descendant results update ancestor aggregates with contribution deltas. Live
-roots use generation-based copy-on-write: once a root is published, later task
-completion clones only modified directory paths, so old frames remain safe to
-read. The recursive `scanner.walker.scan_directory()` and long-standing
+Each chunk installs file nodes and zero-valued child-directory placeholders.
+Directory and ancestor aggregates update in O(1) deltas, live publication uses
+geometrically spaced checkpoints per directory, and children sort only when a
+directory settles. Live roots use generation-based copy-on-write: once a root
+is published, later mutation clones only modified directory paths, so old
+frames remain safe to read. The recursive `scanner.walker.scan_directory()` and long-standing
 `ScanEngine().scan(path)` APIs remain for diagnostics and compatibility tools;
 product presentation code does not construct the engine directly.
 
@@ -200,15 +203,18 @@ waiting for the UI event loop during shutdown.
 
 ### Adaptive Worker Count
 
-`sysinfo.detect_system_info()` examines CPU count, load average, filesystem type (local vs network), storage type (HDD vs SSD), and available memory. Constraints:
+`sysinfo.select_scan_workers()` resolves policy against the actual scan path. An
+automatic selection combines CPU availability, load, memory, filesystem/media
+classification, and a bounded 64-entry/75-ms metadata sample:
 
-- Network filesystems (NFS, CIFS, FUSE): capped at 4 workers
-- HDD (rotational): capped at 4
-- High system load: worker count reduced proportionally
-- Low memory (<512 MB free): capped at 2
-- Final range: 1--16 workers
+- low-latency local or RAM-backed storage defaults to 1 worker;
+- rotational local storage uses at most 2 workers;
+- network or measured high-latency storage uses at most 4 workers;
+- high host load reduces parallel choices, and <512 MB available memory forces 1;
+- probe errors use a conservative 1-worker fallback.
 
-When `workers` is set in config or CLI, the auto-detection is skipped.
+An explicit `workers` value is exact and skips metadata sampling. Every run
+retains the requested/effective values and an explainable reason.
 
 ### Progress Reporting
 
@@ -396,14 +402,17 @@ stale status object.
 
 `monitor_status` exposes periodic/event-assisted mode, backend status, watched
 root count, pending paths, last event/local/full reconciliation, overflow and
-recovery counters, degraded reason, and confidence state. Backend stop, lease
+recovery counters, degraded reason, confidence state, scan-resource queue/slot,
+and effective worker policy. Backend stop, lease
 expiry, root loss, watch-limit failure, or queue overflow cannot retain a stale
 healthy projection; they require a later full reconciliation.
 
 Every hosted run uses one pipeline: scan, persist snapshot, evaluate alerts,
 apply retention when needed, record run/status, and publish monitor events.
-`ScanService` serializes full scans shared by Explorer and Monitor so competing
-product surfaces do not start simultaneous tree walks.
+`ScanService` applies a FIFO `ScanResourcePolicy`; by default one run is active
+per filesystem device, while unrelated devices may proceed concurrently.
+Queued runs publish their position and reason and can be cancelled before a
+collector is created.
 
 Retention keeps recent snapshots densely, promotes older history into
 hourly/daily/weekly representatives, preserves pinned snapshots and the newest
@@ -428,7 +437,7 @@ SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects
 
 ### Schema
 
-Database schema v7 remains distinct from snapshot format v2 and the public
+Database schema v8 remains distinct from snapshot format v2 and the public
 snapshot API version.
 
 **monitor_definitions** -- Canonical path, label, revision, desired state,
@@ -437,8 +446,8 @@ versioned retention policy.
 
 **monitor_status / monitor_leases** -- Activity/health projection, next due and
 last run details, active phase/progress, failure state, retention summary,
-event/backend/dirty/reconciliation confidence, and the current foreground host
-lease/heartbeat.
+event/backend/dirty/reconciliation confidence, scan-resource queue/slot and
+worker diagnostics, and the current foreground host lease/heartbeat.
 
 **monitored_roots** -- Stable root path plus observed device, inode, filesystem,
 and last-seen timestamp.
@@ -498,13 +507,14 @@ the TUI never converts an absent subtree into a false zero.
 ### Migration and degraded behavior
 
 Before changing a non-empty on-disk database, migration writes a SQLite backup
-next to it (for the current schema v7: `data.db.pre-v7.bak`). All DDL, backfill, and schema
+next to it (for the current schema v8: `data.db.pre-v8.bak`). All DDL, backfill, and schema
 version changes run in one transaction; failure rolls back without advancing
 `schema_version`. Existing schema-v3/v0.1.7 snapshots are marked legacy with an
 explicit inference source rather than discarded. Schema-v5 migration also maps
 the old size/percentage alert prototype into the new rule/event audit fields;
-schema v6 adds CleanupPlan/audit tables and schema v7 adds event-assisted monitor
-status without changing snapshot format v2.
+schema v6 adds CleanupPlan/audit tables, schema v7 adds event-assisted monitor
+status, and schema v8 adds scan-resource/worker status without changing snapshot
+format v2.
 
 If migration or writes fail but the database is readable, the adapter opens the
 original read-only so list/history remain available. If the file is corrupt or

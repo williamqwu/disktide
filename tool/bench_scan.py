@@ -34,9 +34,13 @@ is best effort and degrades gracefully if it changes upstream.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import platform
 import sys
 import time
+from dataclasses import asdict
+from datetime import datetime, timezone
 
 from fs_monitor.scanner.engine import ScanEngine
 
@@ -67,21 +71,57 @@ def main() -> int:
         default="raw",
         help="measure raw scan, event transport, or live view-model delivery",
     )
+    ap.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="emit one machine-readable JSON document",
+    )
     args = ap.parse_args()
 
     path = os.path.abspath(os.path.expanduser(args.path))
-    print(f"bench: scanning {path}", flush=True)
-    print(f"bench: pid={os.getpid()}", flush=True)
+    if not args.json_output:
+        print(f"bench: scanning {path}", flush=True)
+        print(f"bench: pid={os.getpid()}", flush=True)
 
     engine = ScanEngine(workers=args.workers)
-    workers = getattr(engine, "_workers", args.workers if args.workers else "auto")
-    print(f"bench: workers={workers}", flush=True)
-    print(f"bench: mode={args.mode}", flush=True)
+    workers = args.workers if args.workers is not None else "auto"
+    if not args.json_output:
+        print(f"bench: workers={workers}", flush=True)
+        print(f"bench: mode={args.mode}", flush=True)
 
     if args.mode == "raw":
         t0 = time.monotonic()
         root = engine.scan(path)
         elapsed = time.monotonic() - t0
+        if args.json_output:
+            stats = engine.scheduler_stats
+            print(
+                json.dumps(
+                    {
+                        "benchmark": "scan",
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "host": {
+                            "python": platform.python_version(),
+                            "platform": platform.platform(),
+                        },
+                        "path": path,
+                        "mode": args.mode,
+                        "elapsed_seconds": elapsed,
+                        "directories": int(getattr(root, "dir_count", 0)),
+                        "files": int(getattr(root, "file_count", 0)),
+                        "logical_bytes": int(getattr(root, "size", 0)),
+                        "worker_selection": (
+                            asdict(engine.worker_selection)
+                            if engine.worker_selection is not None
+                            else None
+                        ),
+                        "scheduler": asdict(stats) if stats is not None else None,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
         _print_summary(root, elapsed)
         return 0
 
@@ -122,12 +162,82 @@ def main() -> int:
     )
     elapsed = time.monotonic() - t0
     if run.root is None:
+        if args.json_output:
+            print(
+                json.dumps(
+                    {
+                        "benchmark": "scan",
+                        "path": path,
+                        "mode": args.mode,
+                        "status": run.status.value,
+                        "error_type": run.error_type,
+                        "error_message": run.error_message,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
         print(
             f"bench: {args.mode} failed: {run.error_type or run.status.value}: "
             f"{run.error_message or 'no root returned'}",
             file=sys.stderr,
         )
         return 1
+
+    if args.json_output:
+        print(
+            json.dumps(
+                {
+                    "benchmark": "scan",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "host": {
+                        "python": platform.python_version(),
+                        "platform": platform.platform(),
+                    },
+                    "path": path,
+                    "mode": args.mode,
+                    "status": run.status.value,
+                    "elapsed_seconds": elapsed,
+                    "directories": run.root.dir_count,
+                    "files": run.root.file_count,
+                    "logical_bytes": run.root.size,
+                    "events": run.event_count,
+                    "event_batches": run.event_batch_count,
+                    "coalesced_events": run.coalesced_event_count,
+                    "event_queue_high_watermark": run.event_queue_high_watermark,
+                    "time_to_first_event_seconds": run.time_to_first_event_seconds,
+                    "time_to_first_visual_seconds": run.time_to_first_visual_seconds,
+                    "visual_updates": run.visual_update_count,
+                    "resource_wait_seconds": run.resource_wait_seconds,
+                    "worker_selection": (
+                        asdict(run.worker_selection)
+                        if run.worker_selection is not None
+                        else None
+                    ),
+                    "scheduler": {
+                        "queue_capacity": run.scheduler_queue_capacity,
+                        "queue_high_watermark": (
+                            run.scheduler_queue_high_watermark
+                        ),
+                        "in_flight_high_watermark": (
+                            run.scheduler_in_flight_high_watermark
+                        ),
+                        "entry_chunk_size": run.scheduler_entry_chunk_size,
+                        "entry_chunk_queue_capacity": (
+                            run.scheduler_entry_chunk_queue_capacity
+                        ),
+                        "entry_chunk_queue_high_watermark": (
+                            run.scheduler_entry_chunk_queue_high_watermark
+                        ),
+                        "entry_chunks_processed": (
+                            run.scheduler_entry_chunks_processed
+                        ),
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
 
     print(
         f"bench: events={run.event_count:,} batches={run.event_batch_count:,} "

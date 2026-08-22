@@ -51,6 +51,43 @@ class ScanPhase(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ScanResourcePolicy:
+    """Bound concurrent scans by filesystem resource rather than by API call."""
+
+    max_active_runs: int = 1
+    per_device: bool = True
+    queue_reason: str = "queued by scan resource policy"
+
+    def __post_init__(self) -> None:
+        if self.max_active_runs <= 0:
+            raise ValueError("max_active_runs must be greater than zero")
+
+    def summary(self) -> str:
+        scope = "filesystem device" if self.per_device else "process"
+        return f"{self.max_active_runs} active run(s) per {scope}"
+
+
+@dataclass(frozen=True, slots=True)
+class ScanWorkerSelection:
+    """Explain how a scan's requested worker count became an effective count."""
+
+    requested_workers: int | None
+    effective_workers: int
+    mode: str
+    reason: str
+    filesystem_type: str = "unknown"
+    storage_medium: str = "unknown"
+    is_network_fs: bool = False
+    available_cpus: int = 1
+    load_1min: float = 0.0
+    sample_entries: int = 0
+    sample_elapsed_seconds: float = 0.0
+    sample_average_seconds: float = 0.0
+    sample_errors: int = 0
+    sample_outcome: str = "not-run"
+
+
+@dataclass(frozen=True, slots=True)
 class ScanRequest:
     """Normalized user intent submitted to :class:`ScanService`."""
 
@@ -112,6 +149,8 @@ class ScanRun:
     request: ScanRequest
     policy: ScanPolicy
     platform_adapter: str
+    resource_policy: ScanResourcePolicy = field(default_factory=ScanResourcePolicy)
+    worker_selection: ScanWorkerSelection | None = None
     status: ScanStatus = ScanStatus.PENDING
     phase: ScanPhase = ScanPhase.VALIDATING
     created_at: datetime = field(default_factory=utc_now)
@@ -137,6 +176,17 @@ class ScanRun:
     scheduler_queue_capacity: int = 0
     scheduler_queue_high_watermark: int = 0
     scheduler_in_flight_high_watermark: int = 0
+    scheduler_entry_chunk_size: int = 0
+    scheduler_entry_chunk_queue_capacity: int = 0
+    scheduler_entry_chunk_queue_high_watermark: int = 0
+    scheduler_entry_chunks_processed: int = 0
+    resource_key: str = ""
+    resource_queue_position: int = 0
+    resource_queue_reason: str | None = None
+    resource_queued_at: datetime | None = None
+    resource_slot_acquired_at: datetime | None = None
+    resource_slot: int | None = None
+    resource_wait_seconds: float = 0.0
 
     @property
     def duration_seconds(self) -> float:
@@ -168,10 +218,21 @@ class ScanEvent:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ScanQueued(ScanEvent):
+    resource_key: str
+    position: int
+    reason: str
+    active_runs: int
+    max_active_runs: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ScanStarted(ScanEvent):
     request: ScanRequest
     policy: ScanPolicy
     platform_adapter: str
+    worker_selection: ScanWorkerSelection | None = None
+    resource_slot: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

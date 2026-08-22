@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-CURRENT_VERSION = 7
+CURRENT_VERSION = 8
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -388,6 +388,13 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE monitor_status ADD COLUMN degraded_reason TEXT",
         "ALTER TABLE monitor_status ADD COLUMN reconciliation_required INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE monitor_status ADD COLUMN reconciliation_state TEXT NOT NULL DEFAULT 'unknown'",
+    ],
+    8: [
+        "ALTER TABLE monitor_status ADD COLUMN resource_queue_position INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE monitor_status ADD COLUMN resource_queue_reason TEXT",
+        "ALTER TABLE monitor_status ADD COLUMN resource_active_slot INTEGER",
+        "ALTER TABLE monitor_status ADD COLUMN effective_workers INTEGER",
+        "ALTER TABLE monitor_status ADD COLUMN worker_policy_reason TEXT",
     ],
 }
 

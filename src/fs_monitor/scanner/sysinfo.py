@@ -4,12 +4,35 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from time import perf_counter
 
 from fs_monitor.collectors.platform import get_platform_adapter
 from fs_monitor.collectors.platform.models import (
     NETWORK_FS_TYPES,
     unescape_mount_path,
 )
+from fs_monitor.domain.scan import ScanWorkerSelection
+
+
+_WORKER_SAMPLE_LIMIT = 64
+_WORKER_SAMPLE_BUDGET_SECONDS = 0.075
+
+
+@dataclass(frozen=True, slots=True)
+class DirectoryLatencySample:
+    """Small bounded metadata sample used only for worker selection."""
+
+    entries: int = 0
+    elapsed_seconds: float = 0.0
+    errors: int = 0
+    exhausted: bool = False
+    outcome: str = "not-run"
+
+    @property
+    def average_seconds(self) -> float:
+        if self.entries <= 0:
+            return 0.0
+        return self.elapsed_seconds / self.entries
 
 
 @dataclass
@@ -24,6 +47,11 @@ class SystemInfo:
     fs_type: str
     is_network_fs: bool
     is_rotational: bool | None
+    storage_medium: str
+    sample_entries: int
+    sample_elapsed_seconds: float
+    sample_errors: int
+    sample_outcome: str
     recommended_workers: int
     recommendation_reason: str
 
@@ -186,50 +214,112 @@ def _compute_recommended_workers(
     is_network_fs: bool,
     is_rotational: bool | None,
     available_mb: int,
+    *,
+    fs_type: str = "unknown",
+    sample_entries: int = 0,
+    sample_elapsed_seconds: float = 0.0,
+    sample_outcome: str = "not-run",
 ) -> tuple[int, str]:
-    """Compute recommended worker count and reason string."""
-    base = available_cpus
+    """Choose a conservative local default and bounded latency parallelism."""
+    cpu_cap = max(1, min(available_cpus, 8))
+    medium = classify_medium(fs_type, is_network_fs, is_rotational)
     reasons: list[str] = []
 
-    # High load: reduce if 1-min load > 50% of CPUs
+    average = (
+        sample_elapsed_seconds / sample_entries
+        if sample_entries > 0
+        else 0.0
+    )
+    if is_network_fs:
+        base = min(cpu_cap, 4)
+        reasons.append("network filesystem favors bounded latency parallelism")
+    elif sample_entries > 0 and average >= 0.002:
+        base = min(cpu_cap, 4)
+        reasons.append(
+            f"metadata sample is high latency ({average * 1000:.2f} ms/entry)"
+        )
+    elif is_rotational is True:
+        base = min(cpu_cap, 2)
+        reasons.append("rotational local storage uses conservative parallelism")
+    else:
+        base = 1
+        if sample_entries > 0:
+            reasons.append(
+                f"low-latency local metadata ({average * 1000:.3f} ms/entry)"
+            )
+        elif sample_outcome == "empty":
+            reasons.append("empty local directory uses serial scheduling")
+        elif sample_outcome == "error":
+            reasons.append("metadata sample failed; conservative serial fallback")
+        else:
+            reasons.append(f"conservative {medium} local fallback")
+
     load_1min = load_average[0]
     load_ratio = load_1min / max(available_cpus, 1)
-    if load_ratio > 0.5:
-        old = base
-        base = max(2, int(base * (1 - min(load_ratio - 0.5, 0.5))))
-        reasons.append("high load")
+    if load_ratio > 0.75 and base > 1:
+        base = max(1, base // 2)
+        reasons.append("host load reduced parallelism")
 
-    # I/O constraint
-    if is_network_fs:
-        base = min(base, 4)
-        reasons.append("network FS")
-    elif is_rotational is True:
-        base = min(base, 4)
-        reasons.append("HDD")
-
-    # Low memory guard
     if 0 < available_mb < 512:
-        base = min(base, 2)
-        reasons.append("low memory")
+        base = 1
+        reasons.append("low memory forced serial scheduling")
 
-    # Clamp
-    result = max(1, min(base, 16))
-
-    if reasons:
-        reason = f"{result} ({', '.join(reasons)})"
-    else:
-        reason = str(result)
-
+    result = max(1, min(base, 8))
+    reason = f"{result} ({'; '.join(reasons)})"
     return (result, reason)
 
 
-def detect_system_info(path: str = "/") -> SystemInfo:
+def sample_directory_latency(
+    path: str,
+    *,
+    limit: int = _WORKER_SAMPLE_LIMIT,
+    budget_seconds: float = _WORKER_SAMPLE_BUDGET_SECONDS,
+) -> DirectoryLatencySample:
+    """Measure at most a few metadata operations without walking recursively."""
+    started = perf_counter()
+    entries = 0
+    errors = 0
+    exhausted = False
+    try:
+        with os.scandir(path) as iterator:
+            for entry in iterator:
+                try:
+                    entry.stat(follow_symlinks=False)
+                except OSError:
+                    errors += 1
+                entries += 1
+                if entries >= max(1, limit):
+                    break
+                if perf_counter() - started >= max(0.001, budget_seconds):
+                    break
+            else:
+                exhausted = True
+    except OSError:
+        return DirectoryLatencySample(
+            elapsed_seconds=perf_counter() - started,
+            errors=1,
+            outcome="error",
+        )
+    elapsed = perf_counter() - started
+    return DirectoryLatencySample(
+        entries=entries,
+        elapsed_seconds=elapsed,
+        errors=errors,
+        exhausted=exhausted,
+        outcome="empty" if entries == 0 else "sampled",
+    )
+
+
+def detect_system_info(path: str = "/", *, sample: bool = True) -> SystemInfo:
     """Detect system info and compute recommended workers."""
     cpu_count, available_cpus = detect_cpu_count()
     load_average = detect_load_average()
     memory_total_mb, memory_available_mb = detect_memory()
     fs_type, is_network_fs = detect_fs_type(path)
     is_rotational = detect_storage_type(path)
+    latency_sample = (
+        sample_directory_latency(path) if sample else DirectoryLatencySample()
+    )
 
     recommended_workers, recommendation_reason = _compute_recommended_workers(
         available_cpus=available_cpus,
@@ -237,6 +327,10 @@ def detect_system_info(path: str = "/") -> SystemInfo:
         is_network_fs=is_network_fs,
         is_rotational=is_rotational,
         available_mb=memory_available_mb,
+        fs_type=fs_type,
+        sample_entries=latency_sample.entries,
+        sample_elapsed_seconds=latency_sample.elapsed_seconds,
+        sample_outcome=latency_sample.outcome,
     )
 
     return SystemInfo(
@@ -248,6 +342,59 @@ def detect_system_info(path: str = "/") -> SystemInfo:
         fs_type=fs_type,
         is_network_fs=is_network_fs,
         is_rotational=is_rotational,
+        storage_medium=classify_medium(
+            fs_type,
+            is_network_fs,
+            is_rotational,
+        ),
+        sample_entries=latency_sample.entries,
+        sample_elapsed_seconds=latency_sample.elapsed_seconds,
+        sample_errors=latency_sample.errors,
+        sample_outcome=latency_sample.outcome,
         recommended_workers=recommended_workers,
         recommendation_reason=recommendation_reason,
+    )
+
+
+def select_scan_workers(
+    path: str,
+    requested_workers: int | None,
+) -> ScanWorkerSelection:
+    """Resolve an explicit override or explain the bounded auto policy."""
+    if requested_workers is not None and requested_workers <= 0:
+        raise ValueError("workers must be greater than zero")
+    info = detect_system_info(path, sample=requested_workers is None)
+    if requested_workers is not None:
+        return ScanWorkerSelection(
+            requested_workers=requested_workers,
+            effective_workers=requested_workers,
+            mode="explicit",
+            reason=f"explicit override selected {requested_workers} worker(s)",
+            filesystem_type=info.fs_type,
+            storage_medium=info.storage_medium,
+            is_network_fs=info.is_network_fs,
+            available_cpus=info.available_cpus,
+            load_1min=info.load_average[0],
+            sample_outcome="bypassed-explicit-override",
+        )
+    average = (
+        info.sample_elapsed_seconds / info.sample_entries
+        if info.sample_entries > 0
+        else 0.0
+    )
+    return ScanWorkerSelection(
+        requested_workers=None,
+        effective_workers=info.recommended_workers,
+        mode="auto",
+        reason=info.recommendation_reason,
+        filesystem_type=info.fs_type,
+        storage_medium=info.storage_medium,
+        is_network_fs=info.is_network_fs,
+        available_cpus=info.available_cpus,
+        load_1min=info.load_average[0],
+        sample_entries=info.sample_entries,
+        sample_elapsed_seconds=info.sample_elapsed_seconds,
+        sample_average_seconds=average,
+        sample_errors=info.sample_errors,
+        sample_outcome=info.sample_outcome,
     )

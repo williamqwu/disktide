@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fs_monitor.domain.scan import ScanRequest, ScanTreeUpdate
+from fs_monitor.domain.scan import (
+    ScanRequest,
+    ScanTreeUpdate,
+    ScanWorkerSelection,
+)
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.engine import ScanEngine
 from fs_monitor.scanner.progress import ScanProgress
@@ -19,6 +23,7 @@ class LocalScanner:
         *,
         progress_callback: Callable[[ScanProgress], None] | None = None,
         tree_callback: Callable[[FSNode | ScanTreeUpdate], None] | None = None,
+        worker_selection: ScanWorkerSelection | None = None,
     ):
         policy = request.policy
         self._engine = ScanEngine(
@@ -32,6 +37,7 @@ class LocalScanner:
             one_file_system=policy.one_file_system,
             exclude_pseudo_filesystems=policy.exclude_pseudo_filesystems,
             metric=request.metric,
+            worker_selection=worker_selection,
         )
         self._path = request.path
 
@@ -48,3 +54,7 @@ class LocalScanner:
     @property
     def scheduler_stats(self):
         return self._engine.scheduler_stats
+
+    @property
+    def worker_selection(self) -> ScanWorkerSelection:
+        return self._engine.worker_selection

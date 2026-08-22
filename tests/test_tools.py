@@ -15,6 +15,7 @@ We do not assert specific counts or rates; those are environmental.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -89,6 +90,24 @@ def test_bench_scan_live_mode_reports_event_and_visual_metrics(tmp_path):
     assert "bench: live_updates=" in cp.stdout
     assert "first_visual=" in cp.stdout
     assert "bench: done in" in cp.stdout
+
+
+def test_bench_scan_json_is_machine_readable(tmp_path):
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py",
+        str(tmp_path),
+        "--workers",
+        "1",
+        "--mode",
+        "live",
+        "--json",
+    )
+    assert cp.returncode == 0, cp.stderr
+    payload = json.loads(cp.stdout)
+    assert payload["benchmark"] == "scan"
+    assert payload["worker_selection"]["effective_workers"] == 1
+    assert payload["scheduler"]["entry_chunk_size"] > 0
 
 
 # --- diag_scan -------------------------------------------------------

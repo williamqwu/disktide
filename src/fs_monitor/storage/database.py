@@ -2050,6 +2050,11 @@ class Database:
             reconciliation_state=MonitorReconciliationState(
                 row[37] or MonitorReconciliationState.UNKNOWN.value
             ),
+            resource_queue_position=int(row[38] or 0),
+            resource_queue_reason=row[39],
+            resource_active_slot=row[40],
+            effective_workers=row[41],
+            worker_policy_reason=row[42],
         )
 
     def _monitor_status_columns(self) -> str:
@@ -2075,6 +2080,11 @@ class Database:
             ("degraded_reason", "NULL"),
             ("reconciliation_required", "0"),
             ("reconciliation_state", "'unknown'"),
+            ("resource_queue_position", "0"),
+            ("resource_queue_reason", "NULL"),
+            ("resource_active_slot", "NULL"),
+            ("effective_workers", "NULL"),
+            ("worker_policy_reason", "NULL"),
         )
         base = [
             "activity_state",
@@ -2130,11 +2140,14 @@ class Database:
                    last_reconciliation_path, last_local_size,
                    last_local_file_count, overflow_count, recovery_count,
                    degraded_reason, reconciliation_required,
-                   reconciliation_state
+                   reconciliation_state, resource_queue_position,
+                   resource_queue_reason, resource_active_slot,
+                   effective_workers, worker_policy_reason
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                         ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         ?, ?, ?, ?)
                ON CONFLICT(monitor_id) DO UPDATE SET
                    activity_state = excluded.activity_state,
                    health_state = excluded.health_state,
@@ -2173,7 +2186,12 @@ class Database:
                    recovery_count = excluded.recovery_count,
                    degraded_reason = excluded.degraded_reason,
                    reconciliation_required = excluded.reconciliation_required,
-                   reconciliation_state = excluded.reconciliation_state""",
+                   reconciliation_state = excluded.reconciliation_state,
+                   resource_queue_position = excluded.resource_queue_position,
+                   resource_queue_reason = excluded.resource_queue_reason,
+                   resource_active_slot = excluded.resource_active_slot,
+                   effective_workers = excluded.effective_workers,
+                   worker_policy_reason = excluded.worker_policy_reason""",
             (
                 status.monitor_id,
                 status.activity.value,
@@ -2214,6 +2232,11 @@ class Database:
                 status.degraded_reason,
                 int(status.reconciliation_required),
                 status.reconciliation_state.value,
+                status.resource_queue_position,
+                status.resource_queue_reason,
+                status.resource_active_slot,
+                status.effective_workers,
+                status.worker_policy_reason,
             ),
         )
         self.conn.commit()
@@ -2291,7 +2314,8 @@ class Database:
             """UPDATE monitor_status
                SET activity_state = 'no-host', host_id = NULL,
                    host_type = NULL, lease_expires_at = NULL,
-                   active_run_id = NULL
+                   active_run_id = NULL, resource_queue_position = 0,
+                   resource_queue_reason = NULL, resource_active_slot = NULL
                WHERE monitor_id = ? AND host_id = ?""",
             (monitor_id, host_id),
         )

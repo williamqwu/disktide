@@ -45,6 +45,7 @@ from fs_monitor.domain.scan import (
     ScanFailed,
     ScanPhaseChanged,
     ScanProgressUpdated,
+    ScanQueued,
     ScanRequest,
     ScanRun,
     ScanStarted,
@@ -1151,22 +1152,16 @@ class MonitorService:
             self._active_monitor_id = monitor_id
             self._active_run_id = run.run_id
         if status is not None:
-            status.activity = (
-                MonitorActivityState.RECONCILING
-                if trigger is MonitorTrigger.RECONCILE
-                else MonitorActivityState.SCANNING
-            )
             status.active_run_id = run.run_id
             status.active_phase = run.phase.value
             status.progress_percent = 0.0
             status.current_path = definition.root_path
+            status.resource_queue_position = 0
+            status.resource_queue_reason = None
+            status.resource_active_slot = None
+            status.effective_workers = None
+            status.worker_policy_reason = None
             self._repository.save_monitor_status(status)
-        self._emit(
-            MonitorEventKind.RUN_STARTED,
-            monitor_id,
-            f"run {run.run_id[:8]} started",
-            run_id=run.run_id,
-        )
 
         last_status_write = 0.0
 
@@ -1174,8 +1169,49 @@ class MonitorService:
             nonlocal last_status_write
             if status is None:
                 return
-            if isinstance(event, ScanStarted):
+            if isinstance(event, ScanQueued):
+                status.activity = MonitorActivityState.QUEUED
                 status.active_phase = event.phase.value
+                status.resource_queue_position = event.position
+                status.resource_queue_reason = event.reason
+                status.resource_active_slot = None
+                self._emit(
+                    MonitorEventKind.RUN_QUEUED,
+                    monitor_id,
+                    (
+                        f"run {run.run_id[:8]} queued #{event.position}: "
+                        f"{event.reason}"
+                    ),
+                    run_id=run.run_id,
+                )
+                self._save_scan_progress(status)
+                last_status_write = self._monotonic()
+            elif isinstance(event, ScanStarted):
+                status.activity = (
+                    MonitorActivityState.RECONCILING
+                    if trigger is MonitorTrigger.RECONCILE
+                    else MonitorActivityState.SCANNING
+                )
+                status.active_phase = event.phase.value
+                status.resource_queue_position = 0
+                status.resource_queue_reason = None
+                status.resource_active_slot = event.resource_slot
+                if event.worker_selection is not None:
+                    status.effective_workers = (
+                        event.worker_selection.effective_workers
+                    )
+                    status.worker_policy_reason = event.worker_selection.reason
+                self._emit(
+                    MonitorEventKind.RUN_STARTED,
+                    monitor_id,
+                    (
+                        f"run {run.run_id[:8]} started with "
+                        f"{status.effective_workers or '?'} worker(s)"
+                    ),
+                    run_id=run.run_id,
+                )
+                self._save_scan_progress(status)
+                last_status_write = self._monotonic()
             elif isinstance(event, ScanPhaseChanged):
                 status.active_phase = event.phase.value
             elif isinstance(event, ScanProgressUpdated):
@@ -1669,6 +1705,11 @@ class MonitorService:
         current.active_phase = scan_status.active_phase
         current.progress_percent = scan_status.progress_percent
         current.current_path = scan_status.current_path
+        current.resource_queue_position = scan_status.resource_queue_position
+        current.resource_queue_reason = scan_status.resource_queue_reason
+        current.resource_active_slot = scan_status.resource_active_slot
+        current.effective_workers = scan_status.effective_workers
+        current.worker_policy_reason = scan_status.worker_policy_reason
         current.rerun_pending = scan_status.rerun_pending
         if scan_status.last_error:
             current.last_error = scan_status.last_error
@@ -1909,6 +1950,9 @@ class MonitorService:
             current.active_phase = None
             current.progress_percent = 100.0 if failure is None else 0.0
             current.current_path = None
+            current.resource_queue_position = 0
+            current.resource_queue_reason = None
+            current.resource_active_slot = None
             self._repository.save_monitor_status(current)
             self._emit(
                 MonitorEventKind.RECONCILIATION_FINISHED,
@@ -2002,6 +2046,9 @@ class MonitorService:
         status.active_phase = None
         status.progress_percent = 100.0
         status.current_path = None
+        status.resource_queue_position = 0
+        status.resource_queue_reason = None
+        status.resource_active_slot = None
 
     def _finish_failed_status(
         self, status: MonitorStatus, run: ScanRun, *, blocked: bool = False
@@ -2031,6 +2078,9 @@ class MonitorService:
         status.active_phase = None
         status.progress_percent = 0.0
         status.current_path = None
+        status.resource_queue_position = 0
+        status.resource_queue_reason = None
+        status.resource_active_slot = None
 
     def _validation_failure_run(
         self, request: ScanRequest, exc: Exception
@@ -2142,6 +2192,9 @@ class MonitorService:
             status.host_type = None
             status.lease_expires_at = None
             status.active_run_id = None
+            status.resource_queue_position = 0
+            status.resource_queue_reason = None
+            status.resource_active_slot = None
             if status.watch_mode is MonitorWatchMode.EVENT_ASSISTED:
                 status.event_backend_status = "stopped"
                 status.watched_root_count = 0

@@ -29,17 +29,21 @@ from fs_monitor.domain.scan import (
     ScanPhaseChanged,
     ScanProgressSnapshot,
     ScanProgressUpdated,
+    ScanQueued,
     ScanRequest,
     ScanRequestError,
+    ScanResourcePolicy,
     ScanRun,
     ScanStarted,
     ScanStatus,
     ScanTreeUpdate,
+    ScanWorkerSelection,
     TERMINAL_SCAN_EVENTS,
     utc_now,
 )
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.progress import ScanProgress
+from fs_monitor.scanner.sysinfo import select_scan_workers
 
 
 class ScannerCollector(Protocol):
@@ -173,6 +177,18 @@ class _RunEmitter:
                         0.0,
                         (utc_now() - started_at).total_seconds(),
                     )
+                if (
+                    isinstance(event, NodeAggregateUpdated)
+                    and not event.final
+                    and event.view_root is not None
+                ):
+                    self._run.visual_update_count += 1
+                    if self._run.time_to_first_visual_seconds is None:
+                        started_at = self._run.started_at or self._run.created_at
+                        self._run.time_to_first_visual_seconds = max(
+                            0.0,
+                            (utc_now() - started_at).total_seconds(),
+                        )
                 self._run.event_count = self._sequence
                 for consumer in self._consumers:
                     identity = id(consumer)
@@ -263,20 +279,26 @@ class ScanService:
         consumers: Iterable[ScanEventConsumer] = (),
         run_consumers: Iterable[ScanRunConsumer] = (),
         event_queue_capacity: int = 64,
+        resource_policy: ScanResourcePolicy | None = None,
     ):
         if event_queue_capacity <= 0:
             raise ValueError("event_queue_capacity must be greater than zero")
+        self._uses_default_scanner = scanner_factory is None
         self._scanner_factory = scanner_factory or _default_scanner_factory
         self._run_id_factory = run_id_factory or (lambda: uuid.uuid4().hex)
         self._consumers = tuple(consumers)
         self._run_consumers = tuple(run_consumers)
         self._event_queue_capacity = event_queue_capacity
+        self._resource_policy = resource_policy or ScanResourcePolicy()
         self._active: dict[str, ScannerCollector] = {}
         self._known_run_ids: set[str] = set()
+        self._executing_run_ids: set[str] = set()
         self._cancel_reasons: dict[str, str] = {}
         self._cancel_requested_at: dict[str, datetime] = {}
         self._lock = threading.RLock()
-        self._execution_gate = threading.Lock()
+        self._resource_condition = threading.Condition(self._lock)
+        self._resource_queues: dict[str, deque[ScanRun]] = {}
+        self._resource_slots: dict[str, dict[int, str]] = {}
 
     def create_run(self, request: ScanRequest) -> ScanRun:
         normalized = self._normalize_request(request)
@@ -292,6 +314,7 @@ class ScanService:
             request=normalized,
             policy=normalized.policy,
             platform_adapter=adapter.name,
+            resource_policy=self._resource_policy,
             capability_warnings=warnings,
         )
 
@@ -309,25 +332,50 @@ class ScanService:
         *,
         consumers: Iterable[ScanEventConsumer] = (),
     ) -> ScanRun:
-        with self._execution_gate:
-            return self._execute_serial(run, consumers=consumers)
-
-    def _execute_serial(
-        self,
-        run: ScanRun,
-        *,
-        consumers: Iterable[ScanEventConsumer] = (),
-    ) -> ScanRun:
         if run.status is not ScanStatus.PENDING:
             raise RuntimeError(f"scan run {run.run_id} is already {run.status.value}")
-        with self._lock:
+        with self._resource_condition:
+            if run.run_id in self._executing_run_ids:
+                raise RuntimeError(f"scan run {run.run_id} is already submitted")
             self._known_run_ids.add(run.run_id)
+            self._executing_run_ids.add(run.run_id)
 
         emitter = _RunEmitter(
             run,
             (*self._consumers, *tuple(consumers)),
             queue_capacity=self._event_queue_capacity,
         )
+        slot_acquired = False
+        try:
+            slot = self._acquire_resource_slot(run, emitter)
+            if slot is None:
+                self._finish_cancelled(
+                    run,
+                    emitter,
+                    self._cancel_reason(run.run_id) or "cancel requested",
+                )
+                return run
+            slot_acquired = True
+            return self._execute_active(run, emitter)
+        finally:
+            if slot_acquired:
+                self._release_resource_slot(run)
+            emitter.close()
+            with self._resource_condition:
+                self._active.pop(run.run_id, None)
+                self._known_run_ids.discard(run.run_id)
+                self._executing_run_ids.discard(run.run_id)
+                self._cancel_reasons.pop(run.run_id, None)
+                self._cancel_requested_at.pop(run.run_id, None)
+                self._resource_condition.notify_all()
+            self._notify_run_consumers(run)
+
+    def _execute_active(
+        self,
+        run: ScanRun,
+        emitter: _RunEmitter,
+    ) -> ScanRun:
+        run.worker_selection = self._select_workers(run)
         run.status = ScanStatus.RUNNING
         run.phase = ScanPhase.DISCOVERING
         run.started_at = utc_now()
@@ -336,6 +384,8 @@ class ScanService:
             request=run.request,
             policy=run.policy,
             platform_adapter=run.platform_adapter,
+            worker_selection=run.worker_selection,
+            resource_slot=run.resource_slot,
         )
         emitter.emit(
             DirectoryQueued,
@@ -407,11 +457,25 @@ class ScanService:
             if reason is not None:
                 self._finish_cancelled(run, emitter, reason)
                 return run
-            collector = self._scanner_factory(
-                run.request,
-                on_progress,
-                on_tree if run.request.emit_tree_updates else None,
-            )
+            if self._uses_default_scanner:
+                collector = LocalScanner(
+                    run.request,
+                    progress_callback=on_progress,
+                    tree_callback=(
+                        on_tree if run.request.emit_tree_updates else None
+                    ),
+                    worker_selection=run.worker_selection,
+                )
+            else:
+                effective_request = replace(
+                    run.request,
+                    workers=run.worker_selection.effective_workers,
+                )
+                collector = self._scanner_factory(
+                    effective_request,
+                    on_progress,
+                    on_tree if run.request.emit_tree_updates else None,
+                )
             with self._lock:
                 self._active[run.run_id] = collector
             reason = self._cancel_reason(run.run_id)
@@ -470,32 +534,29 @@ class ScanService:
         finally:
             if collector is not None:
                 self._capture_collector_stats(run, collector)
-            emitter.close()
             with self._lock:
                 self._active.pop(run.run_id, None)
-                self._known_run_ids.discard(run.run_id)
-                self._cancel_reasons.pop(run.run_id, None)
-                self._cancel_requested_at.pop(run.run_id, None)
-            self._notify_run_consumers(run)
 
     def cancel(self, run_id: str, reason: str = "cancel requested") -> bool:
-        with self._lock:
+        with self._resource_condition:
             if run_id not in self._known_run_ids and run_id not in self._active:
                 return False
             self._cancel_reasons[run_id] = reason
             self._cancel_requested_at.setdefault(run_id, utc_now())
             collector = self._active.get(run_id)
+            self._resource_condition.notify_all()
         if collector is not None:
             collector.cancel()
         return True
 
     def cancel_all(self, reason: str = "cancel requested") -> int:
-        with self._lock:
+        with self._resource_condition:
             run_ids = set(self._known_run_ids) | set(self._active)
             for run_id in run_ids:
                 self._cancel_reasons[run_id] = reason
                 self._cancel_requested_at.setdefault(run_id, utc_now())
             collectors = tuple(self._active.values())
+            self._resource_condition.notify_all()
         for collector in collectors:
             collector.cancel()
         return len(run_ids)
@@ -504,6 +565,137 @@ class ScanService:
     def active_run_ids(self) -> tuple[str, ...]:
         with self._lock:
             return tuple(self._active)
+
+    @property
+    def queued_run_ids(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(
+                run.run_id
+                for queued in self._resource_queues.values()
+                for run in queued
+            )
+
+    @property
+    def resource_policy(self) -> ScanResourcePolicy:
+        return self._resource_policy
+
+    def _acquire_resource_slot(
+        self,
+        run: ScanRun,
+        emitter: _RunEmitter,
+    ) -> int | None:
+        resource_key = self._resource_key(run.request.path)
+        run.resource_key = resource_key
+        last_position = 0
+        with self._resource_condition:
+            queued = self._resource_queues.setdefault(resource_key, deque())
+            queued.append(run)
+            while True:
+                if self._cancel_reasons.get(run.run_id) is not None:
+                    self._remove_queued_run(resource_key, run)
+                    self._resource_condition.notify_all()
+                    return None
+
+                slots = self._resource_slots.setdefault(resource_key, {})
+                available_slot = next(
+                    (
+                        slot
+                        for slot in range(1, self._resource_policy.max_active_runs + 1)
+                        if slot not in slots
+                    ),
+                    None,
+                )
+                if queued and queued[0] is run and available_slot is not None:
+                    queued.popleft()
+                    if not queued:
+                        self._resource_queues.pop(resource_key, None)
+                    slots[available_slot] = run.run_id
+                    acquired_at = utc_now()
+                    run.resource_slot = available_slot
+                    run.resource_slot_acquired_at = acquired_at
+                    run.resource_queue_position = 0
+                    if run.resource_queued_at is not None:
+                        run.resource_wait_seconds = max(
+                            0.0,
+                            (acquired_at - run.resource_queued_at).total_seconds(),
+                        )
+                    self._resource_condition.notify_all()
+                    return available_slot
+
+                position = next(
+                    (
+                        index
+                        for index, item in enumerate(queued, start=1)
+                        if item is run
+                    ),
+                    0,
+                )
+                if position != last_position:
+                    run.resource_queue_position = position
+                    run.resource_queue_reason = self._resource_queue_reason()
+                    run.resource_queued_at = run.resource_queued_at or utc_now()
+                    emitter.emit(
+                        ScanQueued,
+                        resource_key=resource_key,
+                        position=position,
+                        reason=run.resource_queue_reason,
+                        active_runs=len(slots),
+                        max_active_runs=self._resource_policy.max_active_runs,
+                    )
+                    last_position = position
+                self._resource_condition.wait()
+
+    def _release_resource_slot(self, run: ScanRun) -> None:
+        if run.resource_slot is None:
+            return
+        with self._resource_condition:
+            slots = self._resource_slots.get(run.resource_key)
+            if slots is not None:
+                slots.pop(run.resource_slot, None)
+                if not slots:
+                    self._resource_slots.pop(run.resource_key, None)
+            self._resource_condition.notify_all()
+
+    def _remove_queued_run(self, resource_key: str, run: ScanRun) -> None:
+        queued = self._resource_queues.get(resource_key)
+        if queued is None:
+            return
+        retained = deque(item for item in queued if item is not run)
+        if retained:
+            self._resource_queues[resource_key] = retained
+        else:
+            self._resource_queues.pop(resource_key, None)
+
+    def _resource_key(self, path: str) -> str:
+        if not self._resource_policy.per_device:
+            return "process"
+        try:
+            return f"device:{os.stat(path).st_dev}"
+        except OSError:
+            return "device:unknown"
+
+    def _resource_queue_reason(self) -> str:
+        return (
+            f"{self._resource_policy.queue_reason}; "
+            f"{self._resource_policy.summary()}"
+        )
+
+    @staticmethod
+    def _select_workers(run: ScanRun) -> ScanWorkerSelection:
+        try:
+            return select_scan_workers(run.request.path, run.request.workers)
+        except Exception as exc:
+            effective = run.request.workers or 1
+            return ScanWorkerSelection(
+                requested_workers=run.request.workers,
+                effective_workers=effective,
+                mode="explicit" if run.request.workers is not None else "auto",
+                reason=(
+                    f"worker policy fallback selected {effective}: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                sample_outcome="policy-error-fallback",
+            )
 
     def _cancel_reason(self, run_id: str) -> str | None:
         with self._lock:
@@ -620,6 +812,18 @@ class ScanService:
         )
         run.scheduler_in_flight_high_watermark = int(
             getattr(stats, "max_in_flight", 0)
+        )
+        run.scheduler_entry_chunk_size = int(
+            getattr(stats, "entry_chunk_size", 0)
+        )
+        run.scheduler_entry_chunk_queue_capacity = int(
+            getattr(stats, "entry_chunk_queue_capacity", 0)
+        )
+        run.scheduler_entry_chunk_queue_high_watermark = int(
+            getattr(stats, "max_entry_chunk_queue", 0)
+        )
+        run.scheduler_entry_chunks_processed = int(
+            getattr(stats, "entry_chunks_processed", 0)
         )
 
     @staticmethod

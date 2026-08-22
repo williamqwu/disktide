@@ -194,6 +194,7 @@ def scan(
         ScanFailed,
         ScanPhaseChanged,
         ScanProgressUpdated,
+        ScanQueued,
         ScanRequest,
         ScanRequestError,
         ScanStarted,
@@ -238,11 +239,31 @@ def scan(
                 self.progress_written = False
 
         def __call__(self, event) -> None:
-            if isinstance(event, ScanStarted):
+            if isinstance(event, ScanQueued):
+                self._finish_progress_line()
+                click.echo(
+                    f"Scan {event.run_id[:8]} queued at position "
+                    f"{event.position}: {event.reason}"
+                )
+            elif isinstance(event, ScanStarted):
                 click.echo(f"Scan {event.run_id[:8]} started")
                 click.echo(f"  Path: {event.request.path}")
                 click.echo(f"  Phase: {event.phase.value}")
                 click.echo(f"  Policy: {event.policy.summary()}")
+                if event.worker_selection is not None:
+                    selection = event.worker_selection
+                    requested = (
+                        "auto"
+                        if selection.requested_workers is None
+                        else str(selection.requested_workers)
+                    )
+                    click.echo(
+                        f"  Workers: requested={requested}, "
+                        f"effective={selection.effective_workers}"
+                    )
+                    click.echo(f"  Worker reason: {selection.reason}")
+                if event.resource_slot is not None:
+                    click.echo(f"  Resource slot: {event.resource_slot}")
             elif isinstance(event, ScanProgressUpdated):
                 progress = event.progress
                 click.echo(
@@ -293,6 +314,13 @@ def scan(
     click.echo(f"  Unique on disk: {metric_text(root, 'unique')}")
     click.echo(f"  Files: {root.file_count:,}")
     click.echo(f"  Directories: {root.dir_count:,}")
+    if run.worker_selection is not None:
+        click.echo(
+            f"  Workers: {run.worker_selection.effective_workers} "
+            f"({run.worker_selection.mode})"
+        )
+    if run.resource_wait_seconds > 0:
+        click.echo(f"  Resource wait: {run.resource_wait_seconds:.3f}s")
     if root.scan_policy is not None:
         click.echo(f"  Policy: {root.scan_policy.summary()}")
     for warning in run.capability_warnings:
@@ -871,6 +899,19 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
                             "desired": item.definition.desired_state.value,
                             "activity": item.status.activity.value,
                             "health": item.status.health.value,
+                            "resource_queue_position": (
+                                item.status.resource_queue_position
+                            ),
+                            "resource_queue_reason": (
+                                item.status.resource_queue_reason
+                            ),
+                            "resource_active_slot": (
+                                item.status.resource_active_slot
+                            ),
+                            "effective_workers": item.status.effective_workers,
+                            "worker_policy_reason": (
+                                item.status.worker_policy_reason
+                            ),
                             "host_id": item.status.host_id,
                             "host_type": item.status.host_type,
                             "next_due_at": (
@@ -955,6 +996,18 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
                 f"  Policy: {definition.metric.value}; {definition.policy.summary()}; "
                 f"revision {definition.revision}"
             )
+            if status.resource_queue_position:
+                click.echo(
+                    f"  Scan resource: queued #{status.resource_queue_position}; "
+                    f"{status.resource_queue_reason or 'policy constrained'}"
+                )
+            else:
+                click.echo(
+                    f"  Scan resource: slot {status.resource_active_slot or 'none'}; "
+                    f"workers {status.effective_workers or 'unknown'}"
+                )
+            if status.worker_policy_reason:
+                click.echo(f"  Worker policy: {status.worker_policy_reason}")
             click.echo(
                 f"  History: {item.snapshot_count} snapshot(s), "
                 f"~{humanize.naturalsize(item.database_bytes, binary=True)}"

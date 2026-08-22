@@ -261,8 +261,8 @@ class TestComputeRecommendedWorkers:
             is_rotational=False,
             available_mb=4096,
         )
-        assert workers == 8
-        assert reason == "8"
+        assert workers == 1
+        assert "conservative" in reason
 
     def test_high_load_reduces_workers(self):
         workers, reason = _compute_recommended_workers(
@@ -273,7 +273,7 @@ class TestComputeRecommendedWorkers:
             available_mb=4096,
         )
         assert workers < 8
-        assert "high load" in reason
+        assert workers == 1
 
     def test_network_fs_caps_at_4(self):
         workers, reason = _compute_recommended_workers(
@@ -284,7 +284,7 @@ class TestComputeRecommendedWorkers:
             available_mb=4096,
         )
         assert workers <= 4
-        assert "network FS" in reason
+        assert "network filesystem" in reason
 
     def test_hdd_caps_at_4(self):
         workers, reason = _compute_recommended_workers(
@@ -295,7 +295,7 @@ class TestComputeRecommendedWorkers:
             available_mb=4096,
         )
         assert workers <= 4
-        assert "HDD" in reason
+        assert "rotational" in reason
 
     def test_low_memory_caps_at_2(self):
         workers, reason = _compute_recommended_workers(
@@ -337,8 +337,8 @@ class TestComputeRecommendedWorkers:
             available_mb=256,
         )
         assert workers >= 1
-        assert "high load" in reason
-        assert "network FS" in reason
+        assert "host load" in reason
+        assert "network filesystem" in reason
         assert "low memory" in reason
 
     def test_zero_memory_not_flagged(self):
@@ -350,7 +350,7 @@ class TestComputeRecommendedWorkers:
             is_rotational=False,
             available_mb=0,
         )
-        assert workers == 8
+        assert workers == 1
         assert "low memory" not in reason
 
     def test_ssd_not_capped(self):
@@ -361,8 +361,8 @@ class TestComputeRecommendedWorkers:
             is_rotational=False,
             available_mb=4096,
         )
-        assert workers == 12
-        assert "HDD" not in reason
+        assert workers == 1
+        assert "low-latency" not in reason
 
 
 class TestDetectSystemInfo:

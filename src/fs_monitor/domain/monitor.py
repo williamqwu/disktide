@@ -141,6 +141,11 @@ class MonitorStatus:
     active_phase: str | None = None
     progress_percent: float = 0.0
     current_path: str | None = None
+    resource_queue_position: int = 0
+    resource_queue_reason: str | None = None
+    resource_active_slot: int | None = None
+    effective_workers: int | None = None
+    worker_policy_reason: str | None = None
     rerun_pending: bool = False
     latest_snapshot_id: int | None = None
     consecutive_failures: int = 0

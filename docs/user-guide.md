@@ -78,8 +78,9 @@ and snapshot-pair changes. Tree rows add an absolute/percentage delta and a
 short cached history sparkline. `[`/`]` move through adjacent pairs without
 querying SQLite on every repaint.
 
-During a scan, the progress panel shows the scan run id, current phase, active
-policy, current path, counts, Logical bytes, and rate. Rescan and quit cancel by
+During a scan, the progress panel shows the scan run id, queued position when
+resource constrained, current phase, active policy, effective worker count,
+current path, counts, Logical bytes, and rate. Rescan and quit cancel by
 run id. Events from an older run are ignored after a newer scan starts, so a
 late partial update cannot overwrite the final view from the current run.
 
@@ -90,7 +91,8 @@ Symbolic links are shown as `name → target` and never counted toward folder si
 Monitor Center is the shared setup and management surface for persistent
 monitors. Its list/detail layout shows desired state, current host activity,
 health, event/periodic mode, pending dirty paths, reconciliation confidence,
-next full scan, snapshot count, global database usage, and active alerts.
+scan-resource queue/slot and worker reason, next full scan, snapshot count,
+global database usage, and active alerts.
 The detail side has Overview, History, Alerts, and Retention tabs. Terminals
 narrower than 90 columns use a list-first view; press **Enter** for details and
 **Escape** to return.
@@ -434,7 +436,7 @@ same-filesystem quarantine fallback. `history` distinguishes estimated,
 isolated, purged, actually reclaimed, and undone bytes; `undo` refuses to
 overwrite a newly created original path. Plans and per-action audit events
 survive process restart. Cleanup tables retain their schema-v6 contract while
-the overall database is schema v7; the versioned CleanupPlan JSON payload is v2.
+the overall database is schema v8; the versioned CleanupPlan JSON payload is v2.
 
 `history` can group those values by `category`, `pack`, or `path`. `purge` only owns
 revalidated quarantine content and requires the exact `PURGE <plan-id>` token;
@@ -515,7 +517,12 @@ same pack switches with source, rule count, and maximum risk.
 
 The **Live scan rendering** setting (`live_scan_render`) controls whether the active visualization tab redraws as the scan progresses. `auto` (the default) enables it on terminals at least 80 columns by 24 rows with at least 4 CPUs, and stays off on smaller / lower-resource setups where the per-frame redraw cost would compete with the scan. Set to `on` to force it regardless of terminal size, or `off` to wait for the scan to finish and render once.
 
-All fields are optional. Missing values use sensible defaults. When `workers` is omitted, the scanner picks a thread count based on CPU count, system load, filesystem type, and available memory -- detected per scan path, so different directories on different filesystems (e.g., local SSD vs. NFS) automatically use an appropriate thread count.
+All fields are optional. Missing values use sensible defaults. When `workers`
+is omitted, the scanner combines CPU/load/memory information with filesystem
+and storage hints plus a bounded metadata sample of the actual scan path. Warm
+low-latency local paths normally use one worker, rotational paths at most two,
+and network or measured high-latency paths at most four. An explicit value is
+used exactly. CLI and Monitor status show the effective count and reason.
 
 ## File-Type Categories
 

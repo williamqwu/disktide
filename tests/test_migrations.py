@@ -97,6 +97,26 @@ class TestMigrations:
             "reconciliation_state",
         } <= columns
 
+    def test_v8_adds_scan_resource_status_defaults(self, conn):
+        migrate(conn, target_version=7)
+        before = {
+            row[1] for row in conn.execute("PRAGMA table_info(monitor_status)")
+        }
+        assert "resource_queue_position" not in before
+
+        migrate(conn)
+
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(monitor_status)")
+        }
+        assert {
+            "resource_queue_position",
+            "resource_queue_reason",
+            "resource_active_slot",
+            "effective_workers",
+            "worker_policy_reason",
+        } <= columns
+
     def test_snapshots_has_baseline_columns(self, conn):
         migrate(conn)
         # Verify the columns exist by inserting a row

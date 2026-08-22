@@ -24,6 +24,7 @@ from fs_monitor.domain.scan import (
     ScanFailed,
     ScanPhaseChanged,
     ScanProgressUpdated,
+    ScanQueued,
     ScanRequest,
     ScanRequestError,
     ScanRun,
@@ -325,11 +326,23 @@ class ExplorerScreen(Screen):
         if active is None or event.run_id != active.run_id:
             return
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
-        if isinstance(event, ScanStarted):
+        if isinstance(event, ScanQueued):
+            overlay.update_context(
+                run_id=event.run_id,
+                phase=f"queued #{event.position}",
+                policy=event.reason,
+            )
+        elif isinstance(event, ScanStarted):
+            worker_context = event.policy.summary()
+            if event.worker_selection is not None:
+                worker_context += (
+                    f" · workers {event.worker_selection.effective_workers} "
+                    f"({event.worker_selection.mode})"
+                )
             overlay.update_context(
                 run_id=event.run_id,
                 phase=event.phase.value,
-                policy=event.policy.summary(),
+                policy=worker_context,
             )
         elif isinstance(event, ScanPhaseChanged):
             overlay.update_context(run_id=event.run_id, phase=event.phase.value)
@@ -387,11 +400,6 @@ class ExplorerScreen(Screen):
             node,
             changed_nodes,
         )
-        active_run = self._active_run
-        if active_run is not None:
-            active_run.visual_update_count += 1
-            if active_run.time_to_first_visual_seconds is None:
-                active_run.time_to_first_visual_seconds = active_run.duration_seconds
         self._update_active_viz(node, visual_node=self._live_view_snapshot)
 
     def _on_scan_complete(

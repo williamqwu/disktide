@@ -28,9 +28,9 @@ instead of raising into the scanner or UI.
 
 | Interface | Purpose | Fallback when absent |
 |-----------|---------|---------------------|
-| `/proc/meminfo` | Available memory | 0 MB (no low-memory cap applied) |
-| `/proc/mounts` | Filesystem type detection | `"unknown"`, not flagged as network FS |
-| `/sys/block/*/queue/rotational` | HDD vs SSD detection | `None` (no I/O cap applied) |
+| `/proc/meminfo` | Available memory | 0 MB (no low-memory override applied) |
+| `/proc/mounts` | Filesystem type detection | `"unknown"`, conservative local fallback |
+| `/sys/block/*/queue/rotational` | HDD vs SSD detection | `None`, metadata sample decides or falls back to serial |
 | `os.sched_getaffinity(0)` | cgroup-aware CPU count | Falls back to `os.cpu_count()` |
 | `os.getloadavg()` | System load | `(0, 0, 0)` (no load-based reduction) |
 
@@ -235,8 +235,10 @@ Path(raw).resolve()             # resolve before submitting
 ### Platform Adapters and System Info
 
 `scanner/sysinfo.py` remains the compatibility facade used by worker tuning.
-The Linux I/O lives in `collectors/platform/linux.py`; each probe returns an
-available, degraded, or unavailable result with a reason.
+It combines adapter probes with a bounded direct-directory metadata sample and
+records the requested/effective count plus reason. The Linux I/O lives in
+`collectors/platform/linux.py`; each probe returns an available, degraded, or
+unavailable result with a reason.
 
 ```python
 os.cpu_count()                  # CPU count
