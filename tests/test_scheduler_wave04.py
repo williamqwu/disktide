@@ -5,7 +5,10 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from fs_monitor.domain.live_view import build_live_view, count_live_nodes
+from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.scan import (
     DirectoryCompleted,
     DirectoryQueued,
@@ -211,6 +214,58 @@ def test_live_view_model_is_immutable_and_bounded(tmp_path):
     assert len(view.children) == 32
     assert view.children[-1].synthetic is True
     assert count_live_nodes(view) == 33
+
+
+@pytest.mark.parametrize(
+    ("metric", "expected"),
+    [
+        (MetricId.LOGICAL, "logical"),
+        (MetricId.ALLOCATED, "allocated"),
+        (MetricId.UNIQUE, "unique"),
+        (MetricId.FILES, "files"),
+    ],
+)
+def test_live_view_bounded_ranking_uses_requested_metric(metric, expected):
+    children = [
+        FSNode(
+            name="logical",
+            path="/root/logical",
+            size=10_000,
+            allocated_size=1,
+            unique_allocated_size=1,
+            file_count=1,
+        ),
+        FSNode(
+            name="allocated",
+            path="/root/allocated",
+            size=1,
+            allocated_size=20_000,
+            unique_allocated_size=1,
+            file_count=1,
+        ),
+        FSNode(
+            name="unique",
+            path="/root/unique",
+            size=1,
+            allocated_size=1,
+            unique_allocated_size=30_000,
+            file_count=1,
+        ),
+        FSNode(
+            name="files",
+            path="/root/files",
+            size=1,
+            allocated_size=1,
+            unique_allocated_size=1,
+            file_count=40_000,
+        ),
+    ]
+    root = FSNode(name="root", path="/root", is_dir=True, children=children)
+
+    view = build_live_view(root, metric=metric, max_children=2)
+
+    assert view.children[0].name == expected
+    assert view.children[1].synthetic is True
 
 
 def test_live_view_updates_are_checkpoint_bounded_not_file_bounded(tmp_path):

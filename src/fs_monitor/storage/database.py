@@ -10,8 +10,10 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TypeVar
 from urllib.parse import quote
 
 from fs_monitor import LEGACY_STORAGE_NAMESPACE, __version__
@@ -63,6 +65,9 @@ from fs_monitor.storage.migrations import (
 
 # How often to store a full baseline (every N snapshots per root_path).
 _BASELINE_INTERVAL = 50
+_SQLITE_BIND_BATCH_SIZE = 900
+
+_BatchValue = TypeVar("_BatchValue")
 
 # Node tuple fields: logical, own logical, allocated, own allocated, unique,
 # own unique, file count, dir count, mtime, error, is_dir.
@@ -79,6 +84,14 @@ _NodeTuple = tuple[
     str | None,
     bool,
 ]
+
+
+def _batches(
+    values: Sequence[_BatchValue],
+    size: int = _SQLITE_BIND_BATCH_SIZE,
+) -> Iterator[Sequence[_BatchValue]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 def _datetime_text(value: datetime | None) -> str | None:
@@ -355,17 +368,19 @@ class Database:
         # Batch insert (ignore duplicates)
         self.conn.executemany(
             "INSERT OR IGNORE INTO paths (path, name, depth) VALUES (?, ?, ?)",
-            [(node.path, node.name, node.depth) for node in nodes],
+            ((node.path, node.name, node.depth) for node in nodes),
         )
 
-        # Fetch all path_ids for these paths
-        placeholders = ",".join("?" * len(nodes))
-        paths = [node.path for node in nodes]
-        rows = self.conn.execute(
-            f"SELECT id, path FROM paths WHERE path IN ({placeholders})",
-            paths,
-        ).fetchall()
-        path_to_id = {r[1]: r[0] for r in rows}
+        # Fetch all path_ids without retaining a second full-tree path list.
+        path_to_id: dict[str, int] = {}
+        for batch in _batches(nodes):
+            paths = tuple(node.path for node in batch)
+            placeholders = ",".join("?" * len(paths))
+            rows = self.conn.execute(
+                f"SELECT id, path FROM paths WHERE path IN ({placeholders})",
+                paths,
+            ).fetchall()
+            path_to_id.update({row[1]: row[0] for row in rows})
 
         # Update parent_id for any newly inserted paths
         for node in nodes:
@@ -460,12 +475,16 @@ class Database:
         """Batch-fetch path strings for a set of path IDs."""
         if not path_ids:
             return {}
-        placeholders = ",".join("?" * len(path_ids))
-        rows = self.conn.execute(
-            f"SELECT id, path FROM paths WHERE id IN ({placeholders})",
-            list(path_ids),
-        ).fetchall()
-        return {r[0]: r[1] for r in rows}
+        ordered_ids = list(path_ids)
+        result: dict[int, str] = {}
+        for batch in _batches(ordered_ids):
+            placeholders = ",".join("?" * len(batch))
+            rows = self.conn.execute(
+                f"SELECT id, path FROM paths WHERE id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            result.update({row[0]: row[1] for row in rows})
+        return result
 
     # ── Snapshots ──
 
@@ -981,12 +1000,16 @@ class Database:
 
         # Fetch path metadata
         path_ids = list(flat.keys())
-        placeholders = ",".join("?" * len(path_ids))
-        rows = self.conn.execute(
-            f"SELECT id, path, parent_id, name, depth FROM paths "
-            f"WHERE id IN ({placeholders})",
-            path_ids,
-        ).fetchall()
+        rows = []
+        for batch in _batches(path_ids):
+            placeholders = ",".join("?" * len(batch))
+            rows.extend(
+                self.conn.execute(
+                    f"SELECT id, path, parent_id, name, depth FROM paths "
+                    f"WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+            )
 
         # path_id -> (path, parent_id, name, depth)
         paths_info: dict[int, tuple[str, int | None, str, int]] = {}
@@ -1140,16 +1163,20 @@ class Database:
 
         # For each baseline being deleted, promote the earliest survivor
         for bid in baseline_ids:
-            survivors = self.conn.execute(
-                "SELECT id FROM snapshots "
-                "WHERE baseline_id = ? AND id NOT IN ({}) "
-                "ORDER BY timestamp ASC LIMIT 1".format(
-                    ",".join("?" * len(delete_ids))
+            survivor = next(
+                (
+                    row[0]
+                    for row in self.conn.execute(
+                        "SELECT id FROM snapshots WHERE baseline_id = ? "
+                        "ORDER BY timestamp ASC, id ASC",
+                        (bid,),
+                    )
+                    if row[0] not in delete_ids
                 ),
-                [bid] + list(delete_ids),
-            ).fetchall()
-            if survivors:
-                self._promote_to_baseline(survivors[0][0])
+                None,
+            )
+            if survivor is not None:
+                self._promote_to_baseline(survivor)
 
         # Delete
         self.conn.executemany(
@@ -2164,12 +2191,19 @@ class Database:
                         json.dumps(cleanup_action_to_dict(action), sort_keys=True),
                     ),
                 )
-            if action_ids:
-                placeholders = ",".join("?" for _ in action_ids)
-                self.conn.execute(
-                    f"DELETE FROM cleanup_actions WHERE plan_id = ? AND id NOT IN ({placeholders})",
-                    (plan.id, *action_ids),
+            current_action_ids = set(action_ids)
+            persisted_action_ids = {
+                str(row[0])
+                for row in self.conn.execute(
+                    "SELECT id FROM cleanup_actions WHERE plan_id = ?",
+                    (plan.id,),
                 )
+            }
+            stale_action_ids = persisted_action_ids - current_action_ids
+            self.conn.executemany(
+                "DELETE FROM cleanup_actions WHERE plan_id = ? AND id = ?",
+                ((plan.id, action_id) for action_id in stale_action_ids),
+            )
 
     def get_cleanup_plan(self, plan_id: str) -> CleanupPlan | None:
         row = self.conn.execute(

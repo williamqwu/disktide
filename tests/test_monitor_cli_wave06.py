@@ -21,7 +21,15 @@ def test_monitor_cli_create_run_status_and_alert_check(tmp_path, monkeypatch):
 
     created = runner.invoke(
         cli,
-        ["monitor", "add", str(root), "--interval", "10m"],
+        [
+            "monitor",
+            "add",
+            str(root),
+            "--interval",
+            "10m",
+            "--metric",
+            "files",
+        ],
     )
     assert created.exit_code == 0, created.output
     listed = runner.invoke(cli, ["monitor", "list", "--json"])
@@ -32,6 +40,7 @@ def test_monitor_cli_create_run_status_and_alert_check(tmp_path, monkeypatch):
 
     run = runner.invoke(cli, ["monitor", "run", "1"])
     assert run.exit_code == 0, run.output
+    assert "Files: 1 file" in run.output
     assert "snapshot #1" in run.output
     status = runner.invoke(cli, ["monitor", "status", "1", "--json"])
     status_payload = json.loads(status.output)[0]

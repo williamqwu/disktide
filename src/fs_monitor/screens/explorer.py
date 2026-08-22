@@ -376,11 +376,11 @@ class ExplorerScreen(Screen):
         if isinstance(event, FSNode):
             node = event
             changed_nodes = (event,)
-            view_root = build_live_view(event)
         else:
             node = event.root
             changed_nodes = event.changed_nodes or (node,)
-            view_root = event.view_root or build_live_view(node)
+        metric = self.query_one("#size-tree", SizeTree).metric
+        view_root = build_live_view(node, metric=metric)
         self._live_snapshot = node
         self._live_view_snapshot = view_root
         self.query_one("#size-tree", SizeTree).apply_live_update(
@@ -922,6 +922,15 @@ class ExplorerScreen(Screen):
         self.query_one("#treemap-view", TreemapView).set_metric(metric)
         self.query_one("#sunburst-view", SunburstView).set_metric(metric)
         self.query_one("#info-panel", InfoPanel).set_metric(metric)
+        if self._scan_in_progress and self._live_snapshot is not None:
+            self._live_view_snapshot = build_live_view(
+                self._live_snapshot,
+                metric=metric,
+            )
+            self._update_active_viz(
+                self._live_snapshot,
+                visual_node=self._live_view_snapshot,
+            )
         if self._space_time is not None:
             self._request_space_time_context()
         self._update_status()

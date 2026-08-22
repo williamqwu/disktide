@@ -17,14 +17,19 @@ Trusted Publishing. The release workflow is defined in
    periodic watch smoke succeed from the core wheel.
 6. A separate clean install of `fsmonitor-cli[watch]` discovers the native
    backend and completes strict `watch --events` smoke.
+7. The full test suite passes in both the locked core environment and a locked
+   Python 3.13 environment with the `watch` extra installed.
 
 ## Local Candidate Build
 
 ```bash
 uv sync --locked
-uv run pytest -q
+.venv/bin/python -m pytest -q
+uv sync --locked --python 3.13 --extra watch
+.venv/bin/python -m pytest -q
+uv sync --locked
 uv build
-uv run python tool/verify_distribution.py
+.venv/bin/python tool/verify_distribution.py
 ```
 
 Refresh the developer's installed checkout after every source version change.

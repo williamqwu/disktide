@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fs_monitor.domain.metrics import StorageMeasurements, sum_available
+from fs_monitor.domain.metrics import MetricId, StorageMeasurements, sum_available
 from fs_monitor.models.tree import FSNode
 
 
@@ -46,6 +46,7 @@ class LiveViewNode:
 def build_live_view(
     root: FSNode,
     *,
+    metric: MetricId | str = MetricId.LOGICAL,
     stable_paths: frozenset[str] = frozenset(),
     max_depth: int = DEFAULT_LIVE_MAX_DEPTH,
     max_children: int = DEFAULT_LIVE_MAX_CHILDREN,
@@ -56,13 +57,18 @@ def build_live_view(
         raise ValueError("max_depth must be zero or greater")
     if max_children < 2:
         raise ValueError("max_children must be at least two")
+    selected_metric = MetricId.parse(metric)
 
     def convert(node: FSNode, depth: int) -> LiveViewNode:
         children: tuple[LiveViewNode, ...] = ()
         if depth < max_depth and node.children:
             ordered = sorted(
                 node.children,
-                key=lambda child: (-child.size, child.name, child.path),
+                key=lambda child: (
+                    -(child.measurements.value(selected_metric) or 0),
+                    child.name,
+                    child.path,
+                ),
             )
             visible = ordered
             omitted: list[FSNode] = []

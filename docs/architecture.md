@@ -194,6 +194,9 @@ product presentation code does not construct the engine directly.
 The main Textual event loop stays on the main thread. Long-running scans use the
 `@work(thread=True)` decorator. The screen submits a `ScanRun`, consumes typed
 events, and uses `app.call_from_thread()` to marshal them back to the UI thread.
+Monitor host events instead use Textual's non-blocking, thread-safe message
+queue. This prevents the UI thread from joining a host worker that is itself
+waiting for the UI event loop during shutdown.
 
 ### Adaptive Worker Count
 
@@ -469,6 +472,10 @@ trigger/suppression audit. The legacy `deletion_log` API table and
 **cleanup_plans / cleanup_actions / cleanup_audit** -- Schema-v6 persistent
 plan payloads, per-action state/identity indexes, and immutable validation,
 execution, and undo events.
+
+Dynamic path/id lookups are split into bounded SQLite bind batches. Snapshot
+save/load, tree reconstruction, retention pruning, and cleanup-action pruning do
+not generate SQL whose placeholder count grows with the scanned tree or plan.
 
 The first snapshot for a root is a baseline; another full baseline is stored every 50 snapshots. Intermediate snapshots compare against the previously resolved state and persist only changed directory rows. When retention deletes a baseline, the earliest surviving dependent is materialized and promoted before the old baseline is removed.
 

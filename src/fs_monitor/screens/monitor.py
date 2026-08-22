@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 
 import humanize
@@ -11,6 +10,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import (
     DataTable,
@@ -47,6 +47,12 @@ from fs_monitor.widgets.sunburst_view import SunburstView
 from fs_monitor.widgets.treemap_view import TreemapView
 from fs_monitor.widgets.trend_chart import TrendChart
 from fs_monitor.presentation.tui.viewmodels.visualization import legend_text
+
+
+class _MonitorServiceEventMessage(Message):
+    def __init__(self, event: MonitorEvent):
+        super().__init__()
+        self.event = event
 
 
 class MonitorScreen(Screen):
@@ -1072,13 +1078,13 @@ class MonitorScreen(Screen):
             self.remove_class("detail")
 
     def _on_service_event(self, event: MonitorEvent) -> None:
-        if threading.current_thread() is threading.main_thread():
-            self._handle_service_event(event)
-        else:
-            try:
-                self.app.call_from_thread(self._handle_service_event, event)
-            except Exception:
-                pass
+        self.post_message(_MonitorServiceEventMessage(event))
+
+    @on(_MonitorServiceEventMessage)
+    def _on_monitor_service_event_message(
+        self, message: _MonitorServiceEventMessage
+    ) -> None:
+        self._handle_service_event(message.event)
 
     def _handle_service_event(self, event: MonitorEvent) -> None:
         if not self.is_mounted:

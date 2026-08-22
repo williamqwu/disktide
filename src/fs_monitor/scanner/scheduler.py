@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Callable, Mapping
 
 from fs_monitor.domain.live_view import build_live_view
-from fs_monitor.domain.metrics import sum_available
+from fs_monitor.domain.metrics import MetricId, sum_available
 from fs_monitor.domain.policy import ScanPolicy
 from fs_monitor.domain.scan import ScanTreeUpdate
 from fs_monitor.models.tree import FSNode
@@ -400,6 +400,7 @@ class TreeScanScheduler:
         policy: ScanPolicy,
         cancel_event: threading.Event,
         excluded_mounts: Mapping[str, str],
+        metric: MetricId | str = MetricId.LOGICAL,
         progress_callback: Callable[[SchedulerProgress], None] | None = None,
         tree_callback: Callable[[ScanTreeUpdate], None] | None = None,
         tree_callback_interval: float = 0.25,
@@ -412,6 +413,7 @@ class TreeScanScheduler:
         self._policy = policy
         self._cancel_event = cancel_event
         self._excluded_mounts = excluded_mounts
+        self._metric = MetricId.parse(metric)
         self._progress_callback = progress_callback
         self._tree_callback = tree_callback
         self._tree_callback_interval = max(0.0, tree_callback_interval)
@@ -763,6 +765,7 @@ class TreeScanScheduler:
                 stable_paths=stable_paths,
                 view_root=build_live_view(
                     root,
+                    metric=self._metric,
                     stable_paths=frozenset(self._settled_paths),
                 ),
             )

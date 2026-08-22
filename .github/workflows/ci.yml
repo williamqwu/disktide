@@ -32,6 +32,21 @@ jobs:
       - name: Run test suite
         run: .venv/bin/python -m pytest -q
 
+  watch-test:
+    name: Python 3.13 with watch extra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync locked watch environment
+        run: uv sync --locked --python 3.13 --extra watch
+      - name: Run full suite with watch extra
+        run: .venv/bin/python -m pytest -q
+
   minimal-distribution:
     name: Minimal wheel and sdist
     runs-on: ubuntu-latest

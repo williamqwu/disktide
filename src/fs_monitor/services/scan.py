@@ -398,7 +398,7 @@ class ScanService:
                 root=update,
                 final=False,
                 changed_nodes=(update,),
-                view_root=build_live_view(update),
+                view_root=build_live_view(update, metric=run.request.metric),
             )
 
         collector: ScannerCollector | None = None

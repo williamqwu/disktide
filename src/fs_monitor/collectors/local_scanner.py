@@ -31,6 +31,7 @@ class LocalScanner:
             ),
             one_file_system=policy.one_file_system,
             exclude_pseudo_filesystems=policy.exclude_pseudo_filesystems,
+            metric=request.metric,
         )
         self._path = request.path
 

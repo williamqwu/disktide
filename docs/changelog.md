@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.10
+
+**Release stabilization and scale correctness**
+
+- **large snapshot safety** Reworked dynamic SQLite path/id lookups and pruning so snapshot save/load/compare and cleanup-plan updates no longer cross the host SQLite bind-variable limit. Automated coverage now round-trips and compares a 100,001-node tree and prunes 100,001 persisted cleanup actions.
+- **monitor lifecycle** Replaced the synchronous service-to-TUI callback bridge with Textual's non-blocking message queue, removing the UI-thread/worker shutdown wait cycle while preserving off-screen foreground-host continuation and final `NO_HOST` lease state.
+- **metric-correct live views** Propagated the requested `MetricId` through ScanService, ScanEngine, and the bounded live projection. Explorer metric changes now immediately rebuild the in-flight projection, and `monitor run` reports the configured metric instead of always reporting logical bytes.
+- **release gates** Added a Linux Python 3.13 full-suite CI job with the `watch` extra and documented core/watch parity as a release prerequisite.
+
 ## v0.2.9
 
 **Optional filesystem-event acceleration**

@@ -766,7 +766,7 @@ def monitor_resume(identifier: str) -> None:
 @click.argument("identifier")
 def monitor_run(identifier: str) -> None:
     """Run one saved monitor immediately in the foreground."""
-    import humanize
+    from fs_monitor.metrics import METRIC_NAMES, metric_text
 
     _, repository, service = _monitor_service()
     try:
@@ -779,7 +779,9 @@ def monitor_run(identifier: str) -> None:
                 result.run.error_message if result.run else "run did not start"
             )
         root = result.run.root
-        size = humanize.naturalsize(root.size, binary=True) if root else "unknown"
+        metric = result.definition.metric
+        metric_name = METRIC_NAMES[metric.value]
+        value = metric_text(root, metric) if root else "unknown"
         snapshot = (
             f"snapshot #{result.snapshot.id}"
             if result.snapshot is not None
@@ -787,7 +789,8 @@ def monitor_run(identifier: str) -> None:
         )
         click.echo(
             f"Run {result.run.run_id[:8]} {result.run.status.value}: "
-            f"{size}, {snapshot}, {len(result.alerts)} alert event(s)"
+            f"{metric_name}: {value}, {snapshot}, "
+            f"{len(result.alerts)} alert event(s)"
         )
         if result.persistence_error:
             click.echo(f"Warning: {result.persistence_error}", err=True)

@@ -6,6 +6,7 @@ import os
 import threading
 from typing import Callable
 
+from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.policy import ScanPolicy
 from fs_monitor.domain.scan import ScanTreeUpdate
 from fs_monitor.models.tree import FSNode
@@ -39,6 +40,7 @@ class ScanEngine:
         scheduler_submission_limit: int | None = None,
         scheduler_queue_capacity: int | None = None,
         tree_update_callback: Callable[[ScanTreeUpdate], None] | None = None,
+        metric: MetricId | str = MetricId.LOGICAL,
     ):
         if workers is not None:
             self._workers = workers
@@ -48,6 +50,7 @@ class ScanEngine:
             info = detect_system_info(scan_path or "/")
             self._workers = info.recommended_workers
         self._cancel_event = threading.Event()
+        self._metric = MetricId.parse(metric)
         self._policy = ScanPolicy(
             one_file_system=one_file_system,
             exclude_pseudo_filesystems=exclude_pseudo_filesystems,
@@ -93,6 +96,7 @@ class ScanEngine:
             policy=self._policy,
             cancel_event=self._cancel_event,
             excluded_mounts=excluded_mounts,
+            metric=self._metric,
             progress_callback=self._on_scheduler_progress,
             tree_callback=(
                 self._on_scheduler_tree_update
