@@ -50,8 +50,10 @@ from fs_monitor.domain.monitor import (
     RetentionPolicy,
     RetentionSnapshot,
     RetentionResult,
+    WatchDiagnostics,
 )
 from fs_monitor.domain.policy import ScanPolicy
+from fs_monitor.domain.provisional import ProvisionalSummary
 from fs_monitor.domain.snapshot import (
     Snapshot,
     policy_from_dict,
@@ -72,6 +74,14 @@ _BASELINE_INTERVAL = 50
 _SQLITE_BIND_BATCH_SIZE = 900
 
 _BatchValue = TypeVar("_BatchValue")
+
+
+def _json_object(value: object) -> dict[str, object]:
+    try:
+        decoded = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 # Node tuple fields: logical, own logical, allocated, own allocated, unique,
 # own unique, file count, dir count, mtime, error, is_dir.
@@ -2058,6 +2068,12 @@ class Database:
             resource_active_slot=row[40],
             effective_workers=row[41],
             worker_policy_reason=row[42],
+            watch_diagnostics=WatchDiagnostics.from_dict(
+                _json_object(row[43])
+            ),
+            provisional=ProvisionalSummary.from_dict(
+                _json_object(row[44])
+            ),
         )
 
     def _monitor_status_columns(self) -> str:
@@ -2088,6 +2104,8 @@ class Database:
             ("resource_active_slot", "NULL"),
             ("effective_workers", "NULL"),
             ("worker_policy_reason", "NULL"),
+            ("watch_diagnostics_json", "'{}'"),
+            ("provisional_summary_json", "'{}'"),
         )
         base = [
             "activity_state",
@@ -2145,12 +2163,13 @@ class Database:
                    degraded_reason, reconciliation_required,
                    reconciliation_state, resource_queue_position,
                    resource_queue_reason, resource_active_slot,
-                   effective_workers, worker_policy_reason
+                   effective_workers, worker_policy_reason,
+                   watch_diagnostics_json, provisional_summary_json
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                         ?, ?, ?, ?)
+                         ?, ?, ?, ?, ?, ?)
                ON CONFLICT(monitor_id) DO UPDATE SET
                    activity_state = excluded.activity_state,
                    health_state = excluded.health_state,
@@ -2194,7 +2213,9 @@ class Database:
                    resource_queue_reason = excluded.resource_queue_reason,
                    resource_active_slot = excluded.resource_active_slot,
                    effective_workers = excluded.effective_workers,
-                   worker_policy_reason = excluded.worker_policy_reason""",
+                   worker_policy_reason = excluded.worker_policy_reason,
+                   watch_diagnostics_json = excluded.watch_diagnostics_json,
+                   provisional_summary_json = excluded.provisional_summary_json""",
             (
                 status.monitor_id,
                 status.activity.value,
@@ -2240,6 +2261,8 @@ class Database:
                 status.resource_active_slot,
                 status.effective_workers,
                 status.worker_policy_reason,
+                json.dumps(status.watch_diagnostics.to_dict(), sort_keys=True),
+                json.dumps(status.provisional.to_dict(), sort_keys=True),
             ),
         )
         self.conn.commit()

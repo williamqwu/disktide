@@ -117,6 +117,24 @@ class TestMigrations:
             "worker_policy_reason",
         } <= columns
 
+    def test_v10_adds_watch_diagnostics_and_provisional_status(self, conn):
+        migrate(conn, target_version=9)
+        before = {
+            row[1] for row in conn.execute("PRAGMA table_info(monitor_status)")
+        }
+        assert "watch_diagnostics_json" not in before
+        assert "provisional_summary_json" not in before
+
+        migrate(conn)
+
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(monitor_status)")
+        }
+        assert {
+            "watch_diagnostics_json",
+            "provisional_summary_json",
+        } <= columns
+
     def test_snapshots_has_baseline_columns(self, conn):
         migrate(conn)
         # Verify the columns exist by inserting a row

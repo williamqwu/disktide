@@ -24,6 +24,7 @@ from fs_monitor.collectors.events.native import (
     probe_native_event_backend,
 )
 from fs_monitor.domain.alerts import AlertEvent, AlertRule
+from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.monitor import (
     MonitorActivityState,
     MonitorDashboard,
@@ -39,6 +40,12 @@ from fs_monitor.domain.monitor import (
     MonitorWatchMode,
     RetentionPreview,
     RetentionResult,
+    WatchDiagnostics,
+)
+from fs_monitor.domain.provisional import (
+    ProvisionalConfidence,
+    ProvisionalCurrentState,
+    ProvisionalSummary,
 )
 from fs_monitor.domain.scan import (
     ScanEvent,
@@ -59,9 +66,15 @@ from fs_monitor.repositories.snapshots import SnapshotRepository
 from fs_monitor.services.alerts import AlertService
 from fs_monitor.services.retention import RetentionService
 from fs_monitor.services.scan import ScanService
+from fs_monitor.services.provisional import (
+    ProvisionalProjectionRequiresFull,
+    ProvisionalProjectionService,
+)
 from fs_monitor.services.snapshots import SnapshotService
 from fs_monitor.services.watch import DirtyBatch, DirtyPathTracker, DirtySnapshot
 from fs_monitor.extensions.capabilities import CapabilityStatus
+from fs_monitor.models.tree import FSNode
+from fs_monitor.scanner.policy import discover_pseudo_mounts
 
 
 class MonitorStore(
@@ -142,6 +155,15 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _path_is_within(path: str, root: str) -> bool:
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        normalized_root = os.path.normcase(os.path.abspath(root))
+        return os.path.commonpath((normalized_root, normalized_path)) == normalized_root
+    except ValueError:
+        return False
+
+
 class MonitorService:
     """One command/query surface shared by CLI, TUI, and foreground hosts."""
 
@@ -159,6 +181,7 @@ class MonitorService:
         event_backend_probe: Callable[[], EventBackendInfo] = probe_native_event_backend,
         event_backend_factory: Callable[[], EventBackend] = create_native_event_backend,
         dirty_path_limit: int = 128,
+        provisional_node_limit: int = 50_000,
         event_debounce_seconds: float = 0.5,
         now: Callable[[], datetime] = _utc_now,
         monotonic: Callable[[], float] = time.monotonic,
@@ -183,6 +206,11 @@ class MonitorService:
         self._event_backend_probe = event_backend_probe
         self._event_backend_factory = event_backend_factory
         self._dirty_path_limit = max(1, int(dirty_path_limit))
+        self._provisional_projection = ProvisionalProjectionService(
+            repository,
+            max_overlay_paths=self._dirty_path_limit,
+            max_overlay_nodes=provisional_node_limit,
+        )
         self._event_debounce_seconds = max(0.0, float(event_debounce_seconds))
         self._now = now
         self._monotonic = monotonic
@@ -202,7 +230,9 @@ class MonitorService:
         self._dirty_trackers: dict[int, DirtyPathTracker] = {}
         self._event_status_write_at: dict[int, float] = {}
         self._event_backend_retry_at: dict[int, float] = {}
+        self._event_backend_fallbacks: dict[int, str] = {}
         self._reconciliation_retry_at: dict[int, float] = {}
+        self._provisional_states: dict[int, ProvisionalCurrentState] = {}
 
     @property
     def host_id(self) -> str:
@@ -232,6 +262,42 @@ class MonitorService:
                 suggestion="Use periodic mode or reinstall fsmonitor-cli[watch].",
             )
 
+    def current_summary(self, identifier: int | str) -> ProvisionalSummary:
+        monitor = self._resolve_monitor(identifier)
+        assert monitor.id is not None
+        return self._normalized_status(monitor.id).provisional
+
+    def current_tree(
+        self,
+        identifier: int | str,
+    ) -> tuple[FSNode | None, ProvisionalSummary]:
+        """Return canonical data with any in-process provisional overlays applied."""
+
+        monitor = self._resolve_monitor(identifier)
+        assert monitor.id is not None
+        status = self._normalized_status(monitor.id)
+        with self._condition:
+            state = self._provisional_states.get(monitor.id)
+        if (
+            state is not None
+            and state.summary.active
+            and state.summary.base_snapshot_id == status.latest_snapshot_id
+        ):
+            return self._provisional_projection.materialize(state), state.summary
+        snapshot_id = status.latest_snapshot_id
+        tree = self._repository.load_tree(snapshot_id) if snapshot_id is not None else None
+        summary = status.provisional
+        if summary.active:
+            summary = self._provisional_projection.invalidate(
+                summary,
+                reason=(
+                    "provisional subtree detail is unavailable outside its "
+                    "hosting process; canonical tree returned"
+                ),
+                dirty_paths=status.dirty_paths,
+            )
+        return tree, summary
+
     def set_event_mode(
         self, mode: MonitorEventMode | str
     ) -> MonitorEventMode:
@@ -239,7 +305,9 @@ class MonitorService:
         if selected is MonitorEventMode.EVENTS:
             self._require_event_backend()
         with self._condition:
+            self._event_backend_fallbacks.clear()
             if selected is self._event_mode:
+                self._condition.notify_all()
                 return selected
             self._event_mode = selected
             active_ids = tuple(self._event_backends)
@@ -281,6 +349,8 @@ class MonitorService:
         updated = self._repository.update_monitor(
             definition, expected_revision=expected_revision
         )
+        if updated.id is not None:
+            self._event_backend_fallbacks.pop(updated.id, None)
         self._emit(
             MonitorEventKind.DEFINITION_CHANGED,
             updated.id,
@@ -317,6 +387,7 @@ class MonitorService:
         self._repository.set_monitor_desired_state(
             monitor.id, MonitorDesiredState.ENABLED.value
         )
+        self._event_backend_fallbacks.pop(monitor.id, None)
         updated = self._resolve_monitor(monitor.id)
         self._emit(
             MonitorEventKind.DEFINITION_CHANGED,
@@ -536,6 +607,7 @@ class MonitorService:
                 self._session_monitor_ids = None
                 self._active_monitor_id = None
                 self._active_run_id = None
+                self._event_backend_fallbacks.clear()
         self._emit(
             MonitorEventKind.HOST_CHANGED,
             None,
@@ -1116,6 +1188,7 @@ class MonitorService:
         try:
             run = self._scan_service.create_run(request)
         except Exception as exc:
+            self._finish_backend_registration(monitor_id)
             run = self._validation_failure_run(request, exc)
             self._restore_dirty_batch(monitor_id, drained_dirty)
             self._defer_reconciliation(monitor_id, definition.interval_seconds)
@@ -1134,6 +1207,10 @@ class MonitorService:
                 self._mark_reconciliation_failure(
                     status,
                     run.error_message or "full reconciliation validation failed",
+                )
+                self._sync_watch_diagnostics(
+                    status,
+                    self._event_backends.get(status.monitor_id),
                 )
                 self._repository.save_monitor_status(status)
             if acquired_here and monitor_id is not None:
@@ -1237,8 +1314,14 @@ class MonitorService:
         alerts: tuple[AlertEvent, ...] = ()
         retention: RetentionResult | None = None
         persistence_error: str | None = None
+        directory_observer = self._directory_observer_for(monitor_id)
         try:
-            run = self._scan_service.execute(run, consumers=(consume_scan_event,))
+            run = self._scan_service.execute(
+                run,
+                consumers=(consume_scan_event,),
+                directory_observer=directory_observer,
+            )
+            self._finish_backend_registration(monitor_id)
             if not run.succeeded:
                 self._restore_dirty_batch(monitor_id, drained_dirty)
                 self._defer_reconciliation(
@@ -1354,6 +1437,7 @@ class MonitorService:
                     self._finish_full_reconciliation_status(
                         status,
                         run,
+                        snapshot=snapshot,
                         drained_dirty=drained_dirty,
                     )
                 else:
@@ -1364,8 +1448,13 @@ class MonitorService:
                         or run.cancellation_reason
                         or "full reconciliation failed",
                     )
+                self._sync_watch_diagnostics(
+                    status,
+                    self._event_backends.get(status.monitor_id),
+                )
                 self._repository.save_monitor_status(status)
         finally:
+            self._finish_backend_registration(monitor_id)
             with self._condition:
                 self._active_monitor_id = None
                 self._active_run_id = None
@@ -1415,6 +1504,12 @@ class MonitorService:
     def _ensure_event_backend(self, definition: MonitorDefinition) -> None:
         monitor_id = definition.id
         if monitor_id is None:
+            return
+
+        if (
+            self._event_mode is MonitorEventMode.AUTO
+            and monitor_id in self._event_backend_fallbacks
+        ):
             return
         info = self.event_backend_info()
         if self._event_mode is MonitorEventMode.PERIODIC or not info.available:
@@ -1473,12 +1568,14 @@ class MonitorService:
 
         try:
             backend = self._event_backend_factory()
-            backend.start(
-                (watch,),
-                lambda event, selected=monitor_id: self._handle_filesystem_event(
-                    selected, event
-                ),
+            callback = lambda event, selected=monitor_id: self._handle_filesystem_event(
+                selected, event
             )
+            handoff_start = getattr(backend, "start_discovery_handoff", None)
+            if self._scan_service.supports_directory_observer and callable(handoff_start):
+                handoff_start((watch,), callback)
+            else:
+                backend.start((watch,), callback)
         except Exception as exc:
             self._event_backend_retry_at[monitor_id] = self._monotonic() + 5.0
             reason = f"event backend start failed: {type(exc).__name__}: {exc}"
@@ -1486,6 +1583,14 @@ class MonitorService:
             status.event_backend = info.name
             status.event_backend_status = "degraded"
             status.watched_root_count = 0
+            status.watch_diagnostics = WatchDiagnostics(
+                descriptor_limit=info.descriptor_limit,
+                instance_limit=info.instance_limit,
+                queued_event_limit=info.queued_event_limit,
+                registration_strategy="failed",
+                fallback_reason=reason,
+            )
+            self._invalidate_provisional(status, reason)
             status.reconciliation_required = True
             status.reconciliation_state = MonitorReconciliationState.DEGRADED
             status.degraded_reason = reason
@@ -1507,6 +1612,17 @@ class MonitorService:
         self._event_backends[monitor_id] = backend
         self._event_backend_retry_at.pop(monitor_id, None)
         self._event_backend_watches[monitor_id] = watch
+        diagnostics = self._backend_diagnostics(backend, info=info)
+        if diagnostics.fallback_reason:
+            reason = diagnostics.fallback_reason
+            if self._event_mode is MonitorEventMode.AUTO:
+                self._event_backend_fallbacks[monitor_id] = reason
+            self._stop_event_backend(
+                monitor_id,
+                reason=reason,
+                fallback_to_periodic=self._event_mode is MonitorEventMode.AUTO,
+            )
+            return
         dirty = tracker.force_full(
             "event backend started or restarted; full reconciliation required"
         )
@@ -1516,6 +1632,12 @@ class MonitorService:
         status.event_backend = backend.name
         status.event_backend_status = "active"
         status.watched_root_count = len(backend.watched_roots)
+        self._sync_watch_diagnostics(status, backend, info=info)
+        self._invalidate_provisional(
+            status,
+            "event backend started or restarted; full reconciliation required",
+            dirty_paths=dirty.paths,
+        )
         self._apply_dirty_snapshot_to_status(status, dirty)
         self._repository.save_monitor_status(status)
         self._emit(
@@ -1543,6 +1665,13 @@ class MonitorService:
         status.event_backend = info.name
         status.event_backend_status = desired_status
         status.watched_root_count = 0
+        status.watch_diagnostics = WatchDiagnostics(
+            descriptor_limit=info.descriptor_limit,
+            instance_limit=info.instance_limit,
+            queued_event_limit=info.queued_event_limit,
+            registration_strategy="periodic-only",
+            fallback_reason=(None if disabled else info.reason),
+        )
         if status.reconciliation_required:
             retry_at = self._reconciliation_retry_at.get(monitor_id, 0.0)
             if self._monotonic() >= retry_at:
@@ -1557,6 +1686,7 @@ class MonitorService:
         *,
         reason: str,
         require_reconciliation: bool = True,
+        fallback_to_periodic: bool = False,
     ) -> None:
         backend = self._event_backends.pop(monitor_id, None)
         self._event_backend_watches.pop(monitor_id, None)
@@ -1573,14 +1703,28 @@ class MonitorService:
         dirty = tracker.force_full(reason) if tracker is not None else None
         status = self._repository.get_monitor_status(monitor_id)
         status.watched_root_count = 0
-        status.event_backend_status = "stopped"
-        if self._event_mode is MonitorEventMode.PERIODIC:
+        status.event_backend_status = (
+            "degraded" if fallback_to_periodic else "stopped"
+        )
+        diagnostics = self._backend_diagnostics(backend)
+        status.watch_diagnostics = replace(
+            diagnostics,
+            descriptor_count=0,
+            registration_in_progress=False,
+            fallback_reason=reason,
+        )
+        if self._event_mode is MonitorEventMode.PERIODIC or fallback_to_periodic:
             status.watch_mode = MonitorWatchMode.PERIODIC
         if require_reconciliation:
             self._reconciliation_retry_at.pop(monitor_id, None)
             status.reconciliation_required = True
             status.reconciliation_state = MonitorReconciliationState.DEGRADED
             status.degraded_reason = reason
+            self._invalidate_provisional(
+                status,
+                reason,
+                dirty_paths=(dirty.paths if dirty is not None else status.dirty_paths),
+            )
             if dirty is not None:
                 self._apply_dirty_snapshot_to_status(status, dirty)
             elif not status.dirty_paths:
@@ -1610,6 +1754,24 @@ class MonitorService:
         if tracker is None:
             return
         dirty = tracker.record(event)
+        if event.kind is FilesystemEventKind.BACKEND_ERROR:
+            backend = self._event_backends.get(monitor_id)
+            diagnostics = self._backend_diagnostics(backend)
+            if (
+                self._event_mode is MonitorEventMode.AUTO
+                or diagnostics.fallback_reason
+            ):
+                reason = event.detail or "event backend failed"
+                if self._event_mode is MonitorEventMode.AUTO:
+                    self._event_backend_fallbacks[monitor_id] = reason
+                self._stop_event_backend(
+                    monitor_id,
+                    reason=reason,
+                    fallback_to_periodic=(
+                        self._event_mode is MonitorEventMode.AUTO
+                    ),
+                )
+                return
         status = self._repository.get_monitor_status(monitor_id)
         status.watch_mode = MonitorWatchMode.EVENT_ASSISTED
         status.event_backend = event.backend or status.event_backend
@@ -1623,6 +1785,13 @@ class MonitorService:
         if severe:
             self._reconciliation_retry_at.pop(monitor_id, None)
             status.event_backend_status = "degraded"
+            self._invalidate_provisional(status, event.detail or event.kind.value, dirty_paths=dirty.paths)
+        else:
+            self._mark_provisional_dirty(status, dirty.paths)
+        self._sync_watch_diagnostics(
+            status,
+            self._event_backends.get(monitor_id),
+        )
         self._apply_dirty_snapshot_to_status(status, dirty)
         now_mono = self._monotonic()
         last_write = self._event_status_write_at.get(monitor_id)
@@ -1670,6 +1839,127 @@ class MonitorService:
             MonitorHealthState.FAILED,
         }:
             status.health = MonitorHealthState.WARNING
+
+    def _backend_diagnostics(
+        self,
+        backend: EventBackend | None,
+        *,
+        info: EventBackendInfo | None = None,
+    ) -> WatchDiagnostics:
+        if backend is not None:
+            diagnostics = getattr(backend, "diagnostics", None)
+            if isinstance(diagnostics, WatchDiagnostics):
+                return diagnostics
+            return WatchDiagnostics(
+                descriptor_count=len(backend.watched_roots),
+                registration_strategy="backend-recursive-prewalk",
+            )
+        selected = info or self.event_backend_info()
+        return WatchDiagnostics(
+            descriptor_limit=selected.descriptor_limit,
+            instance_limit=selected.instance_limit,
+            queued_event_limit=selected.queued_event_limit,
+        )
+
+    def _sync_watch_diagnostics(
+        self,
+        status: MonitorStatus,
+        backend: EventBackend | None,
+        *,
+        info: EventBackendInfo | None = None,
+    ) -> None:
+        diagnostics = self._backend_diagnostics(backend, info=info)
+        if backend is None and status.watch_diagnostics.fallback_reason:
+            previous = status.watch_diagnostics
+            diagnostics = replace(
+                previous,
+                descriptor_count=0,
+                descriptor_limit=(
+                    diagnostics.descriptor_limit or previous.descriptor_limit
+                ),
+                instance_limit=(
+                    diagnostics.instance_limit or previous.instance_limit
+                ),
+                queued_event_limit=(
+                    diagnostics.queued_event_limit
+                    or previous.queued_event_limit
+                ),
+                registration_in_progress=False,
+            )
+        status.watch_diagnostics = diagnostics
+        status.watched_root_count = (
+            len(backend.watched_roots) if backend is not None else 0
+        )
+        if diagnostics.fallback_reason:
+            status.event_backend_status = "degraded"
+
+    def _directory_observer_for(
+        self,
+        monitor_id: int | None,
+    ) -> Callable[[str], None] | None:
+        if monitor_id is None or not self._scan_service.supports_directory_observer:
+            return None
+        backend = self._event_backends.get(monitor_id)
+        register = getattr(backend, "register_directory", None)
+        diagnostics = self._backend_diagnostics(backend)
+        if not callable(register) or not diagnostics.registration_in_progress:
+            return None
+
+        def observe(path: str) -> None:
+            try:
+                register(path)
+            except Exception as exc:
+                self._handle_filesystem_event(
+                    monitor_id,
+                    FilesystemEvent(
+                        kind=FilesystemEventKind.BACKEND_ERROR,
+                        path=path,
+                        is_directory=True,
+                        backend=backend.name if backend is not None else "unknown",
+                        detail=(
+                            "scan-driven watch registration failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                    ),
+                )
+
+        return observe
+
+    def _finish_backend_registration(self, monitor_id: int | None) -> None:
+        if monitor_id is None:
+            return
+        backend = self._event_backends.get(monitor_id)
+        finish = getattr(backend, "finish_registration", None)
+        if callable(finish):
+            finish()
+
+    def _invalidate_provisional(
+        self,
+        status: MonitorStatus,
+        reason: str,
+        *,
+        dirty_paths: tuple[str, ...] = (),
+    ) -> None:
+        with self._condition:
+            self._provisional_states.pop(status.monitor_id, None)
+        status.provisional = self._provisional_projection.invalidate(
+            status.provisional,
+            reason=reason,
+            dirty_paths=dirty_paths,
+        )
+
+    @staticmethod
+    def _mark_provisional_dirty(
+        status: MonitorStatus,
+        dirty_paths: tuple[str, ...],
+    ) -> None:
+        if not status.provisional.active:
+            return
+        status.provisional = replace(
+            status.provisional,
+            confidence=ProvisionalConfidence.DEGRADED,
+            dirty_paths=dirty_paths,
+        )
 
     def _drain_monitor_dirty(self, monitor_id: int | None) -> DirtyBatch | None:
         if monitor_id is None:
@@ -1720,6 +2010,7 @@ class MonitorService:
         status: MonitorStatus,
         run: ScanRun,
         *,
+        snapshot: Snapshot | None,
         drained_dirty: DirtyBatch | None,
     ) -> None:
         finished_at = run.finished_at or self._now()
@@ -1731,11 +2022,27 @@ class MonitorService:
         backend = self._event_backends.get(status.monitor_id)
         backend_failure = (
             status.event_backend_status == "degraded"
-            and (backend is None or not backend.running)
+            and (
+                backend is None
+                or not backend.running
+                or bool(self._backend_diagnostics(backend).fallback_reason)
+            )
         )
         backend_failure_reason = status.degraded_reason
         status.last_full_reconciliation_at = finished_at
         status.last_reconciliation_path = run.request.path
+        with self._condition:
+            self._provisional_states.pop(status.monitor_id, None)
+        if snapshot is not None:
+            status.provisional = self._provisional_projection.canonical_summary(
+                snapshot,
+                metric=run.request.metric,
+            )
+        else:
+            self._invalidate_provisional(
+                status,
+                "full scan completed without a persisted canonical snapshot",
+            )
         tracker = self._dirty_trackers.get(status.monitor_id)
         current_dirty = tracker.snapshot() if tracker is not None else None
         if current_dirty is not None and current_dirty.paths:
@@ -1746,6 +2053,11 @@ class MonitorService:
                 else None
             )
             self._apply_dirty_snapshot_to_status(status, current_dirty)
+            status.provisional = replace(
+                status.provisional,
+                confidence=ProvisionalConfidence.DEGRADED,
+                dirty_paths=current_dirty.paths,
+            )
             if recovery_pending and not current_dirty.full_reconciliation:
                 status.recovery_count += 1
             return
@@ -1763,7 +2075,7 @@ class MonitorService:
             MonitorHealthState.FAILED,
         }:
             status.health = MonitorHealthState.WARNING
-        if backend is not None and backend.running:
+        if backend is not None and backend.running and not backend_failure:
             status.event_backend_status = "active"
 
     def _mark_reconciliation_failure(
@@ -1774,11 +2086,16 @@ class MonitorService:
         status.reconciliation_required = True
         status.reconciliation_state = MonitorReconciliationState.DEGRADED
         status.degraded_reason = reason
+        tracker = self._dirty_trackers.get(status.monitor_id)
+        dirty = tracker.force_full(reason) if tracker is not None else None
+        self._invalidate_provisional(
+            status,
+            reason,
+            dirty_paths=(dirty.paths if dirty is not None else status.dirty_paths),
+        )
         if status.watch_mode is MonitorWatchMode.EVENT_ASSISTED:
             status.event_backend_status = "degraded"
-        tracker = self._dirty_trackers.get(status.monitor_id)
-        if tracker is not None:
-            dirty = tracker.force_full(reason)
+        if dirty is not None:
             self._apply_dirty_snapshot_to_status(status, dirty)
         elif not status.dirty_paths:
             monitor = self._repository.get_monitor(status.monitor_id)
@@ -1809,11 +2126,36 @@ class MonitorService:
         status.last_attempt_at = self._now()
         status.current_path = batch.paths[0]
         self._repository.save_monitor_status(status)
+        base_snapshot = self._latest_monitor_snapshot(monitor_id)
+        reason = self._local_projection_block_reason(
+            definition,
+            base_snapshot,
+            batch.paths,
+        )
+        if reason is not None:
+            tracker = self._dirty_trackers.get(monitor_id)
+            if tracker is not None:
+                tracker.restore(
+                    batch.paths,
+                    full_reconciliation=True,
+                    reason=reason,
+                )
+            current = self._repository.get_monitor_status(monitor_id)
+            self._mark_reconciliation_failure(current, reason)
+            current.activity = (
+                MonitorActivityState.WAITING
+                if monitor_id in self._held_leases
+                and not self._session_stop.is_set()
+                else MonitorActivityState.NO_HOST
+            )
+            self._repository.save_monitor_status(current)
+            self._emit(
+                MonitorEventKind.RECONCILIATION_FINISHED,
+                monitor_id,
+                reason,
+            )
+            return ()
         runs: list[ScanRun] = []
-        selected_total = 0
-        selected_available = True
-        file_total = 0
-        partial = False
         failure: str | None = None
         try:
             for path in batch.paths:
@@ -1877,17 +2219,62 @@ class MonitorService:
                         or f"local reconciliation failed for {path}"
                     )
                     break
-                value = run.root.measurements.value(definition.metric)
-                if value is None:
-                    selected_available = False
-                else:
-                    selected_total += value
-                file_total += run.root.file_count
-                partial = partial or run.partial
+                if run.partial:
+                    failure = (
+                        f"local reconciliation for {path} was partial; "
+                        "full reconciliation required"
+                    )
+                    break
+                if run.root.excluded or run.root.filesystem_boundary:
+                    failure = (
+                        f"local reconciliation for {path} crossed a policy boundary; "
+                        "full reconciliation required"
+                    )
+                    break
+                if (
+                    definition.policy.one_file_system
+                    and (
+                        run.root.device_id is None
+                        or run.root.device_id != base_snapshot.root_device_id
+                    )
+                ):
+                    failure = (
+                        f"local reconciliation for {path} changed filesystem device; "
+                        "full reconciliation required"
+                    )
+                    break
 
             current = self._repository.get_monitor_status(monitor_id)
+            tracker = self._dirty_trackers.get(monitor_id)
+            pending = tracker.snapshot() if tracker is not None else None
+            if failure is None and pending is not None and pending.full_reconciliation:
+                failure = "; ".join(pending.reasons) or "full reconciliation required"
+            state: ProvisionalCurrentState | None = None
+            if failure is None:
+                try:
+                    with self._condition:
+                        existing = self._provisional_states.get(monitor_id)
+                    state = self._provisional_projection.apply(
+                        monitor_id=monitor_id,
+                        root_path=definition.root_path,
+                        metric=definition.metric,
+                        base_snapshot=base_snapshot,
+                        existing=existing,
+                        roots=(
+                            (
+                                run.request.path,
+                                run.run_id,
+                                run.finished_at or self._now(),
+                                run.root,
+                            )
+                            for run in runs
+                            if run.root is not None
+                        ),
+                        dirty_paths=(pending.paths if pending is not None else ()),
+                    )
+                except ProvisionalProjectionRequiresFull as exc:
+                    failure = str(exc)
             if failure is not None:
-                tracker = self._dirty_trackers.get(monitor_id)
                 if tracker is not None:
                     tracker.restore(
                         batch.paths,
@@ -1902,18 +2289,22 @@ class MonitorService:
                     current.health = MonitorHealthState.WARNING
                 current.last_error = failure
             else:
-                current.last_local_reconciliation_at = self._now()
+                assert state is not None
+                with self._condition:
+                    self._provisional_states[monitor_id] = state
+                current.provisional = state.summary
+                current.last_local_reconciliation_at = state.summary.updated_at
                 current.last_reconciliation_path = (
                     batch.paths[0]
                     if len(batch.paths) == 1
                     else f"{len(batch.paths)} dirty paths"
                 )
-                current.last_local_size = (
-                    selected_total if selected_available else None
+                current.last_local_size = state.summary.current_value
+                current.last_local_file_count = (
+                    state.summary.current.file_count
+                    if state.summary.current is not None
+                    else None
                 )
-                current.last_local_file_count = file_total
-                tracker = self._dirty_trackers.get(monitor_id)
-                pending = tracker.snapshot() if tracker is not None else None
                 if pending is not None and pending.paths:
                     current.reconciliation_required = pending.full_reconciliation
                     current.degraded_reason = (
@@ -1936,10 +2327,12 @@ class MonitorService:
                         MonitorHealthState.FAILED,
                     }:
                         current.health = (
-                            MonitorHealthState.WARNING
-                            if partial
-                            else MonitorHealthState.HEALTHY
+                            MonitorHealthState.HEALTHY
                         )
+                self._sync_watch_diagnostics(
+                    current,
+                    self._event_backends.get(monitor_id),
+                )
             current.activity = (
                 MonitorActivityState.WAITING
                 if monitor_id in self._held_leases
@@ -1959,7 +2352,10 @@ class MonitorService:
                 monitor_id,
                 (
                     failure
-                    or f"locally reconciled {len(batch.paths)} dirty path(s)"
+                    or (
+                        f"provisional current state updated from "
+                        f"{len(batch.paths)} dirty path(s)"
+                    )
                 ),
             )
             return tuple(runs)
@@ -1968,6 +2364,37 @@ class MonitorService:
                 self._active_monitor_id = None
                 self._active_run_id = None
                 self._condition.notify_all()
+
+    @staticmethod
+    def _local_projection_block_reason(
+        definition: MonitorDefinition,
+        base_snapshot: Snapshot | None,
+        paths: tuple[str, ...],
+    ) -> str | None:
+        if base_snapshot is None:
+            return "local reconciliation requires a canonical base snapshot"
+        if definition.metric is MetricId.UNIQUE:
+            return "unique allocation requires full-tree hardlink reconciliation"
+        if base_snapshot.partial:
+            return "partial canonical coverage requires full reconciliation"
+        if base_snapshot.root_path != definition.root_path:
+            return "canonical root changed; full reconciliation required"
+        if base_snapshot.policy != definition.policy:
+            return "scan policy changed; full reconciliation required"
+        if (
+            definition.policy.one_file_system
+            and base_snapshot.root_device_id is None
+        ):
+            return "canonical filesystem device is unknown; full reconciliation required"
+        if definition.policy.exclude_pseudo_filesystems:
+            excluded_mounts = discover_pseudo_mounts(definition.root_path)
+            if any(
+                _path_is_within(path, mountpoint)
+                for path in paths
+                for mountpoint in excluded_mounts
+            ):
+                return "dirty path enters an excluded filesystem; full reconciliation required"
+        return None
 
     @staticmethod
     def _local_reconciliation_policy(
@@ -2196,18 +2623,28 @@ class MonitorService:
             status.resource_queue_reason = None
             status.resource_active_slot = None
             if status.watch_mode is MonitorWatchMode.EVENT_ASSISTED:
+                reason = "event host lease expired; full reconciliation required"
                 status.event_backend_status = "stopped"
                 status.watched_root_count = 0
                 status.reconciliation_required = True
                 status.reconciliation_state = MonitorReconciliationState.DEGRADED
-                status.degraded_reason = (
-                    "event host lease expired; full reconciliation required"
-                )
+                status.degraded_reason = reason
                 if not status.dirty_paths:
                     monitor = self._repository.get_monitor(monitor_id)
                     if monitor is not None:
                         status.dirty_paths = (monitor.root_path,)
                         status.pending_dirty_paths = 1
+                status.watch_diagnostics = replace(
+                    status.watch_diagnostics,
+                    descriptor_count=0,
+                    registration_in_progress=False,
+                    fallback_reason=reason,
+                )
+                self._invalidate_provisional(
+                    status,
+                    reason,
+                    dirty_paths=status.dirty_paths,
+                )
                 if status.health not in {
                     MonitorHealthState.BLOCKED,
                     MonitorHealthState.FAILED,

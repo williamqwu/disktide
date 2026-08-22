@@ -64,6 +64,7 @@ ScannerFactory = Callable[
     ScannerCollector,
 ]
 ScanEventConsumer = Callable[[ScanEvent], None]
+DirectoryObserver = Callable[[str], None]
 
 
 class ScanRunConsumer(Protocol):
@@ -300,6 +301,10 @@ class ScanService:
         self._resource_queues: dict[str, deque[ScanRun]] = {}
         self._resource_slots: dict[str, dict[int, str]] = {}
 
+    @property
+    def supports_directory_observer(self) -> bool:
+        return self._uses_default_scanner
+
     def create_run(self, request: ScanRequest) -> ScanRun:
         normalized = self._normalize_request(request)
         adapter = get_platform_adapter()
@@ -323,14 +328,20 @@ class ScanService:
         request: ScanRequest,
         *,
         consumers: Iterable[ScanEventConsumer] = (),
+        directory_observer: DirectoryObserver | None = None,
     ) -> ScanRun:
-        return self.execute(self.create_run(request), consumers=consumers)
+        return self.execute(
+            self.create_run(request),
+            consumers=consumers,
+            directory_observer=directory_observer,
+        )
 
     def execute(
         self,
         run: ScanRun,
         *,
         consumers: Iterable[ScanEventConsumer] = (),
+        directory_observer: DirectoryObserver | None = None,
     ) -> ScanRun:
         if run.status is not ScanStatus.PENDING:
             raise RuntimeError(f"scan run {run.run_id} is already {run.status.value}")
@@ -356,7 +367,11 @@ class ScanService:
                 )
                 return run
             slot_acquired = True
-            return self._execute_active(run, emitter)
+            return self._execute_active(
+                run,
+                emitter,
+                directory_observer=directory_observer,
+            )
         finally:
             if slot_acquired:
                 self._release_resource_slot(run)
@@ -374,6 +389,8 @@ class ScanService:
         self,
         run: ScanRun,
         emitter: _RunEmitter,
+        *,
+        directory_observer: DirectoryObserver | None = None,
     ) -> ScanRun:
         run.worker_selection = self._select_workers(run)
         run.status = ScanStatus.RUNNING
@@ -465,6 +482,7 @@ class ScanService:
                         on_tree if run.request.emit_tree_updates else None
                     ),
                     worker_selection=run.worker_selection,
+                    directory_observer=directory_observer,
                 )
             else:
                 effective_request = replace(

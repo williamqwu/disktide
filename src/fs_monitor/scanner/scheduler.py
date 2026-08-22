@@ -265,6 +265,7 @@ def scan_directory_once(
     excluded_mounts: Mapping[str, str],
     checkpoint_callback: Callable[[DirectoryEntryChunk], bool | None] | None = None,
     entry_chunk_size: int = _DEFAULT_ENTRY_CHUNK_SIZE,
+    directory_observer: Callable[[str], None] | None = None,
 ) -> DirectoryScanResult:
     """Scan direct entries with one cursor and bounded chunk checkpoints."""
 
@@ -323,6 +324,9 @@ def scan_directory_once(
             node.is_loop = True
             return DirectoryScanResult(job, node, frozenset(), 0, 0)
         child_ancestors = job.ancestors | {identity}
+
+    if directory_observer is not None:
+        directory_observer(job.path)
 
     try:
         scandir_iterator = os.scandir(job.path)
@@ -503,6 +507,7 @@ class TreeScanScheduler:
         queue_capacity: int | None = None,
         entry_chunk_size: int = _DEFAULT_ENTRY_CHUNK_SIZE,
         entry_chunk_queue_capacity: int | None = None,
+        directory_observer: Callable[[str], None] | None = None,
     ):
         if workers <= 0:
             raise ValueError("workers must be greater than zero")
@@ -535,6 +540,7 @@ class TreeScanScheduler:
             if entry_chunk_queue_capacity is not None
             else max(2, workers * 2)
         )
+        self._directory_observer = directory_observer
 
         self._states: dict[str, _DirectoryState] = {}
         self._root_path = ""
@@ -653,6 +659,7 @@ class TreeScanScheduler:
                         excluded_mounts=self._excluded_mounts,
                         checkpoint_callback=publish_checkpoint,
                         entry_chunk_size=self._entry_chunk_size,
+                        directory_observer=self._directory_observer,
                     )
                     futures[future] = job
                     future.add_done_callback(

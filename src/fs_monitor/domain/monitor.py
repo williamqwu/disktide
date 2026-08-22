@@ -6,9 +6,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.policy import ScanPolicy
+from fs_monitor.domain.provisional import ProvisionalSummary
 
 
 def monitor_utc_now() -> datetime:
@@ -70,6 +72,59 @@ class HistoryPointState(StrEnum):
     MISSING = "missing"
     REMOVED = "removed"
     INCOMPATIBLE = "incompatible"
+
+
+@dataclass(frozen=True, slots=True)
+class WatchDiagnostics:
+    """Runtime resource cost and registration state for one event backend."""
+
+    descriptor_count: int = 0
+    descriptor_limit: int | None = None
+    instance_limit: int | None = None
+    queued_event_limit: int | None = None
+    registration_duration_seconds: float | None = None
+    registration_strategy: str = "unavailable"
+    registration_in_progress: bool = False
+    warning: str | None = None
+    fallback_reason: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "descriptor_count": self.descriptor_count,
+            "descriptor_limit": self.descriptor_limit,
+            "instance_limit": self.instance_limit,
+            "queued_event_limit": self.queued_event_limit,
+            "registration_duration_seconds": self.registration_duration_seconds,
+            "registration_strategy": self.registration_strategy,
+            "registration_in_progress": self.registration_in_progress,
+            "warning": self.warning,
+            "fallback_reason": self.fallback_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> WatchDiagnostics:
+        if not isinstance(value, dict) or not value:
+            return cls()
+        try:
+            return cls(
+                descriptor_count=max(0, int(value.get("descriptor_count", 0))),
+                descriptor_limit=_optional_int(value.get("descriptor_limit")),
+                instance_limit=_optional_int(value.get("instance_limit")),
+                queued_event_limit=_optional_int(value.get("queued_event_limit")),
+                registration_duration_seconds=_optional_float(
+                    value.get("registration_duration_seconds")
+                ),
+                registration_strategy=str(
+                    value.get("registration_strategy", "unavailable")
+                ),
+                registration_in_progress=bool(
+                    value.get("registration_in_progress", False)
+                ),
+                warning=_optional_text(value.get("warning")),
+                fallback_reason=_optional_text(value.get("fallback_reason")),
+            )
+        except (TypeError, ValueError):
+            return cls()
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +212,7 @@ class MonitorStatus:
     event_backend: str | None = None
     event_backend_status: str = "unavailable"
     watched_root_count: int = 0
+    watch_diagnostics: WatchDiagnostics = field(default_factory=WatchDiagnostics)
     pending_dirty_paths: int = 0
     dirty_paths: tuple[str, ...] = ()
     last_event_at: datetime | None = None
@@ -172,6 +228,7 @@ class MonitorStatus:
     reconciliation_state: MonitorReconciliationState = (
         MonitorReconciliationState.UNKNOWN
     )
+    provisional: ProvisionalSummary = field(default_factory=ProvisionalSummary)
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,3 +308,19 @@ class RetentionResult:
     policy_version: int = 1
     started_at: datetime = field(default_factory=monitor_utc_now)
     finished_at: datetime = field(default_factory=monitor_utc_now)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _optional_text(value: object) -> str | None:
+    return None if value is None else str(value)

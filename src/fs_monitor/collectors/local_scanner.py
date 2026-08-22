@@ -24,6 +24,7 @@ class LocalScanner:
         progress_callback: Callable[[ScanProgress], None] | None = None,
         tree_callback: Callable[[FSNode | ScanTreeUpdate], None] | None = None,
         worker_selection: ScanWorkerSelection | None = None,
+        directory_observer: Callable[[str], None] | None = None,
     ):
         policy = request.policy
         self._engine = ScanEngine(
@@ -38,6 +39,7 @@ class LocalScanner:
             exclude_pseudo_filesystems=policy.exclude_pseudo_filesystems,
             metric=request.metric,
             worker_selection=worker_selection,
+            directory_observer=directory_observer,
         )
         self._path = request.path
 

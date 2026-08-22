@@ -58,6 +58,7 @@ def _verify_wheel(path: Path, version: str) -> None:
             "fs_monitor/domain/delta.py",
             "fs_monitor/domain/live_view.py",
             "fs_monitor/domain/monitor.py",
+            "fs_monitor/domain/provisional.py",
             "fs_monitor/domain/scan.py",
             "fs_monitor/domain/snapshot.py",
             "fs_monitor/domain/visualization.py",
@@ -75,6 +76,7 @@ def _verify_wheel(path: Path, version: str) -> None:
             "fs_monitor/services/compare.py",
             "fs_monitor/services/doctor.py",
             "fs_monitor/services/monitor.py",
+            "fs_monitor/services/provisional.py",
             "fs_monitor/services/retention.py",
             "fs_monitor/services/scan.py",
             "fs_monitor/services/scan_consumers.py",
@@ -150,6 +152,7 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "docs/adr/0011-scalable-space-time-data-plane.md",
         prefix + "docs/adr/0012-adaptive-live-scan-engine.md",
         prefix + "docs/adr/0013-cleanup-scale-and-race-safety.md",
+        prefix + "docs/adr/0014-event-assisted-provisional-current-state.md",
         prefix + "src/fs_monitor/assets/default.tcss",
         prefix + "src/fs_monitor/cleanup/actions.py",
         prefix + "src/fs_monitor/cleanup/scoring.py",
@@ -168,6 +171,7 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "src/fs_monitor/domain/delta.py",
         prefix + "src/fs_monitor/domain/live_view.py",
         prefix + "src/fs_monitor/domain/monitor.py",
+        prefix + "src/fs_monitor/domain/provisional.py",
         prefix + "src/fs_monitor/domain/scan.py",
         prefix + "src/fs_monitor/domain/snapshot.py",
         prefix + "src/fs_monitor/domain/visualization.py",
@@ -185,6 +189,7 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "src/fs_monitor/services/compare.py",
         prefix + "src/fs_monitor/services/doctor.py",
         prefix + "src/fs_monitor/services/monitor.py",
+        prefix + "src/fs_monitor/services/provisional.py",
         prefix + "src/fs_monitor/services/retention.py",
         prefix + "src/fs_monitor/services/scan.py",
         prefix + "src/fs_monitor/services/scan_consumers.py",
@@ -202,6 +207,7 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "tool/benchmark_wave12.py",
         prefix + "tool/benchmark_wave13.py",
         prefix + "tool/benchmark_wave14.py",
+        prefix + "tool/benchmark_wave15.py",
     }
     missing = sorted(required - names)
     if missing:

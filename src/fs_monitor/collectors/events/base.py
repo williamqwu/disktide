@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Callable, Protocol, runtime_checkable
 
+from fs_monitor.domain.monitor import WatchDiagnostics
 from fs_monitor.domain.policy import ScanPolicy
 from fs_monitor.extensions.capabilities import CapabilityStatus
 
@@ -50,6 +51,9 @@ class EventBackendInfo:
     suggestion: str | None = None
     version: str | None = None
     system: str | None = None
+    descriptor_limit: int | None = None
+    instance_limit: int | None = None
+    queued_event_limit: int | None = None
 
     @property
     def available(self) -> bool:
@@ -65,6 +69,9 @@ class EventBackendInfo:
             "supported": self.status is not CapabilityStatus.UNAVAILABLE,
             "reason": self.reason,
             "suggestion": self.suggestion,
+            "descriptor_limit": self.descriptor_limit,
+            "instance_limit": self.instance_limit,
+            "queued_event_limit": self.queued_event_limit,
         }
 
 
@@ -81,6 +88,9 @@ class EventBackend(Protocol):
 
     @property
     def watched_roots(self) -> tuple[str, ...]: ...
+
+    @property
+    def diagnostics(self) -> WatchDiagnostics: ...
 
     def start(
         self,

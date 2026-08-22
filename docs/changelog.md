@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.14
+
+**Event-assisted live state**
+
+- **provisional current view** Added bounded subtree overlays so successful local reconciliation updates Monitor totals and Explorer trees without creating snapshots or feeding history, alerts, compare, exports, or retention.
+- **fail-closed convergence** Invalidates provisional state on overflow, root/backend loss, lease expiry, partial scans, hardlink-unique accounting, policy/device uncertainty, excluded filesystems, and overlay bounds; successful full scans clear overlays and advance the canonical base.
+- **watch runtime** Added descriptor counts and kernel limits, registration timing/strategy, warnings and fallback reasons, plus session-sticky periodic fallback after runtime backend failure in `auto` mode.
+- **startup efficiency** Replaced normal inotify recursive prewalk plus scan with root-first, scan-driven directory registration and added a machine-readable startup/projection benchmark.
+- **storage and release** Upgraded monitor status persistence to schema v10 with malformed-JSON fallback and added Wave 15 migration, lifecycle, projection, handoff, fallback, and canonical-side-effect gates.
+
 ## v0.2.13
 
 **Cleanup scale and race safety**

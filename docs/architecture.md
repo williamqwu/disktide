@@ -20,6 +20,7 @@ src/fs_monitor/
     metrics.py           MetricId + StorageMeasurements semantics
     monitor.py           Definitions, status, history, retention contracts
     policy.py            Explicit ScanPolicy metadata
+    provisional.py       Bounded canonical/provisional current-state contracts
     scan.py              ScanRequest/ScanRun/status/event contracts
     snapshot.py          Snapshot format v2 metadata
     visualization.py     Shared delta/trend/heatmap visual contracts
@@ -45,6 +46,7 @@ src/fs_monitor/
     compare.py           Policy-aware snapshot selection + compare reports
     doctor.py            Human + JSON installation diagnostics
     monitor.py           Shared management and foreground host pipeline
+    provisional.py       Subtree overlay merge and current-tree materialization
     retention.py         Rollup planning, pins, budget maintenance
     scan.py              Run lifecycle, cancellation, event dispatch
     scan_consumers.py    Progress/tree view models and event replay
@@ -400,6 +402,21 @@ are the only runs that persist canonical history. Events that arrive during a
 full scan stay dirty for the next reconciliation rather than being cleared by a
 stale status object.
 
+Wave 15 adds a strict canonical/provisional split. A successful local scan can
+replace bounded subtrees in an in-process `ProvisionalCurrentState`; its compact
+summary is persisted for status/diagnostics, but it never creates a snapshot or
+feeds history, compare, alerts, exports, or retention. Full reconciliation
+atomically advances the canonical baseline and clears the overlay. Uncertain
+hardlink, partial, policy, filesystem-device, excluded-mount, overflow, backend,
+or restart states invalidate the overlay and fail closed to a full scan.
+
+On Linux, initial watch setup uses a scan-driven handoff: the root descriptor is
+installed before event capture starts, then each directory is registered just
+before the scheduler opens its sole `scandir` cursor. Monitor status reports
+actual descriptor count and kernel limits, registration duration/strategy,
+warnings, and fallback reason. `auto` mode stops a failed backend and remains
+periodic-only for the rest of that host session.
+
 `monitor_status` exposes periodic/event-assisted mode, backend status, watched
 root count, pending paths, last event/local/full reconciliation, overflow and
 recovery counters, degraded reason, confidence state, scan-resource queue/slot,
@@ -437,7 +454,7 @@ SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects
 
 ### Schema
 
-Database schema v9 remains distinct from snapshot format v2 and the public
+Database schema v10 remains distinct from snapshot format v2 and the public
 snapshot API version.
 
 **monitor_definitions** -- Canonical path, label, revision, desired state,
@@ -508,14 +525,15 @@ the TUI never converts an absent subtree into a false zero.
 ### Migration and degraded behavior
 
 Before changing a non-empty on-disk database, migration writes a SQLite backup
-next to it (for the current schema v9: `data.db.pre-v9.bak`). All DDL, backfill, and schema
+next to it (for the current schema v10: `data.db.pre-v10.bak`). All DDL, backfill, and schema
 version changes run in one transaction; failure rolls back without advancing
 `schema_version`. Existing schema-v3/v0.1.7 snapshots are marked legacy with an
 explicit inference source rather than discarded. Schema-v5 migration also maps
 the old size/percentage alert prototype into the new rule/event audit fields;
 schema v6 adds CleanupPlan/audit tables, schema v7 adds event-assisted monitor
-status, schema v8 adds scan-resource/worker status, and schema v9 normalizes
-CleanupPlan provenance/action ordering without changing snapshot format v2.
+status, schema v8 adds scan-resource/worker status, schema v9 normalizes
+CleanupPlan provenance/action ordering, and schema v10 adds watch diagnostics
+plus provisional-current summaries without changing snapshot format v2.
 
 If migration or writes fail but the database is readable, the adapter opens the
 original read-only so list/history remain available. If the file is corrupt or

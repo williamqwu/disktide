@@ -220,6 +220,7 @@ class FSMonitorApp(App):
             config=self._config,
             scan_service=self._scan_service,
             visualization_service=self._visualization_service,
+            monitor_service=self._monitor_service,
         )
         self._cleanup = CleanupScreen(
             service=self._cleanup_service,

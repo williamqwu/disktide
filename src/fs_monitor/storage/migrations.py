@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-CURRENT_VERSION = 9
+CURRENT_VERSION = 10
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -402,6 +402,10 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE cleanup_plans ADD COLUMN metric TEXT NOT NULL DEFAULT 'logical'",
         "ALTER TABLE cleanup_plans ADD COLUMN normalized_actions INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE cleanup_actions ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+    ],
+    10: [
+        "ALTER TABLE monitor_status ADD COLUMN watch_diagnostics_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE monitor_status ADD COLUMN provisional_summary_json TEXT NOT NULL DEFAULT '{}'",
     ],
 }
 

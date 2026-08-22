@@ -929,6 +929,9 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
                             "event_backend": item.status.event_backend,
                             "event_backend_status": item.status.event_backend_status,
                             "watched_root_count": item.status.watched_root_count,
+                            "watch_diagnostics": (
+                                item.status.watch_diagnostics.to_dict()
+                            ),
                             "pending_dirty_paths": item.status.pending_dirty_paths,
                             "dirty_paths": list(item.status.dirty_paths),
                             "last_event_at": (
@@ -962,6 +965,7 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
                             "reconciliation_state": (
                                 item.status.reconciliation_state.value
                             ),
+                            "current_state": item.status.provisional.to_dict(),
                             "next_full_scan_at": (
                                 item.status.next_due_at.isoformat()
                                 if item.status.next_due_at
@@ -1021,6 +1025,19 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
                 f"{status.event_backend or 'none'} · {status.event_backend_status}; "
                 f"{status.watched_root_count} root(s)"
             )
+            diagnostics = status.watch_diagnostics
+            click.echo(
+                f"  Watch resources: {diagnostics.descriptor_count} descriptor(s) / "
+                f"{diagnostics.descriptor_limit or 'unknown'}; "
+                f"instances {diagnostics.instance_limit or 'unknown'}; "
+                f"queue {diagnostics.queued_event_limit or 'unknown'}"
+            )
+            click.echo(
+                f"  Registration: {diagnostics.registration_strategy}; "
+                f"{diagnostics.registration_duration_seconds or 0:.4f}s; "
+                f"warning {diagnostics.warning or 'none'}; "
+                f"fallback {diagnostics.fallback_reason or 'none'}"
+            )
             click.echo(
                 f"  Reconciliation: {status.reconciliation_state.value}; "
                 f"pending {status.pending_dirty_paths}; "
@@ -1031,6 +1048,18 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
                 f"{status.last_local_reconciliation_at.isoformat() if status.last_local_reconciliation_at else 'never'} / "
                 f"{status.last_full_reconciliation_at.isoformat() if status.last_full_reconciliation_at else 'never'}"
             )
+            current = status.provisional
+            click.echo(
+                f"  Current state: "
+                f"{'provisional' if current.active else 'canonical'}; "
+                f"base {current.base_snapshot_id or 'none'}; "
+                f"confidence {current.confidence.value}; "
+                f"canonical/current {current.canonical_value} / {current.current_value}"
+            )
+            if current.invalidation_reason:
+                click.echo(
+                    f"  Current invalidation: {current.invalidation_reason}"
+                )
             click.echo(
                 f"  Recovery: overflow {status.overflow_count}; "
                 f"recovered {status.recovery_count}; "

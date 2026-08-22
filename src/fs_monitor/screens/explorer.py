@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 
@@ -16,6 +18,7 @@ from fs_monitor.config import AppConfig, resolve_live_scan_render
 from fs_monitor.domain.live_view import LiveViewNode, build_live_view
 from fs_monitor.domain.metrics import MetricId
 from fs_monitor.domain.policy import ScanPolicy
+from fs_monitor.domain.provisional import ProvisionalConfidence, ProvisionalSummary
 from fs_monitor.domain.scan import (
     NodeAggregateUpdated,
     ScanCancelled,
@@ -37,6 +40,7 @@ from fs_monitor.rendering import denied_glyph, partial_glyph
 from fs_monitor.models.tree import FSNode
 from fs_monitor.scanner.walker import classify_symlink
 from fs_monitor.services.scan import ScanService
+from fs_monitor.services.monitor import MonitorEvent, MonitorEventKind, MonitorService
 from fs_monitor.services.visualization import VisualizationService
 from fs_monitor.widgets.size_tree import SizeTree
 from fs_monitor.widgets.breadcrumb import Breadcrumb
@@ -45,6 +49,12 @@ from fs_monitor.widgets.info_panel import InfoPanel
 from fs_monitor.widgets.treemap_view import TreemapView
 from fs_monitor.widgets.sunburst_view import SunburstView
 from fs_monitor.widgets.scan_progress import ScanProgressOverlay
+
+
+class _ExplorerMonitorEventMessage(Message):
+    def __init__(self, event: MonitorEvent):
+        super().__init__()
+        self.event = event
 
 
 class ExplorerScreen(Screen):
@@ -145,6 +155,7 @@ class ExplorerScreen(Screen):
         config: AppConfig | None = None,
         scan_service: ScanService | None = None,
         visualization_service: VisualizationService | None = None,
+        monitor_service: MonitorService | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -152,6 +163,7 @@ class ExplorerScreen(Screen):
         self._config = config
         self._scan_service = scan_service or ScanService()
         self._visualization_service = visualization_service
+        self._monitor_service = monitor_service
         self._root: FSNode | None = None
         self._current: FSNode | None = None
         self._live_snapshot: FSNode | None = None
@@ -172,6 +184,8 @@ class ExplorerScreen(Screen):
         self._space_time_error: str | None = None
         self._diff_mode = False
         self._pair_index = 0
+        self._provisional_summary: ProvisionalSummary | None = None
+        self._monitor_projection_id: int | None = None
 
     @property
     def selected_path(self) -> str:
@@ -209,12 +223,18 @@ class ExplorerScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        if self._monitor_service is not None:
+            self._monitor_service.subscribe(self._on_monitor_event)
         if self._config and self._config.ui.default_viz:
             viz = self._config.ui.default_viz
             tab_map = {"sunburst": "tab-sunburst", "treemap": "tab-treemap", "details": "tab-details"}
             if viz in tab_map:
                 self.query_one("#viz-tabs", TabbedContent).active = tab_map[viz]
         self._start_scan()
+
+    def on_unmount(self) -> None:
+        if self._monitor_service is not None:
+            self._monitor_service.unsubscribe(self._on_monitor_event)
 
     def _start_scan(self, force: bool = False) -> None:
         """Kick off a filesystem scan."""
@@ -227,6 +247,8 @@ class ExplorerScreen(Screen):
         self._space_time = None
         self._space_time_error = None
         self._pair_index = 0
+        self._provisional_summary = None
+        self._monitor_projection_id = None
 
         setting = (
             self._config.ui.live_scan_render
@@ -672,10 +694,103 @@ class ExplorerScreen(Screen):
         self.app.sub_title = (
             f"{run_prefix}{self._root.file_count:,} files, "
             f"{self._root.dir_count:,} dirs  |  "
-            f"{metric_label}: {total}{suffix}"
+            f"{metric_label}: {total}{suffix}{self._provisional_status_suffix()}"
         )
         self._update_tree_indicator()
 
+    def _provisional_status_suffix(self) -> str:
+        summary = self._provisional_summary
+        if summary is None:
+            return ""
+        if summary.active:
+            updated = (
+                summary.updated_at.astimezone().strftime("%H:%M:%S")
+                if summary.updated_at
+                else "unknown"
+            )
+            return (
+                f"  |  PROVISIONAL {summary.confidence.value} "
+                f"@ {updated} · base #{summary.base_snapshot_id or '?'}"
+            )
+        if summary.confidence is ProvisionalConfidence.INVALIDATED:
+            return "  |  PROVISIONAL INVALIDATED · awaiting full reconciliation"
+        return ""
+
+    def _on_monitor_event(self, event: MonitorEvent) -> None:
+        self.post_message(_ExplorerMonitorEventMessage(event))
+
+    @on(_ExplorerMonitorEventMessage)
+    def _on_explorer_monitor_event(
+        self,
+        message: _ExplorerMonitorEventMessage,
+    ) -> None:
+        event = message.event
+        if event.monitor_id is None or self._monitor_service is None:
+            return
+        monitor = self._monitor_service.get_monitor(event.monitor_id)
+        if monitor is None:
+            return
+        if not _path_is_within(self._scan_path, monitor.root_path):
+            return
+        if event.kind is MonitorEventKind.WATCH_CHANGED:
+            self._provisional_summary = self._monitor_service.current_summary(
+                event.monitor_id
+            )
+            self._update_status()
+            return
+        if event.kind in {
+            MonitorEventKind.RECONCILIATION_FINISHED,
+            MonitorEventKind.RUN_FINISHED,
+        }:
+            self._load_monitor_current(event.monitor_id)
+
+    @work(thread=True, exclusive=True, group="explorer-monitor-current")
+    def _load_monitor_current(self, monitor_id: int) -> None:
+        service = self._monitor_service
+        if service is None:
+            return
+        try:
+            tree, summary = service.current_tree(monitor_id)
+        except Exception:
+            return
+        if tree is None:
+            return
+        selected = tree if tree.path == self._scan_path else tree.find(self._scan_path)
+        if selected is None:
+            return
+        self.app.call_from_thread(
+            self._apply_monitor_current,
+            selected,
+            summary,
+            monitor_id,
+        )
+
+    def _apply_monitor_current(
+        self,
+        root: FSNode,
+        summary: ProvisionalSummary,
+        monitor_id: int,
+    ) -> None:
+        if not self.is_mounted or self._scan_in_progress:
+            return
+        selected_path = self.query_one("#size-tree", SizeTree).selected_path
+        current_path = self._current.path if self._current is not None else root.path
+        self._root = root
+        self._current = root.find(current_path)
+        if self._current is None:
+            self._current = root
+        self._provisional_summary = summary
+        self._monitor_projection_id = monitor_id
+        self.query_one("#size-tree", SizeTree).reload(
+            self._current,
+            selected_path=selected_path,
+        )
+        self.query_one("#breadcrumb", Breadcrumb).update_path(
+            self._current.path,
+            access=self._access_state(self._current),
+        )
+        self._update_active_viz(self._current)
+        self._update_status()
     def _update_tree_indicator(self) -> None:
         """Refresh the indicator above the tree (sort order and bar metric)."""
         tree = self.query_one("#size-tree", SizeTree)
@@ -1001,3 +1116,12 @@ class ExplorerScreen(Screen):
             ),
             callback=_on_confirm,
         )
+
+
+def _path_is_within(path: str, root: str) -> bool:
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        normalized_root = os.path.normcase(os.path.abspath(root))
+        return os.path.commonpath((normalized_root, normalized_path)) == normalized_root
+    except ValueError:
+        return False

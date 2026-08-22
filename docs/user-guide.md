@@ -147,6 +147,14 @@ reconciliation; startup, restart, overflow, backend loss, manual `g`, and the
 normal interval trigger full reconciliation. Events never replace the periodic
 full-scan source of truth.
 
+After a successful local reconciliation, Monitor and Explorer show a clearly
+labelled **provisional** current value/tree with its canonical base snapshot,
+timestamp, confidence, dirty paths, and overlay size. History, compare, alerts,
+retention, and exports remain canonical-only. Watch status also reports actual
+descriptor usage, kernel limits, registration strategy/time, warnings, and any
+periodic fallback reason. A restart or uncertain local result invalidates the
+provisional view until the next full reconciliation succeeds.
+
 ### FS Overview (3)
 
 Shows all mounted real filesystems at a glance. Press `3` to open.

@@ -478,6 +478,15 @@ class MonitorScreen(Screen):
     def _render_overview(self, summary) -> None:
         definition = summary.definition
         status = summary.status
+        current = status.provisional
+        canonical_value = self._current_value_text(
+            current.canonical_value,
+            definition.metric.value,
+        )
+        current_value = self._current_value_text(
+            current.current_value,
+            definition.metric.value,
+        )
         next_due = status.next_due_at.isoformat() if status.next_due_at else "not scheduled"
         last_success = (
             status.last_success_at.isoformat()
@@ -514,6 +523,15 @@ class MonitorScreen(Screen):
             f"  Backend: {status.event_backend or 'none'} · "
             f"{status.event_backend_status}\n"
             f"  Watched roots: {status.watched_root_count}\n"
+            f"  Actual descriptors: {status.watch_diagnostics.descriptor_count} / "
+            f"{status.watch_diagnostics.descriptor_limit or 'unknown'}\n"
+            f"  Instance / queue limits: "
+            f"{status.watch_diagnostics.instance_limit or 'unknown'} / "
+            f"{status.watch_diagnostics.queued_event_limit or 'unknown'}\n"
+            f"  Registration: {status.watch_diagnostics.registration_strategy} · "
+            f"{status.watch_diagnostics.registration_duration_seconds or 0:.4f}s\n"
+            f"  Watch warning: {status.watch_diagnostics.warning or 'none'}\n"
+            f"  Fallback: {status.watch_diagnostics.fallback_reason or 'none'}\n"
             f"  Pending dirty paths: {status.pending_dirty_paths}\n"
             f"  Reconciliation: {status.reconciliation_state.value}\n"
             f"  Last event: "
@@ -524,6 +542,15 @@ class MonitorScreen(Screen):
             f"{status.last_full_reconciliation_at.isoformat() if status.last_full_reconciliation_at else 'never'}\n"
             f"  Overflow/recovery: {status.overflow_count}/{status.recovery_count}\n"
             f"  Degraded: {status.degraded_reason or 'no'}\n\n"
+            f"[b]Current measurement[/b]\n"
+            f"  Source: {'provisional' if current.active else 'canonical'}\n"
+            f"  Base snapshot: {current.base_snapshot_id or 'none'}\n"
+            f"  Canonical/current: {canonical_value} / {current_value}\n"
+            f"  Updated: {current.updated_at.isoformat() if current.updated_at else 'never'}\n"
+            f"  Confidence: {current.confidence.value}\n"
+            f"  Overlays: {current.overlay_count} / "
+            f"{current.overlay_node_count} node(s)\n"
+            f"  Invalidated: {current.invalidation_reason or 'no'}\n\n"
             f"[b]Definition[/b]\n"
             f"  Metric: {definition.metric.value}\n"
             f"  Policy: {definition.policy.summary()}\n"
@@ -536,6 +563,14 @@ class MonitorScreen(Screen):
             f"  Last retention: {status.last_retention_summary or 'never'}\n"
             f"  Problem: {problem}"
         )
+
+    @staticmethod
+    def _current_value_text(value: int | None, metric: str) -> str:
+        if value is None:
+            return "unavailable"
+        if metric == "files":
+            return f"{value:,} files"
+        return humanize.naturalsize(value, binary=True)
 
     def _render_history(
         self,

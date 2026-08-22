@@ -20,6 +20,7 @@ from fs_monitor.collectors.events.base import (
     FilesystemEvent,
     FilesystemEventKind,
 )
+from fs_monitor.domain.monitor import WatchDiagnostics
 from fs_monitor.domain.policy import ScanPolicy
 from fs_monitor.extensions.capabilities import CapabilityStatus
 from fs_monitor.scanner.policy import discover_pseudo_mounts
@@ -47,6 +48,13 @@ class _PendingMove:
     created_at: float
 
 
+def _read_linux_limit(name: str) -> int | None:
+    try:
+        return int(Path("/proc/sys/fs/inotify", name).read_text().strip())
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def probe_native_event_backend() -> EventBackendInfo:
     if not sys.platform.startswith("linux"):
         return EventBackendInfo(
@@ -56,6 +64,9 @@ def probe_native_event_backend() -> EventBackendInfo:
             suggestion="Use periodic mode; Linux inotify support is available through fsmonitor-cli[watch].",
             system=sys.platform,
         )
+    descriptor_limit = _read_linux_limit("max_user_watches")
+    instance_limit = _read_linux_limit("max_user_instances")
+    queued_event_limit = _read_linux_limit("max_queued_events")
     if find_spec("inotify_simple") is None:
         return EventBackendInfo(
             name="inotify-simple",
@@ -63,6 +74,9 @@ def probe_native_event_backend() -> EventBackendInfo:
             reason="the optional inotify backend is not installed",
             suggestion="Install with: uv tool install 'fsmonitor-cli[watch]'",
             system=sys.platform,
+            descriptor_limit=descriptor_limit,
+            instance_limit=instance_limit,
+            queued_event_limit=queued_event_limit,
         )
     try:
         backend_version = version("inotify-simple")
@@ -75,6 +89,9 @@ def probe_native_event_backend() -> EventBackendInfo:
         reason="Linux inotify event acceleration is available",
         suggestion="Periodic full reconciliation remains enabled.",
         system=sys.platform,
+        descriptor_limit=descriptor_limit,
+        instance_limit=instance_limit,
+        queued_event_limit=queued_event_limit,
     )
 
 
@@ -106,6 +123,17 @@ class InotifyEventBackend:
         self._wd_by_path: dict[str, int] = {}
         self._pending_moves: dict[int, _PendingMove] = {}
         self._roots: tuple[str, ...] = ()
+        self._root_states: dict[str, _WatchState] = {}
+        self._registration_started_at: float | None = None
+        self._registration_duration_seconds: float | None = None
+        self._registration_strategy = "unavailable"
+        self._registration_in_progress = False
+        self._warning: str | None = None
+        self._fallback_reason: str | None = None
+        info = probe_native_event_backend()
+        self._descriptor_limit = info.descriptor_limit
+        self._instance_limit = info.instance_limit
+        self._queued_event_limit = info.queued_event_limit
 
     @property
     def name(self) -> str:
@@ -119,10 +147,109 @@ class InotifyEventBackend:
     def watched_roots(self) -> tuple[str, ...]:
         return self._roots
 
+    @property
+    def diagnostics(self) -> WatchDiagnostics:
+        with self._lock:
+            duration = self._registration_duration_seconds
+            if self._registration_in_progress and self._registration_started_at is not None:
+                duration = max(0.0, time.monotonic() - self._registration_started_at)
+            return WatchDiagnostics(
+                descriptor_count=len(self._watches_by_wd),
+                descriptor_limit=self._descriptor_limit,
+                instance_limit=self._instance_limit,
+                queued_event_limit=self._queued_event_limit,
+                registration_duration_seconds=duration,
+                registration_strategy=self._registration_strategy,
+                registration_in_progress=self._registration_in_progress,
+                warning=self._warning,
+                fallback_reason=self._fallback_reason,
+            )
+
     def start(
         self,
         watches: tuple[EventWatch, ...],
         callback: EventCallback,
+    ) -> None:
+        self._prepare_start(watches, callback, strategy="recursive-prewalk")
+        try:
+            for item, root_path in zip(watches, self._roots, strict=True):
+                self._add_watch_tree(root_path, item)
+        except Exception:
+            self.stop()
+            raise
+        self.finish_registration()
+        self._start_thread()
+
+    def start_discovery_handoff(
+        self,
+        watches: tuple[EventWatch, ...],
+        callback: EventCallback,
+    ) -> None:
+        """Start with root watches; the scanner registers each directory before read."""
+
+        self._prepare_start(watches, callback, strategy="scan-driven-handoff")
+        try:
+            for item, root_path in zip(watches, self._roots, strict=True):
+                state = self._build_root_state(root_path, item)
+                self._root_states[root_path] = state
+                self._add_one(root_path, state)
+        except Exception:
+            self.stop()
+            raise
+        self._start_thread()
+
+    def register_directory(self, path: str) -> None:
+        """Register a directory immediately before the scanner enumerates it."""
+
+        normalized = str(Path(path).expanduser().resolve())
+        root_path = next(
+            (
+                root
+                for root in sorted(self._roots, key=len, reverse=True)
+                if normalized == root
+                or normalized.startswith(root.rstrip(os.sep) + os.sep)
+            ),
+            None,
+        )
+        if root_path is None:
+            return
+        root_state = self._root_states.get(root_path)
+        if root_state is None:
+            return
+        try:
+            depth = len(Path(normalized).relative_to(root_path).parts)
+        except ValueError:
+            return
+        state = _WatchState(
+            path=normalized,
+            root_path=root_path,
+            depth=depth,
+            root_device=root_state.root_device,
+            excluded_mounts=root_state.excluded_mounts,
+            policy=root_state.policy,
+        )
+        if not self._path_allowed(normalized, state):
+            return
+        self._add_one(normalized, state)
+
+    def finish_registration(self) -> None:
+        with self._lock:
+            if not self._registration_in_progress:
+                return
+            started = self._registration_started_at
+            self._registration_duration_seconds = (
+                max(0.0, time.monotonic() - started)
+                if started is not None
+                else None
+            )
+            self._registration_in_progress = False
+
+    def _prepare_start(
+        self,
+        watches: tuple[EventWatch, ...],
+        callback: EventCallback,
+        *,
+        strategy: str,
     ) -> None:
         if self.running:
             raise RuntimeError("event backend is already running")
@@ -140,12 +267,15 @@ class InotifyEventBackend:
         self._roots = tuple(
             str(Path(item.root_path).expanduser().resolve()) for item in watches
         )
-        try:
-            for item, root_path in zip(watches, self._roots, strict=True):
-                self._add_watch_tree(root_path, item)
-        except Exception:
-            self.stop()
-            raise
+        self._root_states.clear()
+        self._registration_started_at = time.monotonic()
+        self._registration_duration_seconds = None
+        self._registration_strategy = strategy
+        self._registration_in_progress = True
+        self._warning = None
+        self._fallback_reason = None
+
+    def _start_thread(self) -> None:
         self._thread = threading.Thread(
             target=self._run,
             name="fsmonitor-inotify",
@@ -171,6 +301,8 @@ class InotifyEventBackend:
             self._wd_by_path.clear()
             self._pending_moves.clear()
             self._roots = ()
+            self._root_states.clear()
+            self._registration_in_progress = False
 
     def _run(self) -> None:
         try:
@@ -309,6 +441,15 @@ class InotifyEventBackend:
             )
         )
         device = root_device if root_device is not None else root_stat.st_dev
+        if monitor_root not in self._root_states:
+            self._root_states[monitor_root] = _WatchState(
+                path=monitor_root,
+                root_path=monitor_root,
+                depth=0,
+                root_device=device,
+                excluded_mounts=excluded,
+                policy=watch.policy,
+            )
         stack = [(path, depth_offset)]
         while stack:
             current_path, depth = stack.pop()
@@ -356,9 +497,6 @@ class InotifyEventBackend:
             self._emit_watch_error(path, exc)
 
     def _add_one(self, path: str, state: _WatchState) -> None:
-        with self._lock:
-            if path in self._wd_by_path:
-                return
         flags = self._flags
         mask = (
             flags.CREATE
@@ -374,14 +512,50 @@ class InotifyEventBackend:
             | flags.ONLYDIR
             | flags.DONT_FOLLOW
         )
-        try:
-            wd = self._notifier.add_watch(path, mask)
-        except OSError as exc:
-            self._emit_watch_error(path, exc)
-            return
         with self._lock:
+            if path in self._wd_by_path or self._notifier is None:
+                return
+            try:
+                wd = self._notifier.add_watch(path, mask)
+            except OSError as exc:
+                self._fallback_reason = (
+                    "inotify descriptor capacity was exhausted"
+                    if exc.errno in {errno.ENOSPC, errno.EMFILE, errno.ENFILE}
+                    else f"cannot register inotify descriptor: {exc}"
+                )
+                self._emit_watch_error(path, exc)
+                return
             self._watches_by_wd[wd] = state
             self._wd_by_path[path] = wd
+            self._update_limit_warning_locked()
+
+    def _build_root_state(self, root_path: str, watch: EventWatch) -> _WatchState:
+        root_stat = os.stat(root_path, follow_symlinks=False)
+        excluded = frozenset(
+            discover_pseudo_mounts(root_path)
+            if watch.policy.exclude_pseudo_filesystems
+            else ()
+        )
+        return _WatchState(
+            path=root_path,
+            root_path=root_path,
+            depth=0,
+            root_device=root_stat.st_dev,
+            excluded_mounts=excluded,
+            policy=watch.policy,
+        )
+
+    def _update_limit_warning_locked(self) -> None:
+        limit = self._descriptor_limit
+        if limit is None or limit <= 0:
+            return
+        count = len(self._watches_by_wd)
+        ratio = count / limit
+        if ratio >= 0.8:
+            self._warning = (
+                f"inotify descriptors use {count:,}/{limit:,} "
+                f"({ratio:.0%}); periodic fallback may be required"
+            )
 
     def _emit_watch_error(self, path: str, exc: OSError) -> None:
         if exc.errno in {errno.ENOSPC, errno.EMFILE, errno.ENFILE}:

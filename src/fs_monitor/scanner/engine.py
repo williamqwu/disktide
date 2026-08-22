@@ -44,6 +44,7 @@ class ScanEngine:
         tree_update_callback: Callable[[ScanTreeUpdate], None] | None = None,
         metric: MetricId | str = MetricId.LOGICAL,
         worker_selection: ScanWorkerSelection | None = None,
+        directory_observer: Callable[[str], None] | None = None,
     ):
         from fs_monitor.scanner.sysinfo import select_scan_workers
 
@@ -74,6 +75,7 @@ class ScanEngine:
         self._scheduler_queue_capacity = scheduler_queue_capacity
         self._entry_chunk_size = entry_chunk_size
         self._entry_chunk_queue_capacity = entry_chunk_queue_capacity
+        self._directory_observer = directory_observer
         self._scheduler_stats: SchedulerStats | None = None
 
     def cancel(self) -> None:
@@ -133,6 +135,7 @@ class ScanEngine:
             queue_capacity=self._scheduler_queue_capacity,
             entry_chunk_size=self._entry_chunk_size,
             entry_chunk_queue_capacity=self._entry_chunk_queue_capacity,
+            directory_observer=self._directory_observer,
         )
 
         scheduled: ScheduledTree = scheduler.scan(path)

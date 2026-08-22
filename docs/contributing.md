@@ -118,6 +118,7 @@ scores as ordering metadata; every filesystem action still passes through
 uv build
 uv run python tool/verify_distribution.py
 uv run python tool/benchmark_wave13.py --output /tmp/wave-13-benchmark.json
+uv run python tool/benchmark_wave15.py --output /tmp/wave-15-benchmark.json
 ```
 
 The CI minimal-install job installs the wheel into a fresh environment, runs
@@ -185,7 +186,7 @@ default_action = "safe"
    schema, scoring, and detection-only cases in `tests/test_cleanup_wave09.py`,
    plus Wave08 revalidation coverage when the safety contract changes.
 4. Preserve old CleanupPlan payload readers when adding plan metadata. The
-   schema-v6 cleanup base tables, current database schema v9, and CleanupPlan
+   schema-v6 cleanup base tables, current database schema v10, and CleanupPlan
    payload v2 are independent version numbers. Runtime action transitions must
    use `update_cleanup_action()` rather than rewriting the full plan.
 
