@@ -149,6 +149,7 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "docs/adr/0010-release-stabilization.md",
         prefix + "docs/adr/0011-scalable-space-time-data-plane.md",
         prefix + "docs/adr/0012-adaptive-live-scan-engine.md",
+        prefix + "docs/adr/0013-cleanup-scale-and-race-safety.md",
         prefix + "src/fs_monitor/assets/default.tcss",
         prefix + "src/fs_monitor/cleanup/actions.py",
         prefix + "src/fs_monitor/cleanup/scoring.py",
@@ -200,6 +201,7 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "src/fs_monitor/widgets/growth_heatmap.py",
         prefix + "tool/benchmark_wave12.py",
         prefix + "tool/benchmark_wave13.py",
+        prefix + "tool/benchmark_wave14.py",
     }
     missing = sorted(required - names)
     if missing:

@@ -1697,7 +1697,10 @@ def cleanup(
     import json
     import humanize
 
-    from fs_monitor.cleanup.actions import QuarantineExecutor
+    from fs_monitor.cleanup.actions import (
+        CleanupExecutionError,
+        QuarantineExecutor,
+    )
     from fs_monitor.cleanup.detector import detect_targets
     from fs_monitor.cleanup.rules import get_rule_by_name, get_rule_catalog
     from fs_monitor.config import (
@@ -1764,6 +1767,20 @@ def cleanup(
             raise click.UsageError("usage: fsmonitor cleanup purge PLAN_OR_ACTION_ID")
         operation = "purge"
         operand = arguments[1]
+    elif arguments and arguments[0] == "quarantine":
+        if (
+            len(arguments) != 3
+            or arguments[1] not in {"audit", "rebuild"}
+            or plan_id
+            or apply_safe
+            or permanent
+            or history_group
+        ):
+            raise click.UsageError(
+                "usage: fsmonitor cleanup quarantine audit|rebuild ROOT"
+            )
+        operation = f"quarantine-{arguments[1]}"
+        operand = arguments[2]
     else:
         if history_group is not None:
             raise click.UsageError("--by is only valid with cleanup history")
@@ -1859,6 +1876,41 @@ def cleanup(
                     f"INVALID      isolated {issue.path}: {issue.error}",
                     err=True,
                 )
+        return
+
+    if operation.startswith("quarantine-"):
+        executor = QuarantineExecutor(
+            retention_days=config.cleanup.quarantine_retention_days,
+            max_bytes=config.cleanup.quarantine_max_bytes,
+        )
+        try:
+            status = executor.audit(
+                operand or "",
+                rebuild=operation == "quarantine-rebuild",
+            )
+        except CleanupExecutionError as exc:
+            raise click.ClickException(str(exc)) from exc
+        payload = status.to_dict()
+        if json_output:
+            click.echo(json.dumps(payload, sort_keys=True))
+        else:
+            verdict = "MATCH" if status.ledger_matches else "MISMATCH"
+            click.echo(f"Quarantine ledger {verdict}: {status.root}")
+            click.echo(
+                f"  Ledger: {status.ledger_items} items / "
+                f"{humanize.naturalsize(status.ledger_bytes, binary=True)}"
+            )
+            click.echo(
+                f"  Manifests: {status.manifest_items} items / "
+                f"{humanize.naturalsize(status.manifest_bytes, binary=True)}"
+            )
+            click.echo(f"  Pending reservations: {status.pending_items}")
+            if status.rebuilt:
+                click.echo("  Ledger rebuilt from recovery manifests.")
+            for recovery in status.recoveries:
+                click.echo(f"  RECOVERED: {recovery}")
+            for issue in status.issues:
+                click.echo(f"  ISSUE: {issue}")
         return
 
     repository = default_snapshot_repository()

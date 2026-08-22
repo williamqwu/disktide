@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.13
+
+**Cleanup scale and race safety**
+
+- **large-plan runtime** Replaced quadratic parent scans with a sorted ancestor stack and moved normal execution, undo, and purge to normalized action-level persistence with independent plan summaries.
+- **quarantine ledger** Added constant-time capacity accounting, pending reservations, crash-state recovery, explicit audit/rebuild commands, and doctor-visible mismatch diagnostics while retaining manifests as recovery evidence.
+- **mutation binding** Added short-lived parent/entry identity tokens and POSIX dir-fd mutation checks with post-rename verification and rollback. Direct permanent files use a verified staging unlink; direct permanent directories now fail closed in favor of quarantine then purge.
+- **release gates** Added schema-v9 legacy/normalized round trips, adversarial rename/symlink tests, crash-point recovery tests, and a machine-readable 2k/5k/10k plus 600-move benchmark.
+
 ## v0.2.12
 
 **Adaptive live scan engine**

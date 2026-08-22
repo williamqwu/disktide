@@ -437,7 +437,7 @@ SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects
 
 ### Schema
 
-Database schema v8 remains distinct from snapshot format v2 and the public
+Database schema v9 remains distinct from snapshot format v2 and the public
 snapshot API version.
 
 **monitor_definitions** -- Canonical path, label, revision, desired state,
@@ -478,9 +478,10 @@ rollup provenance, and auditable maintenance before/after counts and bytes.
 trigger/suppression audit. The legacy `deletion_log` API table and
 `schema_version` also remain.
 
-**cleanup_plans / cleanup_actions / cleanup_audit** -- Schema-v6 persistent
-plan payloads, per-action state/identity indexes, and immutable validation,
-execution, and undo events.
+**cleanup_plans / cleanup_actions / cleanup_audit** -- Schema-v6 base tables
+with schema-v9 normalized plan provenance, stable action positions, per-action
+state/identity payloads, and immutable validation, execution, undo, and purge
+events. Legacy payload-only plans remain readable.
 
 Dynamic path/id lookups are split into bounded SQLite bind batches. Snapshot
 save/load, tree reconstruction, retention pruning, and cleanup-action pruning do
@@ -507,14 +508,14 @@ the TUI never converts an absent subtree into a false zero.
 ### Migration and degraded behavior
 
 Before changing a non-empty on-disk database, migration writes a SQLite backup
-next to it (for the current schema v8: `data.db.pre-v8.bak`). All DDL, backfill, and schema
+next to it (for the current schema v9: `data.db.pre-v9.bak`). All DDL, backfill, and schema
 version changes run in one transaction; failure rolls back without advancing
 `schema_version`. Existing schema-v3/v0.1.7 snapshots are marked legacy with an
 explicit inference source rather than discarded. Schema-v5 migration also maps
 the old size/percentage alert prototype into the new rule/event audit fields;
 schema v6 adds CleanupPlan/audit tables, schema v7 adds event-assisted monitor
-status, and schema v8 adds scan-resource/worker status without changing snapshot
-format v2.
+status, schema v8 adds scan-resource/worker status, and schema v9 normalizes
+CleanupPlan provenance/action ordering without changing snapshot format v2.
 
 If migration or writes fail but the database is readable, the adapter opens the
 original read-only so list/history remain available. If the file is corrupt or
@@ -563,11 +564,13 @@ captures `lstat` identity, rule and pack provenance, pack/schema versions,
 source, path context, rule policy, risk, age, score, confidence/coverage,
 logical reclaim estimate, and scan reference. It resolves ancestor/descendant
 overlap before persistence; a parent action subsumes its children so bytes and
-execution are counted once. CleanupPlan JSON payload v2 is stored in the
-existing schema-v6 plan/action tables, so Wave 09 adds no database migration.
-Legacy plan payloads remain readable. The default CLI and TUI action is
-`preview`, which persists the plan/audit records but does not mutate the
-filesystem.
+execution are counted once. Overlap resolution uses a path-component sort and
+ancestor stack rather than scanning every prior parent. Schema v9 stores plan
+metadata separately from ordered normalized action rows. Runtime status changes
+update one action at a time and final plan aggregates independently; exported
+CleanupPlan JSON v2 is rebuilt from those rows. Legacy payload-only plans remain
+readable. The default CLI and TUI action is `preview`, which persists the
+plan/audit records but does not mutate the filesystem.
 
 ### Revalidation and protected paths
 
@@ -576,19 +579,34 @@ re-measures directory contents, and rechecks rule name, indicators, age, current
 risk, scan-root containment, mount boundaries, and application-protected paths.
 `/`, the scan root, mount roots, the database directory, and quarantine roots
 fail closed. Replacing a target with a symlink is stale; an original symlink is
-handled as the link itself and is never followed.
+handled as the link itself and is never followed. A successful check creates a
+short-lived token containing the parent identity, entry name, target identity,
+creation time, expiry, and active mutation mode.
 
 ### Safe executors and undo
 
 Normal apply first attempts an atomic same-filesystem Freedesktop Trash rename.
 If Trash is unavailable for that target, `QuarantineExecutor` creates an owned
-mode-0700 sibling directory, writes a recovery manifest, enforces capacity and
-expiry policy, and performs `os.rename()` without cross-filesystem copy/delete.
-Both paths persist undo metadata and refuse to overwrite a newly created
+mode-0700 sibling directory. On supported POSIX systems both paths open and
+verify the source parent directory, repeat the target inode/type/metadata check
+immediately before a dir-fd rename, then verify the destination identity and
+roll back a mismatch when possible. They never substitute copy+delete.
+
+Each quarantine root keeps a constant-size `.ledger.json` protected by
+`.ledger.lock`. A move reserves capacity, writes a prepared manifest, renames,
+marks the manifest isolated, and commits byte/item totals. Normal moves do not
+glob old manifests. `cleanup quarantine audit ROOT` compares ledger and recovery
+evidence; `rebuild` reconstructs counters and interrupted prepared/restoring/
+purging states without deleting unknown files.
+
+Both safe paths persist undo metadata and refuse to overwrite a newly created
 original path. Isolation reports actual reclaimed bytes as zero. Permanent
-deletion remains a low-level primitive reachable only after the exact
-`DELETE <plan-id>` confirmation. Detection-only rules are blocked by every
-generic safe/permanent execution path.
+files require the exact `DELETE <plan-id>` confirmation and use a verified
+sibling staging rename before unlink. Direct permanent directory deletion is
+blocked; directories must be quarantined and then explicitly purged inside the
+owned root. Platforms without the required dir-fd primitives block permanent
+deletion and retain only the recoverable path-revalidated move. Detection-only
+rules are blocked by every generic safe/permanent execution path.
 
 Every validation, pre-execution intent, result, and undo is appended to
 `cleanup_audit`. If the pre-execution audit write fails, no filesystem action is
@@ -606,7 +624,9 @@ list. `cleanup.map_max_points` constrains the model to 10–500 points.
 Savings history is derived from persisted plans/actions and keeps estimated,
 isolated, purged, actual reclaimed, and undone bytes separate. Quarantine purge
 revalidates the manifest/identity and requires `PURGE <plan-id>`; system Trash
-is outside the purge contract. Cleanup-opportunity alerts read a persisted plan
+is outside the purge contract. Doctor schema v4 reports the mutation capability
+matrix and audits quarantine roots discoverable from active CleanupPlan undo
+metadata. Cleanup-opportunity alerts read a persisted plan
 summary, include top categories/estimate/confidence plus a preview command, and
 only notify. They never create or execute a plan and use a distinct Trend
 marker.

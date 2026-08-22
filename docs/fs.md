@@ -195,15 +195,19 @@ This checks whether files like `package.json` or `Cargo.toml` exist next to a ca
 os.lstat(target.path)           # device/inode/type/mtime/size; never follows links
 os.scandir(target.path)         # re-measure directory contents before action
 os.path.ismount(target.path)    # root/mount protection
-os.rename(source, trash_path)   # same-filesystem system Trash move
-os.rename(source, quarantine)   # atomic quarantine fallback
+os.open(parent, O_DIRECTORY | O_NOFOLLOW)
+os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+os.rename(name, destination, src_dir_fd=parent_fd, dst_dir_fd=destination_fd)
 Path.write_text(...)            # .trashinfo or quarantine recovery manifest
 ```
 
 Quarantine directories must be owned by the current user, mode `0700`, and on
 the same device as the target. The executor never substitutes copy+delete for an
-atomic rename. Undo uses `os.rename()` back to the original path only when that
-path is absent and the isolated inode still matches the plan identity.
+atomic rename. A constant-size `.ledger.json` and lock provide normal-path
+capacity accounting; manifests are scanned only for explicit audit/rebuild or
+interrupted-state recovery. Undo uses a reverified dir-fd rename back to the
+original path only when that path is absent and the isolated inode still matches
+the plan identity.
 
 Owned quarantine purge repeats manifest and identity checks, then removes only
 the isolated quarantine object after the exact `PURGE <plan-id>` confirmation.
@@ -211,11 +215,13 @@ It does not enumerate or remove system Trash. The audit/history model records
 isolated, purged, actual reclaimed, and undone bytes separately.
 
 Permanent deletion is not the default executor. It is available only after a
-plan-scoped typed confirmation and then uses `os.unlink()` for files/symlinks or
-`shutil.rmtree()` for real directories. Product CLI/TUI code cannot call this
-primitive without `CleanupService` revalidation and a successful pre-action
-audit write. Rules marked detection-only cannot reach either safe or permanent
-filesystem primitives.
+plan-scoped typed confirmation. Supported POSIX systems stage a verified file or
+symlink under the same parent and unlink it by directory fd. Direct permanent
+directory deletion is blocked; directory content must first enter the owned
+quarantine and can then be purged through a no-symlink dir-fd traversal. Product
+CLI/TUI code cannot call this primitive without `CleanupService` revalidation
+and a successful pre-action audit write. Rules marked detection-only cannot
+reach either safe or permanent filesystem primitives.
 
 ### Welcome Screen -- `screens/welcome.py`
 

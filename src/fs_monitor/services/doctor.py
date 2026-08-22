@@ -13,6 +13,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from fs_monitor import APP_NAME, LEGACY_STORAGE_NAMESPACE, __version__
+from fs_monitor.cleanup.actions import QuarantineExecutor, mutation_capabilities
 from fs_monitor.cleanup.rules import get_rule_catalog
 from fs_monitor.collectors.platform import get_platform_adapter
 from fs_monitor.collectors.platform.base import PlatformAdapter
@@ -27,7 +28,7 @@ from fs_monitor.storage.database import Database
 from fs_monitor.storage.migrations import CURRENT_VERSION, get_version
 
 
-DOCTOR_SCHEMA_VERSION = 3
+DOCTOR_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class DoctorReport:
     optional_extras: dict[str, object]
     scan_policy: dict[str, object]
     cleanup_rules: dict[str, object]
+    cleanup_safety: dict[str, object]
     schema_version: int = DOCTOR_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, object]:
@@ -59,6 +61,7 @@ class DoctorReport:
             "optional_extras": self.optional_extras,
             "scan_policy": self.scan_policy,
             "cleanup_rules": self.cleanup_rules,
+            "cleanup_safety": self.cleanup_safety,
         }
 
     def to_json(self) -> str:
@@ -126,6 +129,10 @@ def build_doctor_report(
             for issue in catalog.issues
         ],
     }
+    cleanup_safety = _cleanup_safety_report(
+        database_factory,
+        show_paths=show_paths,
+    )
 
     metric_items = {
         "logical": capabilities.get(CapabilityId.LOGICAL_METRIC).to_dict(),
@@ -195,6 +202,7 @@ def build_doctor_report(
             "hardlinks": "lexical-owner",
         },
         cleanup_rules=cleanup_rules,
+        cleanup_safety=cleanup_safety,
     )
 
 
@@ -270,6 +278,27 @@ def render_doctor_report(report: DoctorReport) -> str:
             f"  [INVALID] {issue['path']}: {issue['error']}"
         )
 
+    cleanup_safety = payload["cleanup_safety"]
+    mutation = cleanup_safety["mutation"]
+    quarantine = cleanup_safety["quarantine_ledger"]
+    lines.extend([
+        "",
+        "Cleanup mutation safety",
+        f"  Dir-fd verification: {mutation['dir_fd_verification']}",
+        f"  Recoverable move: {mutation['recoverable_move']}",
+        f"  Permanent file: {mutation['permanent_file']}",
+        f"  Permanent directory: {mutation['permanent_directory']}",
+        f"  Quarantine ledgers: {quarantine['status']}",
+    ])
+    for item in quarantine["roots"]:
+        state = "OK" if item["ledger_matches"] else "MISMATCH"
+        lines.append(
+            f"  [{state}] {item['root']} · {item['manifest_items']} items · "
+            f"{item['manifest_bytes']} bytes"
+        )
+    for issue in quarantine["issues"]:
+        lines.append(f"  [CHECK] {issue}")
+
     policy = payload["scan_policy"]
     lines.extend([
         "",
@@ -281,6 +310,70 @@ def render_doctor_report(report: DoctorReport) -> str:
         f"  Hardlinks: {policy['hardlinks']}",
     ])
     return "\n".join(lines)
+
+
+def _cleanup_safety_report(
+    database_factory: Callable[[], Database],
+    *,
+    show_paths: bool,
+) -> dict[str, object]:
+    capabilities = mutation_capabilities().to_dict()
+    roots: set[Path] = set()
+    issues: list[str] = []
+    database = None
+    try:
+        database = database_factory()
+        database.connect()
+        list_roots = getattr(database, "list_quarantine_roots", None)
+        if callable(list_roots):
+            roots.update(Path(item) for item in list_roots(limit=1000))
+    except Exception as exc:
+        issues.append(
+            _redact_text(
+                f"quarantine discovery unavailable: {type(exc).__name__}: {exc}",
+                show_paths,
+            )
+        )
+    finally:
+        if database is not None:
+            try:
+                database.close()
+            except Exception:
+                pass
+
+    statuses: list[dict[str, object]] = []
+    executor = QuarantineExecutor()
+    for root in sorted(roots):
+        try:
+            payload = executor.audit(root).to_dict()
+            payload["root"] = _redact_text(str(root), show_paths)
+            payload["issues"] = [
+                _redact_text(str(issue), show_paths)
+                for issue in payload["issues"]
+            ]
+            statuses.append(payload)
+        except Exception as exc:
+            issues.append(
+                _redact_text(
+                    f"{root}: {type(exc).__name__}: {exc}",
+                    show_paths,
+                )
+            )
+    state = "ok"
+    if issues:
+        state = "degraded"
+    if any(not bool(item["ledger_matches"]) for item in statuses):
+        state = "mismatch"
+    return {
+        "mutation": capabilities,
+        "quarantine_ledger": {
+            "status": state,
+            "root_count": len(statuses),
+            "roots": statuses,
+            "issues": issues,
+            "rebuild_command": "fsmonitor cleanup quarantine rebuild ROOT",
+        },
+    }
 
 
 def _render_capability_group(items: object) -> list[str]:

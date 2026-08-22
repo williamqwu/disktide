@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+import stat
 from typing import Any
 
 from fs_monitor.domain.metrics import MetricId
@@ -84,6 +85,27 @@ class FileIdentity:
             and self.is_dir == other.is_dir
             and self.is_symlink == other.is_symlink
         )
+
+    def same_object(self, other: FileIdentity) -> bool:
+        return (
+            self.device == other.device
+            and self.inode == other.inode
+            and stat.S_IFMT(self.mode) == stat.S_IFMT(other.mode)
+            and self.is_dir == other.is_dir
+            and self.is_symlink == other.is_symlink
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupMutationToken:
+    path: str
+    parent_path: str
+    entry_name: str
+    parent_identity: FileIdentity
+    target_identity: FileIdentity
+    created_at: datetime
+    expires_at: datetime
+    mode: str
 
 
 @dataclass(slots=True)

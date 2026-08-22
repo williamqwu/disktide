@@ -25,12 +25,15 @@ from fs_monitor.domain.alerts import (
     AlertSeverity,
 )
 from fs_monitor.domain.cleanup import (
+    CleanupAction,
+    CleanupActionKind,
     CleanupAuditEvent,
     CleanupAuditKind,
     CleanupPlan,
+    CleanupPlanStatus,
+    cleanup_action_from_dict,
     cleanup_action_to_dict,
     cleanup_plan_from_dict,
-    cleanup_plan_to_dict,
 )
 from fs_monitor.domain.delta import NodeMeasurement, SizeDelta
 from fs_monitor.domain.metrics import MetricId
@@ -2761,69 +2764,11 @@ class Database:
     # ── Cleanup plans and audit ──
 
     def save_cleanup_plan(self, plan: CleanupPlan) -> None:
-        payload = json.dumps(cleanup_plan_to_dict(plan), sort_keys=True)
+        """Compatibility full upsert used for imports and explicit replacements."""
         with self.conn:
-            self.conn.execute(
-                """INSERT INTO cleanup_plans (
-                       id, version, created_at, updated_at, scan_root, status,
-                       requested_action, estimated_bytes, validated_bytes,
-                       actual_reclaimed_bytes, payload_json
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                       version = excluded.version,
-                       updated_at = excluded.updated_at,
-                       scan_root = excluded.scan_root,
-                       status = excluded.status,
-                       requested_action = excluded.requested_action,
-                       estimated_bytes = excluded.estimated_bytes,
-                       validated_bytes = excluded.validated_bytes,
-                       actual_reclaimed_bytes = excluded.actual_reclaimed_bytes,
-                       payload_json = excluded.payload_json""",
-                (
-                    plan.id,
-                    plan.version,
-                    _datetime_text(plan.created_at),
-                    _datetime_text(plan.updated_at),
-                    plan.scan_root,
-                    plan.status.value,
-                    plan.requested_action.value,
-                    plan.estimated_reclaimable_bytes,
-                    plan.validated_reclaimable_bytes,
-                    plan.actual_reclaimed_bytes,
-                    payload,
-                ),
-            )
-            action_ids = []
-            for action in plan.actions:
-                action_ids.append(action.id)
-                self.conn.execute(
-                    """INSERT INTO cleanup_actions (
-                           id, plan_id, path, status, validation_status,
-                           planned_action, executed_action, estimated_bytes,
-                           actual_reclaimed_bytes, payload_json
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(id) DO UPDATE SET
-                           path = excluded.path,
-                           status = excluded.status,
-                           validation_status = excluded.validation_status,
-                           planned_action = excluded.planned_action,
-                           executed_action = excluded.executed_action,
-                           estimated_bytes = excluded.estimated_bytes,
-                           actual_reclaimed_bytes = excluded.actual_reclaimed_bytes,
-                           payload_json = excluded.payload_json""",
-                    (
-                        action.id,
-                        plan.id,
-                        action.path,
-                        action.execution_status.value,
-                        action.validation_status.value,
-                        action.planned_action.value,
-                        action.executed_action.value if action.executed_action else None,
-                        action.estimated_reclaimable_bytes,
-                        action.actual_reclaimed_bytes,
-                        json.dumps(cleanup_action_to_dict(action), sort_keys=True),
-                    ),
-                )
+            self._upsert_cleanup_plan_summary(plan)
+            self._upsert_cleanup_actions(plan)
+            action_ids = [action.id for action in plan.actions]
             current_action_ids = set(action_ids)
             persisted_action_ids = {
                 str(row[0])
@@ -2838,14 +2783,161 @@ class Database:
                 ((plan.id, action_id) for action_id in stale_action_ids),
             )
 
+    def create_cleanup_plan(self, plan: CleanupPlan) -> None:
+        """Persist initial plan metadata and actions in one transaction."""
+        with self.conn:
+            self._upsert_cleanup_plan_summary(plan)
+            self._upsert_cleanup_actions(plan)
+
+    def update_cleanup_action(self, action: CleanupAction) -> None:
+        """Persist one action without serializing or rewriting its whole plan."""
+        with self.conn:
+            self._upsert_cleanup_action(action)
+
+    def update_cleanup_actions(self, plan: CleanupPlan) -> None:
+        """Persist a plan's action rows without rewriting plan payload data."""
+        with self.conn:
+            self._upsert_cleanup_actions(plan)
+
+    def update_cleanup_plan_summary(self, plan: CleanupPlan) -> None:
+        """Persist plan metadata/aggregates independently from action rows."""
+        with self.conn:
+            self._upsert_cleanup_plan_summary(plan)
+
+    def _upsert_cleanup_plan_summary(self, plan: CleanupPlan) -> None:
+        payload = {
+            "id": plan.id,
+            "version": plan.version,
+            "created_at": plan.created_at.isoformat(),
+            "updated_at": plan.updated_at.isoformat(),
+            "scan_root": plan.scan_root,
+            "scan_run_id": plan.scan_run_id,
+            "snapshot_id": plan.snapshot_id,
+            "metric": plan.metric.value,
+            "requested_action": plan.requested_action.value,
+            "status": plan.status.value,
+            "actions": [],
+        }
+        self.conn.execute(
+            """INSERT INTO cleanup_plans (
+                   id, version, created_at, updated_at, scan_root, status,
+                   requested_action, estimated_bytes, validated_bytes,
+                   actual_reclaimed_bytes, payload_json, scan_run_id,
+                   snapshot_id, metric, normalized_actions
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+               ON CONFLICT(id) DO UPDATE SET
+                   version = excluded.version,
+                   updated_at = excluded.updated_at,
+                   scan_root = excluded.scan_root,
+                   status = excluded.status,
+                   requested_action = excluded.requested_action,
+                   estimated_bytes = excluded.estimated_bytes,
+                   validated_bytes = excluded.validated_bytes,
+                   actual_reclaimed_bytes = excluded.actual_reclaimed_bytes,
+                   payload_json = excluded.payload_json,
+                   scan_run_id = excluded.scan_run_id,
+                   snapshot_id = excluded.snapshot_id,
+                   metric = excluded.metric,
+                   normalized_actions = 1""",
+            (
+                plan.id,
+                plan.version,
+                _datetime_text(plan.created_at),
+                _datetime_text(plan.updated_at),
+                plan.scan_root,
+                plan.status.value,
+                plan.requested_action.value,
+                plan.estimated_reclaimable_bytes,
+                plan.validated_reclaimable_bytes,
+                plan.actual_reclaimed_bytes,
+                json.dumps(payload, sort_keys=True),
+                plan.scan_run_id,
+                plan.snapshot_id,
+                plan.metric.value,
+            ),
+        )
+
+    def _upsert_cleanup_actions(self, plan: CleanupPlan) -> None:
+        for position, action in enumerate(plan.actions):
+            self._upsert_cleanup_action(action, position=position)
+
+    def _upsert_cleanup_action(
+        self,
+        action: CleanupAction,
+        *,
+        position: int | None = None,
+    ) -> None:
+        position_sql = "position = excluded.position," if position is not None else ""
+        stored_position = 0 if position is None else position
+        self.conn.execute(
+            f"""INSERT INTO cleanup_actions (
+                   id, plan_id, path, status, validation_status,
+                   planned_action, executed_action, estimated_bytes,
+                   actual_reclaimed_bytes, payload_json, position
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   path = excluded.path,
+                   status = excluded.status,
+                   validation_status = excluded.validation_status,
+                   planned_action = excluded.planned_action,
+                   executed_action = excluded.executed_action,
+                   estimated_bytes = excluded.estimated_bytes,
+                   actual_reclaimed_bytes = excluded.actual_reclaimed_bytes,
+                   payload_json = excluded.payload_json,
+                   {position_sql}
+                   plan_id = excluded.plan_id""",
+            (
+                action.id,
+                action.plan_id,
+                action.path,
+                action.execution_status.value,
+                action.validation_status.value,
+                action.planned_action.value,
+                action.executed_action.value if action.executed_action else None,
+                action.estimated_reclaimable_bytes,
+                action.actual_reclaimed_bytes,
+                json.dumps(cleanup_action_to_dict(action), sort_keys=True),
+                stored_position,
+            ),
+        )
+
     def get_cleanup_plan(self, plan_id: str) -> CleanupPlan | None:
         row = self.conn.execute(
-            "SELECT payload_json FROM cleanup_plans WHERE id = ?",
+            """SELECT id, version, created_at, updated_at, scan_root, status,
+                      requested_action, scan_run_id, snapshot_id, metric,
+                      normalized_actions, payload_json
+               FROM cleanup_plans WHERE id = ?""",
             (plan_id,),
         ).fetchone()
         if row is None:
             return None
-        return cleanup_plan_from_dict(json.loads(row[0]))
+        if not bool(row[10]):
+            return cleanup_plan_from_dict(json.loads(row[11]))
+        actions = [
+            cleanup_action_from_dict(json.loads(action_row[0]))
+            for action_row in self.conn.execute(
+                """SELECT payload_json FROM cleanup_actions
+                   WHERE plan_id = ? ORDER BY position, id""",
+                (plan_id,),
+            )
+        ]
+        created_at = _datetime_value(row[2])
+        updated_at = _datetime_value(row[3])
+        if created_at is None or updated_at is None:
+            raise ValueError(f"cleanup plan {plan_id} has invalid timestamps")
+        return CleanupPlan(
+            id=str(row[0]),
+            version=int(row[1]),
+            created_at=created_at,
+            updated_at=updated_at,
+            scan_root=str(row[4]),
+            status=CleanupPlanStatus(str(row[5])),
+            requested_action=CleanupActionKind(str(row[6])),
+            scan_run_id=row[7],
+            snapshot_id=row[8],
+            metric=MetricId.parse(row[9]),
+            actions=actions,
+        )
 
     def get_cleanup_plan_for_action(
         self, action_id: str
@@ -2860,11 +2952,36 @@ class Database:
 
     def list_cleanup_plans(self, limit: int = 50) -> list[CleanupPlan]:
         rows = self.conn.execute(
-            """SELECT payload_json FROM cleanup_plans
+            """SELECT id FROM cleanup_plans
                ORDER BY created_at DESC LIMIT ?""",
             (max(1, limit),),
         ).fetchall()
-        return [cleanup_plan_from_dict(json.loads(row[0])) for row in rows]
+        return [
+            plan
+            for row in rows
+            if (plan := self.get_cleanup_plan(str(row[0]))) is not None
+        ]
+
+    def list_quarantine_roots(self, limit: int = 1000) -> list[str]:
+        rows = self.conn.execute(
+            """SELECT path, payload_json FROM cleanup_actions
+               ORDER BY rowid DESC LIMIT ?""",
+            (max(1, limit),),
+        ).fetchall()
+        roots: set[str] = set()
+        for row in rows:
+            candidate = Path(str(row[0])).parent / ".fsmonitor-quarantine"
+            if candidate.exists():
+                roots.add(str(candidate))
+            try:
+                payload = json.loads(row[1])
+                undo = payload.get("undo")
+                metadata_path = undo.get("metadata_path") if undo else None
+                if metadata_path:
+                    roots.add(str(Path(metadata_path).parent))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return sorted(roots)
 
     def append_cleanup_audit(self, event: CleanupAuditEvent) -> int:
         cursor = self.conn.execute(

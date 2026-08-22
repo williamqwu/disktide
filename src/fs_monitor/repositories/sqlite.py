@@ -7,7 +7,7 @@ from datetime import datetime
 from threading import RLock
 
 from fs_monitor.domain.alerts import AlertEvent, AlertRule
-from fs_monitor.domain.cleanup import CleanupAuditEvent, CleanupPlan
+from fs_monitor.domain.cleanup import CleanupAction, CleanupAuditEvent, CleanupPlan
 from fs_monitor.domain.delta import NodeMeasurement, SizeDelta
 from fs_monitor.domain.monitor import (
     MonitorDefinition,
@@ -176,6 +176,22 @@ class SQLiteSnapshotRepository:
     def save_cleanup_plan(self, plan: CleanupPlan) -> None:
         with self._lock:
             self._database.save_cleanup_plan(plan)
+
+    def create_cleanup_plan(self, plan: CleanupPlan) -> None:
+        with self._lock:
+            self._database.create_cleanup_plan(plan)
+
+    def update_cleanup_action(self, action: CleanupAction) -> None:
+        with self._lock:
+            self._database.update_cleanup_action(action)
+
+    def update_cleanup_actions(self, plan: CleanupPlan) -> None:
+        with self._lock:
+            self._database.update_cleanup_actions(plan)
+
+    def update_cleanup_plan_summary(self, plan: CleanupPlan) -> None:
+        with self._lock:
+            self._database.update_cleanup_plan_summary(plan)
 
     def get_cleanup_plan(self, plan_id: str) -> CleanupPlan | None:
         with self._lock:

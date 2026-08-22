@@ -48,6 +48,7 @@ def test_doctor_json_has_versioned_schema_and_expected_sections(tmp_path, monkey
         "optional_extras",
         "scan_policy",
         "cleanup_rules",
+        "cleanup_safety",
     }
     assert payload["platform"]["adapter"] == "macos-portable"
     assert payload["metrics"]["logical"]["status"] == "available"
@@ -108,12 +109,13 @@ def test_doctor_reports_watch_backend_version_and_configured_mode(
     payload = report.to_dict()
     watch = payload["optional_extras"]["watch"]
 
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["config"]["monitor_event_mode"] == "auto"
     assert watch["available"] is True
     assert watch["version"] == "2.0.1"
     assert watch["configured_mode"] == "auto"
     assert payload["capabilities"]["filesystem_events"]["status"] == "available"
+    assert "permanent_directory" in payload["cleanup_safety"]["mutation"]
     output = render_doctor_report(report)
     assert "Backend version: 2.0.1" in output
     assert "Configured mode: auto" in output

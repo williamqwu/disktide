@@ -30,7 +30,8 @@ snapshot/database storage, cleanup rule-pack validation/scoring/plans/actions,
 visualizations, TUI navigation and modals, FS Overview/block
 devices/benchmarking, progress reporting, system detection, welcome flow, and
 migrations. Wave-specific cleanup contracts live in
-`tests/test_cleanup_wave08.py` and `tests/test_cleanup_wave09.py`.
+`tests/test_cleanup_wave08.py`, `tests/test_cleanup_wave09.py`, and
+`tests/test_cleanup_wave14.py`.
 Filesystem-event normalization, dirty coalescing, overflow recovery, optional
 dependency fallback, and MonitorService integration live in
 `tests/test_watch_wave10.py`. Adaptive worker selection, giant-directory chunk
@@ -184,8 +185,9 @@ default_action = "safe"
    schema, scoring, and detection-only cases in `tests/test_cleanup_wave09.py`,
    plus Wave08 revalidation coverage when the safety contract changes.
 4. Preserve old CleanupPlan payload readers when adding plan metadata. The
-   schema-v6 cleanup table contract, current database schema v7, and CleanupPlan
-   payload v2 are independent version numbers.
+   schema-v6 cleanup base tables, current database schema v9, and CleanupPlan
+   payload v2 are independent version numbers. Runtime action transitions must
+   use `update_cleanup_action()` rather than rewriting the full plan.
 
 ## Adding a New Screen
 

@@ -176,6 +176,10 @@ fsmonitor cleanup rules enable node
 # Revalidate and purge owned quarantine content (never system Trash)
 fsmonitor cleanup purge PLAN_OR_ACTION_ID
 
+# Audit or rebuild constant-time quarantine accounting
+fsmonitor cleanup quarantine audit /path/.fsmonitor-quarantine
+fsmonitor cleanup quarantine rebuild /path/.fsmonitor-quarantine
+
 # Permanent deletion is separate and requires the exact plan-scoped token
 fsmonitor cleanup --plan PLAN_ID --permanent
 ```

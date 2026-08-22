@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from fs_monitor.domain.cleanup import CleanupAuditEvent, CleanupPlan
+from fs_monitor.domain.cleanup import CleanupAction, CleanupAuditEvent, CleanupPlan
 from fs_monitor.repositories.snapshots import RepositoryStatus
 
 
@@ -16,6 +16,14 @@ class CleanupRepository(Protocol):
     def status(self) -> RepositoryStatus: ...
 
     def save_cleanup_plan(self, plan: CleanupPlan) -> None: ...
+
+    def create_cleanup_plan(self, plan: CleanupPlan) -> None: ...
+
+    def update_cleanup_action(self, action: CleanupAction) -> None: ...
+
+    def update_cleanup_actions(self, plan: CleanupPlan) -> None: ...
+
+    def update_cleanup_plan_summary(self, plan: CleanupPlan) -> None: ...
 
     def get_cleanup_plan(self, plan_id: str) -> CleanupPlan | None: ...
 

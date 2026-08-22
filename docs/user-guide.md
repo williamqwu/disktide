@@ -428,6 +428,8 @@ fsmonitor cleanup --plan PLAN_ID --apply
 fsmonitor cleanup history --by category
 fsmonitor cleanup undo PLAN_OR_ACTION_ID
 fsmonitor cleanup purge PLAN_OR_ACTION_ID
+fsmonitor cleanup quarantine audit /path/.fsmonitor-quarantine
+fsmonitor cleanup quarantine rebuild /path/.fsmonitor-quarantine
 ```
 
 The first command scans, resolves parent/child overlap, saves the plan, and makes
@@ -435,12 +437,16 @@ no filesystem changes. `--apply` revalidates each target and uses Trash with
 same-filesystem quarantine fallback. `history` distinguishes estimated,
 isolated, purged, actually reclaimed, and undone bytes; `undo` refuses to
 overwrite a newly created original path. Plans and per-action audit events
-survive process restart. Cleanup tables retain their schema-v6 contract while
-the overall database is schema v8; the versioned CleanupPlan JSON payload is v2.
+survive process restart. Database schema v9 stores plan metadata and ordered
+action rows separately, so one action update does not rewrite a large plan; the
+versioned CleanupPlan JSON payload remains v2 and legacy payloads remain readable.
 
 `history` can group those values by `category`, `pack`, or `path`. `purge` only owns
 revalidated quarantine content and requires the exact `PURGE <plan-id>` token;
-it never purges system Trash.
+it never purges system Trash. Quarantine capacity uses `.ledger.json` rather
+than rescanning every manifest before every move. `quarantine audit` reports a
+ledger/manifest mismatch, while `quarantine rebuild` safely reconstructs the
+summary and interrupted transition state without deleting unknown files.
 
 Manage declarative rule packs from the same configuration used by the TUI:
 
@@ -465,7 +471,11 @@ fsmonitor cleanup --plan PLAN_ID --permanent
 ```
 
 The command prints the irreversible warning and requires the exact
-`DELETE <plan-id>` token. `--apply` can never select permanent deletion.
+`DELETE <plan-id>` token. Supported POSIX systems bind file deletion to a
+short-lived parent/entry identity token and a verified staging unlink. Direct
+permanent directory deletion is blocked; use quarantine followed by confirmed
+purge. Platforms without the required dir-fd primitives block permanent
+deletion. `--apply` can never select permanent deletion.
 
 ## Configuration
 
