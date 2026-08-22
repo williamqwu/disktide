@@ -115,7 +115,7 @@ SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant;
 | Create dir | `os.makedirs(db_dir, exist_ok=True)` |
 | Open/create DB | `sqlite3.connect(path)` |
 | Open read-only recovery | SQLite URI with `mode=ro`, then `PRAGMA query_only=ON` |
-| Pre-migration backup | SQLite backup API to `data.db.pre-v6.bak` |
+| Pre-migration backup | SQLite backup API to `data.db.pre-v7.bak` |
 | Integrity probe | `PRAGMA quick_check` |
 | Budget measurement | `Path.stat()` on the database, WAL, and shared-memory files |
 | Retention compaction | `PRAGMA wal_checkpoint(TRUNCATE)` followed by `VACUUM` |
@@ -136,6 +136,27 @@ an in-memory degraded repository. The original database is never automatically
 deleted or overwritten.
 
 On network filesystems, placing the database on the network share would be slow. The default XDG path puts it on the local filesystem, which is correct.
+
+### Optional filesystem events -- `collectors/events/`, `services/watch.py`
+
+The core install performs no native watch calls. On Linux, installing
+`fsmonitor-cli[watch]` makes `inotify-simple` available through a lazy probe. A
+held monitor lease recursively adds directory watches while respecting
+`one_file_system`, pseudo-filesystem exclusion, maximum depth, and never-follow
+symlink policy. Newly created directories receive watches before later events
+are consumed when possible.
+
+The backend emits normalized create, modify, delete, move, overflow, root-lost,
+and backend-error hints. Rename cookies are paired inside the adapter; unmatched
+moves become deletes after a bounded timeout. `Q_OVERFLOW`, watch-limit errors,
+unmounts, root replacement, backend restart, and expired host leases mark the
+monitor degraded and require a full reconciliation.
+
+Ordinary hints are projected to their containing parent/subtree and coalesced by
+`DirtyPathTracker`. Local reconciliation calls the same `ScanService`, metric,
+and policy contract but does not write a snapshot. Periodic/manual/recovery full
+scans remain authoritative. Consequently the event stream is not a filesystem
+audit log, and process downtime is never represented as complete event history.
 
 ### Capacity alerts -- `services/alerts.py`
 

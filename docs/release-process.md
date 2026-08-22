@@ -13,8 +13,10 @@ Trusted Publishing. The release workflow is defined in
 3. The Python 3.11, 3.12, and 3.13 CI matrix is green.
 4. The minimal wheel environment stays within 20 runtime distributions and
    20 MiB, with no native extension.
-5. `fsmonitor doctor`, `fsmonitor doctor --json`, and a small directory scan
-   succeed from the built wheel.
+5. `fsmonitor doctor`, `fsmonitor doctor --json`, a small directory scan, and a
+   periodic watch smoke succeed from the core wheel.
+6. A separate clean install of `fsmonitor-cli[watch]` discovers the native
+   backend and completes strict `watch --events` smoke.
 
 ## Local Candidate Build
 
@@ -47,9 +49,20 @@ uv pip install --python .venv-release-smoke/bin/python \
 uv venv --python 3.13 .venv-release-sdist
 uv pip install --python .venv-release-sdist/bin/python \
   dist/fsmonitor_cli-*.tar.gz
+uv venv --python 3.13 .venv-release-watch
+wheel=$(echo dist/fsmonitor_cli-*.whl)
+uv pip install --python .venv-release-watch/bin/python \
+  "fsmonitor-cli[watch] @ file://${PWD}/${wheel}"
+mkdir -p /tmp/fsmonitor-smoke
+printf 'smoke' > /tmp/fsmonitor-smoke/payload
 .venv-release-smoke/bin/fsmonitor --version
 .venv-release-smoke/bin/fsmonitor doctor --json
+.venv-release-smoke/bin/fsmonitor watch /tmp/fsmonitor-smoke \
+  --periodic-only --interval 1h --max-time 1s
 .venv-release-sdist/bin/fsmonitor doctor --json
+.venv-release-watch/bin/fsmonitor doctor --json
+.venv-release-watch/bin/fsmonitor watch /tmp/fsmonitor-smoke \
+  --events --interval 1h --max-time 1s
 .venv-release-smoke/bin/python tool/check_dependency_budget.py
 ```
 

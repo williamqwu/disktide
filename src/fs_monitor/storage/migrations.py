@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-CURRENT_VERSION = 6
+CURRENT_VERSION = 7
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -369,6 +369,25 @@ MIGRATIONS: dict[int, list[str]] = {
             FOREIGN KEY (action_id) REFERENCES cleanup_actions(id) ON DELETE SET NULL
         )""",
         "CREATE INDEX idx_cleanup_audit_plan ON cleanup_audit(plan_id, created_at)",
+    ],
+    7: [
+        "ALTER TABLE monitor_status ADD COLUMN watch_mode TEXT NOT NULL DEFAULT 'periodic'",
+        "ALTER TABLE monitor_status ADD COLUMN event_backend TEXT",
+        "ALTER TABLE monitor_status ADD COLUMN event_backend_status TEXT NOT NULL DEFAULT 'unavailable'",
+        "ALTER TABLE monitor_status ADD COLUMN watched_root_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE monitor_status ADD COLUMN pending_dirty_paths INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE monitor_status ADD COLUMN dirty_paths_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE monitor_status ADD COLUMN last_event_at TEXT",
+        "ALTER TABLE monitor_status ADD COLUMN last_local_reconciliation_at TEXT",
+        "ALTER TABLE monitor_status ADD COLUMN last_full_reconciliation_at TEXT",
+        "ALTER TABLE monitor_status ADD COLUMN last_reconciliation_path TEXT",
+        "ALTER TABLE monitor_status ADD COLUMN last_local_size INTEGER",
+        "ALTER TABLE monitor_status ADD COLUMN last_local_file_count INTEGER",
+        "ALTER TABLE monitor_status ADD COLUMN overflow_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE monitor_status ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE monitor_status ADD COLUMN degraded_reason TEXT",
+        "ALTER TABLE monitor_status ADD COLUMN reconciliation_required INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE monitor_status ADD COLUMN reconciliation_state TEXT NOT NULL DEFAULT 'unknown'",
     ],
 }
 

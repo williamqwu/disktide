@@ -57,6 +57,7 @@ class MonitorScreen(Screen):
         Binding("e", "edit_monitor", "Edit", show=True),
         Binding("p", "pause_resume", "Pause/Resume", show=True),
         Binding("shift+r", "run_now", "Run now", show=True, key_display="R"),
+        Binding("g", "reconcile", "Reconcile", show=True),
         Binding("s", "toggle_session", "Start/Stop session", show=True),
         Binding("d", "archive_monitor", "Archive", show=False),
         Binding("i", "pin_snapshot", "Pin/Unpin", show=False),
@@ -410,6 +411,16 @@ class MonitorScreen(Screen):
             if item.definition.desired_state is MonitorDesiredState.ENABLED
         )
         session = "RUNNING" if dashboard.session_running else "STOPPED"
+        event_assisted = sum(
+            item.status.watch_mode.value == "event-assisted"
+            for item in dashboard.monitors
+        )
+        pending = sum(
+            item.status.pending_dirty_paths for item in dashboard.monitors
+        )
+        degraded = sum(
+            item.status.reconciliation_required for item in dashboard.monitors
+        )
         budget = humanize.naturalsize(dashboard.database_bytes, binary=True)
         if dashboard.hard_budget_bytes:
             budget += " / " + humanize.naturalsize(
@@ -417,6 +428,7 @@ class MonitorScreen(Screen):
             )
         self.query_one("#monitor-session-banner", Static).update(
             f"Monitor Center · Session {session} · {enabled} enabled · "
+            f"events {event_assisted} · dirty {pending} · degraded {degraded} · "
             f"DB {budget} · repository {dashboard.repository_state}"
         )
 
@@ -484,6 +496,21 @@ class MonitorScreen(Screen):
             f"  Next due: {next_due}\n"
             f"  Last success: {last_success}\n"
             f"  Last duration: {status.last_duration_seconds or 0:.1f}s\n\n"
+            f"[b]Watch & confidence[/b]\n"
+            f"  Mode: {status.watch_mode.value}\n"
+            f"  Backend: {status.event_backend or 'none'} · "
+            f"{status.event_backend_status}\n"
+            f"  Watched roots: {status.watched_root_count}\n"
+            f"  Pending dirty paths: {status.pending_dirty_paths}\n"
+            f"  Reconciliation: {status.reconciliation_state.value}\n"
+            f"  Last event: "
+            f"{status.last_event_at.isoformat() if status.last_event_at else 'never'}\n"
+            f"  Last local: "
+            f"{status.last_local_reconciliation_at.isoformat() if status.last_local_reconciliation_at else 'never'}\n"
+            f"  Last full: "
+            f"{status.last_full_reconciliation_at.isoformat() if status.last_full_reconciliation_at else 'never'}\n"
+            f"  Overflow/recovery: {status.overflow_count}/{status.recovery_count}\n"
+            f"  Degraded: {status.degraded_reason or 'no'}\n\n"
             f"[b]Definition[/b]\n"
             f"  Metric: {definition.metric.value}\n"
             f"  Policy: {definition.policy.summary()}\n"
@@ -830,12 +857,40 @@ class MonitorScreen(Screen):
             return
         self._run_one_shot(self._selected_monitor_id)
 
+    def action_reconcile(self) -> None:
+        if self._selected_monitor_id is None:
+            return
+        if self._service.session_running:
+            try:
+                self._service.reconcile_monitor(self._selected_monitor_id)
+                self.app.notify("Full reconciliation queued in the active TUI session.")
+            except Exception as exc:
+                self._notify_error(exc)
+            self._load_data()
+            return
+        self._reconcile_one_shot(self._selected_monitor_id)
+
     @work(thread=True, exclusive=True, group="monitor-run")
     def _run_one_shot(self, monitor_id: int) -> None:
         try:
             result = self._service.run_monitor_now(monitor_id)
             if result is not None and result.run is not None:
                 message = f"Run {result.run.run_id[:8]} {result.run.status.value}"
+                self.app.call_from_thread(self.app.notify, message)
+        except Exception as exc:
+            self.app.call_from_thread(self._notify_error, exc)
+        finally:
+            self.app.call_from_thread(self._load_data)
+
+    @work(thread=True, exclusive=True, group="monitor-run")
+    def _reconcile_one_shot(self, monitor_id: int) -> None:
+        try:
+            result = self._service.reconcile_monitor(monitor_id)
+            if result is not None and result.run is not None:
+                message = (
+                    f"Reconciliation {result.run.run_id[:8]} "
+                    f"{result.run.status.value}"
+                )
                 self.app.call_from_thread(self.app.notify, message)
         except Exception as exc:
             self.app.call_from_thread(self._notify_error, exc)
@@ -1047,6 +1102,8 @@ class MonitorScreen(Screen):
             MonitorEventKind.RUN_FINISHED,
             MonitorEventKind.SNAPSHOT_SAVED,
             MonitorEventKind.RETENTION_COMPLETED,
+            MonitorEventKind.WATCH_CHANGED,
+            MonitorEventKind.RECONCILIATION_FINISHED,
         }:
             self._load_data()
 

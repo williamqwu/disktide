@@ -27,7 +27,7 @@ from fs_monitor.storage.database import Database
 from fs_monitor.storage.migrations import CURRENT_VERSION, get_version
 
 
-DOCTOR_SCHEMA_VERSION = 2
+DOCTOR_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,11 +181,12 @@ def build_doctor_report(
         config={
             "status": config_status,
             "reason": _redact_text(config_reason, show_paths),
+            "monitor_event_mode": config.monitor.event_mode,
         },
         database=database_report,
         metrics=metric_items,
         capabilities=platform_items,
-        optional_extras=_optional_extras(),
+        optional_extras=_optional_extras(config.monitor.event_mode),
         scan_policy={
             "one_file_system": config.scan.one_file_system,
             "exclude_pseudo_filesystems": config.scan.exclude_pseudo_filesystems,
@@ -312,6 +313,12 @@ def _render_capability_group(items: object) -> list[str]:
         }.get(status, "NO")
         label = labels.get(key, key.replace("_", " ").title())
         lines.append(f"  [{marker}] {label}: {value.get('reason', '')}")
+        version_value = value.get("version")
+        if version_value:
+            lines.append(f"       Backend version: {version_value}")
+        configured_mode = value.get("configured_mode")
+        if configured_mode:
+            lines.append(f"       Configured mode: {configured_mode}")
         suggestion = value.get("suggestion")
         if suggestion:
             lines.append(f"       Suggestion: {suggestion}")
@@ -393,10 +400,20 @@ def _safe_memory_probe(adapter: PlatformAdapter):
         )
 
 
-def _optional_extras() -> dict[str, object]:
+def _optional_extras(configured_mode: str) -> dict[str, object]:
+    from fs_monitor.collectors.events.native import probe_native_event_backend
+
+    watch = probe_native_event_backend().to_dict()
+    watch.update(
+        {
+            "extra": "watch",
+            "configured_mode": configured_mode,
+            "install": "uv tool install 'fsmonitor-cli[watch]'",
+        }
+    )
     reason = "not shipped by the 0.2 core installation"
     suggestion = "No action required; this integration is reserved for a later wave."
-    return {
+    reserved = {
         name: {
             "status": "unavailable",
             "available": False,
@@ -404,8 +421,9 @@ def _optional_extras() -> dict[str, object]:
             "reason": reason,
             "suggestion": suggestion,
         }
-        for name in ("watch", "remote", "web", "export")
+        for name in ("remote", "web", "export")
     }
+    return {"watch": watch, **reserved}
 
 
 def _distribution_version(distribution: str) -> str:

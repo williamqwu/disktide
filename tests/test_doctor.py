@@ -9,6 +9,8 @@ from click.testing import CliRunner
 
 from fs_monitor.__main__ import cli
 from fs_monitor.collectors.platform.portable import PortablePlatformAdapter
+from fs_monitor.collectors.events.base import EventBackendInfo
+from fs_monitor.extensions.capabilities import CapabilityStatus
 from fs_monitor.services.doctor import (
     DOCTOR_SCHEMA_VERSION,
     build_doctor_report,
@@ -84,6 +86,37 @@ def test_human_report_explains_unavailable_capabilities(tmp_path, monkeypatch):
     assert "[NO] Block devices" in output
     assert "Suggestion:" in output
     assert "Default scan policy" in output
+
+
+def test_doctor_reports_watch_backend_version_and_configured_mode(
+    tmp_path,
+    monkeypatch,
+):
+    _set_xdg(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "fs_monitor.collectors.events.native.probe_native_event_backend",
+        lambda: EventBackendInfo(
+            name="inotify-simple",
+            version="2.0.1",
+            status=CapabilityStatus.AVAILABLE,
+            reason="Linux inotify event acceleration is available",
+            suggestion="Periodic full reconciliation remains enabled.",
+        ),
+    )
+
+    report = build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+    payload = report.to_dict()
+    watch = payload["optional_extras"]["watch"]
+
+    assert payload["schema_version"] == 3
+    assert payload["config"]["monitor_event_mode"] == "auto"
+    assert watch["available"] is True
+    assert watch["version"] == "2.0.1"
+    assert watch["configured_mode"] == "auto"
+    assert payload["capabilities"]["filesystem_events"]["status"] == "available"
+    output = render_doctor_report(report)
+    assert "Backend version: 2.0.1" in output
+    assert "Configured mode: auto" in output
 
 
 class _DegradedDatabase:

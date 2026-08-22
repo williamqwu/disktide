@@ -449,7 +449,7 @@ def compare(
         raise click.exceptions.Exit(2)
 
 
-def _monitor_service():
+def _monitor_service(*, event_mode: str | None = None):
     from fs_monitor.config import load_config
     from fs_monitor.repositories import default_snapshot_repository
     from fs_monitor.services.monitor import MonitorService
@@ -462,6 +462,7 @@ def _monitor_service():
         host_type="cli",
         soft_budget_bytes=config.monitor.database_soft_budget,
         hard_budget_bytes=config.monitor.database_hard_budget,
+        event_mode=event_mode or config.monitor.event_mode,
     )
     return config, repository, service
 
@@ -799,6 +800,40 @@ def monitor_run(identifier: str) -> None:
         repository.close()
 
 
+@monitor_group.command("reconcile")
+@click.argument("identifier")
+def monitor_reconcile(identifier: str) -> None:
+    """Run a trusted full reconciliation for one monitor."""
+    _, repository, service = _monitor_service()
+    try:
+        result = service.reconcile_monitor(identifier)
+        if result is None:
+            click.echo("Full reconciliation queued in the active host session.")
+            return
+        if result.run is None or not result.run.succeeded:
+            raise click.ClickException(
+                result.run.error_message if result.run else "reconciliation did not start"
+            )
+        snapshot = (
+            f"snapshot #{result.snapshot.id}"
+            if result.snapshot is not None
+            else "snapshot not persisted"
+        )
+        click.echo(
+            f"Reconciliation {result.run.run_id[:8]} "
+            f"{result.run.status.value}: {snapshot}"
+        )
+        if result.persistence_error:
+            click.echo(f"Warning: {result.persistence_error}", err=True)
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        service.shutdown(wait=False)
+        repository.close()
+
+
 @monitor_group.command("status")
 @click.argument("identifier", required=False)
 @click.option("--json", "json_output", is_flag=True)
@@ -846,6 +881,48 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
                                 else None
                             ),
                             "last_error": item.status.last_error,
+                            "watch_mode": item.status.watch_mode.value,
+                            "event_backend": item.status.event_backend,
+                            "event_backend_status": item.status.event_backend_status,
+                            "watched_root_count": item.status.watched_root_count,
+                            "pending_dirty_paths": item.status.pending_dirty_paths,
+                            "dirty_paths": list(item.status.dirty_paths),
+                            "last_event_at": (
+                                item.status.last_event_at.isoformat()
+                                if item.status.last_event_at
+                                else None
+                            ),
+                            "last_local_reconciliation_at": (
+                                item.status.last_local_reconciliation_at.isoformat()
+                                if item.status.last_local_reconciliation_at
+                                else None
+                            ),
+                            "last_full_reconciliation_at": (
+                                item.status.last_full_reconciliation_at.isoformat()
+                                if item.status.last_full_reconciliation_at
+                                else None
+                            ),
+                            "last_reconciliation_path": (
+                                item.status.last_reconciliation_path
+                            ),
+                            "last_local_size": item.status.last_local_size,
+                            "last_local_file_count": (
+                                item.status.last_local_file_count
+                            ),
+                            "overflow_count": item.status.overflow_count,
+                            "recovery_count": item.status.recovery_count,
+                            "degraded_reason": item.status.degraded_reason,
+                            "reconciliation_required": (
+                                item.status.reconciliation_required
+                            ),
+                            "reconciliation_state": (
+                                item.status.reconciliation_state.value
+                            ),
+                            "next_full_scan_at": (
+                                item.status.next_due_at.isoformat()
+                                if item.status.next_due_at
+                                else None
+                            ),
                             "snapshot_count": item.snapshot_count,
                             "database_bytes": item.database_bytes,
                         }
@@ -883,6 +960,28 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
                 click.echo(f"  Host: {status.host_type} · {status.host_id}")
             else:
                 click.echo("  Host: none (enabled does not install a daemon)")
+            click.echo(
+                f"  Watch: {status.watch_mode.value}; "
+                f"{status.event_backend or 'none'} · {status.event_backend_status}; "
+                f"{status.watched_root_count} root(s)"
+            )
+            click.echo(
+                f"  Reconciliation: {status.reconciliation_state.value}; "
+                f"pending {status.pending_dirty_paths}; "
+                f"last event {status.last_event_at.isoformat() if status.last_event_at else 'never'}"
+            )
+            click.echo(
+                f"  Last local/full: "
+                f"{status.last_local_reconciliation_at.isoformat() if status.last_local_reconciliation_at else 'never'} / "
+                f"{status.last_full_reconciliation_at.isoformat() if status.last_full_reconciliation_at else 'never'}"
+            )
+            click.echo(
+                f"  Recovery: overflow {status.overflow_count}; "
+                f"recovered {status.recovery_count}; "
+                f"next full {status.next_due_at.isoformat() if status.next_due_at else 'not scheduled'}"
+            )
+            if status.degraded_reason:
+                click.echo(f"  Degraded: {status.degraded_reason}", err=True)
             if status.last_error or status.blocked_reason:
                 click.echo(
                     f"  Problem: {status.blocked_reason or status.last_error}",
@@ -1345,6 +1444,16 @@ def alerts_check(monitor_id: int | None, json_output: bool) -> None:
 @click.option("--interval", "-i", default=None, help="Transient scan interval")
 @click.option("--max-time", "-t", default=None, help="Maximum foreground host time")
 @click.option("--workers", "-w", type=int, default=None, help="Transient scan workers")
+@click.option(
+    "--events",
+    is_flag=True,
+    help="Require optional native filesystem-event acceleration",
+)
+@click.option(
+    "--periodic-only",
+    is_flag=True,
+    help="Disable filesystem events for this foreground host",
+)
 def watch(
     path: Path | None,
     monitor_identifier: str | None,
@@ -1352,6 +1461,8 @@ def watch(
     interval: str | None,
     max_time: str | None,
     workers: int | None,
+    events: bool,
+    periodic_only: bool,
 ) -> None:
     """Run the shared monitor host in the foreground.
 
@@ -1368,6 +1479,8 @@ def watch(
 
     if watch_all and monitor_identifier is not None:
         raise click.UsageError("--all and --monitor are mutually exclusive")
+    if events and periodic_only:
+        raise click.UsageError("--events and --periodic-only are mutually exclusive")
     if (watch_all or monitor_identifier is not None) and path is not None:
         raise click.UsageError("PATH cannot be combined with --all or --monitor")
     if (watch_all or monitor_identifier is not None) and (
@@ -1377,7 +1490,8 @@ def watch(
             "saved monitors use their persisted interval/workers; edit the definition instead"
         )
 
-    config, repository, service = _monitor_service()
+    requested_mode = "events" if events else "periodic" if periodic_only else None
+    config, repository, service = _monitor_service(event_mode=requested_mode)
     max_seconds = (
         _duration_value(max_time, param_hint="--max-time")
         if max_time is not None
@@ -1396,9 +1510,27 @@ def watch(
             click.echo(f"[{stamp}] {event.message}")
         elif event.kind is MonitorEventKind.RUN_FINISHED:
             click.echo(f"[{stamp}] {event.message}")
+        elif event.kind is MonitorEventKind.WATCH_CHANGED:
+            click.echo(f"[{stamp}] watch: {event.message}")
+        elif event.kind is MonitorEventKind.RECONCILIATION_FINISHED:
+            click.echo(f"[{stamp}] reconcile: {event.message}")
 
     service.subscribe(report)
     try:
+        if events:
+            service.set_event_mode("events")
+        backend = service.event_backend_info()
+        if service.event_mode.value == "periodic":
+            click.echo("Watch mode: periodic-only")
+        elif backend.available:
+            click.echo(
+                f"Watch mode: event-assisted ({backend.name} {backend.version or 'unknown'})"
+            )
+        else:
+            click.echo(
+                f"Watch mode: periodic fallback ({backend.reason})",
+                err=True,
+            )
         if watch_all or monitor_identifier is not None:
             monitor_ids: set[int] | None = None
             if monitor_identifier is not None:

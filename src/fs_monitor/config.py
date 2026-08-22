@@ -77,6 +77,7 @@ class MonitorConfig:
     database_soft_budget: int | None = 2 * 1024**3
     database_hard_budget: int | None = 3 * 1024**3
     auto_start_in_tui: bool = False
+    event_mode: str = "auto"
 
 
 @dataclass
@@ -206,6 +207,7 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     )
     if config.monitor.auto_start_in_tui:
         lines.append("auto_start_in_tui = true")
+    lines.append(f'event_mode = "{config.monitor.event_mode}"')
     lines.append("")
 
     lines.append("[cleanup]")
@@ -293,6 +295,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         )
         config.monitor.auto_start_in_tui = monitor.get(
             "auto_start_in_tui", False
+        )
+        raw_event_mode = str(monitor.get("event_mode", "auto")).lower()
+        config.monitor.event_mode = (
+            raw_event_mode
+            if raw_event_mode in {"auto", "events", "periodic"}
+            else "auto"
         )
 
     if "cleanup" in data:

@@ -80,6 +80,7 @@ class FSMonitorApp(App):
             host_type="tui",
             soft_budget_bytes=self._config.monitor.database_soft_budget,
             hard_budget_bytes=self._config.monitor.database_hard_budget,
+            event_mode=self._config.monitor.event_mode,
         )
         self._visualization_service = VisualizationService(
             self._snapshot_repository

@@ -52,16 +52,24 @@ jobs:
         run: |
           uv venv --python 3.13 .venv-smoke
           uv pip install --python .venv-smoke/bin/python dist/fsmonitor_cli-*.whl
+          uv venv --python 3.13 .venv-watch-smoke
+          wheel=$(echo dist/fsmonitor_cli-*.whl)
+          uv pip install --python .venv-watch-smoke/bin/python \
+            "fsmonitor-cli[watch] @ file://${PWD}/${wheel}"
           uv venv --python 3.13 .venv-sdist-smoke
           uv pip install --python .venv-sdist-smoke/bin/python dist/fsmonitor_cli-*.tar.gz
       - name: Smoke test installed entry points
         run: |
           .venv-smoke/bin/fsmonitor --version
           .venv-smoke/bin/fsmonitor doctor --json > doctor.json
-          .venv-smoke/bin/python -c 'import json; json.load(open("doctor.json"))'
+          .venv-smoke/bin/python -c 'import json; data=json.load(open("doctor.json")); assert not data["optional_extras"]["watch"]["available"]'
           mkdir -p /tmp/fsmonitor-smoke/data
           printf 'smoke' > /tmp/fsmonitor-smoke/data/file.txt
           .venv-smoke/bin/fsmonitor scan /tmp/fsmonitor-smoke --metric unique --workers 1
+          .venv-smoke/bin/fsmonitor watch /tmp/fsmonitor-smoke --periodic-only --interval 1h --max-time 1s
+          .venv-watch-smoke/bin/fsmonitor doctor --json > doctor-watch.json
+          .venv-watch-smoke/bin/python -c 'import json; data=json.load(open("doctor-watch.json")); assert data["optional_extras"]["watch"]["available"]'
+          .venv-watch-smoke/bin/fsmonitor watch /tmp/fsmonitor-smoke --events --interval 1h --max-time 1s
           .venv-sdist-smoke/bin/fsmonitor --version
           .venv-sdist-smoke/bin/fsmonitor doctor --json > doctor-sdist.json
           .venv-sdist-smoke/bin/python -c 'import json; json.load(open("doctor-sdist.json"))'

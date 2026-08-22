@@ -38,7 +38,9 @@ from fs_monitor.domain.monitor import (
     MonitorDesiredState,
     MonitorHealthState,
     MonitorHistoryPoint,
+    MonitorReconciliationState,
     MonitorStatus,
+    MonitorWatchMode,
     RetentionPolicy,
     RetentionSnapshot,
     RetentionResult,
@@ -1416,20 +1418,83 @@ class Database:
             blocked_reason=row[18],
             last_retention_at=_datetime_value(row[19]),
             last_retention_summary=row[20],
+            watch_mode=MonitorWatchMode(row[21] or MonitorWatchMode.PERIODIC.value),
+            event_backend=row[22],
+            event_backend_status=row[23] or "unavailable",
+            watched_root_count=int(row[24] or 0),
+            pending_dirty_paths=int(row[25] or 0),
+            dirty_paths=tuple(json.loads(row[26] or "[]")),
+            last_event_at=_datetime_value(row[27]),
+            last_local_reconciliation_at=_datetime_value(row[28]),
+            last_full_reconciliation_at=_datetime_value(row[29]),
+            last_reconciliation_path=row[30],
+            last_local_size=row[31],
+            last_local_file_count=row[32],
+            overflow_count=int(row[33] or 0),
+            recovery_count=int(row[34] or 0),
+            degraded_reason=row[35],
+            reconciliation_required=bool(row[36]),
+            reconciliation_state=MonitorReconciliationState(
+                row[37] or MonitorReconciliationState.UNKNOWN.value
+            ),
         )
+
+    def _monitor_status_columns(self) -> str:
+        columns = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(monitor_status)")
+        }
+        optional = (
+            ("watch_mode", "'periodic'"),
+            ("event_backend", "NULL"),
+            ("event_backend_status", "'unavailable'"),
+            ("watched_root_count", "0"),
+            ("pending_dirty_paths", "0"),
+            ("dirty_paths_json", "'[]'"),
+            ("last_event_at", "NULL"),
+            ("last_local_reconciliation_at", "NULL"),
+            ("last_full_reconciliation_at", "NULL"),
+            ("last_reconciliation_path", "NULL"),
+            ("last_local_size", "NULL"),
+            ("last_local_file_count", "NULL"),
+            ("overflow_count", "0"),
+            ("recovery_count", "0"),
+            ("degraded_reason", "NULL"),
+            ("reconciliation_required", "0"),
+            ("reconciliation_state", "'unknown'"),
+        )
+        base = [
+            "activity_state",
+            "health_state",
+            "host_id",
+            "host_type",
+            "lease_expires_at",
+            "next_due_at",
+            "last_attempt_at",
+            "last_success_at",
+            "last_failure_at",
+            "last_duration",
+            "active_run_id",
+            "active_phase",
+            "progress_percent",
+            "current_path",
+            "rerun_pending",
+            "latest_snapshot_id",
+            "consecutive_failures",
+            "last_error",
+            "blocked_reason",
+            "last_retention_at",
+            "last_retention_summary",
+        ]
+        base.extend(name if name in columns else default for name, default in optional)
+        return ", ".join(base)
 
     def get_monitor_status(self, monitor_id: int) -> MonitorStatus:
         if not self._table_exists("monitor_status"):
             return MonitorStatus(monitor_id=monitor_id)
         row = self.conn.execute(
-            """SELECT activity_state, health_state, host_id, host_type,
-                      lease_expires_at, next_due_at, last_attempt_at,
-                      last_success_at, last_failure_at, last_duration,
-                      active_run_id, active_phase, progress_percent,
-                      current_path, rerun_pending, latest_snapshot_id,
-                      consecutive_failures, last_error, blocked_reason,
-                      last_retention_at, last_retention_summary
-               FROM monitor_status WHERE monitor_id = ?""",
+            f"SELECT {self._monitor_status_columns()} "
+            "FROM monitor_status WHERE monitor_id = ?",
             (monitor_id,),
         ).fetchone()
         return self._row_to_monitor_status(row, monitor_id)
@@ -1445,9 +1510,18 @@ class Database:
                    active_run_id, active_phase, progress_percent, current_path,
                    rerun_pending, latest_snapshot_id, consecutive_failures,
                    last_error, blocked_reason, last_retention_at,
-                   last_retention_summary
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                         ?, ?, ?, ?)
+                   last_retention_summary, watch_mode, event_backend,
+                   event_backend_status, watched_root_count,
+                   pending_dirty_paths, dirty_paths_json, last_event_at,
+                   last_local_reconciliation_at, last_full_reconciliation_at,
+                   last_reconciliation_path, last_local_size,
+                   last_local_file_count, overflow_count, recovery_count,
+                   degraded_reason, reconciliation_required,
+                   reconciliation_state
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(monitor_id) DO UPDATE SET
                    activity_state = excluded.activity_state,
                    health_state = excluded.health_state,
@@ -1469,7 +1543,24 @@ class Database:
                    last_error = excluded.last_error,
                    blocked_reason = excluded.blocked_reason,
                    last_retention_at = excluded.last_retention_at,
-                   last_retention_summary = excluded.last_retention_summary""",
+                   last_retention_summary = excluded.last_retention_summary,
+                   watch_mode = excluded.watch_mode,
+                   event_backend = excluded.event_backend,
+                   event_backend_status = excluded.event_backend_status,
+                   watched_root_count = excluded.watched_root_count,
+                   pending_dirty_paths = excluded.pending_dirty_paths,
+                   dirty_paths_json = excluded.dirty_paths_json,
+                   last_event_at = excluded.last_event_at,
+                   last_local_reconciliation_at = excluded.last_local_reconciliation_at,
+                   last_full_reconciliation_at = excluded.last_full_reconciliation_at,
+                   last_reconciliation_path = excluded.last_reconciliation_path,
+                   last_local_size = excluded.last_local_size,
+                   last_local_file_count = excluded.last_local_file_count,
+                   overflow_count = excluded.overflow_count,
+                   recovery_count = excluded.recovery_count,
+                   degraded_reason = excluded.degraded_reason,
+                   reconciliation_required = excluded.reconciliation_required,
+                   reconciliation_state = excluded.reconciliation_state""",
             (
                 status.monitor_id,
                 status.activity.value,
@@ -1493,6 +1584,23 @@ class Database:
                 status.blocked_reason,
                 _datetime_text(status.last_retention_at),
                 status.last_retention_summary,
+                status.watch_mode.value,
+                status.event_backend,
+                status.event_backend_status,
+                status.watched_root_count,
+                status.pending_dirty_paths,
+                json.dumps(list(status.dirty_paths), sort_keys=True),
+                _datetime_text(status.last_event_at),
+                _datetime_text(status.last_local_reconciliation_at),
+                _datetime_text(status.last_full_reconciliation_at),
+                status.last_reconciliation_path,
+                status.last_local_size,
+                status.last_local_file_count,
+                status.overflow_count,
+                status.recovery_count,
+                status.degraded_reason,
+                int(status.reconciliation_required),
+                status.reconciliation_state.value,
             ),
         )
         self.conn.commit()

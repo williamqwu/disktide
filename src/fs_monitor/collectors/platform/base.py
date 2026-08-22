@@ -164,11 +164,14 @@ class PlatformAdapter:
         )
 
     def filesystem_events_capability(self) -> Capability:
+        from fs_monitor.collectors.events.native import probe_native_event_backend
+
+        info = probe_native_event_backend()
         return Capability(
             CapabilityId.FILESYSTEM_EVENTS,
-            CapabilityStatus.UNAVAILABLE,
-            "native filesystem event acceleration is not installed",
-            "Polling and full scans remain available; native watch support is optional later.",
+            info.status,
+            info.reason,
+            info.suggestion,
         )
 
     def capabilities(self, path: str = "/") -> PlatformCapabilities:

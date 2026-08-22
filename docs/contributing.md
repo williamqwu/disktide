@@ -31,6 +31,9 @@ visualizations, TUI navigation and modals, FS Overview/block
 devices/benchmarking, progress reporting, system detection, welcome flow, and
 migrations. Wave-specific cleanup contracts live in
 `tests/test_cleanup_wave08.py` and `tests/test_cleanup_wave09.py`.
+Filesystem-event normalization, dirty coalescing, overflow recovery, optional
+dependency fallback, and MonitorService integration live in
+`tests/test_watch_wave10.py`.
 
 `PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app tests instead wrap an async helper with `asyncio.run(...)` and use `app.run_test()`; follow the style of the nearby tests.
 
@@ -90,6 +93,19 @@ scores as ordering metadata; every filesystem action still passes through
 - Directory workers scan direct entries only; descendants must return through `TreeScanScheduler` rather than recursively occupying a worker.
 - Keep `ScanEngine().scan(path)` compatibility for `tool/bench_scan.py` and `tool/diag_scan.py` until the compatibility facade is intentionally retired.
 
+### Filesystem Event Backends
+
+- Backends implement `collectors.events.base.EventBackend` and emit normalized
+  hints only. They do not import presentation or persistence adapters.
+- Optional packages must be probed and imported lazily. Core periodic scans,
+  doctor, CLI, and TUI must work when no backend package is installed.
+- Never treat events as authoritative totals or an audit stream. Local dirty
+  scans use `ScanService`; only successful full reconciliation writes snapshots.
+- Overflow, watch limits, root loss, restart, and lease expiry must persist a
+  degraded/full-reconciliation-required state.
+- Add backend-neutral tests with a fake backend. Platform integration tests may
+  require the `[watch]` extra but cannot weaken the core clean-install gate.
+
 ## Distribution Checks
 
 ```bash
@@ -98,8 +114,10 @@ uv run python tool/verify_distribution.py
 ```
 
 The CI minimal-install job installs the wheel into a fresh environment, runs
-`fsmonitor doctor` plus a small scan, and enforces at most 20 runtime
-distributions, at most 20 MiB of installed files, and no native extension.
+`fsmonitor doctor`, a small scan, and periodic watch smoke, and enforces at most
+20 runtime distributions, at most 20 MiB of installed files, and no native
+extension. A second clean environment installs `fsmonitor-cli[watch]`, verifies
+backend discovery, and runs strict `watch --events` smoke.
 See [release-process.md](release-process.md) for the tag and PyPI flow.
 
 ### Configuration
@@ -159,8 +177,9 @@ default_action = "safe"
 3. Add positive, negative, parent-indicator/path-context, age-boundary, invalid
    schema, scoring, and detection-only cases in `tests/test_cleanup_wave09.py`,
    plus Wave08 revalidation coverage when the safety contract changes.
-4. Preserve old CleanupPlan payload readers when adding plan metadata. Database
-   schema v6 and CleanupPlan payload v2 are independent version numbers.
+4. Preserve old CleanupPlan payload readers when adding plan metadata. The
+   schema-v6 cleanup table contract, current database schema v7, and CleanupPlan
+   payload v2 are independent version numbers.
 
 ## Adding a New Screen
 

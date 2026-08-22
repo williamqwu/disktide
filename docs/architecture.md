@@ -26,6 +26,9 @@ src/fs_monitor/
 
   collectors/
     local_scanner.py     ScanEngine adapter used by ScanService
+  collectors/events/
+    base.py              Backend-neutral filesystem event protocol
+    native.py            Optional Linux inotify adapter and lazy probe
   collectors/platform/
     base.py              Portable adapter + shared capability probes
     linux.py             procfs/sysfs/lsblk implementation
@@ -47,6 +50,7 @@ src/fs_monitor/
     scan_consumers.py    Progress/tree view models and event replay
     snapshots.py         Persist successful ScanRun results
     visualization.py     Bounded Compare/Monitor query + view-model cache
+    watch.py             Bounded dirty-path debounce/coalescing
 
   repositories/
     alerts.py            AlertRepository protocol
@@ -358,23 +362,40 @@ blocked unless the caller explicitly requests a raw/untrusted diff.
 
 `MonitorService` is the command/query boundary shared by Click commands and the
 Textual Monitor Center. Presentation code submits create/update/pause/resume,
-run-now, host-session, archive, pin, retention, and alert intents; it does not
+run-now, reconcile, host-session, archive, pin, retention, and alert intents; it does not
 write SQLite or construct a second scheduler. Persistent definitions live in
 the repository, while `config.toml` contains only global defaults, database
-budgets, and the TUI auto-start preference.
+budgets, the TUI auto-start preference, and `monitor.event_mode`.
 
 Three state dimensions remain separate:
 
 - desired state: `enabled`, `paused`, or `archived`;
-- activity: `no-host`, `waiting`, `queued`, `scanning`, or `stopping`;
+- activity: `no-host`, `waiting`, `queued`, `scanning`, `reconciling`, or `stopping`;
 - health: `unknown`, `healthy`, `warning`, `failed`, or `blocked`.
 
-An enabled definition does not imply background execution. Wave 06 hosts are
-the current TUI process or `fsmonitor watch --monitor/--all`; both acquire the
-same expiring repository lease and heartbeat it. Start-to-start UTC due times
-are persisted, process waits use a monotonic clock, one monitor never overlaps
-itself, and repeated run-now requests coalesce to one pending rerun. Native
-daemon or user-service installation remains outside this release.
+An enabled definition does not imply background execution. The current TUI
+process, `fsmonitor watch --monitor/--all`, and an externally supervised user
+unit all acquire the same expiring repository lease and heartbeat it.
+Start-to-start UTC due times are persisted, process waits use a monotonic clock,
+one monitor never overlaps itself, and repeated run-now requests coalesce to one
+pending rerun. The application ships a systemd user-unit example but does not
+install or enable it.
+
+Wave 10 inserts optional event acceleration into that host instead of creating a
+second scheduler. `collectors.events` normalizes create/modify/delete/move,
+overflow, root-lost, and backend-error signals. One backend and bounded
+`DirtyPathTracker` attach to each held lease. Ordinary dirty subtrees are
+rescanned through `ScanService` without writing a formal snapshot. Scheduled,
+manual, startup/restart, and overflow recovery scans remain full root scans and
+are the only runs that persist canonical history. Events that arrive during a
+full scan stay dirty for the next reconciliation rather than being cleared by a
+stale status object.
+
+`monitor_status` exposes periodic/event-assisted mode, backend status, watched
+root count, pending paths, last event/local/full reconciliation, overflow and
+recovery counters, degraded reason, and confidence state. Backend stop, lease
+expiry, root loss, watch-limit failure, or queue overflow cannot retain a stale
+healthy projection; they require a later full reconciliation.
 
 Every hosted run uses one pipeline: scan, persist snapshot, evaluate alerts,
 apply retention when needed, record run/status, and publish monitor events.
@@ -395,8 +416,8 @@ snapshot ids, observed and threshold values, severity, confidence, cooldown
 suppression, and suppression reason. Partial snapshots create suppressed audit
 events instead of presenting low-confidence triggers as definitive.
 
-See `docs/adr/0005-monitor-service-retention-and-alerts.md` for the accepted
-host, scheduling, retention, alert, and schema boundaries.
+See `docs/adr/0005-monitor-service-retention-and-alerts.md` for the base host,
+scheduling, retention, and alert boundaries, and ADR 0009 for event acceleration.
 
 ## Database
 
@@ -404,7 +425,7 @@ SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects
 
 ### Schema
 
-Database schema v5 remains distinct from snapshot format v2 and the public
+Database schema v7 remains distinct from snapshot format v2 and the public
 snapshot API version.
 
 **monitor_definitions** -- Canonical path, label, revision, desired state,
@@ -412,8 +433,9 @@ start-to-start interval, selected metric, serialized scan policy, workers, and
 versioned retention policy.
 
 **monitor_status / monitor_leases** -- Activity/health projection, next due and
-last run details, active phase/progress, failure state, retention summary, and
-the current foreground host lease/heartbeat.
+last run details, active phase/progress, failure state, retention summary,
+event/backend/dirty/reconciliation confidence, and the current foreground host
+lease/heartbeat.
 
 **monitored_roots** -- Stable root path plus observed device, inode, filesystem,
 and last-seen timestamp.
@@ -466,12 +488,13 @@ the TUI never converts an absent subtree into a false zero.
 ### Migration and degraded behavior
 
 Before changing a non-empty on-disk database, migration writes a SQLite backup
-next to it (for the current schema v6: `data.db.pre-v6.bak`). All DDL, backfill, and schema
+next to it (for the current schema v7: `data.db.pre-v7.bak`). All DDL, backfill, and schema
 version changes run in one transaction; failure rolls back without advancing
 `schema_version`. Existing schema-v3/v0.1.7 snapshots are marked legacy with an
 explicit inference source rather than discarded. Schema-v5 migration also maps
 the old size/percentage alert prototype into the new rule/event audit fields;
-schema v6 adds CleanupPlan/audit tables without changing snapshot format v2.
+schema v6 adds CleanupPlan/audit tables and schema v7 adds event-assisted monitor
+status without changing snapshot format v2.
 
 If migration or writes fail but the database is readable, the adapter opens the
 original read-only so list/history remain available. If the file is corrupt or
@@ -722,9 +745,13 @@ a bounded temporary benchmark file on the selected mount.
 | drawille >= 0.2.0 | Braille canvas drawing |
 | click >= 8.0 | CLI argument parsing |
 | humanize >= 4.0 | Human-readable sizes and dates |
+| inotify-simple >= 2, < 3 | Optional Linux `[watch]` event acceleration |
 
 Python >= 3.11 required (uses `tomllib`, `slots=True` dataclasses, `X | Y` union syntax).
 
 `uv.lock` is committed. CI tests Python 3.11, 3.12, and 3.13 with
 `uv sync --locked`, then installs the wheel into a clean environment. The core
 budget is at most 20 runtime distributions and 20 MiB with no native extension.
+CI separately installs the `watch` extra and verifies event backend discovery;
+the minimal environment verifies that the same capability remains unavailable
+without affecting periodic monitoring.

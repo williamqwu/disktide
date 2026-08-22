@@ -49,6 +49,9 @@ def _verify_wheel(path: Path, version: str) -> None:
             "fs_monitor/cleanup/rulepacks/ide.toml",
             "fs_monitor/cleanup/rulepacks/containers.toml",
             "fs_monitor/collectors/local_scanner.py",
+            "fs_monitor/collectors/events/__init__.py",
+            "fs_monitor/collectors/events/base.py",
+            "fs_monitor/collectors/events/native.py",
             "fs_monitor/collectors/platform/linux.py",
             "fs_monitor/domain/alerts.py",
             "fs_monitor/domain/cleanup.py",
@@ -77,6 +80,7 @@ def _verify_wheel(path: Path, version: str) -> None:
             "fs_monitor/services/scan_consumers.py",
             "fs_monitor/services/snapshots.py",
             "fs_monitor/services/visualization.py",
+            "fs_monitor/services/watch.py",
             "fs_monitor/viz/layout.py",
             "fs_monitor/widgets/alert_editor.py",
             "fs_monitor/widgets/cleanup_modal.py",
@@ -111,6 +115,15 @@ def _verify_wheel(path: Path, version: str) -> None:
         )
         if metadata["Version"] != version:
             raise SystemExit("wheel metadata version does not match pyproject")
+        if "watch" not in metadata.get_all("Provides-Extra", []):
+            raise SystemExit("wheel metadata missing watch extra")
+        watch_requirements = [
+            item
+            for item in metadata.get_all("Requires-Dist", [])
+            if "inotify-simple" in item and "extra == 'watch'" in item
+        ]
+        if not watch_requirements:
+            raise SystemExit("wheel metadata missing conditional inotify-simple dependency")
         entry_points = archive.read(
             f"fsmonitor_cli-{version}.dist-info/entry_points.txt"
         ).decode()
@@ -132,6 +145,7 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "docs/adr/0006-space-time-visualization-contracts.md",
         prefix + "docs/adr/0007-cleanup-plan-safe-execution.md",
         prefix + "docs/adr/0008-cleanup-intelligence-rule-packs.md",
+        prefix + "docs/adr/0009-optional-filesystem-event-acceleration.md",
         prefix + "src/fs_monitor/assets/default.tcss",
         prefix + "src/fs_monitor/cleanup/actions.py",
         prefix + "src/fs_monitor/cleanup/scoring.py",
@@ -142,6 +156,9 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "src/fs_monitor/cleanup/rulepacks/ide.toml",
         prefix + "src/fs_monitor/cleanup/rulepacks/containers.toml",
         prefix + "src/fs_monitor/collectors/local_scanner.py",
+        prefix + "src/fs_monitor/collectors/events/__init__.py",
+        prefix + "src/fs_monitor/collectors/events/base.py",
+        prefix + "src/fs_monitor/collectors/events/native.py",
         prefix + "src/fs_monitor/domain/alerts.py",
         prefix + "src/fs_monitor/domain/cleanup.py",
         prefix + "src/fs_monitor/domain/delta.py",
@@ -169,6 +186,7 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "src/fs_monitor/services/scan_consumers.py",
         prefix + "src/fs_monitor/services/snapshots.py",
         prefix + "src/fs_monitor/services/visualization.py",
+        prefix + "src/fs_monitor/services/watch.py",
         prefix + "src/fs_monitor/viz/layout.py",
         prefix + "src/fs_monitor/widgets/alert_editor.py",
         prefix + "src/fs_monitor/widgets/cleanup_modal.py",

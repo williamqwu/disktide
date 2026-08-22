@@ -156,6 +156,7 @@ show_hidden = true
         config.monitor.database_soft_budget = 512 * 1024**2
         config.monitor.database_hard_budget = None
         config.monitor.auto_start_in_tui = True
+        config.monitor.event_mode = "periodic"
 
         config_file = tmp_path / "monitor.toml"
         save_config(config, config_file)
@@ -164,7 +165,16 @@ show_hidden = true
         assert loaded.monitor.database_soft_budget == 512 * 1024**2
         assert loaded.monitor.database_hard_budget is None
         assert loaded.monitor.auto_start_in_tui is True
+        assert loaded.monitor.event_mode == "periodic"
         assert "database_hard_budget = 0" in config_file.read_text()
+
+    def test_invalid_monitor_event_mode_falls_back_to_auto(self, tmp_path):
+        config_file = tmp_path / "invalid-monitor.toml"
+        config_file.write_text('[monitor]\nevent_mode = "audit-everything"\n')
+
+        loaded = load_config(config_file)
+
+        assert loaded.monitor.event_mode == "auto"
 
     def test_save_creates_parent_dirs(self, tmp_path):
         config = AppConfig()

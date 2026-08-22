@@ -89,7 +89,8 @@ Symbolic links are shown as `name → target` and never counted toward folder si
 
 Monitor Center is the shared setup and management surface for persistent
 monitors. Its list/detail layout shows desired state, current host activity,
-health, next due time, snapshot count, global database usage, and active alerts.
+health, event/periodic mode, pending dirty paths, reconciliation confidence,
+next full scan, snapshot count, global database usage, and active alerts.
 The detail side has Overview, History, Alerts, and Retention tabs. Terminals
 narrower than 90 columns use a list-first view; press **Enter** for details and
 **Escape** to return.
@@ -100,6 +101,7 @@ narrower than 90 columns use a list-first view; press **Enter** for details and
 | `e` | Edit path, interval, metric, scan policy, workers, or retention preset |
 | `p` | Pause or resume the selected definition |
 | `R` | Run the selected monitor now |
+| `g` | Run or queue a trusted full reconciliation |
 | `s` | Start or stop this TUI's foreground monitoring session |
 | `d` | Archive the monitor after confirmation; history remains |
 | `i` | Pin or unpin the selected History snapshot |
@@ -137,7 +139,11 @@ Definitions are persistent; execution is not. `enabled · no-host` means the
 definition is ready but no process currently owns it. Press `s` in the TUI or
 run `fsmonitor watch --monitor/--all` to host scans. Leaving Monitor Center for
 Explorer keeps the TUI session alive, while quitting the app stops it and
-releases its lease. Wave 06 does not install a daemon.
+releases its lease. With `fsmonitor-cli[watch]` installed on Linux, `auto` mode
+attaches inotify to each held lease. Ordinary events trigger bounded local
+reconciliation; startup, restart, overflow, backend loss, manual `g`, and the
+normal interval trigger full reconciliation. Events never replace the periodic
+full-scan source of truth.
 
 ### FS Overview (3)
 
@@ -234,7 +240,8 @@ These commands run outside the TUI and print results to stdout.
 
 Report the installed version, Python/Textual versions, active platform adapter,
 application paths, database status/schema, storage metrics, platform
-capabilities, optional extras, and default scan policy:
+capabilities, optional extras (including watch backend/version/status), and
+default scan policy:
 
 ```bash
 fsmonitor doctor
@@ -305,6 +312,7 @@ fsmonitor monitor edit 1 --interval 1h --metric allocated
 fsmonitor monitor pause 1
 fsmonitor monitor resume 1
 fsmonitor monitor run 1
+fsmonitor monitor reconcile 1
 fsmonitor monitor retention 1          # preview
 fsmonitor monitor retention 1 --apply  # run maintenance
 fsmonitor monitor pin 42 --label release
@@ -352,16 +360,25 @@ Run the shared monitor host in the foreground until interrupted or
 fsmonitor watch /path                   # transient definition; default 6h
 fsmonitor watch /path --interval 1h
 fsmonitor watch /path -i 30m -t 12h
+fsmonitor watch /path --events          # require fsmonitor-cli[watch]
+fsmonitor watch /path --periodic-only   # force the dependency-free core path
 fsmonitor watch --monitor 1             # host one saved definition
 fsmonitor watch --all                   # host all enabled definitions
 ```
 
-Each interval is a distinct scan run and prints its run id, policy, terminal
-status, duration, and snapshot result. Snapshots are saved to the database and
-visible in Monitor Center. `watch PATH` does not silently create a persistent
+The default `auto` mode uses the native backend when installed and otherwise
+prints a periodic fallback reason. `--events` is strict and exits non-zero with
+an installation suggestion when the backend is unavailable. `--periodic-only`
+never imports the optional dependency.
+
+Periodic/manual/full-recovery runs print their run id, policy, terminal status,
+duration, and snapshot result. Event-driven local reconciliation uses the same
+`ScanService` and policy contract but does not write an intermediate formal
+snapshot; only full reconciliation updates history, compare baselines,
+retention, and alerts. `watch PATH` does not silently create a persistent
 definition; saved monitors use their stored retention policy, alerts, revision,
-and schedule. A repository lease prevents a TUI and CLI host from running the
-same monitor concurrently.
+and schedule. A repository lease prevents a TUI, CLI, and supervised user
+service from running the same monitor concurrently.
 
 Since `watch` runs in the foreground, use tmux or another external supervisor
 when it must outlive the current shell:
@@ -375,14 +392,15 @@ fsmonitor watch /path --interval 6h
 nohup fsmonitor watch --all > /dev/null 2>&1 &
 ```
 
-An external systemd user unit can supervise the foreground host, but Wave 06
-does not install or manage that unit; native daemon/user-service integration is
-reserved for a later wave:
+An external systemd user unit can supervise the same foreground host. The
+project ships `docs/examples/fsmonitor-watch.service` as a copyable example; it
+does not install, enable, or grant cleanup permissions to that unit:
 
 ```ini
 # ~/.config/systemd/user/fsmonitor.service
 [Service]
 ExecStart=%h/.local/bin/fsmonitor watch --all
+Restart=on-failure
 
 [Install]
 WantedBy=default.target
@@ -392,6 +410,11 @@ WantedBy=default.target
 systemctl --user enable --now fsmonitor.service
 loginctl enable-linger $USER
 ```
+
+Use `--events` in the unit only after installing `fsmonitor-cli[watch]`. Omit it
+for automatic fallback, or use `--periodic-only` to guarantee core-only hosting.
+Every backend start/restart is recorded as requiring full reconciliation, so
+service downtime is never presented as a complete event history.
 
 ### cleanup
 
@@ -410,8 +433,8 @@ no filesystem changes. `--apply` revalidates each target and uses Trash with
 same-filesystem quarantine fallback. `history` distinguishes estimated,
 isolated, purged, actually reclaimed, and undone bytes; `undo` refuses to
 overwrite a newly created original path. Plans and per-action audit events
-survive process restart. The database schema remains v6 while the versioned
-CleanupPlan JSON payload is v2.
+survive process restart. Cleanup tables retain their schema-v6 contract while
+the overall database is schema v7; the versioned CleanupPlan JSON payload is v2.
 
 `history` can group those values by `category`, `pack`, or `path`. `purge` only owns
 revalidated quarantine content and requires the exact `PURGE <plan-id>` token;
@@ -459,6 +482,7 @@ default_interval = 21600                 # 6 hours, in seconds
 database_soft_budget = 2147483648        # 2 GiB; trigger maintenance
 database_hard_budget = 3221225472        # 3 GiB; block new snapshots after maintenance
 # auto_start_in_tui = true              # default false; host enabled monitors on launch
+event_mode = "auto"                      # auto | events | periodic
 
 [cleanup]
 # prefer_trash = false                   # default true; false uses quarantine directly
@@ -480,8 +504,9 @@ default_viz = "sunburst"                 # treemap, sunburst, details
 Per-monitor paths, schedules, scan policy, desired state, revisions, retention,
 pins, and alerts live only in the SQLite repository. Manage them through
 Monitor Center or the `monitor`/`alerts` commands. The `[monitor]` config section
-contains global defaults, database budgets, the foreground watch cap, and the
-TUI auto-start preference.
+contains global defaults, database budgets, the foreground watch cap, TUI
+auto-start preference, and event backend policy. `events` requires the optional
+extra; `auto` safely falls back; `periodic` disables native events.
 
 The `[cleanup]` section controls safe executor preference, quarantine expiry and
 capacity, disabled declarative packs, and the Age/Size Map point budget. It

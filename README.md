@@ -32,6 +32,19 @@ python -m venv .venv
 python -m pip install fsmonitor-cli
 ```
 
+Linux filesystem-event acceleration is optional. Install the `watch` extra to
+reduce change visibility latency while retaining periodic full reconciliation:
+
+```bash
+uv tool install 'fsmonitor-cli[watch]'
+pipx install 'fsmonitor-cli[watch]'
+python -m pip install 'fsmonitor-cli[watch]'
+```
+
+Without the extra, monitor hosting remains fully functional in periodic mode.
+`fsmonitor doctor` reports the active backend, version, status, and installation
+remedy.
+
 Upgrade or uninstall:
 
 ```bash
@@ -62,7 +75,8 @@ definitions exposed by the CLI. Its History tab shares one space-time
 vocabulary across Trend, Diff Treemap, growth-overlay Sunburst, and
 persistent-growth Heatmap views. Definitions do not install a daemon: scans run
 only while the current TUI monitoring session or `fsmonitor watch` foreground
-host is active. Versioned retention policies roll older history into time
+host is active. An external supervisor may keep that same foreground host alive;
+the repository lease remains the single ownership contract. Versioned retention policies roll older history into time
 buckets, preserve pinned snapshots, and enforce configurable database budgets.
 
 Paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME` if set. Settings can also be edited by pressing `?` inside the TUI. See the [User Guide](docs/user-guide.md) for the full configuration reference.
@@ -96,7 +110,8 @@ fsmonitor
 | `q` | Quit |
 
 Inside Monitor Center, use `n` to create a monitor, `e` to edit it, `p` to
-pause/resume, `R` to run now, and `s` to start/stop the current TUI host. The
+pause/resume, `R` to run now, `g` to request a trusted full reconciliation, and
+`s` to start/stop the current TUI host. The
 History tab uses `F1`–`F4` for Trend, Diff Map, Growth Rings, and Heatmap; `b`
 and `v` mark the highlighted snapshot as baseline/target, while `l` restores
 latest/previous. The footer keeps the mode hint visible there; press `1` to
@@ -128,12 +143,15 @@ fsmonitor scan / --metric unique --one-file-system --exclude-pseudo
 # Create a saved monitor and capture its first snapshot
 fsmonitor monitor add /path --interval 6h --capture-now
 fsmonitor monitor list
+fsmonitor monitor reconcile 1
 
 # Add an audited growth alert to monitor 1
 fsmonitor alerts add 1 /path --growth 10GiB --window 24h
 
 # Watch a transient path, one saved monitor, or every enabled monitor
 fsmonitor watch /path --interval 6h
+fsmonitor watch /path --events
+fsmonitor watch /path --periodic-only
 fsmonitor watch --monitor 1
 fsmonitor watch --all
 

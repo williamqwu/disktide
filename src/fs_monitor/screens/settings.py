@@ -206,6 +206,21 @@ class SettingsScreen(Screen):
                 yield Label("(e.g., 2h, 1d; blank = unlimited)", classes="input-hint")
 
             with Horizontal(classes="setting-row"):
+                yield Label("Filesystem events", classes="setting-label")
+                yield Select(
+                    [
+                        ("Auto", "auto"),
+                        ("Require events", "events"),
+                        ("Periodic only", "periodic"),
+                    ],
+                    value=self._config.monitor.event_mode,
+                    id="monitor-event-mode",
+                    classes="viz-select",
+                    allow_blank=False,
+                )
+                yield Label("([watch] extra on Linux)", classes="input-hint")
+
+            with Horizontal(classes="setting-row"):
                 yield Label("Database soft budget", classes="setting-label")
                 yield Input(
                     value=(
@@ -485,7 +500,25 @@ class SettingsScreen(Screen):
             self.app.refresh()
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "default-viz":
+        if event.select.id == "monitor-event-mode":
+            value = str(event.value)
+            if value not in {"auto", "events", "periodic"}:
+                return
+            previous = self._config.monitor.event_mode
+            try:
+                service = getattr(self.app, "_monitor_service", None)
+                if service is not None:
+                    service.set_event_mode(value)
+                self._config.monitor.event_mode = value
+            except Exception as exc:
+                self._config.monitor.event_mode = previous
+                event.select.value = previous
+                self.app.notify(
+                    str(exc),
+                    title="Filesystem events unavailable",
+                    severity="error",
+                )
+        elif event.select.id == "default-viz":
             self._config.ui.default_viz = str(event.value)
         elif event.select.id == "color-theme":
             self._config.ui.color_theme = str(event.value)

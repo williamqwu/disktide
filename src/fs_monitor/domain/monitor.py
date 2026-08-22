@@ -26,6 +26,7 @@ class MonitorActivityState(StrEnum):
     WAITING = "waiting"
     QUEUED = "queued"
     SCANNING = "scanning"
+    RECONCILING = "reconciling"
     STOPPING = "stopping"
 
 
@@ -40,8 +41,28 @@ class MonitorHealthState(StrEnum):
 class MonitorTrigger(StrEnum):
     SCHEDULED = "scheduled"
     MANUAL = "manual"
+    RECONCILE = "reconcile"
     TRANSIENT = "transient"
     FIRST_SNAPSHOT = "first-snapshot"
+
+
+class MonitorEventMode(StrEnum):
+    AUTO = "auto"
+    EVENTS = "events"
+    PERIODIC = "periodic"
+
+
+class MonitorWatchMode(StrEnum):
+    PERIODIC = "periodic"
+    EVENT_ASSISTED = "event-assisted"
+
+
+class MonitorReconciliationState(StrEnum):
+    UNKNOWN = "unknown"
+    FULL = "full-reconciled"
+    DIRTY = "dirty"
+    LOCAL = "local-reconciled"
+    DEGRADED = "degraded"
 
 
 class HistoryPointState(StrEnum):
@@ -127,6 +148,25 @@ class MonitorStatus:
     blocked_reason: str | None = None
     last_retention_at: datetime | None = None
     last_retention_summary: str | None = None
+    watch_mode: MonitorWatchMode = MonitorWatchMode.PERIODIC
+    event_backend: str | None = None
+    event_backend_status: str = "unavailable"
+    watched_root_count: int = 0
+    pending_dirty_paths: int = 0
+    dirty_paths: tuple[str, ...] = ()
+    last_event_at: datetime | None = None
+    last_local_reconciliation_at: datetime | None = None
+    last_full_reconciliation_at: datetime | None = None
+    last_reconciliation_path: str | None = None
+    last_local_size: int | None = None
+    last_local_file_count: int | None = None
+    overflow_count: int = 0
+    recovery_count: int = 0
+    degraded_reason: str | None = None
+    reconciliation_required: bool = False
+    reconciliation_state: MonitorReconciliationState = (
+        MonitorReconciliationState.UNKNOWN
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -75,6 +75,28 @@ class TestMigrations:
         assert "idx_deltas_path_id" in index_names
         assert "idx_snapshots_baseline" in index_names
 
+    def test_v7_adds_event_assisted_monitor_status_defaults(self, conn):
+        migrate(conn, target_version=6)
+        before = {
+            row[1] for row in conn.execute("PRAGMA table_info(monitor_status)")
+        }
+        assert "watch_mode" not in before
+
+        migrate(conn)
+
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(monitor_status)")
+        }
+        assert {
+            "watch_mode",
+            "event_backend_status",
+            "dirty_paths_json",
+            "last_full_reconciliation_at",
+            "overflow_count",
+            "reconciliation_required",
+            "reconciliation_state",
+        } <= columns
+
     def test_snapshots_has_baseline_columns(self, conn):
         migrate(conn)
         # Verify the columns exist by inserting a row

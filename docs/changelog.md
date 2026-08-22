@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.9
+
+**Optional filesystem-event acceleration**
+
+- **optional watch extra** Added `fsmonitor-cli[watch]` with lazy Linux `inotify-simple` discovery. The core wheel remains dependency-isolated and periodic monitoring, CLI, TUI, and doctor continue to work without the extra. `watch --events` is strict; `--periodic-only` is an explicit rollback path.
+- **event/reconciliation contract** Added backend-neutral create/modify/delete/move/overflow/root-lost/backend-error events plus a bounded, debounced dirty-path tracker. Ordinary changes trigger policy-aware local `ScanService` reconciliation without writing formal snapshots; scheduled, manual, startup/restart, and overflow recovery remain full authoritative scans.
+- **health and persistence** Upgraded SQLite schema to v7 with event mode/backend, watched roots, dirty paths, last event/local/full reconciliation, overflow/recovery counters, degraded reason, and reconciliation confidence. Backend stop, expired lease, root loss, watch limits, and overflow cannot retain stale healthy state.
+- **CLI/TUI/config** Added `monitor.event_mode = auto|events|periodic`, `fsmonitor monitor reconcile`, Monitor Center `g` reconciliation, detailed event health in human/JSON status, and banner visibility for dirty/degraded monitors.
+- **diagnostics/distribution** Upgraded doctor JSON schema to v3 with watch backend/version/status and install remedy. CI now tests clean core and clean watch-extra environments separately, the distribution verifier checks event modules/ADR/extra metadata, and a copyable systemd user-service example supervises the existing foreground host without creating a second scheduler.
+
 ## v0.2.8
 
 **Cleanup intelligence and rule packs**
