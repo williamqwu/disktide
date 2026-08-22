@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -22,6 +23,9 @@ class RepositoryStatus:
 
 @runtime_checkable
 class SnapshotRepository(Protocol):
+    @property
+    def snapshot_generation(self) -> int: ...
+
     @property
     def path(self) -> str: ...
 
@@ -50,6 +54,32 @@ class SnapshotRepository(Protocol):
     def load_measurements(
         self, snapshot_id: int
     ) -> dict[str, NodeMeasurement]: ...
+
+    def load_measurement_series(
+        self,
+        snapshot_ids: Sequence[int],
+        paths: Sequence[str],
+    ) -> dict[str, tuple[NodeMeasurement | None, ...]]: ...
+
+    def list_changed_paths(
+        self,
+        snapshot_ids: Sequence[int],
+        *,
+        metric: str,
+        limit: int,
+        required_paths: Sequence[str] = (),
+    ) -> tuple[str, ...]: ...
+
+    def load_visualization_projection(
+        self,
+        baseline_id: int,
+        target_id: int,
+        *,
+        metric: str,
+        limit: int,
+        max_depth: int = 3,
+        required_paths: Sequence[str] = (),
+    ) -> tuple[FSNode | None, FSNode | None]: ...
 
     def compare_snapshots(
         self, old_id: int, new_id: int, min_delta: int = 0

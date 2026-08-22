@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from threading import RLock
 
@@ -36,6 +37,10 @@ class SQLiteSnapshotRepository:
             read_only=read_only,
         )
         self._lock = RLock()
+
+    @property
+    def snapshot_generation(self) -> int:
+        return self._database.snapshot_generation
 
     @property
     def path(self) -> str:
@@ -101,6 +106,50 @@ class SQLiteSnapshotRepository:
     def load_measurements(self, snapshot_id: int) -> dict[str, NodeMeasurement]:
         with self._lock:
             return self._database.load_measurements(snapshot_id)
+
+    def load_measurement_series(
+        self,
+        snapshot_ids: Sequence[int],
+        paths: Sequence[str],
+    ) -> dict[str, tuple[NodeMeasurement | None, ...]]:
+        with self._lock:
+            return self._database.load_measurement_series(snapshot_ids, paths)
+
+    def list_changed_paths(
+        self,
+        snapshot_ids: Sequence[int],
+        *,
+        metric: str,
+        limit: int,
+        required_paths: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        with self._lock:
+            return self._database.list_changed_paths(
+                snapshot_ids,
+                metric=metric,
+                limit=limit,
+                required_paths=required_paths,
+            )
+
+    def load_visualization_projection(
+        self,
+        baseline_id: int,
+        target_id: int,
+        *,
+        metric: str,
+        limit: int,
+        max_depth: int = 3,
+        required_paths: Sequence[str] = (),
+    ) -> tuple[FSNode | None, FSNode | None]:
+        with self._lock:
+            return self._database.load_visualization_projection(
+                baseline_id,
+                target_id,
+                metric=metric,
+                limit=limit,
+                max_depth=max_depth,
+                required_paths=required_paths,
+            )
 
     def compare_snapshots(
         self, old_id: int, new_id: int, min_delta: int = 0
@@ -265,6 +314,20 @@ class SQLiteSnapshotRepository:
     ) -> list[MonitorHistoryPoint]:
         with self._lock:
             return self._database.get_monitor_history_points(monitor_id, path)
+
+    def get_monitor_history(
+        self,
+        monitor_id: int,
+        paths: Sequence[str],
+        *,
+        limit: int = 0,
+    ) -> dict[str, list[MonitorHistoryPoint]]:
+        with self._lock:
+            return self._database.get_monitor_history(
+                monitor_id,
+                paths,
+                limit=limit,
+            )
 
     def database_size(self) -> int:
         with self._lock:

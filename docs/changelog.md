@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.11
+
+**Scalable space-time data plane**
+
+- **targeted history** Added batch path-series resolution across baseline/delta snapshots and changed Monitor history to fetch root plus selected paths in one repository operation while preserving missing, removed, incompatible, partial, pin, and rollup semantics.
+- **bounded visualization** Moved interactive diff and Heatmap loading to repository-owned sparse projections and streamed exact changed-path ranking; full snapshot maps and trees are no longer the default visualization input.
+- **bounded CPU and memory** Replaced full sibling sorts with heap selection, retained selected branches, emitted exact aggregate remainder totals, and bounded measurement caches by both entries and points.
+- **architecture** Moved shared visual formatting out of the TUI view-model package and added an import-boundary regression gate plus a machine-readable Wave 12 benchmark.
+
 ## v0.2.10
 
 **Release stabilization and scale correctness**

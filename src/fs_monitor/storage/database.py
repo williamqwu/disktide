@@ -12,6 +12,7 @@ import os
 import sqlite3
 from collections.abc import Iterator, Sequence
 from datetime import datetime, timedelta, timezone
+from heapq import nsmallest
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import quote
@@ -124,6 +125,23 @@ def _measurement_value(
     return measurement.file_count
 
 
+def _node_measurement(path: str, values: _NodeTuple) -> NodeMeasurement:
+    return NodeMeasurement(
+        path=path,
+        is_dir=values[10],
+        logical_bytes=values[0],
+        own_logical_bytes=values[1],
+        allocated_bytes=values[2],
+        own_allocated_bytes=values[3],
+        unique_allocated_bytes=values[4],
+        own_unique_allocated_bytes=values[5],
+        file_count=values[6],
+        dir_count=values[7],
+        mtime=values[8],
+        error=values[9],
+    )
+
+
 def _retention_to_dict(policy: RetentionPolicy) -> dict[str, object]:
     return {
         "version": policy.version,
@@ -189,6 +207,14 @@ class Database:
         self.degraded = False
         self.degraded_reason: str | None = None
         self.recovery_hint: str | None = None
+        self._snapshot_generation = 0
+
+    @property
+    def snapshot_generation(self) -> int:
+        return self._snapshot_generation
+
+    def _touch_snapshot_generation(self) -> None:
+        self._snapshot_generation += 1
 
     @property
     def path(self) -> str:
@@ -760,6 +786,7 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+        self._touch_snapshot_generation()
         snapshot.id = snapshot_id
         snapshot.is_baseline = is_baseline
         snapshot.baseline_id = None if is_baseline else prev_baseline_id
@@ -855,6 +882,7 @@ class Database:
 
         self.conn.execute("DELETE FROM snapshots WHERE id = ?", (snapshot_id,))
         self.conn.commit()
+        self._touch_snapshot_generation()
 
     def _row_to_snapshot(self, row) -> Snapshot:
         if len(row) <= 8:
@@ -1072,21 +1100,578 @@ class Database:
             path = path_strings.get(path_id)
             if path is None:
                 continue
-            result[path] = NodeMeasurement(
-                path=path,
-                is_dir=values[10],
-                logical_bytes=values[0],
-                own_logical_bytes=values[1],
-                allocated_bytes=values[2],
-                own_allocated_bytes=values[3],
-                unique_allocated_bytes=values[4],
-                own_unique_allocated_bytes=values[5],
-                file_count=values[6],
-                dir_count=values[7],
-                mtime=values[8],
-                error=values[9],
-            )
+            result[path] = _node_measurement(path, values)
         return result
+
+    def load_measurement_series(
+        self,
+        snapshot_ids: Sequence[int],
+        paths: Sequence[str],
+    ) -> dict[str, tuple[NodeMeasurement | None, ...]]:
+        """Resolve only requested paths across snapshots, preserving order."""
+        ordered_snapshot_ids = tuple(int(value) for value in snapshot_ids)
+        ordered_paths = tuple(dict.fromkeys(str(path) for path in paths))
+        if not ordered_paths:
+            return {}
+        if not ordered_snapshot_ids:
+            return {path: () for path in ordered_paths}
+
+        path_to_id: dict[str, int] = {}
+        for batch in _batches(ordered_paths):
+            placeholders = ",".join("?" * len(batch))
+            rows = self.conn.execute(
+                f"SELECT id, path FROM paths WHERE path IN ({placeholders})",
+                batch,
+            ).fetchall()
+            path_to_id.update({str(row[1]): int(row[0]) for row in rows})
+
+        unique_snapshot_ids = tuple(dict.fromkeys(ordered_snapshot_ids))
+        snapshot_info: dict[int, tuple[bool, int | None]] = {}
+        for batch in _batches(unique_snapshot_ids):
+            placeholders = ",".join("?" * len(batch))
+            rows = self.conn.execute(
+                f"SELECT id, is_baseline, baseline_id FROM snapshots "
+                f"WHERE id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            snapshot_info.update(
+                {
+                    int(row[0]): (bool(row[1]), row[2])
+                    for row in rows
+                }
+            )
+
+        groups: dict[int, set[int]] = {}
+        for snapshot_id, (is_baseline, baseline_id) in snapshot_info.items():
+            group_id = snapshot_id if is_baseline else baseline_id
+            if group_id is not None:
+                groups.setdefault(int(group_id), set()).add(snapshot_id)
+
+        path_ids = tuple(path_to_id.values())
+        path_by_id = {value: path for path, value in path_to_id.items()}
+        resolved: dict[tuple[int, int], NodeMeasurement | None] = {}
+        for baseline_id, requested_group in groups.items():
+            state: dict[int, NodeMeasurement] = {}
+            for batch in _batches(path_ids):
+                placeholders = ",".join("?" * len(batch))
+                rows = self.conn.execute(
+                    "SELECT path_id, size, own_size, allocated_size, "
+                    "own_allocated_size, unique_allocated_size, "
+                    "own_unique_allocated_size, file_count, dir_count, "
+                    "mtime, error, is_dir FROM nodes "
+                    f"WHERE snapshot_id = ? AND path_id IN ({placeholders})",
+                    (baseline_id, *batch),
+                ).fetchall()
+                for row in rows:
+                    path_id = int(row[0])
+                    values: _NodeTuple = (
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                        row[6],
+                        row[7],
+                        row[8],
+                        row[9],
+                        row[10],
+                        bool(row[11]),
+                    )
+                    state[path_id] = _node_measurement(path_by_id[path_id], values)
+
+            if baseline_id in requested_group:
+                for path_id in path_ids:
+                    resolved[(baseline_id, path_id)] = state.get(path_id)
+
+            max_snapshot_id = max(requested_group)
+            chain_ids = [
+                int(row[0])
+                for row in self.conn.execute(
+                    "SELECT id FROM snapshots WHERE baseline_id = ? AND id <= ? "
+                    "ORDER BY timestamp ASC, id ASC",
+                    (baseline_id, max_snapshot_id),
+                )
+            ]
+            deltas_by_snapshot: dict[int, list[tuple]] = {}
+            for batch in _batches(path_ids):
+                placeholders = ",".join("?" * len(batch))
+                rows = self.conn.execute(
+                    """SELECT d.snapshot_id, d.path_id, d.size, d.own_size,
+                              d.allocated_size, d.own_allocated_size,
+                              d.unique_allocated_size,
+                              d.own_unique_allocated_size, d.file_count,
+                              d.dir_count, d.mtime, d.error, d.is_dir,
+                              d.is_removed
+                       FROM deltas d
+                       JOIN snapshots s ON s.id = d.snapshot_id
+                       WHERE s.baseline_id = ? AND s.id <= ?
+                         AND d.path_id IN ("""
+                    + placeholders
+                    + ") ORDER BY s.timestamp ASC, s.id ASC, d.id ASC",
+                    (baseline_id, max_snapshot_id, *batch),
+                ).fetchall()
+                for row in rows:
+                    deltas_by_snapshot.setdefault(int(row[0]), []).append(row)
+
+            for snapshot_id in chain_ids:
+                for row in deltas_by_snapshot.get(snapshot_id, ()):
+                    path_id = int(row[1])
+                    if row[13]:
+                        state.pop(path_id, None)
+                        continue
+                    values = (
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                        row[6],
+                        row[7],
+                        row[8],
+                        row[9],
+                        row[10],
+                        row[11],
+                        bool(row[12]),
+                    )
+                    state[path_id] = _node_measurement(path_by_id[path_id], values)
+                if snapshot_id in requested_group:
+                    for path_id in path_ids:
+                        resolved[(snapshot_id, path_id)] = state.get(path_id)
+
+        return {
+            path: tuple(
+                resolved.get((snapshot_id, path_to_id[path]))
+                if path in path_to_id
+                else None
+                for snapshot_id in ordered_snapshot_ids
+            )
+            for path in ordered_paths
+        }
+
+    def _effective_state_query(
+        self, snapshot_id: int
+    ) -> tuple[str, tuple[object, ...]]:
+        snapshot = self.conn.execute(
+            "SELECT is_baseline, baseline_id FROM snapshots WHERE id = ?",
+            (snapshot_id,),
+        ).fetchone()
+        columns = (
+            "path_id, size, own_size, allocated_size, own_allocated_size, "
+            "unique_allocated_size, own_unique_allocated_size, file_count, "
+            "dir_count, mtime, error, is_dir, is_removed"
+        )
+        if snapshot is None:
+            return f"SELECT {columns} FROM deltas WHERE 0", ()
+        if bool(snapshot[0]):
+            return (
+                "SELECT path_id, size, own_size, allocated_size, "
+                "own_allocated_size, unique_allocated_size, "
+                "own_unique_allocated_size, file_count, dir_count, mtime, "
+                "error, is_dir, 0 AS is_removed "
+                "FROM nodes WHERE snapshot_id = ?",
+                (snapshot_id,),
+            )
+        baseline_id = snapshot[1]
+        if baseline_id is None:
+            return f"SELECT {columns} FROM deltas WHERE 0", ()
+        return (
+            "SELECT path_id, size, own_size, allocated_size, "
+            "own_allocated_size, unique_allocated_size, "
+            "own_unique_allocated_size, file_count, dir_count, mtime, "
+            "error, is_dir, is_removed FROM ("
+            "SELECT events.*, ROW_NUMBER() OVER ("
+            "PARTITION BY path_id ORDER BY event_timestamp DESC, "
+            "event_snapshot_id DESC, event_row_id DESC"
+            ") AS state_rank FROM ("
+            "SELECT n.path_id, n.size, n.own_size, n.allocated_size, "
+            "n.own_allocated_size, n.unique_allocated_size, "
+            "n.own_unique_allocated_size, n.file_count, n.dir_count, "
+            "n.mtime, n.error, n.is_dir, 0 AS is_removed, "
+            "s.timestamp AS event_timestamp, s.id AS event_snapshot_id, "
+            "n.id AS event_row_id FROM nodes n "
+            "JOIN snapshots s ON s.id = n.snapshot_id "
+            "WHERE n.snapshot_id = ? UNION ALL "
+            "SELECT d.path_id, d.size, d.own_size, d.allocated_size, "
+            "d.own_allocated_size, d.unique_allocated_size, "
+            "d.own_unique_allocated_size, d.file_count, d.dir_count, "
+            "d.mtime, d.error, d.is_dir, d.is_removed, "
+            "s.timestamp AS event_timestamp, s.id AS event_snapshot_id, "
+            "d.id AS event_row_id FROM deltas d "
+            "JOIN snapshots s ON s.id = d.snapshot_id "
+            "WHERE s.baseline_id = ? AND s.id <= ?"
+            ") AS events) AS ranked WHERE state_rank = 1",
+            (int(baseline_id), int(baseline_id), snapshot_id),
+        )
+
+    def _rank_snapshot_paths(
+        self,
+        snapshot_id: int,
+        *,
+        metric: MetricId,
+        limit: int,
+        max_depth: int,
+    ) -> dict[str, int]:
+        snapshot_row = self.conn.execute(
+            "SELECT root_path FROM snapshots WHERE id = ?",
+            (snapshot_id,),
+        ).fetchone()
+        if snapshot_row is None:
+            return {}
+        root_path = str(snapshot_row[0])
+        root_row = self.conn.execute(
+            "SELECT depth FROM paths WHERE path = ?",
+            (root_path,),
+        ).fetchone()
+        root_depth = int(root_row[0]) if root_row is not None else 0
+        column = {
+            MetricId.LOGICAL: "size",
+            MetricId.ALLOCATED: "allocated_size",
+            MetricId.UNIQUE: "unique_allocated_size",
+            MetricId.FILES: "file_count",
+        }[metric]
+        state_sql, state_params = self._effective_state_query(snapshot_id)
+        rows = self.conn.execute(
+            f"""SELECT p.path, ABS(COALESCE(state.{column}, 0)) AS score
+                FROM ({state_sql}) AS state
+                JOIN paths p ON p.id = state.path_id
+                WHERE state.is_removed = 0
+                  AND p.depth <= ?
+                  AND p.path != ?
+                ORDER BY score DESC, p.path ASC
+                LIMIT ?""",
+            (*state_params, root_depth + max(0, max_depth), root_path, limit),
+        ).fetchall()
+        ranked = {str(path): int(score or 0) for path, score in rows}
+        ranked[root_path] = max(ranked.get(root_path, 0), 0)
+        return ranked
+
+    def _rank_changed_pair(
+        self,
+        baseline_id: int,
+        target_id: int,
+        *,
+        metric: MetricId,
+        limit: int,
+    ) -> dict[str, int]:
+        baseline_row = self.conn.execute(
+            "SELECT root_path, is_baseline, baseline_id FROM snapshots WHERE id = ?",
+            (baseline_id,),
+        ).fetchone()
+        target_row = self.conn.execute(
+            "SELECT root_path, is_baseline, baseline_id FROM snapshots WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if baseline_row is None or target_row is None:
+            return {}
+
+        same_chain = (
+            str(baseline_row[0]) == str(target_row[0])
+            and not bool(target_row[1])
+            and target_row[2] is not None
+            and (
+                baseline_id == int(target_row[2])
+                or baseline_row[2] == target_row[2]
+            )
+            and baseline_id < target_id
+        )
+        if same_chain:
+            cursor = self.conn.execute(
+                """SELECT DISTINCT p.path
+                   FROM deltas d
+                   JOIN snapshots s ON s.id = d.snapshot_id
+                   JOIN paths p ON p.id = d.path_id
+                   WHERE s.baseline_id = ? AND s.id > ? AND s.id <= ?
+                   ORDER BY p.path""",
+                (int(target_row[2]), baseline_id, target_id),
+            )
+        else:
+            baseline_sql, baseline_params = self._effective_state_query(baseline_id)
+            target_sql, target_params = self._effective_state_query(target_id)
+            cursor = self.conn.execute(
+                f"""WITH baseline_state AS ({baseline_sql}),
+                         target_state AS ({target_sql})
+                    SELECT p.path
+                    FROM (
+                        SELECT path_id FROM baseline_state WHERE is_removed = 0
+                        UNION
+                        SELECT path_id FROM target_state WHERE is_removed = 0
+                    ) AS candidate
+                    JOIN paths p ON p.id = candidate.path_id
+                    ORDER BY p.path""",
+                (*baseline_params, *target_params),
+            )
+
+        ranked: dict[str, int] = {}
+        while rows := cursor.fetchmany(_SQLITE_BIND_BATCH_SIZE):
+            paths = tuple(str(row[0]) for row in rows)
+            series = self.load_measurement_series(
+                (baseline_id, target_id),
+                paths,
+            )
+            batch_scores: dict[str, int] = {}
+            for path, measurements in series.items():
+                old, new = measurements
+                if old == new:
+                    continue
+                old_value = _measurement_value(old, metric) if old else 0
+                new_value = _measurement_value(new, metric) if new else 0
+                score = abs((new_value or 0) - (old_value or 0))
+                batch_scores[path] = score
+            merged = dict(ranked)
+            for path, score in batch_scores.items():
+                merged[path] = max(merged.get(path, 0), score)
+            ranked = {
+                path: merged[path]
+                for path in nsmallest(
+                    limit,
+                    merged,
+                    key=lambda candidate: (-merged[candidate], candidate),
+                )
+            }
+        return ranked
+
+    def list_changed_paths(
+        self,
+        snapshot_ids: Sequence[int],
+        *,
+        metric: str,
+        limit: int,
+        required_paths: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        """Return exact top changed paths for the requested adjacent pairs."""
+        selected_metric = MetricId.parse(metric)
+        cap = max(1, int(limit))
+        ordered_ids = tuple(dict.fromkeys(int(value) for value in snapshot_ids))
+        candidates: dict[str, int] = {}
+
+        for baseline_id, target_id in zip(ordered_ids, ordered_ids[1:]):
+            for path, score in self._rank_changed_pair(
+                baseline_id,
+                target_id,
+                metric=selected_metric,
+                limit=cap,
+            ).items():
+                candidates[path] = max(candidates.get(path, 0), score)
+
+        ranked = nsmallest(
+            cap,
+            candidates,
+            key=lambda path: (-candidates[path], path),
+        )
+        for path in required_paths:
+            normalized = str(path)
+            if normalized and normalized not in ranked:
+                ranked.append(normalized)
+        return tuple(ranked)
+
+    def load_visualization_projection(
+        self,
+        baseline_id: int,
+        target_id: int,
+        *,
+        metric: str,
+        limit: int,
+        max_depth: int = 3,
+        required_paths: Sequence[str] = (),
+    ) -> tuple[FSNode | None, FSNode | None]:
+        """Build paired sparse trees with exact aggregate remainder nodes."""
+        selected_metric = MetricId.parse(metric)
+        cap = max(2, int(limit))
+        candidates = self._rank_snapshot_paths(
+            target_id,
+            metric=selected_metric,
+            limit=cap,
+            max_depth=max_depth,
+        )
+        for path, score in self._rank_changed_pair(
+            baseline_id,
+            target_id,
+            metric=selected_metric,
+            limit=cap,
+        ).items():
+            candidates[path] = max(candidates.get(path, 0), score)
+        candidate_paths = nsmallest(
+            cap * 2,
+            candidates,
+            key=lambda path: (-candidates[path], path),
+        )
+        for path in required_paths:
+            normalized = str(path)
+            if normalized and normalized not in candidate_paths:
+                candidate_paths.append(normalized)
+
+        metadata = self._projection_path_metadata(candidate_paths)
+        paths = tuple(value[0] for value in metadata.values())
+        series = self.load_measurement_series(
+            (baseline_id, target_id),
+            paths,
+        )
+        baseline = self.get_snapshot(baseline_id)
+        target = self.get_snapshot(target_id)
+        return (
+            self._build_projection_tree(
+                baseline.root_path if baseline is not None else "",
+                metadata,
+                series,
+                series_index=0,
+            ),
+            self._build_projection_tree(
+                target.root_path if target is not None else "",
+                metadata,
+                series,
+                series_index=1,
+            ),
+        )
+
+    def _projection_path_metadata(
+        self, paths: Sequence[str]
+    ) -> dict[int, tuple[str, int | None, str, int]]:
+        requested = tuple(dict.fromkeys(str(path) for path in paths if path))
+        metadata: dict[int, tuple[str, int | None, str, int]] = {}
+        frontier: set[int] = set()
+        for batch in _batches(requested):
+            placeholders = ",".join("?" * len(batch))
+            rows = self.conn.execute(
+                f"SELECT id, path, parent_id, name, depth FROM paths "
+                f"WHERE path IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                path_id = int(row[0])
+                parent_id = int(row[2]) if row[2] is not None else None
+                metadata[path_id] = (
+                    str(row[1]),
+                    parent_id,
+                    str(row[3]),
+                    int(row[4]),
+                )
+                if parent_id is not None:
+                    frontier.add(parent_id)
+
+        while frontier:
+            missing = tuple(path_id for path_id in frontier if path_id not in metadata)
+            if not missing:
+                break
+            frontier = set()
+            for batch in _batches(missing):
+                placeholders = ",".join("?" * len(batch))
+                rows = self.conn.execute(
+                    f"SELECT id, path, parent_id, name, depth FROM paths "
+                    f"WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    path_id = int(row[0])
+                    parent_id = int(row[2]) if row[2] is not None else None
+                    metadata[path_id] = (
+                        str(row[1]),
+                        parent_id,
+                        str(row[3]),
+                        int(row[4]),
+                    )
+                    if parent_id is not None and parent_id not in metadata:
+                        frontier.add(parent_id)
+        return metadata
+
+    @staticmethod
+    def _build_projection_tree(
+        root_path: str,
+        metadata: dict[int, tuple[str, int | None, str, int]],
+        series: dict[str, tuple[NodeMeasurement | None, ...]],
+        *,
+        series_index: int,
+    ) -> FSNode | None:
+        nodes: dict[int, FSNode] = {}
+        for path_id, (path, _parent_id, name, depth) in metadata.items():
+            values = series.get(path, ())
+            measurement = values[series_index] if len(values) > series_index else None
+            if measurement is None:
+                continue
+            nodes[path_id] = FSNode(
+                name=name,
+                path=path,
+                size=measurement.logical_bytes,
+                own_size=measurement.own_logical_bytes,
+                allocated_size=measurement.allocated_bytes,
+                own_allocated_size=measurement.own_allocated_bytes,
+                unique_allocated_size=measurement.unique_allocated_bytes,
+                own_unique_allocated_size=measurement.own_unique_allocated_bytes,
+                file_count=measurement.file_count,
+                dir_count=measurement.dir_count,
+                is_dir=measurement.is_dir,
+                mtime=measurement.mtime,
+                depth=depth,
+                error=measurement.error,
+            )
+
+        root = None
+        for path_id, node in nodes.items():
+            parent_id = metadata[path_id][1]
+            parent = nodes.get(parent_id) if parent_id is not None else None
+            if parent is not None:
+                parent.children.append(node)
+            elif node.path == root_path:
+                root = node
+        if root is None:
+            return None
+
+        for node in tuple(nodes.values()):
+            if not node.is_dir:
+                continue
+            node.children.sort(key=lambda child: (child.name, child.path))
+            logical = max(0, node.size - sum(child.size for child in node.children))
+            allocated = Database._optional_remainder(
+                node.allocated_size,
+                (child.allocated_size for child in node.children),
+            )
+            unique = Database._optional_remainder(
+                node.unique_allocated_size,
+                (child.unique_allocated_size for child in node.children),
+            )
+            files = max(
+                0,
+                node.file_count - sum(child.file_count for child in node.children),
+            )
+            directories = max(
+                0,
+                node.dir_count
+                - sum(child.dir_count + int(child.is_dir) for child in node.children),
+            )
+            if not any(
+                value not in (None, 0)
+                for value in (logical, allocated, unique, files, directories)
+            ):
+                continue
+            node.children.append(
+                FSNode(
+                    name="… remainder",
+                    path=f"{node.path.rstrip('/')}/.fsmonitor-projection-remainder",
+                    size=logical,
+                    own_size=logical,
+                    allocated_size=allocated,
+                    own_allocated_size=allocated,
+                    unique_allocated_size=unique,
+                    own_unique_allocated_size=unique,
+                    file_count=files,
+                    dir_count=directories,
+                    is_dir=True,
+                    mtime=node.mtime,
+                    depth=node.depth + 1,
+                )
+            )
+        return root
+
+    @staticmethod
+    def _optional_remainder(
+        total: int | None, children: Iterator[int | None]
+    ) -> int | None:
+        if total is None:
+            return None
+        consumed = 0
+        for value in children:
+            if value is None:
+                return None
+            consumed += value
+        return max(0, total - consumed)
 
     # ── Baseline promotion ──
 
@@ -1184,6 +1769,7 @@ class Database:
             [(did,) for did in delete_ids],
         )
         self.conn.commit()
+        self._touch_snapshot_generation()
         return len(delete_ids)
 
     # ── Diffs ──
@@ -1828,11 +2414,24 @@ class Database:
     def get_monitor_history_points(
         self, monitor_id: int, path: str
     ) -> list[MonitorHistoryPoint]:
+        return self.get_monitor_history(monitor_id, (path,)).get(path, [])
+
+    def get_monitor_history(
+        self,
+        monitor_id: int,
+        paths: Sequence[str],
+        *,
+        limit: int = 0,
+    ) -> dict[str, list[MonitorHistoryPoint]]:
+        """Load multiple monitor paths with one targeted state resolution."""
         if not self._table_exists("monitor_definitions"):
-            return []
+            return {str(path): [] for path in paths}
         monitor = self.get_monitor(monitor_id)
         if monitor is None:
-            return []
+            return {str(path): [] for path in paths}
+        ordered_paths = tuple(dict.fromkeys(str(path) for path in paths))
+        if not ordered_paths:
+            return {}
         rows = self.conn.execute(
             """SELECT s.id, s.timestamp, m.partial, m.monitor_revision,
                       COALESCE(r.rollup_kind, m.rollup_kind),
@@ -1845,46 +2444,53 @@ class Database:
                ORDER BY s.timestamp ASC, s.id ASC""",
             (monitor_id,),
         ).fetchall()
-        points: list[MonitorHistoryPoint] = []
-        ever_seen = False
-        for row in rows:
-            snapshot_id = int(row[0])
-            revision = row[3]
-            measurements = self.load_measurements(snapshot_id)
-            measurement = measurements.get(path)
-            compatible = revision == monitor.revision
-            if not compatible:
-                state = HistoryPointState.INCOMPATIBLE
-                value = (
-                    _measurement_value(measurement, monitor.metric)
-                    if measurement is not None
-                    else None
+        if limit > 0:
+            rows = rows[-limit:]
+        snapshot_ids = tuple(int(row[0]) for row in rows)
+        measurements = self.load_measurement_series(snapshot_ids, ordered_paths)
+        result: dict[str, list[MonitorHistoryPoint]] = {}
+        for path in ordered_paths:
+            points: list[MonitorHistoryPoint] = []
+            ever_seen = False
+            for row, measurement in zip(rows, measurements[path]):
+                snapshot_id = int(row[0])
+                revision = row[3]
+                compatible = revision == monitor.revision
+                if not compatible:
+                    state = HistoryPointState.INCOMPATIBLE
+                    value = (
+                        _measurement_value(measurement, monitor.metric)
+                        if measurement is not None
+                        else None
+                    )
+                elif measurement is None:
+                    state = (
+                        HistoryPointState.REMOVED
+                        if ever_seen
+                        else HistoryPointState.MISSING
+                    )
+                    value = None
+                else:
+                    state = HistoryPointState.PRESENT
+                    value = _measurement_value(measurement, monitor.metric)
+                    ever_seen = True
+                points.append(
+                    MonitorHistoryPoint(
+                        snapshot_id=snapshot_id,
+                        timestamp=(
+                            _datetime_value(row[1]) or datetime.now(timezone.utc)
+                        ),
+                        value=value,
+                        state=state,
+                        partial=bool(row[2]),
+                        compatible=compatible,
+                        pinned=bool(row[5]),
+                        rollup_kind=row[4],
+                        monitor_revision=revision,
+                    )
                 )
-            elif measurement is None:
-                state = (
-                    HistoryPointState.REMOVED
-                    if ever_seen
-                    else HistoryPointState.MISSING
-                )
-                value = None
-            else:
-                state = HistoryPointState.PRESENT
-                value = _measurement_value(measurement, monitor.metric)
-                ever_seen = True
-            points.append(
-                MonitorHistoryPoint(
-                    snapshot_id=snapshot_id,
-                    timestamp=_datetime_value(row[1]) or datetime.now(timezone.utc),
-                    value=value,
-                    state=state,
-                    partial=bool(row[2]),
-                    compatible=compatible,
-                    pinned=bool(row[5]),
-                    rollup_kind=row[4],
-                    monitor_revision=revision,
-                )
-            )
-        return points
+            result[path] = points
+        return result
 
     def database_size(self) -> int:
         if self._path == ":memory:":
@@ -1909,6 +2515,7 @@ class Database:
             (snapshot_id, _datetime_text(datetime.now(timezone.utc)), label),
         )
         self.conn.commit()
+        self._touch_snapshot_generation()
 
     def unpin_snapshot(self, snapshot_id: int) -> None:
         if self.read_only:
@@ -1917,6 +2524,7 @@ class Database:
             "DELETE FROM snapshot_pins WHERE snapshot_id = ?", (snapshot_id,)
         )
         self.conn.commit()
+        self._touch_snapshot_generation()
 
     def pinned_snapshot_ids(self, monitor_id: int | None = None) -> set[int]:
         if not self._table_exists("snapshot_pins"):
@@ -2033,6 +2641,7 @@ class Database:
             (kind, snapshot_id),
         )
         self.conn.commit()
+        self._touch_snapshot_generation()
 
     def record_retention_result(self, result: RetentionResult) -> None:
         if self.read_only:

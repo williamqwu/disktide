@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -75,6 +76,14 @@ class MonitorRepository(Protocol):
     def get_monitor_history_points(
         self, monitor_id: int, path: str
     ) -> list[MonitorHistoryPoint]: ...
+
+    def get_monitor_history(
+        self,
+        monitor_id: int,
+        paths: Sequence[str],
+        *,
+        limit: int = 0,
+    ) -> dict[str, list[MonitorHistoryPoint]]: ...
 
     def database_size(self) -> int: ...
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from heapq import nsmallest
 
-from fs_monitor.domain.metrics import MetricId, StorageMeasurements, sum_available
+from fs_monitor.domain.metrics import MetricId, StorageMeasurements
 from fs_monitor.models.tree import FSNode
 
 
@@ -59,26 +61,41 @@ def build_live_view(
         raise ValueError("max_children must be at least two")
     selected_metric = MetricId.parse(metric)
 
+    def metric_value(node: FSNode) -> int:
+        if selected_metric is MetricId.LOGICAL:
+            return node.size
+        if selected_metric is MetricId.ALLOCATED:
+            return node.allocated_size or 0
+        if selected_metric is MetricId.UNIQUE:
+            return node.unique_allocated_size or 0
+        return node.file_count
+
     def convert(node: FSNode, depth: int) -> LiveViewNode:
         children: tuple[LiveViewNode, ...] = ()
         if depth < max_depth and node.children:
-            ordered = sorted(
-                node.children,
-                key=lambda child: (
-                    -(child.measurements.value(selected_metric) or 0),
-                    child.name,
-                    child.path,
-                ),
+            key = lambda child: (
+                -metric_value(child),
+                child.name,
+                child.path,
             )
-            visible = ordered
-            omitted: list[FSNode] = []
-            if len(ordered) > max_children:
-                visible = ordered[: max_children - 1]
-                omitted = ordered[max_children - 1 :]
+            if len(node.children) <= max_children:
+                visible = sorted(node.children, key=key)
+                omitted_ids: set[int] = set()
+            else:
+                visible = nsmallest(max_children - 1, node.children, key=key)
+                omitted_ids = {id(child) for child in visible}
             converted = [convert(child, depth + 1) for child in visible]
-            if omitted:
+            if omitted_ids:
                 converted.append(
-                    _aggregate_omitted(node, omitted, stable_paths)
+                    _aggregate_omitted(
+                        node,
+                        (
+                            child
+                            for child in node.children
+                            if id(child) not in omitted_ids
+                        ),
+                        stable_paths,
+                    )
                 )
             children = tuple(converted)
 
@@ -116,27 +133,51 @@ def count_live_nodes(root: LiveViewNode) -> int:
 
 def _aggregate_omitted(
     parent: FSNode,
-    omitted: list[FSNode],
+    omitted: Iterable[FSNode],
     stable_paths: frozenset[str],
 ) -> LiveViewNode:
-    count = len(omitted)
+    count = 0
+    logical = 0
+    allocated = 0
+    allocated_available = True
+    unique = 0
+    unique_available = True
+    files = 0
+    directories = 0
+    mtime = 0.0
+    inaccessible = 0
+    inaccessible_subtree = 0
+    stable = True
+    for node in omitted:
+        count += 1
+        logical += node.size
+        if node.allocated_size is None:
+            allocated_available = False
+        else:
+            allocated += node.allocated_size
+        if node.unique_allocated_size is None:
+            unique_available = False
+        else:
+            unique += node.unique_allocated_size
+        files += node.file_count
+        directories += node.dir_count + int(node.is_dir)
+        mtime = max(mtime, node.mtime)
+        inaccessible += node.inaccessible_count
+        inaccessible_subtree += node.inaccessible_subtree_count
+        stable = stable and node.path in stable_paths
     return LiveViewNode(
         name=f"Other ({count:,})",
         path=f"{parent.path.rstrip('/')}/.fsmonitor-live-other",
-        size=sum(node.size for node in omitted),
-        allocated_size=sum_available(node.allocated_size for node in omitted),
-        unique_allocated_size=sum_available(
-            node.unique_allocated_size for node in omitted
-        ),
-        file_count=sum(node.file_count for node in omitted),
-        dir_count=sum(node.dir_count + int(node.is_dir) for node in omitted),
+        size=logical,
+        allocated_size=allocated if allocated_available else None,
+        unique_allocated_size=unique if unique_available else None,
+        file_count=files,
+        dir_count=directories,
         is_dir=True,
-        mtime=max((node.mtime for node in omitted), default=0.0),
+        mtime=mtime,
         error=None,
-        inaccessible_count=sum(node.inaccessible_count for node in omitted),
-        inaccessible_subtree_count=sum(
-            node.inaccessible_subtree_count for node in omitted
-        ),
-        stable=all(node.path in stable_paths for node in omitted),
+        inaccessible_count=inaccessible,
+        inaccessible_subtree_count=inaccessible_subtree,
+        stable=stable,
         synthetic=True,
     )

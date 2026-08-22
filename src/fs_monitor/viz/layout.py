@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from heapq import nlargest
-from typing import Callable, Sequence
 
 from fs_monitor.domain.metrics import MetricId
 from fs_monitor.models.tree import FSNode
@@ -18,100 +18,126 @@ def bounded_children(
     selected_path: str | None = None,
 ) -> list[FSNode]:
     """Return deterministic top-N children plus one aggregate remainder."""
-    candidates = [child for child in node.children if value(child) > 0]
     cap = max(2, limit)
-    if len(candidates) <= cap:
-        return sorted(candidates, key=lambda child: (-value(child), child.name))
+    candidate_count = 0
+    selected_child = None
+    total_layout_value = 0
 
-    selected = nlargest(
-        cap - 1,
-        candidates,
-        key=lambda child: (value(child), child.name),
-    )
-    selected_child = next(
-        (
-            child
-            for child in candidates
-            if selected_path
-            and (
+    def weighted_children():
+        nonlocal candidate_count, selected_child, total_layout_value
+        for child in node.children:
+            child_value = value(child)
+            if child_value <= 0:
+                continue
+            candidate_count += 1
+            total_layout_value += child_value
+            if selected_path and (
                 selected_path == child.path
                 or selected_path.startswith(child.path.rstrip("/") + "/")
-            )
-        ),
-        None,
-    )
+            ):
+                selected_child = child
+            yield child_value, child
+
+    ranked = nlargest(cap, weighted_children(), key=lambda item: item[0])
+    small = [child for _, child in ranked]
+    key = lambda child: (-value(child), child.name, child.path)
+    if candidate_count <= cap:
+        return sorted(small, key=key)
+
+    visible_slots = cap - 1
+    selected = small[:visible_slots]
     if selected_child is not None and all(
-        id(child) != id(selected_child) for child in selected
+        child is not selected_child for child in selected
     ):
         selected[-1] = selected_child
 
     selected_ids = {id(child) for child in selected}
-    omitted = [child for child in candidates if id(child) not in selected_ids]
+    omitted_layout_value = total_layout_value - sum(value(child) for child in selected)
     aggregate = _aggregate_node(
         node,
-        omitted,
+        (
+            child
+            for child in node.children
+            if value(child) > 0 and id(child) not in selected_ids
+        ),
         metric=MetricId.parse(metric),
-        layout_value=sum(value(child) for child in omitted),
+        layout_value=omitted_layout_value,
     )
     selected.append(aggregate)
-    return sorted(selected, key=lambda child: (-value(child), child.name))
+    return sorted(selected, key=key)
 
 
 def _aggregate_node(
     parent: FSNode,
-    omitted: Sequence[FSNode],
+    omitted: Iterable[FSNode],
     *,
     metric: MetricId,
     layout_value: int,
 ) -> FSNode:
-    logical = sum(child.size for child in omitted)
-    allocated = _sum_optional(omitted, "allocated_size")
-    unique = _sum_optional(omitted, "unique_allocated_size")
-    files = sum(child.file_count for child in omitted)
-    directories = sum(child.dir_count + int(child.is_dir) for child in omitted)
+    count = 0
+    logical = 0
+    allocated = 0
+    allocated_available = True
+    unique = 0
+    unique_available = True
+    files = 0
+    directories = 0
+    mtime = 0.0
+    inaccessible = 0
+    inaccessible_subtree = 0
+    denied_subtree = 0
+    partial_subtree = 0
+    excluded_subtree = 0
+    depth_limited_subtree = 0
+    for child in omitted:
+        count += 1
+        logical += child.size
+        if child.allocated_size is None:
+            allocated_available = False
+        else:
+            allocated += child.allocated_size
+        if child.unique_allocated_size is None:
+            unique_available = False
+        else:
+            unique += child.unique_allocated_size
+        files += child.file_count
+        directories += child.dir_count + int(child.is_dir)
+        mtime = max(mtime, child.mtime)
+        inaccessible += child.inaccessible_count
+        inaccessible_subtree += child.inaccessible_subtree_count
+        denied_subtree += child.denied_dir_subtree_count
+        partial_subtree += child.partial_dir_subtree_count
+        excluded_subtree += child.excluded_subtree_count
+        depth_limited_subtree += child.depth_limited_subtree_count
     if metric is MetricId.LOGICAL:
         logical = layout_value
     elif metric is MetricId.ALLOCATED:
         allocated = layout_value
+        allocated_available = True
     elif metric is MetricId.UNIQUE:
         unique = layout_value
+        unique_available = True
     else:
         files = layout_value
     path = f"{parent.path.rstrip('/')}/.fsmonitor-other-{parent.depth + 1}"
     return FSNode(
-        name=f"… {len(omitted):,} more",
+        name=f"… {count:,} more",
         path=path,
         size=logical,
         own_size=logical,
-        allocated_size=allocated,
-        own_allocated_size=allocated,
-        unique_allocated_size=unique,
-        own_unique_allocated_size=unique,
+        allocated_size=allocated if allocated_available else None,
+        own_allocated_size=allocated if allocated_available else None,
+        unique_allocated_size=unique if unique_available else None,
+        own_unique_allocated_size=unique if unique_available else None,
         file_count=files,
         dir_count=directories,
         is_dir=True,
-        mtime=max((child.mtime for child in omitted), default=0.0),
+        mtime=mtime,
         depth=parent.depth + 1,
-        inaccessible_subtree_count=sum(
-            child.inaccessible_subtree_count for child in omitted
-        ),
-        denied_dir_subtree_count=sum(
-            child.denied_dir_subtree_count for child in omitted
-        ),
-        partial_dir_subtree_count=sum(
-            child.partial_dir_subtree_count for child in omitted
-        ),
-        excluded_subtree_count=sum(
-            child.excluded_subtree_count for child in omitted
-        ),
-        depth_limited_subtree_count=sum(
-            child.depth_limited_subtree_count for child in omitted
-        ),
+        inaccessible_count=inaccessible,
+        inaccessible_subtree_count=inaccessible_subtree,
+        denied_dir_subtree_count=denied_subtree,
+        partial_dir_subtree_count=partial_subtree,
+        excluded_subtree_count=excluded_subtree,
+        depth_limited_subtree_count=depth_limited_subtree,
     )
-
-
-def _sum_optional(nodes: Sequence[FSNode], attribute: str) -> int | None:
-    values = [getattr(node, attribute) for node in nodes]
-    if any(value is None for value in values):
-        return None
-    return sum(int(value) for value in values)

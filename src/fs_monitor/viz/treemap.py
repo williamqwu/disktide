@@ -9,11 +9,12 @@ import squarify
 from rich.segment import Segment
 from rich.style import Style
 
-from fs_monitor.glyphs import visible_width
-from fs_monitor.metrics import metric_text, metric_value, metric_value_or_zero
+from fs_monitor.domain.metrics import MetricId
 from fs_monitor.models.tree import FSNode
 from fs_monitor.domain.visualization import VisualDelta
-from fs_monitor.presentation.tui.viewmodels.visualization import (
+from fs_monitor.glyphs import visible_width
+from fs_monitor.metrics import metric_text
+from fs_monitor.visualization_formatting import (
     format_visual_delta,
     visual_token,
 )
@@ -370,12 +371,19 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
 
 def _layout_value(
     node: FSNode,
-    metric: str,
+    metric: MetricId | str,
     weights: Mapping[str, int] | None,
 ) -> int:
     if weights is not None and node.path in weights:
         return max(0, int(weights[node.path]))
-    return metric_value_or_zero(node, metric)
+    selected = metric if isinstance(metric, MetricId) else MetricId.parse(metric)
+    if selected is MetricId.LOGICAL:
+        return node.size
+    if selected is MetricId.ALLOCATED:
+        return node.allocated_size or 0
+    if selected is MetricId.UNIQUE:
+        return node.unique_allocated_size or 0
+    return node.file_count
 
 
 def _delta_intensity(visual: VisualDelta) -> int:

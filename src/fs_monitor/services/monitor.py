@@ -454,21 +454,17 @@ class MonitorService:
             root = monitor.root_path.rstrip(os.sep) + os.sep
             if candidate == monitor.root_path or candidate.startswith(root):
                 selected = candidate
+        paths = [monitor.root_path]
+        if selected and selected != monitor.root_path:
+            paths.append(selected)
+        history = self._repository.get_monitor_history(monitor.id, paths)
         return MonitorHistory(
             monitor=monitor,
             root_path=monitor.root_path,
             selected_path=selected,
-            root_points=tuple(
-                self._repository.get_monitor_history_points(
-                    monitor.id, monitor.root_path
-                )
-            ),
+            root_points=tuple(history[monitor.root_path]),
             selected_points=(
-                tuple(
-                    self._repository.get_monitor_history_points(
-                        monitor.id, selected
-                    )
-                )
+                tuple(history[selected])
                 if selected and selected != monitor.root_path
                 else ()
             ),

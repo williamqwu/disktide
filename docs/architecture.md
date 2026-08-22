@@ -483,9 +483,12 @@ The first snapshot for a root is a baseline; another full baseline is stored eve
 
 `list_snapshots(root_path)` uses bidirectional matching by default: given `/a/b`, it finds exact, ancestor, and descendant watch roots. `strict_path=True` restricts this to exact matches.
 
-`load_tree()`, `load_measurements()`, and `compare_snapshots()` reconstruct each
-requested state by loading its baseline and applying ordered deltas. File paths
-are retained, so reports can name `b/new.bin` rather than only its parent.
+`load_tree()`, `load_measurements()`, and `compare_snapshots()` remain explicit
+full-state APIs. Interactive history and visualization use targeted contracts:
+`load_measurement_series()` resolves only requested paths across an ordered
+snapshot window, `list_changed_paths()` streams exact metric-ranked interval
+candidates, and `load_visualization_projection()` constructs paired sparse
+trees with selected ancestors and exact aggregate remainder nodes.
 
 `get_size_history(path)` combines baseline rows and deltas, then forward-fills
 unchanged snapshots to return `(timestamp, size)` pairs. Monitor history queries
@@ -608,18 +611,18 @@ incompatible, and missing data. `DiffFrame`, typed Trend points/series, and
 Growth Heatmap intervals retain path identity, metric, confidence, and snapshot
 ids. Widgets never compare snapshots or query SQLite.
 
-`VisualizationService` consumes `CompareService`, `MonitorHistory`, and the
-`SnapshotRepository` protocol. It blocks incompatible pairs before tree load,
-caches reconstructed diff frames and measurement maps, and builds Heatmap
-intervals from changed-path deltas without cloning every historical tree.
+`VisualizationService` consumes `MonitorHistory` and the `SnapshotRepository`
+protocol. It blocks incompatible pairs before projection, caches sparse diff
+frames and bounded path-series results, and builds Heatmap intervals from one
+windowed changed-path candidate pass instead of cloning historical trees.
 Explorer requests latest/previous or an adjacent pair only after scan
 stabilization; Monitor loads all four History views in its existing background
 worker. Redraw, resize, tab, theme, and cursor events consume cached models.
 
-The presentation vocabulary in `presentation/tui/viewmodels/visualization.py`
-owns shared labels, glyphs, delta formatting, sparklines, and legends. Safe
-rendering substitutes ASCII glyphs; `NO_COLOR` uses grayscale backgrounds while
-preserving the same state tokens.
+The rendering-neutral `visualization_formatting.py` module owns shared labels,
+glyphs, delta formatting, sparklines, and legends. The old TUI view-model module
+is a compatibility re-export only. Safe rendering substitutes ASCII glyphs;
+`NO_COLOR` uses grayscale backgrounds while preserving the same state tokens.
 
 Both spatial charts size their areas by a selectable *metric*: total bytes (the default) or file count. `compute_layout` and `compute_sunburst` take a `metric` argument, and the size tree, treemap, sunburst, and Details panel all read it so a toggle (`t` in the explorer) keeps every view consistent. `fs_monitor/metrics.py` centralises the vocabulary: `metric_value()` selects the FSNode field and `metric_text()` formats it. Both fields are aggregated bottom-up during the scan, so switching is a re-layout of in-memory data with no extra filesystem work.
 

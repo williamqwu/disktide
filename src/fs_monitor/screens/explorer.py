@@ -871,7 +871,16 @@ class ExplorerScreen(Screen):
                 timeout=5,
             )
             return
-        self._diff_mode = not self._diff_mode
+        enabling = not self._diff_mode
+        self._diff_mode = enabling
+        if enabling:
+            selected_path = self.query_one("#size-tree", SizeTree).selected_path
+            if (
+                selected_path
+                and self._space_time.frame.visual_root.find(selected_path) is None
+            ):
+                self._request_space_time_context()
+                return
         self._apply_visual_mode()
 
     def action_browse_snapshot_pair(self, direction: int) -> None:

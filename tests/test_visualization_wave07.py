@@ -355,6 +355,10 @@ class _CountingRepository:
         self.compare_calls = 0
         self.tree_calls = 0
         self.measurement_calls = 0
+        self.measurement_series_calls = 0
+        self.changed_path_calls = 0
+        self.snapshot_list_calls = 0
+        self.projection_calls = 0
 
     def __getattr__(self, name):
         return getattr(self.repository, name)
@@ -371,6 +375,22 @@ class _CountingRepository:
         self.measurement_calls += 1
         return self.repository.load_measurements(*args, **kwargs)
 
+    def load_measurement_series(self, *args, **kwargs):
+        self.measurement_series_calls += 1
+        return self.repository.load_measurement_series(*args, **kwargs)
+
+    def list_changed_paths(self, *args, **kwargs):
+        self.changed_path_calls += 1
+        return self.repository.list_changed_paths(*args, **kwargs)
+
+    def list_snapshots(self, *args, **kwargs):
+        self.snapshot_list_calls += 1
+        return self.repository.list_snapshots(*args, **kwargs)
+
+    def load_visualization_projection(self, *args, **kwargs):
+        self.projection_calls += 1
+        return self.repository.load_visualization_projection(*args, **kwargs)
+
 
 def test_diff_and_path_history_caches_prevent_repeat_queries(repository):
     now = datetime(2026, 8, 21, 12, tzinfo=timezone.utc)
@@ -384,15 +404,24 @@ def test_diff_and_path_history_caches_prevent_repeat_queries(repository):
     service = VisualizationService(counted)
 
     first = service.diff(baseline, target)
-    second = service.diff(baseline, target, selected_path="/data/item")
-    assert first.visuals is second.visuals
-    assert counted.compare_calls == 1
-    assert counted.tree_calls == 2
+    repeated = service.diff(baseline, target)
+    selected = service.diff(baseline, target, selected_path="/data/item")
+    selected_repeated = service.diff(
+        baseline,
+        target,
+        selected_path="/data/item",
+    )
+    assert first is repeated
+    assert selected is selected_repeated
+    assert counted.compare_calls == 0
+    assert counted.tree_calls == 0
+    assert counted.projection_calls == 2
 
     ids = (baseline.id, target.id)
     assert service.path_trend("/data/item", ids, MetricId.LOGICAL) == (100, 200)
     assert service.path_trend("/data/item", ids, MetricId.LOGICAL) == (100, 200)
-    assert counted.measurement_calls == 2
+    assert counted.measurement_calls == 0
+    assert counted.measurement_series_calls == 1
 
 
 def test_safe_rendering_preserves_semantics_without_unicode():
