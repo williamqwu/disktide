@@ -13,6 +13,7 @@ from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import (
+    Button,
     DataTable,
     Footer,
     Header,
@@ -22,14 +23,16 @@ from textual.widgets import (
     TabPane,
 )
 
-from fs_monitor.config import AppConfig, format_duration
+from fs_monitor.config import AppConfig, format_duration, save_config
 from fs_monitor.domain.alerts import AlertRule
 from fs_monitor.domain.monitor import (
     HistoryPointState,
+    MonitorActivityState,
     MonitorDashboard,
     MonitorDefinition,
     MonitorDesiredState,
     MonitorHistory,
+    MonitorSummary,
     RetentionPreview,
 )
 from fs_monitor.domain.visualization import MonitorSpaceTime
@@ -64,7 +67,7 @@ class MonitorScreen(Screen):
         Binding("p", "pause_resume", "Pause/Resume", show=True),
         Binding("shift+r", "run_now", "Run now", show=True, key_display="R"),
         Binding("g", "reconcile", "Reconcile", show=True),
-        Binding("s", "toggle_session", "Start/Stop session", show=True),
+        Binding("s", "toggle_session", "Start/Stop sampling", show=True),
         Binding("d", "archive_monitor", "Archive", show=False),
         Binding("i", "pin_snapshot", "Pin/Unpin", show=False),
         Binding("a", "add_alert", "Add alert", show=False),
@@ -124,6 +127,30 @@ class MonitorScreen(Screen):
         height: 1fr;
     }
 
+    #monitor-sampling-controls {
+        height: 4;
+        padding: 0 1;
+        align: left middle;
+        background: $surface;
+        border-bottom: solid $primary-background;
+    }
+
+    #monitor-session-toggle {
+        width: 22;
+        margin-right: 1;
+    }
+
+    #monitor-auto-start-toggle {
+        width: 20;
+        margin-right: 1;
+    }
+
+    #monitor-session-help {
+        width: 1fr;
+        height: 1;
+        color: $text-muted;
+    }
+
     #monitor-loading-wrap {
         display: none;
         height: 4;
@@ -144,7 +171,7 @@ class MonitorScreen(Screen):
     }
 
     #monitor-history-summary {
-        height: 3;
+        height: 4;
         padding: 0 1;
         color: $text-muted;
     }
@@ -187,6 +214,14 @@ class MonitorScreen(Screen):
         display: block;
         width: 100%;
     }
+
+    MonitorScreen.narrow #monitor-session-toggle {
+        width: 1fr;
+    }
+
+    MonitorScreen.narrow #monitor-session-help {
+        display: none;
+    }
     """
 
     def __init__(
@@ -218,6 +253,7 @@ class MonitorScreen(Screen):
         self._space_time_error: str | None = None
         self._baseline_snapshot_id: int | None = None
         self._target_snapshot_id: int | None = None
+        self._session_stopping = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -231,11 +267,36 @@ class MonitorScreen(Screen):
                 yield monitor_table
             with Vertical(id="monitor-detail-panel"):
                 yield Static("Select a monitor", id="monitor-detail-title")
+                with Horizontal(id="monitor-sampling-controls"):
+                    yield Button(
+                        "Loading sampling state…",
+                        id="monitor-session-toggle",
+                        disabled=True,
+                        tooltip=(
+                            "Start all enabled monitors, or stop the host and "
+                            "cancel its active scan."
+                        ),
+                    )
+                    yield Button(
+                        "Auto-start: On"
+                        if self._config.monitor.auto_start_in_tui
+                        else "Auto-start: Off",
+                        id="monitor-auto-start-toggle",
+                        tooltip=(
+                            "Automatically start all enabled monitors on future "
+                            "TUI launches."
+                        ),
+                    )
+                    yield Static(
+                        "All enabled monitors; TUI must stay open.",
+                        id="monitor-session-help",
+                    )
                 with Vertical(id="monitor-loading-wrap"):
                     yield LoadingIndicator()
-                with TabbedContent(id="monitor-tabs"):
-                    with TabPane("Overview", id="monitor-overview-tab"):
-                        yield Static("", id="monitor-overview")
+                with TabbedContent(
+                    initial="monitor-history-tab",
+                    id="monitor-tabs",
+                ):
                     with TabPane("History", id="monitor-history-tab"):
                         yield Static("", id="monitor-history-summary")
                         with TabbedContent(id="monitor-history-viz-tabs"):
@@ -253,6 +314,8 @@ class MonitorScreen(Screen):
                             "Time", "Path", "Value", "State", "Revision", "Flags"
                         )
                         yield history_table
+                    with TabPane("Details", id="monitor-overview-tab"):
+                        yield Static("", id="monitor-overview")
                     with TabPane("Alerts", id="monitor-alerts-tab"):
                         yield Static("", id="monitor-alert-summary")
                         rules = DataTable(id="monitor-alert-rules")
@@ -383,7 +446,10 @@ class MonitorScreen(Screen):
         self._retention = retention
         self._space_time = space_time
         self._space_time_error = space_time_error
+        if self._session_stopping and not dashboard.session_running:
+            self._session_stopping = False
         self._render_banner()
+        self._render_sampling_controls()
         self._render_monitor_list()
         if selected_id is None:
             self._render_empty()
@@ -403,7 +469,7 @@ class MonitorScreen(Screen):
             f"{summary.definition.label} · {summary.definition.root_path}"
         )
         self._render_overview(summary)
-        self._render_history(history, space_time)
+        self._render_history(summary, history, space_time)
         self._render_alerts(rules, alert_events)
         self._render_retention(summary, history, retention)
 
@@ -416,7 +482,11 @@ class MonitorScreen(Screen):
             for item in dashboard.monitors
             if item.definition.desired_state is MonitorDesiredState.ENABLED
         )
-        session = "RUNNING" if dashboard.session_running else "STOPPED"
+        session = (
+            "STOPPING"
+            if self._session_stopping
+            else "RUNNING" if dashboard.session_running else "STOPPED"
+        )
         event_assisted = sum(
             item.status.watch_mode.value == "event-assisted"
             for item in dashboard.monitors
@@ -436,6 +506,48 @@ class MonitorScreen(Screen):
             f"Monitor Center · Session {session} · {enabled} enabled · "
             f"events {event_assisted} · dirty {pending} · degraded {degraded} · "
             f"DB {budget} · repository {dashboard.repository_state}"
+        )
+
+    def _render_sampling_controls(self) -> None:
+        dashboard = self._dashboard
+        if dashboard is None:
+            return
+        enabled = sum(
+            item.definition.desired_state is MonitorDesiredState.ENABLED
+            for item in dashboard.monitors
+        )
+        toggle = self.query_one("#monitor-session-toggle", Button)
+        auto_start = self.query_one("#monitor-auto-start-toggle", Button)
+        help_text = self.query_one("#monitor-session-help", Static)
+
+        if self._session_stopping:
+            toggle.label = "Stopping & cancelling…"
+            toggle.variant = "warning"
+            toggle.disabled = True
+            help_text.update("Stopping host; cancelling active scan.")
+        elif dashboard.session_running:
+            toggle.label = "Stop & cancel \\[S]"
+            toggle.variant = "error"
+            toggle.disabled = False
+            help_text.update(
+                f"Running · {enabled} enabled · active across screens."
+            )
+        else:
+            toggle.label = "Start sampling \\[S]"
+            toggle.variant = "success"
+            toggle.disabled = enabled == 0 or dashboard.repository_state != "writable"
+            if enabled:
+                help_text.update("Stopped · scheduled collection is off.")
+            else:
+                help_text.update("No enabled monitors available.")
+
+        auto_start.label = (
+            "Auto-start: On"
+            if self._config.monitor.auto_start_in_tui
+            else "Auto-start: Off"
+        )
+        auto_start.variant = (
+            "primary" if self._config.monitor.auto_start_in_tui else "default"
         )
 
     def _render_monitor_list(self) -> None:
@@ -464,6 +576,7 @@ class MonitorScreen(Screen):
         state = self._dashboard.repository_state if self._dashboard else "unknown"
         writable = state == "writable"
         action = "Press n to set up monitoring." if writable else "Setup is disabled."
+        self._clear_detail_tables()
         self.query_one("#monitor-detail-title", Static).update("Monitor Center")
         self.query_one("#monitor-overview", Static).update(
             "[b]No monitor definition covers the current selection.[/b]\n\n"
@@ -473,7 +586,11 @@ class MonitorScreen(Screen):
             "A monitor only runs while this TUI session or a foreground CLI "
             "host is active. Enabled does not mean a daemon is installed."
         )
-        self._clear_detail_tables()
+        self.query_one("#monitor-history-summary", Static).update(
+            "[b]No monitor definition covers the current selection.[/b]\n"
+            f"{action}\n"
+            "Saved definitions need this TUI session or fsmonitor watch --all."
+        )
 
     def _render_overview(self, summary) -> None:
         definition = summary.definition
@@ -574,19 +691,21 @@ class MonitorScreen(Screen):
 
     def _render_history(
         self,
+        summary: MonitorSummary,
         history: MonitorHistory | None,
         space_time: MonitorSpaceTime | None,
     ) -> None:
         table = self.query_one("#monitor-history-table", DataTable)
         table.clear()
         self._selected_snapshot_id = None
+        collection = self._history_collection_line(summary)
         if history is None:
             self.query_one("#monitor-history-chart", TrendChart).set_model(None)
             self.query_one("#monitor-diff-treemap", TreemapView).set_diff(None)
             self.query_one("#monitor-growth-sunburst", SunburstView).set_diff(None)
             self.query_one("#monitor-growth-heatmap", GrowthHeatmap).set_model(None)
             self.query_one("#monitor-history-summary", Static).update(
-                "No compatible history yet."
+                f"{collection}\nNo canonical snapshots yet. Press R to capture one."
             )
             return
 
@@ -614,6 +733,7 @@ class MonitorScreen(Screen):
                 f" · {space_time.diff_error}" if space_time.diff_error else ""
             )
             self.query_one("#monitor-history-summary", Static).update(
+                f"{collection}\n"
                 f"Pair {pair} · {confidence}{problem}\n"
                 f"{legend_text()} · b/v set pair · l latest · z zoom · Shift+←/→ pan"
             )
@@ -636,7 +756,9 @@ class MonitorScreen(Screen):
             growth_sunburst.set_diff(None)
             heatmap.set_model(None)
             message = self._space_time_error or "Space-time visual service unavailable"
-            self.query_one("#monitor-history-summary", Static).update(message)
+            self.query_one("#monitor-history-summary", Static).update(
+                f"{collection}\n{message}"
+            )
 
         paths = [(history.root_path, history.root_points)]
         if history.selected_path and history.selected_points:
@@ -659,6 +781,28 @@ class MonitorScreen(Screen):
                     ", ".join(flags) or "—",
                     key=f"{path}:{point.snapshot_id}",
                 )
+
+    @staticmethod
+    def _history_collection_line(summary: MonitorSummary) -> str:
+        definition = summary.definition
+        status = summary.status
+        points = f"{summary.snapshot_count} canonical point(s)"
+        if definition.desired_state is MonitorDesiredState.PAUSED:
+            return f"Collection paused · {points} · press p to resume"
+        if status.activity is MonitorActivityState.NO_HOST:
+            return (
+                f"Collection stopped · {points} · no active host; "
+                "press s or run fsmonitor watch --all"
+            )
+        next_due = (
+            status.next_due_at.astimezone().strftime("%m-%d %H:%M")
+            if status.next_due_at
+            else "unscheduled"
+        )
+        return (
+            f"Collection active · {points} · {status.activity.value} · "
+            f"next full {next_due}"
+        )
 
     def _render_alerts(self, rules: list[AlertRule], alert_events: list) -> None:
         self.query_one("#monitor-alert-summary", Static).update(
@@ -946,18 +1090,65 @@ class MonitorScreen(Screen):
             self.app.call_from_thread(self._load_data)
 
     def action_toggle_session(self) -> None:
+        if self._session_stopping:
+            return
         try:
             if self._service.session_running:
+                self._session_stopping = True
+                self._render_sampling_controls()
                 self._service.stop_session(wait=False)
-                self.app.notify("Monitoring session stopping.")
+                self.app.notify(
+                    "Continuous sampling is stopping; the active scan was cancelled."
+                )
             else:
+                dashboard = self._dashboard
+                enabled = (
+                    sum(
+                        item.definition.desired_state is MonitorDesiredState.ENABLED
+                        for item in dashboard.monitors
+                    )
+                    if dashboard is not None
+                    else 0
+                )
+                if enabled == 0:
+                    self.app.notify(
+                        "Create or resume an enabled monitor first.",
+                        severity="warning",
+                    )
+                    return
                 self._service.start_session(host_type="tui")
                 self.app.notify(
-                    "Monitoring session started. It continues while you use other TUI screens."
+                    "Continuous sampling started for all enabled monitors. "
+                    "It continues across TUI screens until stopped or the app exits."
                 )
         except Exception as exc:
+            self._session_stopping = False
             self._notify_error(exc)
         self._load_data()
+
+    @on(Button.Pressed, "#monitor-session-toggle")
+    def on_sampling_toggle_pressed(self) -> None:
+        self.action_toggle_session()
+
+    @on(Button.Pressed, "#monitor-auto-start-toggle")
+    def on_auto_start_toggle_pressed(self) -> None:
+        previous = self._config.monitor.auto_start_in_tui
+        self._config.monitor.auto_start_in_tui = not previous
+        try:
+            save_config(self._config)
+        except OSError as exc:
+            self._config.monitor.auto_start_in_tui = previous
+            self.app.notify(
+                f"Could not save auto-start setting: {exc}",
+                severity="error",
+                timeout=8,
+            )
+        else:
+            state = "enabled" if self._config.monitor.auto_start_in_tui else "disabled"
+            self.app.notify(
+                f"Automatic sampling on future TUI launches is {state}."
+            )
+        self._render_sampling_controls()
 
     def action_archive_monitor(self) -> None:
         monitor = self._selected_monitor()

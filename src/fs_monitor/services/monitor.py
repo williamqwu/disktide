@@ -107,6 +107,9 @@ class MonitorEventBackendUnavailable(MonitorServiceError):
     pass
 
 
+_SESSION_STOP_CANCELLATION_REASON = "monitor session stopping"
+
+
 class MonitorEventKind(StrEnum):
     DEFINITION_CHANGED = "definition-changed"
     HOST_CHANGED = "host-changed"
@@ -587,7 +590,10 @@ class MonitorService:
             active_run_id = self._active_run_id
             self._condition.notify_all()
         if active_run_id:
-            self._scan_service.cancel(active_run_id, "monitor session stopping")
+            self._scan_service.cancel(
+                active_run_id,
+                _SESSION_STOP_CANCELLATION_REASON,
+            )
         if wait:
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=10)
@@ -1157,6 +1163,7 @@ class MonitorService:
             if monitor_id is not None
             else None
         )
+        previous_next_due_at = status.next_due_at if status is not None else None
         if status is not None:
             status.activity = MonitorActivityState.QUEUED
             status.host_id = self._host_id
@@ -1439,6 +1446,11 @@ class MonitorService:
                         run,
                         snapshot=snapshot,
                         drained_dirty=drained_dirty,
+                    )
+                elif self._is_session_stop_cancellation(run):
+                    self._finish_stopped_status(
+                        status,
+                        next_due_at=previous_next_due_at,
                     )
                 else:
                     self._finish_failed_status(status, run)
@@ -2509,6 +2521,32 @@ class MonitorService:
         status.resource_queue_reason = None
         status.resource_active_slot = None
 
+    @staticmethod
+    def _is_session_stop_cancellation(run: ScanRun) -> bool:
+        return (
+            run.status is ScanStatus.CANCELLED
+            and run.cancellation_reason == _SESSION_STOP_CANCELLATION_REASON
+        )
+
+    @staticmethod
+    def _finish_stopped_status(
+        status: MonitorStatus,
+        *,
+        next_due_at: datetime | None,
+    ) -> None:
+        status.activity = MonitorActivityState.NO_HOST
+        status.host_id = None
+        status.host_type = None
+        status.lease_expires_at = None
+        status.next_due_at = next_due_at
+        status.active_run_id = None
+        status.active_phase = None
+        status.progress_percent = 0.0
+        status.current_path = None
+        status.resource_queue_position = 0
+        status.resource_queue_reason = None
+        status.resource_active_slot = None
+
     def _validation_failure_run(
         self, request: ScanRequest, exc: Exception
     ) -> ScanRun:
@@ -2604,6 +2642,26 @@ class MonitorService:
     def _normalized_status(self, monitor_id: int) -> MonitorStatus:
         status = self._repository.get_monitor_status(monitor_id)
         now = self._now()
+        changed = False
+        if (
+            status.activity is MonitorActivityState.NO_HOST
+            and status.health is MonitorHealthState.FAILED
+            and status.last_error == _SESSION_STOP_CANCELLATION_REASON
+        ):
+            status.health = (
+                MonitorHealthState.WARNING
+                if status.reconciliation_required or status.degraded_reason
+                else (
+                    MonitorHealthState.HEALTHY
+                    if status.last_success_at is not None
+                    else MonitorHealthState.UNKNOWN
+                )
+            )
+            status.last_failure_at = None
+            status.consecutive_failures = 0
+            status.last_error = None
+            status.blocked_reason = None
+            changed = True
         if (
             status.host_id
             and status.lease_expires_at is not None
@@ -2650,8 +2708,9 @@ class MonitorService:
                     MonitorHealthState.FAILED,
                 }:
                     status.health = MonitorHealthState.WARNING
-            if self._repository.status.writable:
-                self._repository.save_monitor_status(status)
+            changed = True
+        if changed and self._repository.status.writable:
+            self._repository.save_monitor_status(status)
         return status
 
     def _resolve_monitor(self, identifier: int | str) -> MonitorDefinition:

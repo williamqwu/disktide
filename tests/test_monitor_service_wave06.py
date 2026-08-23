@@ -13,6 +13,7 @@ from fs_monitor.domain.monitor import (
     MonitorActivityState,
     MonitorDefinition,
     MonitorDesiredState,
+    MonitorHealthState,
 )
 from fs_monitor.domain.policy import ScanPolicy
 from fs_monitor.models.tree import FSNode
@@ -210,6 +211,70 @@ def test_run_now_during_scan_coalesces_one_rerun_and_shutdown_clears_host(
     assert status.activity is MonitorActivityState.NO_HOST
     assert status.host_id is None
     assert status.active_run_id is None
+    assert status.health is not MonitorHealthState.FAILED
+    assert status.consecutive_failures == 0
+    assert status.last_error is None
+
+
+def test_scheduled_run_cancelled_by_session_stop_remains_due(
+    repository, tmp_path
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    started = threading.Event()
+    release = threading.Event()
+
+    def factory(request, progress_callback, tree_callback):
+        return _BlockingCollector(request, started, release)
+
+    service = MonitorService(
+        repository,
+        scan_service=ScanService(scanner_factory=factory),
+        lease_seconds=6,
+    )
+    monitor = service.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    service.start_session(host_type="test")
+    assert started.wait(2)
+    advanced_due = repository.get_monitor_status(monitor.id).next_due_at
+    assert advanced_due is not None
+
+    service.stop_session(wait=True)
+
+    status = repository.get_monitor_status(monitor.id)
+    assert status.activity is MonitorActivityState.NO_HOST
+    assert status.health is not MonitorHealthState.FAILED
+    assert status.next_due_at is not None
+    assert status.next_due_at < advanced_due
+    assert status.last_attempt_at is not None
+    assert status.next_due_at <= status.last_attempt_at
+    assert status.last_failure_at is None
+    assert status.consecutive_failures == 0
+    assert status.last_error is None
+
+
+def test_dashboard_repairs_legacy_session_stop_failure(repository, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    monitor = repository.create_monitor(MonitorDefinition(root_path=str(root)))
+    status = repository.get_monitor_status(monitor.id)
+    status.health = MonitorHealthState.FAILED
+    status.last_success_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    status.last_failure_at = datetime.now(timezone.utc)
+    status.consecutive_failures = 1
+    status.last_error = "monitor session stopping"
+    repository.save_monitor_status(status)
+
+    repaired = MonitorService(repository).dashboard().monitors[0].status
+
+    assert repaired.health is MonitorHealthState.HEALTHY
+    assert repaired.last_failure_at is None
+    assert repaired.consecutive_failures == 0
+    assert repaired.last_error is None
+    persisted = repository.get_monitor_status(monitor.id)
+    assert persisted.health is MonitorHealthState.HEALTHY
+    assert persisted.last_error is None
 
 
 def test_pause_during_scan_does_not_restore_released_host(repository, tmp_path):

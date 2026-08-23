@@ -89,13 +89,22 @@ Symbolic links are shown as `name → target` and never counted toward folder si
 ### Monitor (2)
 
 Monitor Center is the shared setup and management surface for persistent
-monitors. Its list/detail layout shows desired state, current host activity,
-health, event/periodic mode, pending dirty paths, reconciliation confidence,
-scan-resource queue/slot and worker reason, next full scan, snapshot count,
-global database usage, and active alerts.
-The detail side has Overview, History, Alerts, and Retention tabs. Terminals
-narrower than 90 columns use a list-first view; press **Enter** for details and
-**Escape** to return.
+monitors. Selecting a monitor opens **History** first, with the Trend chart and
+snapshot timeline visible immediately. The chart header also says whether
+collection is active or stopped and gives the exact host action when an enabled
+definition has no owner. Detailed desired state, host activity, health,
+event/periodic mode, pending dirty paths, reconciliation confidence,
+scan-resource queue/slot and worker reason, and database usage remain available
+under **Details**; Alerts and Retention keep their own tabs. Terminals narrower
+than 90 columns use a list-first view; press **Enter** for the chart/detail side
+and **Escape** to return.
+
+The control bar above History makes foreground hosting explicit. **Start
+sampling** hosts every enabled monitor for as long as this TUI remains open;
+**Stop & cancel** stops that host and cancels any active monitor scan. The
+**Auto-start** toggle persists `monitor.auto_start_in_tui`, so future TUI
+launches start the same foreground host automatically. It does not install a
+daemon or keep sampling after the TUI exits.
 
 | Key | Action |
 |-----|--------|
@@ -104,7 +113,7 @@ narrower than 90 columns use a list-first view; press **Enter** for details and
 | `p` | Pause or resume the selected definition |
 | `R` | Run the selected monitor now |
 | `g` | Run or queue a trusted full reconciliation |
-| `s` | Start or stop this TUI's foreground monitoring session |
+| `s` | Start continuous sampling, or stop it and cancel the active monitor scan |
 | `d` | Archive the monitor after confirmation; history remains |
 | `i` | Pin or unpin the selected History snapshot |
 | `a` / `A` | Add or edit an alert rule in the Alerts tab |

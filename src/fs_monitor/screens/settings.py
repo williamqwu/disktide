@@ -347,6 +347,11 @@ class SettingsScreen(Screen):
         self._detect_system()
         self._detect_db_size()
 
+    def on_screen_resume(self) -> None:
+        self.query_one("#monitor-auto-start", Switch).value = (
+            self._config.monitor.auto_start_in_tui
+        )
+
     def _detect_system(self) -> None:
         """Detect system info and update display."""
         from fs_monitor.scanner.sysinfo import detect_system_info

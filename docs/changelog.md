@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.15
+
+**History-first Monitor UX and truthful shutdown state**
+
+- **chart-first monitor** Monitor Center now opens directly on History/Trend, keeps the diagnostic text under Details, and adds visible Start sampling / Stop & cancel controls plus a persisted TUI auto-start toggle.
+- **honest cancellation** Stopping a foreground monitor host no longer records an expected scan cancellation as a failed monitor or advances the schedule past the uncollected due point.
+- **state repair** Dashboard/status reads repair legacy `monitor session stopping` failure projections while preserving the cancelled run audit record.
+
 ## v0.2.14
 
 **Event-assisted live state**
