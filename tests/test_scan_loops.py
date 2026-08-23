@@ -8,8 +8,8 @@ a directory is its own ancestor.
 
 import os
 
-from fs_monitor.scanner.engine import ScanEngine
-from fs_monitor.scanner.walker import scan_directory
+from sizetrail.scanner.engine import ScanEngine
+from sizetrail.scanner.walker import scan_directory
 
 
 def _identity(path: str) -> tuple[int, int]:

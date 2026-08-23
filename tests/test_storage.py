@@ -5,9 +5,9 @@ import tempfile
 from datetime import datetime, timedelta
 
 import pytest
-from fs_monitor.models.tree import FSNode
-from fs_monitor.models.snapshot import Snapshot
-from fs_monitor.storage.database import Database, _BASELINE_INTERVAL
+from sizetrail.models.tree import FSNode
+from sizetrail.models.snapshot import Snapshot
+from sizetrail.storage.database import Database, _BASELINE_INTERVAL
 
 
 @pytest.fixture
@@ -455,7 +455,7 @@ class TestDiskFull:
 
     def test_default_path_makedirs_failure_does_not_raise(self, tmp_path, monkeypatch):
         """A full disk can't create the data dir; construction must survive."""
-        import fs_monitor.storage.database as dbmod
+        import sizetrail.storage.database as dbmod
 
         def boom(*args, **kwargs):
             raise OSError(28, "No space left on device")

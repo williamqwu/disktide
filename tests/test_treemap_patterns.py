@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 from rich.style import Style
 
-from fs_monitor.models.tree import FSNode
-from fs_monitor.viz.colors import file_category as _file_category
-from fs_monitor.viz.treemap import (
+from sizetrail.models.tree import FSNode
+from sizetrail.viz.colors import file_category as _file_category
+from sizetrail.viz.treemap import (
     TreemapLayout,
     compute_layout,
     render_line,
@@ -361,7 +361,7 @@ class TestMixedFileTypes:
                 continue
             cat = _file_category(rect.node.name)
             # Collect the style that would be rendered
-            from fs_monitor.viz.treemap import _rect_bg
+            from sizetrail.viz.treemap import _rect_bg
             bg = _rect_bg(rect.node, rect.depth, rect.is_leaf)
             leaf_bgs.setdefault(cat, set()).add(bg)
 
@@ -600,7 +600,7 @@ class TestFileCategoryMapping:
 
     def test_all_schemes_cover_all_categories(self):
         """Every color scheme must have a hue for every known category."""
-        from fs_monitor.viz.colors import SCHEMES, EXT_CATEGORIES
+        from sizetrail.viz.colors import SCHEMES, EXT_CATEGORIES
         all_cats = set(EXT_CATEGORIES.values()) | {"other"}
         for name, scheme in SCHEMES.items():
             for cat in all_cats:

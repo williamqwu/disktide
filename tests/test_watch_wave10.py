@@ -12,31 +12,31 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from fs_monitor.__main__ import cli
-from fs_monitor.collectors.events.base import (
+from sizetrail.__main__ import cli
+from sizetrail.collectors.events.base import (
     EventBackendInfo,
     EventWatch,
     FilesystemEvent,
     FilesystemEventKind,
 )
-from fs_monitor.collectors.events.native import (
+from sizetrail.collectors.events.native import (
     InotifyEventBackend,
     probe_native_event_backend,
 )
-from fs_monitor.domain.monitor import (
+from sizetrail.domain.monitor import (
     MonitorDefinition,
     MonitorEventMode,
     MonitorHealthState,
     MonitorReconciliationState,
     MonitorWatchMode,
 )
-from fs_monitor.domain.scan import ScanRequest
-from fs_monitor.extensions.capabilities import CapabilityStatus
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.screens.monitor import MonitorScreen
-from fs_monitor.services.monitor import MonitorService
-from fs_monitor.services.scan import ScanService
-from fs_monitor.services.watch import DirtyPathTracker
+from sizetrail.domain.scan import ScanRequest
+from sizetrail.extensions.capabilities import CapabilityStatus
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.screens.monitor import MonitorScreen
+from sizetrail.services.monitor import MonitorService
+from sizetrail.services.scan import ScanService
+from sizetrail.services.watch import DirtyPathTracker
 
 
 class FakeEventBackend:
@@ -92,7 +92,7 @@ def _unavailable_backend() -> EventBackendInfo:
         name="inotify-simple",
         status=CapabilityStatus.UNAVAILABLE,
         reason="optional backend is not installed",
-        suggestion="Install with: uv tool install 'fsmonitor-cli[watch]'",
+        suggestion="Install with: uv tool install 'sizetrail[watch]'",
     )
 
 
@@ -441,7 +441,7 @@ def test_cli_events_requires_extra_and_periodic_override_stays_available(
 
     required = runner.invoke(cli, ["watch", str(root), "--events"])
     assert required.exit_code != 0
-    assert "fsmonitor-cli[watch]" in required.output
+    assert "sizetrail[watch]" in required.output
 
     periodic = runner.invoke(cli, ["watch", str(root), "--periodic-only"])
     assert periodic.exit_code == 0, periodic.output

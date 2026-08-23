@@ -6,7 +6,7 @@ import json
 
 from click.testing import CliRunner
 
-from fs_monitor.__main__ import cli
+from sizetrail.__main__ import cli
 
 
 def test_monitor_cli_create_run_status_and_alert_check(tmp_path, monkeypatch):

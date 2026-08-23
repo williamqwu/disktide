@@ -1,7 +1,7 @@
 """Tests for ColorBrailleCanvas."""
 
 import pytest
-from fs_monitor.viz.braille import ColorBrailleCanvas
+from sizetrail.viz.braille import ColorBrailleCanvas
 
 
 class TestColorBrailleCanvas:

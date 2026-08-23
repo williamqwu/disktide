@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 
-from fs_monitor.app import FSMonitorApp
-from fs_monitor.config import load_config
-from fs_monitor.screens.explorer import ExplorerScreen
-from fs_monitor.widgets.confirm_modal import ConfirmModal
+from sizetrail.app import SizeTrailApp
+from sizetrail.config import load_config
+from sizetrail.screens.explorer import ExplorerScreen
+from sizetrail.widgets.confirm_modal import ConfirmModal
 
 
 async def _wait_for_explorer(pilot, app) -> None:
@@ -19,8 +19,8 @@ async def _wait_for_explorer(pilot, app) -> None:
             return
 
 
-def _new_app(tmp_path) -> FSMonitorApp:
-    return FSMonitorApp(
+def _new_app(tmp_path) -> SizeTrailApp:
+    return SizeTrailApp(
         scan_path=str(tmp_path),
         show_welcome=False,
         config=load_config(),

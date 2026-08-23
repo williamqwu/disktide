@@ -1,6 +1,6 @@
-# fsmonitor
+# SizeTrail
 
-Interactive terminal disk usage explorer built with Python and [Textual](https://github.com/Textualize/textual).
+Storage intelligence for the terminal, built with Python and [Textual](https://github.com/Textualize/textual). Explore current usage, understand how it changed, and reclaim space through reviewable, reversible plans.
 
 Explore the same tree by logical bytes, allocated blocks, unique on-disk
 allocation, or file count. Sparse files, hardlinks, filesystem boundaries,
@@ -17,64 +17,73 @@ collapsed into one ambiguous size number.
 Run once without installing:
 
 ```bash
-uvx fsmonitor-cli
+uvx sizetrail
 ```
 
 Install as an isolated command with any supported tool:
 
 ```bash
-uv tool install fsmonitor-cli
-pipx install fsmonitor-cli
+uv tool install sizetrail
+pipx install sizetrail
 
 # Standard virtual environment
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install fsmonitor-cli
+python -m pip install sizetrail
 ```
 
 Linux filesystem-event acceleration is optional. Install the `watch` extra to
 reduce change visibility latency while retaining periodic full reconciliation:
 
 ```bash
-uv tool install 'fsmonitor-cli[watch]'
-pipx install 'fsmonitor-cli[watch]'
-python -m pip install 'fsmonitor-cli[watch]'
+uv tool install 'sizetrail[watch]'
+pipx install 'sizetrail[watch]'
+python -m pip install 'sizetrail[watch]'
 ```
 
 Without the extra, monitor hosting remains fully functional in periodic mode.
-`fsmonitor doctor` reports the active backend, version, status, and installation
+`sizetrail doctor` reports the active backend, version, status, and installation
 remedy.
 
 Upgrade or uninstall:
 
 ```bash
-uv tool upgrade fsmonitor-cli
-uv tool uninstall fsmonitor-cli
-pipx upgrade fsmonitor-cli
-pipx uninstall fsmonitor-cli
+uv tool upgrade sizetrail
+uv tool uninstall sizetrail
+pipx upgrade sizetrail
+pipx uninstall sizetrail
 ```
 
-The Python distribution is still named `fsmonitor-cli` for package-index compatibility. The canonical command is `fsmonitor`; the previous `fsmonitor-cli` command remains available as a compatibility alias.
+The Python distribution, import package, and canonical command are all named
+`sizetrail`. The previous `fsmonitor` and `fsmonitor-cli` commands remain
+available as compatibility aliases.
 
 The core wheel is pure Python and has no compiler requirement. Development
 checkouts use `uv sync --locked`; see [Contributing](docs/contributing.md).
 
-**Stored data.** The app follows XDG conventions and writes below two persistent roots. Deleting either root is safe for the filesystem, but resets the corresponding settings, custom cleanup policy, or snapshot history. The existing `fsmonitor-cli` directory names are intentionally retained so upgrades keep current data:
+**Stored data.** The app follows XDG conventions and writes below two persistent
+roots. New installations use the SizeTrail paths shown here. If an existing
+`fsmonitor-cli` configuration or database is present and the corresponding
+SizeTrail path is not, SizeTrail continues using the legacy directory so saved
+monitors, snapshots, cleanup rules, and audit history remain available.
 
 | Location | Contents | Typical size |
 |----------|----------|--------------|
-| `~/.config/fsmonitor-cli/config.toml` | User settings | < 1 KB |
-| `~/.config/fsmonitor-cli/cleanup-rules/*.toml` | Optional schema-v1 declarative cleanup rule packs | User-defined |
-| `~/.local/share/fsmonitor-cli/data.db` | SQLite monitor definitions, snapshots/deltas, retention/alert history, and CleanupPlan/audit records | Depends on tree size and snapshot count |
+| `~/.config/sizetrail/config.toml` | User settings | < 1 KB |
+| `~/.config/sizetrail/cleanup-rules/*.toml` | Optional schema-v1 declarative cleanup rule packs | User-defined |
+| `~/.local/share/sizetrail/data.db` | SQLite monitor definitions, snapshots/deltas, retention/alert history, and CleanupPlan/audit records | Depends on tree size and snapshot count |
+
+Legacy paths recognized during upgrade are
+`~/.config/fsmonitor-cli/` and `~/.local/share/fsmonitor-cli/`.
 
 Snapshot data is written by `scan --snapshot`, explicit monitor runs, and active
-foreground monitor hosts. `fsmonitor compare` checks policy and root
+foreground monitor hosts. `sizetrail compare` checks policy and root
 compatibility before reporting growth. Monitor Center in the TUI can create,
 edit, pause, run, archive, pin, and manage alerts for the same persistent
 definitions exposed by the CLI. Its History tab shares one space-time
 vocabulary across Trend, Diff Treemap, growth-overlay Sunburst, and
 persistent-growth Heatmap views. Definitions do not install a daemon: scans run
-only while the current TUI monitoring session or `fsmonitor watch` foreground
+only while the current TUI monitoring session or `sizetrail watch` foreground
 host is active. An external supervisor may keep that same foreground host alive;
 the repository lease remains the single ownership contract. Versioned retention policies roll older history into time
 buckets, preserve pinned snapshots, and enforce configurable database budgets.
@@ -83,13 +92,13 @@ Paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME` if set. Settings can also be
 
 ## Quick Start
 
-`fsmonitor` has two modes of operation: an **interactive TUI** for visual exploration (the main interface), and CLI commands for diagnostics, scripting, monitoring, and cleanup.
+`sizetrail` has two modes of operation: an **interactive TUI** for visual exploration (the main interface), and CLI commands for diagnostics, scripting, monitoring, and cleanup.
 
 ### TUI
 
 ```bash
 # Launch interactive TUI (opens welcome screen)
-fsmonitor
+sizetrail
 ```
 
 #### Key Bindings
@@ -131,57 +140,57 @@ generic executor. Permanent deletion is a separate typed-confirmation path.
 
 ```bash
 # Explain this installation and its available platform features
-fsmonitor doctor
-fsmonitor doctor --json
+sizetrail doctor
+sizetrail doctor --json
 
 # Scan a directory directly
-fsmonitor scan /path --metric allocated --snapshot
+sizetrail scan /path --metric allocated --snapshot
 
 # Stay on one filesystem and skip pseudo-filesystem mounts
-fsmonitor scan / --metric unique --one-file-system --exclude-pseudo
+sizetrail scan / --metric unique --one-file-system --exclude-pseudo
 
 # Create a saved monitor and capture its first snapshot
-fsmonitor monitor add /path --interval 6h --capture-now
-fsmonitor monitor list
-fsmonitor monitor reconcile 1
+sizetrail monitor add /path --interval 6h --capture-now
+sizetrail monitor list
+sizetrail monitor reconcile 1
 
 # Add an audited growth alert to monitor 1
-fsmonitor alerts add 1 /path --growth 10GiB --window 24h
+sizetrail alerts add 1 /path --growth 10GiB --window 24h
 
 # Watch a transient path, one saved monitor, or every enabled monitor
-fsmonitor watch /path --interval 6h
-fsmonitor watch /path --events
-fsmonitor watch /path --periodic-only
-fsmonitor watch --monitor 1
-fsmonitor watch --all
+sizetrail watch /path --interval 6h
+sizetrail watch /path --events
+sizetrail watch /path --periodic-only
+sizetrail watch --monitor 1
+sizetrail watch --all
 
 # Explain growth between snapshots (target first, baseline second)
-fsmonitor compare latest previous /path
-fsmonitor compare --since 7d /path
+sizetrail compare latest previous /path
+sizetrail compare --since 7d /path
 
 # Create a read-only CleanupPlan (default; no filesystem changes)
-fsmonitor cleanup /path
+sizetrail cleanup /path
 
 # Apply the saved plan using Trash/quarantine, inspect history, then undo
-fsmonitor cleanup --plan PLAN_ID --apply
-fsmonitor cleanup history --by category
-fsmonitor cleanup undo PLAN_ID
+sizetrail cleanup --plan PLAN_ID --apply
+sizetrail cleanup history --by category
+sizetrail cleanup undo PLAN_ID
 
 # Inspect, validate, or toggle declarative rule packs
-fsmonitor cleanup rules list
-fsmonitor cleanup rules validate ./my-cleanup-rules.toml
-fsmonitor cleanup rules disable node
-fsmonitor cleanup rules enable node
+sizetrail cleanup rules list
+sizetrail cleanup rules validate ./my-cleanup-rules.toml
+sizetrail cleanup rules disable node
+sizetrail cleanup rules enable node
 
 # Revalidate and purge owned quarantine content (never system Trash)
-fsmonitor cleanup purge PLAN_OR_ACTION_ID
+sizetrail cleanup purge PLAN_OR_ACTION_ID
 
 # Audit or rebuild constant-time quarantine accounting
-fsmonitor cleanup quarantine audit /path/.fsmonitor-quarantine
-fsmonitor cleanup quarantine rebuild /path/.fsmonitor-quarantine
+sizetrail cleanup quarantine audit /path/.sizetrail-quarantine
+sizetrail cleanup quarantine rebuild /path/.sizetrail-quarantine
 
 # Permanent deletion is separate and requires the exact plan-scoped token
-fsmonitor cleanup --plan PLAN_ID --permanent
+sizetrail cleanup --plan PLAN_ID --permanent
 ```
 
 Each scan reports a short run id, active phase and policy, and one explicit

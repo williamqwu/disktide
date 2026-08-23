@@ -1,11 +1,11 @@
 # Architecture
 
-Technical overview of fsmonitor's internals for anyone reading or extending the codebase.
+Technical overview of sizetrail's internals for anyone reading or extending the codebase.
 
 ## Project Layout
 
 ```
-src/fs_monitor/
+src/sizetrail/
   __main__.py            CLI entry point (Click)
   app.py                 Textual App, screen management
   config.py              TOML config load/save, dataclasses
@@ -130,7 +130,7 @@ that screens must catch. `scanner/sysinfo.py` and `scanner/blockdev.py` retain
 their existing call signatures as compatibility facades while delegating I/O to
 the active adapter.
 
-`fsmonitor doctor` consumes the same capability snapshot as FS Overview. Its
+`sizetrail doctor` consumes the same capability snapshot as FS Overview. Its
 versioned JSON output redacts application paths by default and does not enumerate
 the user's scan tree.
 
@@ -251,7 +251,7 @@ Each `os.scandir()` entry is wrapped in try/except. A permission error on one di
 
 Symlinks are never recursed into: a symlink is stored as a leaf `FSNode` sized by the link itself (`lstat`), never its target. This prevents infinite loops and double-counting, and keeps a symlinked directory's bytes from inflating the parent total.
 
-Target classification (the `os.readlink` for the target string and the `os.stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred**: `make_symlink_node` pays only the one `entry.stat(follow_symlinks=False)` needed for the link's own size, and the deferred work runs in `classify_symlink`, called on demand by the Details panel render and the `i` action. The result is cached on the node via `link_classified`, so a second look is free. The engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks at the scan root so the typical `fsmonitor ~` case shows target arrows in the tree from the start without re-introducing the per-symlink cost when the scan root itself contains hundreds of thousands of symlinks. Deeper symlinks remain fully lazy. This is what keeps the scan at one syscall per symlink on slow shared storage (cluster home, NFS, sshfs) where every extra round-trip is sub-millisecond but adds up.
+Target classification (the `os.readlink` for the target string and the `os.stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred**: `make_symlink_node` pays only the one `entry.stat(follow_symlinks=False)` needed for the link's own size, and the deferred work runs in `classify_symlink`, called on demand by the Details panel render and the `i` action. The result is cached on the node via `link_classified`, so a second look is free. The engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks at the scan root so the typical `sizetrail ~` case shows target arrows in the tree from the start without re-introducing the per-symlink cost when the scan root itself contains hundreds of thousands of symlinks. Deeper symlinks remain fully lazy. This is what keeps the scan at one syscall per symlink on slow shared storage (cluster home, NFS, sshfs) where every extra round-trip is sub-millisecond but adds up.
 
 ## Data Model
 
@@ -385,7 +385,7 @@ Three state dimensions remain separate:
 - health: `unknown`, `healthy`, `warning`, `failed`, or `blocked`.
 
 An enabled definition does not imply background execution. The current TUI
-process, `fsmonitor watch --monitor/--all`, and an externally supervised user
+process, `sizetrail watch --monitor/--all`, and an externally supervised user
 unit all acquire the same expiring repository lease and heartbeat it.
 Start-to-start UTC due times are persisted, process waits use a monotonic clock,
 one monitor never overlaps itself, and repeated run-now requests coalesce to one
@@ -450,7 +450,7 @@ scheduling, retention, and alert boundaries, and ADR 0009 for event acceleration
 
 ## Database
 
-SQLite with WAL mode, stored at `~/.local/share/fsmonitor-cli/data.db` (respects `XDG_DATA_HOME`; the legacy directory name is retained for upgrade compatibility).
+SQLite with WAL mode, stored at `~/.local/share/sizetrail/data.db` (respects `XDG_DATA_HOME`; the legacy directory name is retained for upgrade compatibility).
 
 ### Schema
 
@@ -549,7 +549,7 @@ from packaged and user-owned packs. Pack loading fails independently: malformed
 TOML, unknown fields, unsupported versions, invalid identifiers/types, and name
 collisions become doctor-visible issues without hiding valid packs. The schema
 contains no executor or arbitrary code field. User policy loads from
-`~/.config/fsmonitor-cli/cleanup-rules/*.toml`; disabled pack names come from
+`~/.config/sizetrail/cleanup-rules/*.toml`; disabled pack names come from
 `cleanup.disabled_rule_packs` and are shared by CLI and TUI.
 
 `detect_targets(root)` walks the FSNode tree and tests each node against the enabled rule list. A rule matches when:
@@ -672,7 +672,7 @@ glyphs, delta formatting, sparklines, and legends. The old TUI view-model module
 is a compatibility re-export only. Safe rendering substitutes ASCII glyphs;
 `NO_COLOR` uses grayscale backgrounds while preserving the same state tokens.
 
-Both spatial charts size their areas by a selectable *metric*: total bytes (the default) or file count. `compute_layout` and `compute_sunburst` take a `metric` argument, and the size tree, treemap, sunburst, and Details panel all read it so a toggle (`t` in the explorer) keeps every view consistent. `fs_monitor/metrics.py` centralises the vocabulary: `metric_value()` selects the FSNode field and `metric_text()` formats it. Both fields are aggregated bottom-up during the scan, so switching is a re-layout of in-memory data with no extra filesystem work.
+Both spatial charts size their areas by a selectable *metric*: total bytes (the default) or file count. `compute_layout` and `compute_sunburst` take a `metric` argument, and the size tree, treemap, sunburst, and Details panel all read it so a toggle (`t` in the explorer) keeps every view consistent. `sizetrail/metrics.py` centralises the vocabulary: `metric_value()` selects the FSNode field and `metric_text()` formats it. Both fields are aggregated bottom-up during the scan, so switching is a re-layout of in-memory data with no extra filesystem work.
 
 ### Treemap
 
@@ -760,21 +760,21 @@ Helper functions: `file_category(name)` maps extensions to categories, `depth_co
 ### App Startup Flow
 
 ```
-fsmonitor (no subcommand)
-  -> FSMonitorApp(show_welcome=True)
+sizetrail (no subcommand)
+  -> SizeTrailApp(show_welcome=True)
   -> on_mount: push WelcomeScreen
   -> user picks path -> dismiss(path)
   -> _on_welcome_result callback
   -> _launch_explorer: install explorer/cleanup/monitor/fs_overview/settings screens
   -> push explorer screen, scan begins
 
-fsmonitor scan <path>
+sizetrail scan <path>
   -> CLI-only, no TUI
 ```
 
 ### Screen Management
 
-`FSMonitorApp` installs four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings after the welcome screen completes. Screens are installed (not pushed) so they persist when switching among Explorer/Monitor/FS Overview with `1`/`2`/`3`; Cleanup remains on `c` because it is disabled by default and has its own plan/apply workflow.
+`SizeTrailApp` installs four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings after the welcome screen completes. Screens are installed (not pushed) so they persist when switching among Explorer/Monitor/FS Overview with `1`/`2`/`3`; Cleanup remains on `c` because it is disabled by default and has its own plan/apply workflow.
 
 - `switch_screen()` swaps the current screen at the same stack level
 - `push_screen()` adds a screen on top (used for settings overlay)

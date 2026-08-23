@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.16
+
+**Renamed to SizeTrail**
+
+- **new canonical identity** Renamed the product, Python distribution, import package, primary executable, UI title, diagnostics, documentation, service example, and release artifacts to `SizeTrail` / `sizetrail`.
+- **command compatibility** Retained `fsmonitor` and `fsmonitor-cli` as compatibility entry points backed by the same `sizetrail` CLI, and retained a minimal `fs_monitor` import shim for version discovery and `python -m fs_monitor`.
+- **data continuity** New installations use `~/.config/sizetrail` and `~/.local/share/sizetrail`; installations with existing `fsmonitor-cli` configuration, monitor history, cleanup rules, or audit data continue using those legacy directories automatically.
+- **cleanup continuity** New quarantine roots use `.sizetrail-quarantine`, while existing `.fsmonitor-quarantine` roots remain protected and discoverable for audit, undo, and purge workflows.
+
 ## v0.2.15
 
 **History-first Monitor UX and truthful shutdown state**

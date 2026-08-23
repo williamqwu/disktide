@@ -1,7 +1,7 @@
 """Tests for FSNode data model."""
 
 import pytest
-from fs_monitor.models.tree import FSNode
+from sizetrail.models.tree import FSNode
 
 
 def make_tree():

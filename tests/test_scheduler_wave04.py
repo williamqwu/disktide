@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from fs_monitor.domain.live_view import build_live_view, count_live_nodes
-from fs_monitor.domain.metrics import MetricId
-from fs_monitor.domain.scan import (
+from sizetrail.domain.live_view import build_live_view, count_live_nodes
+from sizetrail.domain.metrics import MetricId
+from sizetrail.domain.scan import (
     DirectoryCompleted,
     DirectoryQueued,
     NodeAggregateUpdated,
@@ -18,16 +18,16 @@ from fs_monitor.domain.scan import (
     ScanRequest,
     ScanStatus,
 )
-from fs_monitor.models.tree import FSNode
-from fs_monitor.scanner import scheduler as scheduler_module
-from fs_monitor.scanner.engine import ScanEngine
-from fs_monitor.scanner.progress import ScanProgress
-from fs_monitor.scanner.walker import scan_directory
-from fs_monitor.services.scan import ScanService
-from fs_monitor.services.scan_consumers import ScanEventRecorder
-from fs_monitor.widgets.size_tree import SizeTree
-from fs_monitor.widgets.sunburst_view import SunburstView
-from fs_monitor.widgets.treemap_view import TreemapView
+from sizetrail.models.tree import FSNode
+from sizetrail.scanner import scheduler as scheduler_module
+from sizetrail.scanner.engine import ScanEngine
+from sizetrail.scanner.progress import ScanProgress
+from sizetrail.scanner.walker import scan_directory
+from sizetrail.services.scan import ScanService
+from sizetrail.services.scan_consumers import ScanEventRecorder
+from sizetrail.widgets.size_tree import SizeTree
+from sizetrail.widgets.sunburst_view import SunburstView
+from sizetrail.widgets.treemap_view import TreemapView
 
 
 def test_scheduler_parallelizes_below_a_single_top_level_directory(

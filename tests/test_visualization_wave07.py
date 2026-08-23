@@ -7,19 +7,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from fs_monitor.domain.alerts import AlertEvent
-from fs_monitor.domain.metrics import MetricId
-from fs_monitor.domain.monitor import (
+from sizetrail.domain.alerts import AlertEvent
+from sizetrail.domain.metrics import MetricId
+from sizetrail.domain.monitor import (
     HistoryPointState,
     MonitorDefinition,
     MonitorHistory,
     MonitorHistoryPoint,
 )
-from fs_monitor.app import FSMonitorApp
-from fs_monitor.config import AppConfig
-from fs_monitor.domain.policy import ScanPolicy
-from fs_monitor.domain.snapshot import Snapshot
-from fs_monitor.domain.visualization import (
+from sizetrail.app import SizeTrailApp
+from sizetrail.config import AppConfig
+from sizetrail.domain.policy import ScanPolicy
+from sizetrail.domain.snapshot import Snapshot
+from sizetrail.domain.visualization import (
     HeatmapInterval,
     TrendPoint,
     TrendSeries,
@@ -30,17 +30,17 @@ from fs_monitor.domain.visualization import (
     build_growth_heatmap,
     build_trend_model,
 )
-from fs_monitor.models.tree import FSNode
-from fs_monitor.presentation.tui.viewmodels.visualization import sparkline, visual_token
-from fs_monitor.rendering import set_safe_rendering
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.services.visualization import VisualizationService
-from fs_monitor.viz.sunburst import compute_sunburst
-from fs_monitor.viz.treemap import compute_layout
-from fs_monitor.widgets.trend_chart import TrendChart
-from fs_monitor.widgets.growth_heatmap import GrowthHeatmap
-from fs_monitor.widgets.treemap_view import TreemapView
-from fs_monitor.screens.monitor import MonitorScreen
+from sizetrail.models.tree import FSNode
+from sizetrail.presentation.tui.viewmodels.visualization import sparkline, visual_token
+from sizetrail.rendering import set_safe_rendering
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.services.visualization import VisualizationService
+from sizetrail.viz.sunburst import compute_sunburst
+from sizetrail.viz.treemap import compute_layout
+from sizetrail.widgets.trend_chart import TrendChart
+from sizetrail.widgets.growth_heatmap import GrowthHeatmap
+from sizetrail.widgets.treemap_view import TreemapView
+from sizetrail.screens.monitor import MonitorScreen
 
 
 def _tree(root_path: str, entries: dict[str, int]) -> FSNode:
@@ -595,7 +595,7 @@ def test_tui_diff_and_monitor_views_keep_highlighted_path(tmp_path):
     repository = SQLiteSnapshotRepository(str(database_path))
 
     async def exercise() -> None:
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(root),
             show_welcome=False,
             config=_app_config(),
@@ -664,7 +664,7 @@ def test_monitor_space_time_degrades_cleanly_at_80x24_no_color(
     repository = SQLiteSnapshotRepository(str(database_path))
 
     async def exercise() -> None:
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(root),
             show_welcome=False,
             config=_app_config(safe=True),

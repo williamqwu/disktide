@@ -5,7 +5,7 @@ import tempfile
 from unittest.mock import patch, mock_open
 
 import pytest
-from fs_monitor.scanner.sysinfo import (
+from sizetrail.scanner.sysinfo import (
     SystemInfo,
     detect_cpu_count,
     detect_load_average,

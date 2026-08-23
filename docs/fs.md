@@ -1,6 +1,6 @@
 # Filesystem Interactions & Compatibility
 
-How fsmonitor interacts with the filesystem, and what works (or breaks) on different filesystem types.
+How sizetrail interacts with the filesystem, and what works (or breaks) on different filesystem types.
 
 ## Compatibility Summary
 
@@ -35,7 +35,7 @@ instead of raising into the scanner or UI.
 | `os.getloadavg()` | System load | `(0, 0, 0)` (no load-based reduction) |
 
 On macOS, `/proc` and `/sys` do not exist. Scanning still works, while mount,
-block-device, and medium detection report unavailable through `fsmonitor doctor`
+block-device, and medium detection report unavailable through `sizetrail doctor`
 and FS Overview. Set `workers` explicitly on platforms where storage-medium
 autodetection is unavailable.
 
@@ -85,7 +85,7 @@ This prevents:
 
 Target classification (the `readlink` for the target string and the `stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred to first use**: `make_symlink_node` pays only the link's own `entry.stat(follow_symlinks=False)`, and `classify_symlink(node)` runs the deferred work when the Details panel renders the node or the `i` action navigates a symlinked directory. Result is cached on the node (`link_classified=True`), so a second look is free.
 
-To keep the typical `fsmonitor ~` case showing the inline `→ target` decoration in the tree from the start, the engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks it encounters at the scan root. Deeper symlinks remain fully lazy regardless of count. This costs at most ~60 ms of extra round-trips at scan start on slow shares; it cannot regress the case where the scan root itself is a directory containing hundreds of thousands of symlinks (a real shape: image-cache `.dataset/` trees on a cluster home), which used to add minutes to the scan.
+To keep the typical `sizetrail ~` case showing the inline `→ target` decoration in the tree from the start, the engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks it encounters at the scan root. Deeper symlinks remain fully lazy regardless of count. This costs at most ~60 ms of extra round-trips at scan start on slow shares; it cannot regress the case where the scan root itself is a directory containing hundreds of thousands of symlinks (a real shape: image-cache `.dataset/` trees on a cluster home), which used to add minutes to the scan.
 
 The scan still never traverses the link.
 
@@ -107,7 +107,10 @@ Errors are stored in `FSNode.error` and displayed in the TUI details panel.
 
 ### Monitor and snapshot repository -- `repositories/sqlite.py`, `storage/database.py`
 
-SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant; the legacy directory name is retained for upgrade compatibility).
+SQLite database stored at `~/.local/share/sizetrail/data.db` for new installs.
+When `~/.local/share/fsmonitor-cli/data.db` already exists and the new path
+does not, SizeTrail keeps using that legacy database so monitor history and
+cleanup audit records remain available.
 
 | Operation | System call |
 |-----------|------------|
@@ -140,7 +143,7 @@ On network filesystems, placing the database on the network share would be slow.
 ### Optional filesystem events -- `collectors/events/`, `services/watch.py`
 
 The core install performs no native watch calls. On Linux, installing
-`fsmonitor-cli[watch]` makes `inotify-simple` available through a lazy probe. A
+`sizetrail[watch]` makes `inotify-simple` available through a lazy probe. A
 held monitor lease recursively adds directory watches while respecting
 `one_file_system`, pseudo-filesystem exclusion, maximum depth, and never-follow
 symlink policy. Newly created directories receive watches before later events
@@ -180,7 +183,7 @@ persisted snapshot measurements and make no extra filesystem calls.
 Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator
 rules perform live existence checks. Built-in declarative rule packs are read
 through `importlib.resources`; user packs are parsed with `tomllib` from
-`~/.config/fsmonitor-cli/cleanup-rules/*.toml`. Validation reads policy only:
+`~/.config/sizetrail/cleanup-rules/*.toml`. Validation reads policy only:
 the schema has no shell, Python, or executor hook. Creating a plan additionally
 captures live identity without modifying the target:
 

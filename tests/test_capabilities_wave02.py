@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import mock_open, patch
 
-from fs_monitor.collectors.platform.base import PlatformAdapter
-from fs_monitor.collectors.platform.linux import LinuxPlatformAdapter
-from fs_monitor.collectors.platform.portable import PortablePlatformAdapter
-from fs_monitor.extensions.capabilities import CapabilityId, CapabilityStatus
-from fs_monitor.screens.fs_overview import _probe_message, probe_fs_entries
+from sizetrail.collectors.platform.base import PlatformAdapter
+from sizetrail.collectors.platform.linux import LinuxPlatformAdapter
+from sizetrail.collectors.platform.portable import PortablePlatformAdapter
+from sizetrail.extensions.capabilities import CapabilityId, CapabilityStatus
+from sizetrail.screens.fs_overview import _probe_message, probe_fs_entries
 
 
 def test_portable_adapter_is_conservative_and_explains_unavailable_features():

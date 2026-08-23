@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time a single scan with whatever fs_monitor version is installed.
+"""Time a single scan with whatever sizetrail version is installed.
 
 Minimal, version-agnostic. Works against v0.1.3 and later because it
 uses only the long-stable `ScanEngine().scan(path)` entry point.
@@ -23,7 +23,7 @@ Recommended invocation:
 Forward-compat contract (kept stable across releases; see also
 tests/test_tools.py):
 
-    from fs_monitor.scanner.engine import ScanEngine
+    from sizetrail.scanner.engine import ScanEngine
     ScanEngine(workers=N).scan(path) -> object with .dir_count,
                                        .file_count, .size (all ints)
 
@@ -42,7 +42,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from fs_monitor.scanner.engine import ScanEngine
+from sizetrail.scanner.engine import ScanEngine
 
 
 def _print_summary(root, elapsed: float) -> None:
@@ -125,9 +125,9 @@ def main() -> int:
         _print_summary(root, elapsed)
         return 0
 
-    from fs_monitor.domain.live_view import count_live_nodes
-    from fs_monitor.domain.scan import NodeAggregateUpdated, ScanRequest
-    from fs_monitor.services.scan import ScanService
+    from sizetrail.domain.live_view import count_live_nodes
+    from sizetrail.domain.scan import NodeAggregateUpdated, ScanRequest
+    from sizetrail.services.scan import ScanService
 
     first_event: float | None = None
     first_visual: float | None = None

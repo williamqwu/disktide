@@ -6,13 +6,13 @@ import asyncio
 
 from textual.app import App
 
-from fs_monitor.cleanup.detector import detect_targets
-from fs_monitor.domain.cleanup import CleanupActionKind
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.scanner.walker import scan_directory
-from fs_monitor.screens.cleanup import CleanupScreen
-from fs_monitor.services.cleanup import CleanupService
-from fs_monitor.widgets.cleanup_modal import CleanupModal, CleanupModalResult
+from sizetrail.cleanup.detector import detect_targets
+from sizetrail.domain.cleanup import CleanupActionKind
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.scanner.walker import scan_directory
+from sizetrail.screens.cleanup import CleanupScreen
+from sizetrail.services.cleanup import CleanupService
+from sizetrail.widgets.cleanup_modal import CleanupModal, CleanupModalResult
 
 
 def _plan(tmp_path):

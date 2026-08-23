@@ -15,7 +15,7 @@ from dependency_budget import (
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project", default="fsmonitor-cli")
+    parser.add_argument("--project", default="sizetrail")
     parser.add_argument("--max-distributions", type=int, default=20)
     parser.add_argument("--max-mib", type=float, default=20.0)
     parser.add_argument("--json", action="store_true", dest="json_output")

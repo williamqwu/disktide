@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from fs_monitor.glyphs import DENIED, PARTIAL
-from fs_monitor.models.tree import FSNode
-from fs_monitor.rendering import (
+from sizetrail.glyphs import DENIED, PARTIAL
+from sizetrail.models.tree import FSNode
+from sizetrail.rendering import (
     bar_chars,
     denied_glyph,
     is_safe_rendering,
     partial_glyph,
     set_safe_rendering,
 )
-from fs_monitor.widgets.size_tree import SizeTree
+from sizetrail.widgets.size_tree import SizeTree
 
 
 @pytest.fixture(autouse=True)

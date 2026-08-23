@@ -1,7 +1,7 @@
 """Tests for Snapshot and SizeDelta models."""
 
 import pytest
-from fs_monitor.models.snapshot import Snapshot, SizeDelta
+from sizetrail.models.snapshot import Snapshot, SizeDelta
 
 
 class TestSnapshot:

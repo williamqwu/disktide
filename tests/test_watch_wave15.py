@@ -10,39 +10,39 @@ from pathlib import Path
 
 import pytest
 
-import fs_monitor.scanner.scheduler as scheduler_module
-import fs_monitor.services.monitor as monitor_module
-from fs_monitor.collectors.events.base import (
+import sizetrail.scanner.scheduler as scheduler_module
+import sizetrail.services.monitor as monitor_module
+from sizetrail.collectors.events.base import (
     EventBackendInfo,
     EventWatch,
     FilesystemEvent,
     FilesystemEventKind,
 )
-from fs_monitor.domain.alerts import AlertKind, AlertRule
-from fs_monitor.domain.metrics import MetricId, StorageMeasurements
-from fs_monitor.domain.monitor import (
+from sizetrail.domain.alerts import AlertKind, AlertRule
+from sizetrail.domain.metrics import MetricId, StorageMeasurements
+from sizetrail.domain.monitor import (
     MonitorDefinition,
     MonitorEventMode,
     MonitorReconciliationState,
     MonitorWatchMode,
     WatchDiagnostics,
 )
-from fs_monitor.domain.policy import ScanPolicy
-from fs_monitor.domain.provisional import (
+from sizetrail.domain.policy import ScanPolicy
+from sizetrail.domain.provisional import (
     ProvisionalConfidence,
     ProvisionalSummary,
 )
-from fs_monitor.domain.scan import ScanRequest
-from fs_monitor.domain.snapshot import Snapshot
-from fs_monitor.extensions.capabilities import CapabilityStatus
-from fs_monitor.models.tree import FSNode
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.services.monitor import MonitorService
-from fs_monitor.services.provisional import (
+from sizetrail.domain.scan import ScanRequest
+from sizetrail.domain.snapshot import Snapshot
+from sizetrail.extensions.capabilities import CapabilityStatus
+from sizetrail.models.tree import FSNode
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.services.monitor import MonitorService
+from sizetrail.services.provisional import (
     ProvisionalProjectionRequiresFull,
     ProvisionalProjectionService,
 )
-from fs_monitor.services.scan import ScanService
+from sizetrail.services.scan import ScanService
 
 
 class HandoffEventBackend:

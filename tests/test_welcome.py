@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from fs_monitor.screens.welcome import (
+from sizetrail.screens.welcome import (
     PathSuggester, _get_completions, WelcomeScreen, _MAX_SCANDIR_ENTRIES,
     _build_suggestions,
 )

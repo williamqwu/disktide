@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 
-from fs_monitor.app import FSMonitorApp
-from fs_monitor.config import load_config
-from fs_monitor.screens.explorer import ExplorerScreen
+from sizetrail.app import SizeTrailApp
+from sizetrail.config import load_config
+from sizetrail.screens.explorer import ExplorerScreen
 
 
 async def _wait_for_explorer(pilot, app) -> None:
@@ -28,7 +28,7 @@ def test_quarter_screen_jump_moves_cursor_down(tmp_path):
     _make_flat_tree(tmp_path, 200)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -48,12 +48,12 @@ def test_quarter_screen_jump_moves_cursor_down(tmp_path):
 
 
 def test_no_color_environment_does_not_crash(tmp_path, monkeypatch):
-    from fs_monitor.config import AppConfig
+    from sizetrail.config import AppConfig
 
     monkeypatch.setenv("NO_COLOR", "1")
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=AppConfig()
         )
         assert app.no_color is True
@@ -69,7 +69,7 @@ def test_quarter_screen_jump_up_after_down(tmp_path):
     _make_flat_tree(tmp_path, 200)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -89,7 +89,7 @@ def test_quarter_screen_jump_up_after_down(tmp_path):
 
 def test_settings_down_moves_focus(tmp_path):
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -110,7 +110,7 @@ def test_settings_down_moves_focus(tmp_path):
 
 def test_settings_up_moves_focus_back(tmp_path):
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -137,16 +137,16 @@ def test_live_render_disabled_on_tiny_canvas(tmp_path):
     doesn't fight a cramped terminal for screen space.
 
     Uses a freshly-constructed AppConfig (not load_config()) so the
-    developer's own legacy ~/.config/fsmonitor-cli/config.toml — which may
+    developer's own legacy ~/.config/sizetrail/config.toml — which may
     have been flipped to "on" while testing — doesn't override the
     auto path the test is supposed to exercise.
     """
-    from fs_monitor.config import AppConfig
+    from sizetrail.config import AppConfig
 
     async def go():
         config = AppConfig()
         assert config.ui.live_scan_render == "auto"  # sanity
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=config
         )
         async with app.run_test(size=(70, 30)) as pilot:
@@ -167,7 +167,7 @@ def test_live_render_gate_uses_app_size_not_shutil(tmp_path, monkeypatch):
     """
     captured: dict = {}
 
-    from fs_monitor.screens import explorer as exp_mod
+    from sizetrail.screens import explorer as exp_mod
     original = exp_mod.resolve_live_scan_render
 
     def spy(setting, **kw):
@@ -177,7 +177,7 @@ def test_live_render_gate_uses_app_size_not_shutil(tmp_path, monkeypatch):
     monkeypatch.setattr(exp_mod, "resolve_live_scan_render", spy)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(150, 60)) as pilot:
@@ -220,9 +220,9 @@ def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
 
     async def go():
         import time
-        from fs_monitor.config import AppConfig
-        from fs_monitor.scanner import scheduler as scheduler_mod
-        from fs_monitor.widgets.sunburst_view import SunburstView
+        from sizetrail.config import AppConfig
+        from sizetrail.scanner import scheduler as scheduler_mod
+        from sizetrail.widgets.sunburst_view import SunburstView
 
         # Slow each directory task by 30ms so a 40-top-dir tree takes ~1.2s
         # with workers=1, leaving comfortable mid-scan windows.
@@ -238,7 +238,7 @@ def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
             cfg = AppConfig()
             cfg.ui.live_scan_render = "on"  # bypass auto-gate
             cfg.scan.workers = 1  # one subdir at a time
-            app = FSMonitorApp(
+            app = SizeTrailApp(
                 scan_path=str(tmp_path), show_welcome=False, config=cfg
             )
             async with app.run_test(size=(160, 50)) as pilot:
@@ -301,12 +301,12 @@ def test_viz_clears_at_scan_start_regardless_of_live_render(tmp_path):
     (tmp_path / "sub" / "b.txt").write_text("world")
 
     async def go():
-        from fs_monitor.config import AppConfig
-        from fs_monitor.widgets.sunburst_view import SunburstView
+        from sizetrail.config import AppConfig
+        from sizetrail.widgets.sunburst_view import SunburstView
 
         cfg = AppConfig()
         cfg.ui.live_scan_render = "off"  # the failure mode lived here
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=cfg
         )
         async with app.run_test(size=(140, 50)) as pilot:
@@ -349,10 +349,10 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
 
     async def go():
         import time
-        from fs_monitor.config import AppConfig
-        from fs_monitor.scanner import scheduler as scheduler_mod
-        from fs_monitor.widgets.scan_progress import ScanProgressOverlay
-        from fs_monitor.widgets.size_tree import SizeTree
+        from sizetrail.config import AppConfig
+        from sizetrail.scanner import scheduler as scheduler_mod
+        from sizetrail.widgets.scan_progress import ScanProgressOverlay
+        from sizetrail.widgets.size_tree import SizeTree
 
         orig_scan = scheduler_mod.scan_directory_once
 
@@ -366,7 +366,7 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
             cfg = AppConfig()
             cfg.scan.workers = 1
             cfg.ui.live_scan_render = "on"
-            app = FSMonitorApp(
+            app = SizeTrailApp(
                 scan_path=str(tmp_path), show_welcome=False, config=cfg
             )
             async with app.run_test(size=(140, 40)) as pilot:
@@ -433,8 +433,8 @@ def test_scan_failure_does_not_deadlock_in_progress_flag(tmp_path):
     does (overlay down, live mode off, in-progress flag cleared).
     """
     async def go():
-        from fs_monitor.config import AppConfig
-        from fs_monitor.scanner import engine as engine_mod
+        from sizetrail.config import AppConfig
+        from sizetrail.scanner import engine as engine_mod
 
         # Make engine.scan raise. The exception type is realistic:
         # ValueError is what engine.scan itself raises on a non-dir.
@@ -445,7 +445,7 @@ def test_scan_failure_does_not_deadlock_in_progress_flag(tmp_path):
 
         try:
             cfg = AppConfig()
-            app = FSMonitorApp(
+            app = SizeTrailApp(
                 scan_path=str(tmp_path), show_welcome=False, config=cfg
             )
             async with app.run_test(size=(120, 40)) as pilot:
@@ -485,7 +485,7 @@ def test_settings_arrow_does_not_steal_focus_when_select_expanded(tmp_path):
     async def go():
         from textual.widgets import Select
 
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(140, 50)) as pilot:

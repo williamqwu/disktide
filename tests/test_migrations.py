@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
-from fs_monitor.storage.migrations import (
+from sizetrail.storage.migrations import (
     CURRENT_VERSION,
     MIGRATION_CALLBACKS,
     get_version,

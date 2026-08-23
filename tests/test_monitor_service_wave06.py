@@ -8,23 +8,23 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from fs_monitor.domain.metrics import MetricId
-from fs_monitor.domain.monitor import (
+from sizetrail.domain.metrics import MetricId
+from sizetrail.domain.monitor import (
     MonitorActivityState,
     MonitorDefinition,
     MonitorDesiredState,
     MonitorHealthState,
 )
-from fs_monitor.domain.policy import ScanPolicy
-from fs_monitor.models.tree import FSNode
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.services.monitor import (
+from sizetrail.domain.policy import ScanPolicy
+from sizetrail.models.tree import FSNode
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.services.monitor import (
     MonitorEventKind,
     MonitorLeaseUnavailable,
     MonitorService,
 )
-from fs_monitor.services.scan import ScanService
-from fs_monitor.storage.migrations import migrate
+from sizetrail.services.scan import ScanService
+from sizetrail.storage.migrations import migrate
 
 
 @pytest.fixture

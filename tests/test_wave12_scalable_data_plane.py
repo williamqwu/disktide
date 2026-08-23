@@ -8,17 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from fs_monitor.domain.metrics import MetricId
-from fs_monitor.domain.monitor import (
+from sizetrail.domain.metrics import MetricId
+from sizetrail.domain.monitor import (
     HistoryPointState,
     MonitorDefinition,
 )
-from fs_monitor.domain.policy import ScanPolicy
-from fs_monitor.domain.snapshot import Snapshot
-from fs_monitor.models.tree import FSNode
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.services.monitor import MonitorService
-from fs_monitor.services.visualization import VisualizationService
+from sizetrail.domain.policy import ScanPolicy
+from sizetrail.domain.snapshot import Snapshot
+from sizetrail.models.tree import FSNode
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.services.monitor import MonitorService
+from sizetrail.services.visualization import VisualizationService
 
 
 def _tree(root_path: str, entries: dict[str, int]) -> FSNode:
@@ -234,7 +234,7 @@ def test_changed_path_ranking_handles_new_baseline_and_removal(
     repository,
     monkeypatch,
 ):
-    import fs_monitor.storage.database as database_module
+    import sizetrail.storage.database as database_module
 
     monkeypatch.setattr(database_module, "_BASELINE_INTERVAL", 2)
     started = datetime(2026, 8, 22, tzinfo=timezone.utc)
@@ -429,7 +429,7 @@ def test_oversized_measurement_series_is_not_cached(repository):
 
 
 def test_core_visualization_layers_do_not_import_tui_viewmodels():
-    root = Path(__file__).parents[1] / "src" / "fs_monitor"
+    root = Path(__file__).parents[1] / "src" / "sizetrail"
     files = [
         *sorted((root / "domain").glob("*.py")),
         root / "services" / "visualization.py",
@@ -440,10 +440,10 @@ def test_core_visualization_layers_do_not_import_tui_viewmodels():
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
-                if node.module.startswith("fs_monitor.presentation.tui"):
+                if node.module.startswith("sizetrail.presentation.tui"):
                     violations.append(f"{path.name}:{node.lineno}:{node.module}")
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.startswith("fs_monitor.presentation.tui"):
+                    if alias.name.startswith("sizetrail.presentation.tui"):
                         violations.append(f"{path.name}:{node.lineno}:{alias.name}")
     assert violations == []

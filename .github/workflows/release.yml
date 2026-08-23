@@ -29,11 +29,13 @@ jobs:
           uv build
           .venv/bin/python tool/verify_distribution.py
           uv venv --python 3.13 .venv-release
-          uv pip install --python .venv-release/bin/python dist/fsmonitor_cli-*.whl
+          uv pip install --python .venv-release/bin/python dist/sizetrail-*.whl
           uv venv --python 3.13 .venv-release-sdist
-          uv pip install --python .venv-release-sdist/bin/python dist/fsmonitor_cli-*.tar.gz
-          .venv-release/bin/fsmonitor doctor --json > doctor.json
-          .venv-release-sdist/bin/fsmonitor doctor --json > doctor-sdist.json
+          uv pip install --python .venv-release-sdist/bin/python dist/sizetrail-*.tar.gz
+          .venv-release/bin/sizetrail doctor --json > doctor.json
+          .venv-release-sdist/bin/sizetrail doctor --json > doctor-sdist.json
+          .venv-release/bin/fsmonitor --version
+          .venv-release/bin/fsmonitor-cli --version
           .venv-release/bin/python tool/check_dependency_budget.py
       - name: Generate checksums and SBOM
         run: |
@@ -41,7 +43,7 @@ jobs:
           sha256sum dist/* > release-metadata/SHA256SUMS
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
             .venv-release/bin/python tool/generate_sbom.py \
-              --output release-metadata/fsmonitor-cli.cdx.json
+              --output release-metadata/sizetrail.cdx.json
           cp doctor.json release-metadata/doctor.json
           cp doctor-sdist.json release-metadata/doctor-sdist.json
       - name: Attest Python distributions
@@ -69,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/fsmonitor-cli
+      url: https://pypi.org/p/sizetrail
     permissions:
       id-token: write
     steps:

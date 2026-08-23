@@ -19,8 +19,8 @@ def main() -> int:
     dist_dir = Path(args.dist)
     project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
     version = project["version"]
-    wheel = _single(dist_dir.glob(f"fsmonitor_cli-{version}-*.whl"), "wheel")
-    sdist = _single(dist_dir.glob(f"fsmonitor_cli-{version}.tar.gz"), "sdist")
+    wheel = _single(dist_dir.glob(f"sizetrail-{version}-*.whl"), "wheel")
+    sdist = _single(dist_dir.glob(f"sizetrail-{version}.tar.gz"), "sdist")
     _verify_wheel(wheel, version)
     _verify_sdist(sdist, version)
     print(f"distribution verification: PASS ({wheel.name}, {sdist.name})")
@@ -38,67 +38,69 @@ def _verify_wheel(path: Path, version: str) -> None:
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         required = {
+            "sizetrail/__init__.py",
+            "sizetrail/assets/default.tcss",
+            "sizetrail/cleanup/actions.py",
+            "sizetrail/cleanup/scoring.py",
+            "sizetrail/cleanup/rulepacks/python.toml",
+            "sizetrail/cleanup/rulepacks/node.toml",
+            "sizetrail/cleanup/rulepacks/rust.toml",
+            "sizetrail/cleanup/rulepacks/general.toml",
+            "sizetrail/cleanup/rulepacks/ide.toml",
+            "sizetrail/cleanup/rulepacks/containers.toml",
+            "sizetrail/collectors/local_scanner.py",
+            "sizetrail/collectors/events/__init__.py",
+            "sizetrail/collectors/events/base.py",
+            "sizetrail/collectors/events/native.py",
+            "sizetrail/collectors/platform/linux.py",
+            "sizetrail/domain/alerts.py",
+            "sizetrail/domain/cleanup.py",
+            "sizetrail/domain/delta.py",
+            "sizetrail/domain/live_view.py",
+            "sizetrail/domain/monitor.py",
+            "sizetrail/domain/provisional.py",
+            "sizetrail/domain/scan.py",
+            "sizetrail/domain/snapshot.py",
+            "sizetrail/domain/visualization.py",
+            "sizetrail/extensions/cleanup_rules.py",
+            "sizetrail/presentation/tui/viewmodels/visualization.py",
+            "sizetrail/repositories/alerts.py",
+            "sizetrail/repositories/cleanup.py",
+            "sizetrail/repositories/monitors.py",
+            "sizetrail/repositories/snapshots.py",
+            "sizetrail/repositories/sqlite.py",
+            "sizetrail/scanner/scheduler.py",
+            "sizetrail/screens/cleanup.py",
+            "sizetrail/services/alerts.py",
+            "sizetrail/services/cleanup.py",
+            "sizetrail/services/compare.py",
+            "sizetrail/services/doctor.py",
+            "sizetrail/services/monitor.py",
+            "sizetrail/services/provisional.py",
+            "sizetrail/services/retention.py",
+            "sizetrail/services/scan.py",
+            "sizetrail/services/scan_consumers.py",
+            "sizetrail/services/snapshots.py",
+            "sizetrail/services/visualization.py",
+            "sizetrail/services/watch.py",
+            "sizetrail/viz/layout.py",
+            "sizetrail/widgets/alert_editor.py",
+            "sizetrail/widgets/cleanup_modal.py",
+            "sizetrail/widgets/cleanup_history.py",
+            "sizetrail/widgets/cleanup_map.py",
+            "sizetrail/widgets/monitor_editor.py",
+            "sizetrail/widgets/growth_heatmap.py",
             "fs_monitor/__init__.py",
-            "fs_monitor/assets/default.tcss",
-            "fs_monitor/cleanup/actions.py",
-            "fs_monitor/cleanup/scoring.py",
-            "fs_monitor/cleanup/rulepacks/python.toml",
-            "fs_monitor/cleanup/rulepacks/node.toml",
-            "fs_monitor/cleanup/rulepacks/rust.toml",
-            "fs_monitor/cleanup/rulepacks/general.toml",
-            "fs_monitor/cleanup/rulepacks/ide.toml",
-            "fs_monitor/cleanup/rulepacks/containers.toml",
-            "fs_monitor/collectors/local_scanner.py",
-            "fs_monitor/collectors/events/__init__.py",
-            "fs_monitor/collectors/events/base.py",
-            "fs_monitor/collectors/events/native.py",
-            "fs_monitor/collectors/platform/linux.py",
-            "fs_monitor/domain/alerts.py",
-            "fs_monitor/domain/cleanup.py",
-            "fs_monitor/domain/delta.py",
-            "fs_monitor/domain/live_view.py",
-            "fs_monitor/domain/monitor.py",
-            "fs_monitor/domain/provisional.py",
-            "fs_monitor/domain/scan.py",
-            "fs_monitor/domain/snapshot.py",
-            "fs_monitor/domain/visualization.py",
-            "fs_monitor/extensions/cleanup_rules.py",
-            "fs_monitor/presentation/tui/viewmodels/visualization.py",
-            "fs_monitor/repositories/alerts.py",
-            "fs_monitor/repositories/cleanup.py",
-            "fs_monitor/repositories/monitors.py",
-            "fs_monitor/repositories/snapshots.py",
-            "fs_monitor/repositories/sqlite.py",
-            "fs_monitor/scanner/scheduler.py",
-            "fs_monitor/screens/cleanup.py",
-            "fs_monitor/services/alerts.py",
-            "fs_monitor/services/cleanup.py",
-            "fs_monitor/services/compare.py",
-            "fs_monitor/services/doctor.py",
-            "fs_monitor/services/monitor.py",
-            "fs_monitor/services/provisional.py",
-            "fs_monitor/services/retention.py",
-            "fs_monitor/services/scan.py",
-            "fs_monitor/services/scan_consumers.py",
-            "fs_monitor/services/snapshots.py",
-            "fs_monitor/services/visualization.py",
-            "fs_monitor/services/watch.py",
-            "fs_monitor/viz/layout.py",
-            "fs_monitor/widgets/alert_editor.py",
-            "fs_monitor/widgets/cleanup_modal.py",
-            "fs_monitor/widgets/cleanup_history.py",
-            "fs_monitor/widgets/cleanup_map.py",
-            "fs_monitor/widgets/monitor_editor.py",
-            "fs_monitor/widgets/growth_heatmap.py",
-            f"fsmonitor_cli-{version}.dist-info/METADATA",
-            f"fsmonitor_cli-{version}.dist-info/entry_points.txt",
+            "fs_monitor/__main__.py",
+            f"sizetrail-{version}.dist-info/METADATA",
+            f"sizetrail-{version}.dist-info/entry_points.txt",
         }
         missing = sorted(required - names)
         if missing:
             raise SystemExit(f"wheel missing required files: {missing}")
         forbidden = {
-            "fs_monitor/monitor/alerts.py",
-            "fs_monitor/monitor/scheduler.py",
+            "sizetrail/monitor/alerts.py",
+            "sizetrail/monitor/scheduler.py",
         }
         duplicate_implementations = sorted(forbidden & names)
         if duplicate_implementations:
@@ -113,8 +115,10 @@ def _verify_wheel(path: Path, version: str) -> None:
         if native:
             raise SystemExit(f"wheel contains native extensions: {native}")
         metadata = BytesParser().parsebytes(
-            archive.read(f"fsmonitor_cli-{version}.dist-info/METADATA")
+            archive.read(f"sizetrail-{version}.dist-info/METADATA")
         )
+        if metadata["Name"] != "sizetrail":
+            raise SystemExit("wheel metadata project name is not sizetrail")
         if metadata["Version"] != version:
             raise SystemExit("wheel metadata version does not match pyproject")
         if "watch" not in metadata.get_all("Provides-Extra", []):
@@ -127,15 +131,15 @@ def _verify_wheel(path: Path, version: str) -> None:
         if not watch_requirements:
             raise SystemExit("wheel metadata missing conditional inotify-simple dependency")
         entry_points = archive.read(
-            f"fsmonitor_cli-{version}.dist-info/entry_points.txt"
+            f"sizetrail-{version}.dist-info/entry_points.txt"
         ).decode()
-        for executable in ("fsmonitor =", "fsmonitor-cli ="):
+        for executable in ("sizetrail =", "fsmonitor =", "fsmonitor-cli ="):
             if executable not in entry_points:
                 raise SystemExit(f"wheel entry point missing: {executable}")
 
 
 def _verify_sdist(path: Path, version: str) -> None:
-    prefix = f"fsmonitor_cli-{version}/"
+    prefix = f"sizetrail-{version}/"
     with tarfile.open(path, "r:gz") as archive:
         names = set(archive.getnames())
     required = {
@@ -153,57 +157,59 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "docs/adr/0012-adaptive-live-scan-engine.md",
         prefix + "docs/adr/0013-cleanup-scale-and-race-safety.md",
         prefix + "docs/adr/0014-event-assisted-provisional-current-state.md",
-        prefix + "src/fs_monitor/assets/default.tcss",
-        prefix + "src/fs_monitor/cleanup/actions.py",
-        prefix + "src/fs_monitor/cleanup/scoring.py",
-        prefix + "src/fs_monitor/cleanup/rulepacks/python.toml",
-        prefix + "src/fs_monitor/cleanup/rulepacks/node.toml",
-        prefix + "src/fs_monitor/cleanup/rulepacks/rust.toml",
-        prefix + "src/fs_monitor/cleanup/rulepacks/general.toml",
-        prefix + "src/fs_monitor/cleanup/rulepacks/ide.toml",
-        prefix + "src/fs_monitor/cleanup/rulepacks/containers.toml",
-        prefix + "src/fs_monitor/collectors/local_scanner.py",
-        prefix + "src/fs_monitor/collectors/events/__init__.py",
-        prefix + "src/fs_monitor/collectors/events/base.py",
-        prefix + "src/fs_monitor/collectors/events/native.py",
-        prefix + "src/fs_monitor/domain/alerts.py",
-        prefix + "src/fs_monitor/domain/cleanup.py",
-        prefix + "src/fs_monitor/domain/delta.py",
-        prefix + "src/fs_monitor/domain/live_view.py",
-        prefix + "src/fs_monitor/domain/monitor.py",
-        prefix + "src/fs_monitor/domain/provisional.py",
-        prefix + "src/fs_monitor/domain/scan.py",
-        prefix + "src/fs_monitor/domain/snapshot.py",
-        prefix + "src/fs_monitor/domain/visualization.py",
-        prefix + "src/fs_monitor/extensions/cleanup_rules.py",
-        prefix + "src/fs_monitor/presentation/tui/viewmodels/visualization.py",
-        prefix + "src/fs_monitor/repositories/alerts.py",
-        prefix + "src/fs_monitor/repositories/cleanup.py",
-        prefix + "src/fs_monitor/repositories/monitors.py",
-        prefix + "src/fs_monitor/repositories/snapshots.py",
-        prefix + "src/fs_monitor/repositories/sqlite.py",
-        prefix + "src/fs_monitor/scanner/scheduler.py",
-        prefix + "src/fs_monitor/screens/cleanup.py",
-        prefix + "src/fs_monitor/services/alerts.py",
-        prefix + "src/fs_monitor/services/cleanup.py",
-        prefix + "src/fs_monitor/services/compare.py",
-        prefix + "src/fs_monitor/services/doctor.py",
-        prefix + "src/fs_monitor/services/monitor.py",
-        prefix + "src/fs_monitor/services/provisional.py",
-        prefix + "src/fs_monitor/services/retention.py",
-        prefix + "src/fs_monitor/services/scan.py",
-        prefix + "src/fs_monitor/services/scan_consumers.py",
-        prefix + "src/fs_monitor/services/snapshots.py",
-        prefix + "src/fs_monitor/services/visualization.py",
-        prefix + "src/fs_monitor/services/watch.py",
-        prefix + "src/fs_monitor/visualization_formatting.py",
-        prefix + "src/fs_monitor/viz/layout.py",
-        prefix + "src/fs_monitor/widgets/alert_editor.py",
-        prefix + "src/fs_monitor/widgets/cleanup_modal.py",
-        prefix + "src/fs_monitor/widgets/cleanup_history.py",
-        prefix + "src/fs_monitor/widgets/cleanup_map.py",
-        prefix + "src/fs_monitor/widgets/monitor_editor.py",
-        prefix + "src/fs_monitor/widgets/growth_heatmap.py",
+        prefix + "src/sizetrail/assets/default.tcss",
+        prefix + "src/sizetrail/cleanup/actions.py",
+        prefix + "src/sizetrail/cleanup/scoring.py",
+        prefix + "src/sizetrail/cleanup/rulepacks/python.toml",
+        prefix + "src/sizetrail/cleanup/rulepacks/node.toml",
+        prefix + "src/sizetrail/cleanup/rulepacks/rust.toml",
+        prefix + "src/sizetrail/cleanup/rulepacks/general.toml",
+        prefix + "src/sizetrail/cleanup/rulepacks/ide.toml",
+        prefix + "src/sizetrail/cleanup/rulepacks/containers.toml",
+        prefix + "src/sizetrail/collectors/local_scanner.py",
+        prefix + "src/sizetrail/collectors/events/__init__.py",
+        prefix + "src/sizetrail/collectors/events/base.py",
+        prefix + "src/sizetrail/collectors/events/native.py",
+        prefix + "src/sizetrail/domain/alerts.py",
+        prefix + "src/sizetrail/domain/cleanup.py",
+        prefix + "src/sizetrail/domain/delta.py",
+        prefix + "src/sizetrail/domain/live_view.py",
+        prefix + "src/sizetrail/domain/monitor.py",
+        prefix + "src/sizetrail/domain/provisional.py",
+        prefix + "src/sizetrail/domain/scan.py",
+        prefix + "src/sizetrail/domain/snapshot.py",
+        prefix + "src/sizetrail/domain/visualization.py",
+        prefix + "src/sizetrail/extensions/cleanup_rules.py",
+        prefix + "src/sizetrail/presentation/tui/viewmodels/visualization.py",
+        prefix + "src/sizetrail/repositories/alerts.py",
+        prefix + "src/sizetrail/repositories/cleanup.py",
+        prefix + "src/sizetrail/repositories/monitors.py",
+        prefix + "src/sizetrail/repositories/snapshots.py",
+        prefix + "src/sizetrail/repositories/sqlite.py",
+        prefix + "src/sizetrail/scanner/scheduler.py",
+        prefix + "src/sizetrail/screens/cleanup.py",
+        prefix + "src/sizetrail/services/alerts.py",
+        prefix + "src/sizetrail/services/cleanup.py",
+        prefix + "src/sizetrail/services/compare.py",
+        prefix + "src/sizetrail/services/doctor.py",
+        prefix + "src/sizetrail/services/monitor.py",
+        prefix + "src/sizetrail/services/provisional.py",
+        prefix + "src/sizetrail/services/retention.py",
+        prefix + "src/sizetrail/services/scan.py",
+        prefix + "src/sizetrail/services/scan_consumers.py",
+        prefix + "src/sizetrail/services/snapshots.py",
+        prefix + "src/sizetrail/services/visualization.py",
+        prefix + "src/sizetrail/services/watch.py",
+        prefix + "src/sizetrail/visualization_formatting.py",
+        prefix + "src/sizetrail/viz/layout.py",
+        prefix + "src/sizetrail/widgets/alert_editor.py",
+        prefix + "src/sizetrail/widgets/cleanup_modal.py",
+        prefix + "src/sizetrail/widgets/cleanup_history.py",
+        prefix + "src/sizetrail/widgets/cleanup_map.py",
+        prefix + "src/sizetrail/widgets/monitor_editor.py",
+        prefix + "src/sizetrail/widgets/growth_heatmap.py",
+        prefix + "src/fs_monitor/__init__.py",
+        prefix + "src/fs_monitor/__main__.py",
         prefix + "tool/benchmark_wave12.py",
         prefix + "tool/benchmark_wave13.py",
         prefix + "tool/benchmark_wave14.py",
@@ -213,8 +219,8 @@ def _verify_sdist(path: Path, version: str) -> None:
     if missing:
         raise SystemExit(f"sdist missing required files: {missing}")
     forbidden = {
-        prefix + "src/fs_monitor/monitor/alerts.py",
-        prefix + "src/fs_monitor/monitor/scheduler.py",
+        prefix + "src/sizetrail/monitor/alerts.py",
+        prefix + "src/sizetrail/monitor/scheduler.py",
     }
     duplicate_implementations = sorted(forbidden & names)
     if duplicate_implementations:

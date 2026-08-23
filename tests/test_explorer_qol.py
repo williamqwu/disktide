@@ -7,15 +7,15 @@ from io import StringIO
 
 from rich.console import Console
 
-from fs_monitor.app import FSMonitorApp
-from fs_monitor.config import load_config
-from fs_monitor.metrics import METRIC_NAMES, METRICS, metric_text, metric_value
-from fs_monitor.models.tree import FSNode
-from fs_monitor.screens.explorer import ExplorerScreen
-from fs_monitor.viz.sunburst import compute_sunburst
-from fs_monitor.viz.treemap import compute_layout
-from fs_monitor.widgets.info_panel import InfoPanel
-from fs_monitor.widgets.size_tree import SizeTree
+from sizetrail.app import SizeTrailApp
+from sizetrail.config import load_config
+from sizetrail.metrics import METRIC_NAMES, METRICS, metric_text, metric_value
+from sizetrail.models.tree import FSNode
+from sizetrail.screens.explorer import ExplorerScreen
+from sizetrail.viz.sunburst import compute_sunburst
+from sizetrail.viz.treemap import compute_layout
+from sizetrail.widgets.info_panel import InfoPanel
+from sizetrail.widgets.size_tree import SizeTree
 
 
 # --- unit tests: SizeTree metric ------------------------------------------
@@ -171,7 +171,7 @@ def test_press_y_copies_highlighted_path(tmp_path):
     _make_tree_dir(tmp_path)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -191,7 +191,7 @@ def test_press_t_cycles_bar_metric(tmp_path):
     _make_tree_dir(tmp_path)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -221,7 +221,7 @@ def test_toggle_metric_preserves_cursor_under_name_sort(tmp_path):
     _make_tree_dir(tmp_path)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -248,7 +248,7 @@ def test_toggle_metric_resorts_under_quantitative_sort(tmp_path):
     _make_tree_dir(tmp_path)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -271,7 +271,7 @@ def test_cursor_usable_after_rescan(tmp_path):
     _make_tree_dir(tmp_path)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -442,7 +442,7 @@ def test_press_t_propagates_metric_to_visualizations(tmp_path):
     _make_tree_dir(tmp_path)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
@@ -470,7 +470,7 @@ def test_treemap_recomputes_in_count_mode_after_toggle(tmp_path):
     _make_tree_dir(tmp_path)
 
     async def go():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:

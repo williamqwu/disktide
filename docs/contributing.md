@@ -1,11 +1,11 @@
 # Contributing
 
-Guide for developers working on fsmonitor.
+Guide for developers working on sizetrail.
 
 ## Setup
 
 ```bash
-git clone <repo-url> fsmonitor && cd fsmonitor
+git clone <repo-url> sizetrail && cd sizetrail
 uv sync --locked
 ```
 
@@ -22,7 +22,7 @@ uv run pytest tests/ -v
 uv run pytest tests/test_scanner.py -v
 
 # with coverage (if pytest-cov installed)
-uv run pytest tests/ --cov=fs_monitor
+uv run pytest tests/ --cov=sizetrail
 ```
 
 The test suite covers the scanner and tree model, configuration,
@@ -44,13 +44,13 @@ checkpoints, resource queue cancellation, and Monitor queue projection live in
 
 See [architecture.md](architecture.md) for the full layout. In brief:
 
-- `src/fs_monitor/` -- all source code
+- `src/sizetrail/` -- all source code
 - `tests/` -- test suite (no subdirectories, flat layout)
 - `assets/` -- TCSS stylesheets
-- `src/fs_monitor/collectors/platform/` -- isolated OS/procfs/sysfs/command probes
-- `src/fs_monitor/extensions/` -- typed capability contracts and strict declarative policy loaders
-- `src/fs_monitor/repositories/` -- persistence-neutral protocols and adapters
-- `src/fs_monitor/services/` -- CLI/TUI-neutral application services such as doctor and scan orchestration
+- `src/sizetrail/collectors/platform/` -- isolated OS/procfs/sysfs/command probes
+- `src/sizetrail/extensions/` -- typed capability contracts and strict declarative policy loaders
+- `src/sizetrail/repositories/` -- persistence-neutral protocols and adapters
+- `src/sizetrail/services/` -- CLI/TUI-neutral application services such as doctor and scan orchestration
 - `tool/` -- development utilities (e.g., `gen_activity` for generating test data)
 - `docs/` -- documentation
 
@@ -122,9 +122,9 @@ uv run python tool/benchmark_wave15.py --output /tmp/wave-15-benchmark.json
 ```
 
 The CI minimal-install job installs the wheel into a fresh environment, runs
-`fsmonitor doctor`, a small scan, and periodic watch smoke, and enforces at most
+`sizetrail doctor`, a small scan, and periodic watch smoke, and enforces at most
 20 runtime distributions, at most 20 MiB of installed files, and no native
-extension. A second clean environment installs `fsmonitor-cli[watch]`, verifies
+extension. A second clean environment installs `sizetrail[watch]`, verifies
 backend discovery, and runs strict `watch --events` smoke.
 See [release-process.md](release-process.md) for the tag and PyPI flow.
 
@@ -198,7 +198,7 @@ default_action = "safe"
    ```python
    self.install_screen(MyScreen(...), name="myscreen")
    ```
-4. Add a key binding in `FSMonitorApp.BINDINGS` and a case in `action_switch_mode()`.
+4. Add a key binding in `SizeTrailApp.BINDINGS` and a case in `action_switch_mode()`.
 5. Add styles in `assets/default.tcss`.
 
 ## Adding a New Visualization
@@ -229,8 +229,8 @@ The `tool/` directory contains helper scripts:
 
 ```bash
 # normal launch
-fsmonitor
+sizetrail
 
 # with Textual dev tools (live CSS reloading, DOM inspector)
-textual run --dev -c fsmonitor
+textual run --dev -c sizetrail
 ```

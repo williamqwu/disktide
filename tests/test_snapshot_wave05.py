@@ -9,18 +9,18 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from fs_monitor.__main__ import cli
-from fs_monitor.domain.delta import CompatibilityDecision
-from fs_monitor.domain.metrics import MetricId
-from fs_monitor.domain.policy import ScanPolicy
-from fs_monitor.domain.scan import ScanRequest, ScanRun, ScanStatus
-from fs_monitor.domain.snapshot import Snapshot
-from fs_monitor.models.tree import FSNode
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.services.compare import CompareService
-from fs_monitor.services.snapshots import SnapshotService
-from fs_monitor.storage.database import Database
-from fs_monitor.storage.migrations import MIGRATION_CALLBACKS, migrate
+from sizetrail.__main__ import cli
+from sizetrail.domain.delta import CompatibilityDecision
+from sizetrail.domain.metrics import MetricId
+from sizetrail.domain.policy import ScanPolicy
+from sizetrail.domain.scan import ScanRequest, ScanRun, ScanStatus
+from sizetrail.domain.snapshot import Snapshot
+from sizetrail.models.tree import FSNode
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.services.compare import CompareService
+from sizetrail.services.snapshots import SnapshotService
+from sizetrail.storage.database import Database
+from sizetrail.storage.migrations import MIGRATION_CALLBACKS, migrate
 
 
 def _file(path: str, size: int) -> FSNode:
@@ -405,7 +405,7 @@ def test_corrupted_database_degrades_without_deleting_original(tmp_path):
         assert not database.read_only
         assert database.recovery_hint
         assert path.read_bytes() == original
-        from fs_monitor.storage.migrations import CURRENT_VERSION
+        from sizetrail.storage.migrations import CURRENT_VERSION
 
         assert database.conn.execute(
             "SELECT version FROM schema_version"
@@ -527,12 +527,12 @@ def test_compare_cli_renders_stable_human_report(tmp_path, monkeypatch):
 def test_product_entry_points_do_not_import_sqlite_backend():
     project_root = Path(__file__).parents[1]
     product_paths = (
-        "src/fs_monitor/__main__.py",
-        "src/fs_monitor/app.py",
-        "src/fs_monitor/screens/monitor.py",
-        "src/fs_monitor/screens/settings.py",
+        "src/sizetrail/__main__.py",
+        "src/sizetrail/app.py",
+        "src/sizetrail/screens/monitor.py",
+        "src/sizetrail/screens/settings.py",
     )
     for relative_path in product_paths:
         source = (project_root / relative_path).read_text()
-        assert "fs_monitor.storage.database" not in source
+        assert "sizetrail.storage.database" not in source
         assert "Database(" not in source

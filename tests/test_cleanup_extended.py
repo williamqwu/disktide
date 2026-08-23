@@ -4,10 +4,10 @@ import os
 import tempfile
 
 import pytest
-from fs_monitor.scanner.walker import scan_directory
-from fs_monitor.cleanup.detector import detect_targets, group_by_category, total_savings
-from fs_monitor.cleanup.actions import delete_targets, CleanupResult
-from fs_monitor.models.patterns import CleanupRule, CleanupTarget, RiskLevel
+from sizetrail.scanner.walker import scan_directory
+from sizetrail.cleanup.detector import detect_targets, group_by_category, total_savings
+from sizetrail.cleanup.actions import delete_targets, CleanupResult
+from sizetrail.models.patterns import CleanupRule, CleanupTarget, RiskLevel
 
 
 class TestDetectorRealFS:

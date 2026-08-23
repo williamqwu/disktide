@@ -1,21 +1,21 @@
 # Release Process
 
-fsmonitor releases use the locked dependency graph, build both standard Python
+sizetrail releases use the locked dependency graph, build both standard Python
 distribution formats, verify a clean installation, and publish through PyPI
 Trusted Publishing. The release workflow is defined in
 `.github/workflows/release.yml`.
 
 ## Preconditions
 
-1. The release version matches in `pyproject.toml`, `src/fs_monitor/__init__.py`,
+1. The release version matches in `pyproject.toml`, `src/sizetrail/__init__.py`,
    and `uv.lock`.
 2. `uv sync --locked` succeeds without changing `uv.lock`.
 3. The Python 3.11, 3.12, and 3.13 CI matrix is green.
 4. The minimal wheel environment stays within 20 runtime distributions and
    20 MiB, with no native extension.
-5. `fsmonitor doctor`, `fsmonitor doctor --json`, a small directory scan, and a
+5. `sizetrail doctor`, `sizetrail doctor --json`, a small directory scan, and a
    periodic watch smoke succeed from the core wheel.
-6. A separate clean install of `fsmonitor-cli[watch]` discovers the native
+6. A separate clean install of `sizetrail[watch]` discovers the native
    backend and completes strict `watch --events` smoke.
 7. The full test suite passes in both the locked core environment and a locked
    Python 3.13 environment with the `watch` extra installed.
@@ -33,12 +33,13 @@ uv build
 ```
 
 Refresh the developer's installed checkout after every source version change.
-Do not hard-code the expected version; derive it from the package and verify
-both entry points:
+Do not hard-code the expected version; derive it through the compatibility
+namespace required by the local delivery workflow and verify all entry points:
 
 ```bash
 expected="$(uv run python -c 'from fs_monitor import __version__; print(__version__)')"
 uv tool install --force .
+test "$(sizetrail --version | awk '{print $NF}')" = "$expected"
 test "$(fsmonitor --version | awk '{print $NF}')" = "$expected"
 test "$(fsmonitor-cli --version | awk '{print $NF}')" = "$expected"
 uv tool list
@@ -50,23 +51,23 @@ environment:
 ```bash
 uv venv --python 3.13 .venv-release-smoke
 uv pip install --python .venv-release-smoke/bin/python \
-  dist/fsmonitor_cli-*.whl
+  dist/sizetrail-*.whl
 uv venv --python 3.13 .venv-release-sdist
 uv pip install --python .venv-release-sdist/bin/python \
-  dist/fsmonitor_cli-*.tar.gz
+  dist/sizetrail-*.tar.gz
 uv venv --python 3.13 .venv-release-watch
-wheel=$(echo dist/fsmonitor_cli-*.whl)
+wheel=$(echo dist/sizetrail-*.whl)
 uv pip install --python .venv-release-watch/bin/python \
-  "fsmonitor-cli[watch] @ file://${PWD}/${wheel}"
-mkdir -p /tmp/fsmonitor-smoke
-printf 'smoke' > /tmp/fsmonitor-smoke/payload
-.venv-release-smoke/bin/fsmonitor --version
-.venv-release-smoke/bin/fsmonitor doctor --json
-.venv-release-smoke/bin/fsmonitor watch /tmp/fsmonitor-smoke \
+  "sizetrail[watch] @ file://${PWD}/${wheel}"
+mkdir -p /tmp/sizetrail-smoke
+printf 'smoke' > /tmp/sizetrail-smoke/payload
+.venv-release-smoke/bin/sizetrail --version
+.venv-release-smoke/bin/sizetrail doctor --json
+.venv-release-smoke/bin/sizetrail watch /tmp/sizetrail-smoke \
   --periodic-only --interval 1h --max-time 1s
-.venv-release-sdist/bin/fsmonitor doctor --json
-.venv-release-watch/bin/fsmonitor doctor --json
-.venv-release-watch/bin/fsmonitor watch /tmp/fsmonitor-smoke \
+.venv-release-sdist/bin/sizetrail doctor --json
+.venv-release-watch/bin/sizetrail doctor --json
+.venv-release-watch/bin/sizetrail watch /tmp/sizetrail-smoke \
   --events --interval 1h --max-time 1s
 .venv-release-smoke/bin/python tool/check_dependency_budget.py
 ```
@@ -91,12 +92,12 @@ After PyPI has indexed the release, verify each supported installer in a clean
 shell:
 
 ```bash
-uvx fsmonitor-cli --version
-uvx fsmonitor-cli doctor
-uv tool install --force fsmonitor-cli
-fsmonitor --version
-pipx install --force fsmonitor-cli
-pipx run fsmonitor-cli doctor --json
+uvx sizetrail --version
+uvx sizetrail doctor
+uv tool install --force sizetrail
+sizetrail --version
+pipx install --force sizetrail
+pipx run sizetrail doctor --json
 ```
 
 Compare the published wheel checksum with `SHA256SUMS`, retain the SBOM and

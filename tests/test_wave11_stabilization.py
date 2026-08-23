@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fs_monitor.domain.cleanup import (
+from sizetrail.domain.cleanup import (
     CleanupActionKind,
     CleanupPlan,
     CleanupPlanStatus,
 )
-from fs_monitor.domain.metrics import MetricId
-from fs_monitor.domain.snapshot import Snapshot
-from fs_monitor.models.tree import FSNode
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.domain.metrics import MetricId
+from sizetrail.domain.snapshot import Snapshot
+from sizetrail.models.tree import FSNode
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
 
 
 def _flat_tree(total_nodes: int) -> FSNode:

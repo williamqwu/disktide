@@ -6,16 +6,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from fs_monitor.domain.monitor import (
+from sizetrail.domain.monitor import (
     MonitorDefinition,
     MonitorHealthState,
     RetentionPolicy,
 )
-from fs_monitor.domain.snapshot import Snapshot
-from fs_monitor.models.tree import FSNode
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.services.monitor import MonitorService
-from fs_monitor.services.retention import RetentionService
+from sizetrail.domain.snapshot import Snapshot
+from sizetrail.models.tree import FSNode
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.services.monitor import MonitorService
+from sizetrail.services.retention import RetentionService
 
 
 @pytest.fixture

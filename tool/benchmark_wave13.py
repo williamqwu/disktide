@@ -15,9 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 
-from fs_monitor.domain.scan import NodeAggregateUpdated, ScanRequest
-from fs_monitor.models.tree import FSNode
-from fs_monitor.services.scan import ScanService
+from sizetrail.domain.scan import NodeAggregateUpdated, ScanRequest
+from sizetrail.models.tree import FSNode
+from sizetrail.services.scan import ScanService
 
 
 def _create_warm_tree(root: Path, directories: int, files: int) -> None:
@@ -139,7 +139,7 @@ def run(
     deep_directories: int,
     repeats: int,
 ) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="fsmonitor-wave13-") as directory:
+    with tempfile.TemporaryDirectory(prefix="sizetrail-wave13-") as directory:
         base = Path(directory)
         warm = base / "warm"
         flat = base / "flat"

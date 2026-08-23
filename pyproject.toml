@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fsmonitor-cli"
-version = "0.2.15"
-description = "Interactive terminal disk usage explorer"
+name = "sizetrail"
+version = "0.2.16"
+description = "Storage intelligence TUI for exploring, tracking, and safely reclaiming disk space"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -42,11 +42,12 @@ Repository = "https://github.com/williamqwu/fsmonitor-cli"
 Issues = "https://github.com/williamqwu/fsmonitor-cli/issues"
 
 [project.scripts]
-fsmonitor = "fs_monitor.__main__:cli"
-fsmonitor-cli = "fs_monitor.__main__:cli"
+sizetrail = "sizetrail.__main__:cli"
+fsmonitor = "sizetrail.__main__:cli"
+fsmonitor-cli = "sizetrail.__main__:cli"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fs_monitor"]
+packages = ["src/sizetrail", "src/fs_monitor"]
 
 [dependency-groups]
 dev = [

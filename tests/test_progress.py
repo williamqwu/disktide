@@ -3,7 +3,7 @@
 import time
 
 import pytest
-from fs_monitor.scanner.progress import ScanProgress, ProgressThrottle
+from sizetrail.scanner.progress import ScanProgress, ProgressThrottle
 
 
 class TestScanProgress:

@@ -1,24 +1,24 @@
 # User Guide
 
-fsmonitor is an interactive terminal tool for exploring disk usage, detecting cleanup opportunities, and tracking how directory sizes change over time.
+SizeTrail is an interactive terminal tool for exploring disk usage, detecting cleanup opportunities, and tracking how directory sizes change over time.
 
 ## Getting Started
 
 Install and launch:
 
 ```bash
-uv tool install fsmonitor-cli
-fsmonitor
+uv tool install sizetrail
+sizetrail
 ```
 
-For a one-shot launch, use `uvx fsmonitor-cli`. `pipx install
-fsmonitor-cli` and a normal `pip install fsmonitor-cli` inside a virtual
-environment are also supported. The installed command is always `fsmonitor`;
-`fsmonitor-cli` remains a compatibility alias.
+For a one-shot launch, use `uvx sizetrail`. `pipx install
+sizetrail` and a normal `pip install sizetrail` inside a virtual
+environment are also supported. The installed command is always `sizetrail`;
+`fsmonitor` and `fsmonitor-cli` remain compatibility aliases.
 
 The welcome screen shows a single path input with a list of suggested starting directories:
 
-- **Current directory** -- the directory you launched `fsmonitor` from
+- **Current directory** -- the directory you launched `sizetrail` from
 - **Saved default** -- your previously saved default path (if any)
 - **Last visited** -- the most recently explored path (if different from the above)
 - **Recent** -- paths from previous `watch` or `scan --snapshot` runs
@@ -148,9 +148,9 @@ pinned, and rollup state.
 
 Definitions are persistent; execution is not. `enabled · no-host` means the
 definition is ready but no process currently owns it. Press `s` in the TUI or
-run `fsmonitor watch --monitor/--all` to host scans. Leaving Monitor Center for
+run `sizetrail watch --monitor/--all` to host scans. Leaving Monitor Center for
 Explorer keeps the TUI session alive, while quitting the app stops it and
-releases its lease. With `fsmonitor-cli[watch]` installed on Linux, `auto` mode
+releases its lease. With `sizetrail[watch]` installed on Linux, `auto` mode
 attaches inotify to each held lease. Ordinary events trigger bounded local
 reconciliation; startup, restart, overflow, backend loss, manual `g`, and the
 normal interval trigger full reconciliation. Events never replace the periodic
@@ -216,7 +216,7 @@ separate red action and requires typing the exact plan-scoped
 `DELETE <plan-id>` token. Detection-only rules remain visible but cannot enter
 safe apply, permanent deletion, or purge.
 
-Before every action, fsmonitor repeats `lstat`, identity, rule, age, directory
+Before every action, sizetrail repeats `lstat`, identity, rule, age, directory
 content, mount-boundary, and protected-path checks. Changed, missing, replaced,
 or no-longer-matching targets are skipped with a specific audit reason. Parent
 targets subsume matching children so estimated bytes and execution are not
@@ -263,8 +263,8 @@ capabilities, optional extras (including watch backend/version/status), and
 default scan policy:
 
 ```bash
-fsmonitor doctor
-fsmonitor doctor --json
+sizetrail doctor
+sizetrail doctor --json
 ```
 
 The JSON schema is versioned and suitable for attaching to issue reports. App
@@ -277,11 +277,11 @@ scan tree or lists user files.
 One-shot scan with a text summary:
 
 ```bash
-fsmonitor scan /path
-fsmonitor scan /path --snapshot      # save results to the database
-fsmonitor scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
-fsmonitor scan /path --metric allocated
-fsmonitor scan / --metric unique --one-file-system --exclude-pseudo
+sizetrail scan /path
+sizetrail scan /path --snapshot      # save results to the database
+sizetrail scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
+sizetrail scan /path --metric allocated
+sizetrail scan / --metric unique --one-file-system --exclude-pseudo
 ```
 
 `--metric` controls the completion total, sorting, and top-directory bars.
@@ -301,9 +301,9 @@ an explicit coverage line; cancellation never prints a completion summary.
 Compare a target snapshot with a baseline snapshot:
 
 ```bash
-fsmonitor compare latest previous /path
-fsmonitor compare 42 41
-fsmonitor compare --since 7d /path
+sizetrail compare latest previous /path
+sizetrail compare 42 41
+sizetrail compare --since 7d /path
 ```
 
 The first selector is the target and the second is the baseline, so the report
@@ -324,19 +324,19 @@ keeps every incompatibility visible in the output.
 Create and manage the same persistent definitions used by Monitor Center:
 
 ```bash
-fsmonitor monitor add /data --label data --interval 6h --capture-now
-fsmonitor monitor list
-fsmonitor monitor status 1
-fsmonitor monitor edit 1 --interval 1h --metric allocated
-fsmonitor monitor pause 1
-fsmonitor monitor resume 1
-fsmonitor monitor run 1
-fsmonitor monitor reconcile 1
-fsmonitor monitor retention 1          # preview
-fsmonitor monitor retention 1 --apply  # run maintenance
-fsmonitor monitor pin 42 --label release
-fsmonitor monitor unpin 42
-fsmonitor monitor remove 1             # archive; keep history
+sizetrail monitor add /data --label data --interval 6h --capture-now
+sizetrail monitor list
+sizetrail monitor status 1
+sizetrail monitor edit 1 --interval 1h --metric allocated
+sizetrail monitor pause 1
+sizetrail monitor resume 1
+sizetrail monitor run 1
+sizetrail monitor reconcile 1
+sizetrail monitor retention 1          # preview
+sizetrail monitor retention 1 --apply  # run maintenance
+sizetrail monitor pin 42 --label release
+sizetrail monitor unpin 42
+sizetrail monitor remove 1             # archive; keep history
 ```
 
 Monitor identifiers may be numeric ids or labels where the command accepts an
@@ -351,17 +351,17 @@ Alert rules belong to one monitor and share the same repository/service path as
 the TUI Alerts tab:
 
 ```bash
-fsmonitor alerts add 1 /data --size 500GiB
-fsmonitor alerts add 1 /data/logs --growth 10GiB --window 24h
-fsmonitor alerts add 1 /data --percent 20 --cooldown 6h
-fsmonitor alerts add 1 /data --free-space 50GiB --severity critical
-fsmonitor alerts add 1 /data --inode-free 100000
-fsmonitor alerts add 1 /data/incoming --new-large 4GiB
-fsmonitor alerts list 1
-fsmonitor alerts check 1
-fsmonitor alerts disable RULE_ID
-fsmonitor alerts enable RULE_ID
-fsmonitor alerts remove RULE_ID
+sizetrail alerts add 1 /data --size 500GiB
+sizetrail alerts add 1 /data/logs --growth 10GiB --window 24h
+sizetrail alerts add 1 /data --percent 20 --cooldown 6h
+sizetrail alerts add 1 /data --free-space 50GiB --severity critical
+sizetrail alerts add 1 /data --inode-free 100000
+sizetrail alerts add 1 /data/incoming --new-large 4GiB
+sizetrail alerts list 1
+sizetrail alerts check 1
+sizetrail alerts disable RULE_ID
+sizetrail alerts enable RULE_ID
+sizetrail alerts remove RULE_ID
 ```
 
 Rules can evaluate logical, allocated, unique, or file-count measurements.
@@ -376,13 +376,13 @@ Run the shared monitor host in the foreground until interrupted or
 `--max-time` is reached:
 
 ```bash
-fsmonitor watch /path                   # transient definition; default 6h
-fsmonitor watch /path --interval 1h
-fsmonitor watch /path -i 30m -t 12h
-fsmonitor watch /path --events          # require fsmonitor-cli[watch]
-fsmonitor watch /path --periodic-only   # force the dependency-free core path
-fsmonitor watch --monitor 1             # host one saved definition
-fsmonitor watch --all                   # host all enabled definitions
+sizetrail watch /path                   # transient definition; default 6h
+sizetrail watch /path --interval 1h
+sizetrail watch /path -i 30m -t 12h
+sizetrail watch /path --events          # require sizetrail[watch]
+sizetrail watch /path --periodic-only   # force the dependency-free core path
+sizetrail watch --monitor 1             # host one saved definition
+sizetrail watch --all                   # host all enabled definitions
 ```
 
 The default `auto` mode uses the native backend when installed and otherwise
@@ -405,20 +405,20 @@ when it must outlive the current shell:
 ```bash
 # tmux (recommended -- reattach later with `tmux attach -t fsmon`)
 tmux new -s fsmon
-fsmonitor watch /path --interval 6h
+sizetrail watch /path --interval 6h
 
 # nohup (background, no reattach; host every enabled saved monitor)
-nohup fsmonitor watch --all > /dev/null 2>&1 &
+nohup sizetrail watch --all > /dev/null 2>&1 &
 ```
 
 An external systemd user unit can supervise the same foreground host. The
-project ships `docs/examples/fsmonitor-watch.service` as a copyable example; it
+project ships `docs/examples/sizetrail-watch.service` as a copyable example; it
 does not install, enable, or grant cleanup permissions to that unit:
 
 ```ini
-# ~/.config/systemd/user/fsmonitor.service
+# ~/.config/systemd/user/sizetrail.service
 [Service]
-ExecStart=%h/.local/bin/fsmonitor watch --all
+ExecStart=%h/.local/bin/sizetrail watch --all
 Restart=on-failure
 
 [Install]
@@ -426,11 +426,11 @@ WantedBy=default.target
 ```
 
 ```bash
-systemctl --user enable --now fsmonitor.service
+systemctl --user enable --now sizetrail.service
 loginctl enable-linger $USER
 ```
 
-Use `--events` in the unit only after installing `fsmonitor-cli[watch]`. Omit it
+Use `--events` in the unit only after installing `sizetrail[watch]`. Omit it
 for automatic fallback, or use `--periodic-only` to guarantee core-only hosting.
 Every backend start/restart is recorded as requiring full reconciliation, so
 service downtime is never presented as a complete event history.
@@ -440,13 +440,13 @@ service downtime is never presented as a complete event history.
 Cleanup defaults to a persistent, read-only preview:
 
 ```bash
-fsmonitor cleanup /path
-fsmonitor cleanup --plan PLAN_ID --apply
-fsmonitor cleanup history --by category
-fsmonitor cleanup undo PLAN_OR_ACTION_ID
-fsmonitor cleanup purge PLAN_OR_ACTION_ID
-fsmonitor cleanup quarantine audit /path/.fsmonitor-quarantine
-fsmonitor cleanup quarantine rebuild /path/.fsmonitor-quarantine
+sizetrail cleanup /path
+sizetrail cleanup --plan PLAN_ID --apply
+sizetrail cleanup history --by category
+sizetrail cleanup undo PLAN_OR_ACTION_ID
+sizetrail cleanup purge PLAN_OR_ACTION_ID
+sizetrail cleanup quarantine audit /path/.sizetrail-quarantine
+sizetrail cleanup quarantine rebuild /path/.sizetrail-quarantine
 ```
 
 The first command scans, resolves parent/child overlap, saves the plan, and makes
@@ -468,23 +468,23 @@ summary and interrupted transition state without deleting unknown files.
 Manage declarative rule packs from the same configuration used by the TUI:
 
 ```bash
-fsmonitor cleanup rules list
-fsmonitor cleanup rules validate /path/to/pack.toml
-fsmonitor cleanup rules disable node
-fsmonitor cleanup rules enable node
+sizetrail cleanup rules list
+sizetrail cleanup rules validate /path/to/pack.toml
+sizetrail cleanup rules disable node
+sizetrail cleanup rules enable node
 ```
 
 Built-in packs are packaged with the application. Optional user packs load from
-`~/.config/fsmonitor-cli/cleanup-rules/*.toml` (respecting `XDG_CONFIG_HOME`).
+`~/.config/sizetrail/cleanup-rules/*.toml` (respecting `XDG_CONFIG_HOME`).
 Validation is strict: unknown fields, unsupported schema versions, invalid
 identifiers/types, duplicate names, and executable hook fields are rejected.
-One bad pack is isolated and reported by `fsmonitor doctor`; valid packs remain
+One bad pack is isolated and reported by `sizetrail doctor`; valid packs remain
 available.
 
 Permanent deletion is intentionally separate:
 
 ```bash
-fsmonitor cleanup --plan PLAN_ID --permanent
+sizetrail cleanup --plan PLAN_ID --permanent
 ```
 
 The command prints the irreversible warning and requires the exact
@@ -496,7 +496,12 @@ deletion. `--apply` can never select permanent deletion.
 
 ## Configuration
 
-Settings are stored in `~/.config/fsmonitor-cli/config.toml` (respects `XDG_CONFIG_HOME`). The legacy directory name is retained so existing installations keep their settings. Edit the file directly or use the settings screen (`?` in the TUI).
+New installations store settings in `~/.config/sizetrail/config.toml`
+(respecting `XDG_CONFIG_HOME`). If the SizeTrail path does not yet contain a
+configuration but `~/.config/fsmonitor-cli/config.toml` already exists,
+SizeTrail continues using that legacy file so upgrades keep their settings and
+user cleanup rules. Edit the active file directly or use the settings screen
+(`?` in the TUI).
 
 ```toml
 [scan]

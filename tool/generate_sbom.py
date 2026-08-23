@@ -16,7 +16,7 @@ from dependency_budget import installed_distributions, normalize_name
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project", default="fsmonitor-cli")
+    parser.add_argument("--project", default="sizetrail")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 

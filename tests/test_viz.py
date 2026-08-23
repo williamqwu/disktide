@@ -1,10 +1,10 @@
 """Tests for visualization modules."""
 
 import pytest
-from fs_monitor.models.tree import FSNode
-from fs_monitor.viz.colors import size_color, depth_color, gradient_color, set_color_scheme
-from fs_monitor.viz.treemap import compute_layout, render_line
-from fs_monitor.viz.sunburst import compute_sunburst, render_sunburst_line
+from sizetrail.models.tree import FSNode
+from sizetrail.viz.colors import size_color, depth_color, gradient_color, set_color_scheme
+from sizetrail.viz.treemap import compute_layout, render_line
+from sizetrail.viz.sunburst import compute_sunburst, render_sunburst_line
 
 
 def make_viz_tree():
@@ -235,4 +235,3 @@ class TestSunburst:
         assert len(layout.labels) > 0, "Sunburst should have labels"
         label_texts = [lb.text for lb in layout.labels]
         assert any("root" in t for t in label_texts), "Should have root label"
-

@@ -4,10 +4,10 @@ import os
 import tempfile
 
 import pytest
-from fs_monitor.models.tree import FSNode
-from fs_monitor.models.patterns import CleanupRule, CleanupTarget, RiskLevel
-from fs_monitor.cleanup.detector import detect_targets, group_by_category, total_savings
-from fs_monitor.cleanup.actions import delete_targets
+from sizetrail.models.tree import FSNode
+from sizetrail.models.patterns import CleanupRule, CleanupTarget, RiskLevel
+from sizetrail.cleanup.detector import detect_targets, group_by_category, total_savings
+from sizetrail.cleanup.actions import delete_targets
 
 
 def make_project_tree():
@@ -56,7 +56,7 @@ class TestDetector:
         root = make_project_tree()
         # Use a custom rule without parent_indicators for unit testing
         # (the real rule requires package.json on the actual filesystem)
-        from fs_monitor.models.patterns import CleanupRule, RiskLevel
+        from sizetrail.models.patterns import CleanupRule, RiskLevel
         rules = [
             CleanupRule(
                 name="node_modules", description="test",

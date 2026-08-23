@@ -4,8 +4,8 @@ import os
 import tempfile
 
 import pytest
-from fs_monitor.scanner.walker import scan_directory
-from fs_monitor.scanner.engine import ScanEngine
+from sizetrail.scanner.walker import scan_directory
+from sizetrail.scanner.engine import ScanEngine
 
 
 @pytest.fixture

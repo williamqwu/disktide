@@ -8,31 +8,31 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from fs_monitor.__main__ import cli
-from fs_monitor.app import FSMonitorApp
-from fs_monitor.cleanup.actions import (
+from sizetrail.__main__ import cli
+from sizetrail.app import SizeTrailApp
+from sizetrail.cleanup.actions import (
     CleanupExecutionError,
     QuarantineExecutor,
     XDGTrashAdapter,
 )
-from fs_monitor.cleanup.detector import detect_targets
-from fs_monitor.config import AppConfig
-from fs_monitor.domain.cleanup import (
+from sizetrail.cleanup.detector import detect_targets
+from sizetrail.config import AppConfig
+from sizetrail.domain.cleanup import (
     CleanupActionKind,
     CleanupAuditKind,
     CleanupExecutionStatus,
     CleanupPlanStatus,
     CleanupValidationStatus,
 )
-from fs_monitor.models.patterns import CleanupRule, CleanupTarget, RiskLevel
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.scanner.walker import scan_directory
-from fs_monitor.screens.cleanup import CleanupScreen
-from fs_monitor.services.cleanup import (
+from sizetrail.models.patterns import CleanupRule, CleanupTarget, RiskLevel
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.scanner.walker import scan_directory
+from sizetrail.screens.cleanup import CleanupScreen
+from sizetrail.services.cleanup import (
     CleanupConfirmationRequired,
     CleanupService,
 )
-from fs_monitor.widgets.cleanup_modal import CleanupModal
+from sizetrail.widgets.cleanup_modal import CleanupModal
 
 
 class _UnavailableTrash:
@@ -170,7 +170,7 @@ def test_scan_root_database_directory_quarantine_and_mount_roots_are_blocked(
 ):
     scan_root = tmp_path / "scan"
     database_dir = scan_root / ".state"
-    quarantine = scan_root / ".fsmonitor-quarantine"
+    quarantine = scan_root / ".sizetrail-quarantine"
     mount_candidate = scan_root / "mount-cache"
     for path in (database_dir, quarantine, mount_candidate):
         path.mkdir(parents=True, exist_ok=True)
@@ -180,7 +180,7 @@ def test_scan_root_database_directory_quarantine_and_mount_roots_are_blocked(
     try:
         service = CleanupService(repository)
         monkeypatch.setattr(
-            "fs_monitor.services.cleanup.os.path.ismount",
+            "sizetrail.services.cleanup.os.path.ismount",
             lambda value: Path(value) == mount_candidate,
         )
         targets = [
@@ -399,7 +399,7 @@ def test_tui_preview_safe_apply_and_undo_share_cleanup_service(
         assert predicate()
 
     async def exercise():
-        app = FSMonitorApp(
+        app = SizeTrailApp(
             scan_path=str(root),
             show_welcome=False,
             config=config,

@@ -1,0 +1,13 @@
+[Unit]
+Description=SizeTrail foreground monitor host
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/sizetrail watch --all --events
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from fs_monitor.domain.scan import (
+from sizetrail.domain.scan import (
     ScanCancelled,
     ScanQueued,
     ScanRequest,
@@ -14,16 +14,16 @@ from fs_monitor.domain.scan import (
     ScanStatus,
     ScanWorkerSelection,
 )
-from fs_monitor.domain.monitor import MonitorActivityState, MonitorDefinition
-from fs_monitor.models.tree import FSNode
-from fs_monitor.repositories.sqlite import SQLiteSnapshotRepository
-from fs_monitor.scanner import scheduler as scheduler_module
-from fs_monitor.scanner.engine import ScanEngine
-from fs_monitor.scanner.sysinfo import _compute_recommended_workers
-from fs_monitor.services import scan as scan_service_module
-from fs_monitor.services.scan import ScanService
-from fs_monitor.services.scan_consumers import ScanEventRecorder
-from fs_monitor.services.monitor import MonitorService
+from sizetrail.domain.monitor import MonitorActivityState, MonitorDefinition
+from sizetrail.models.tree import FSNode
+from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from sizetrail.scanner import scheduler as scheduler_module
+from sizetrail.scanner.engine import ScanEngine
+from sizetrail.scanner.sysinfo import _compute_recommended_workers
+from sizetrail.services import scan as scan_service_module
+from sizetrail.services.scan import ScanService
+from sizetrail.services.scan_consumers import ScanEventRecorder
+from sizetrail.services.monitor import MonitorService
 
 
 def _tree_signature(root: FSNode) -> tuple[tuple[object, ...], ...]:
@@ -192,7 +192,7 @@ def test_giant_directory_cancellation_stops_at_chunk_boundary(
     )
 
     def consume(event):
-        from fs_monitor.domain.scan import NodeAggregateUpdated
+        from sizetrail.domain.scan import NodeAggregateUpdated
 
         if isinstance(event, NodeAggregateUpdated) and not event.final:
             first_visual.set()

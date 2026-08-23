@@ -9,18 +9,18 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from fs_monitor.__main__ import cli
-from fs_monitor.domain.metrics import (
+from sizetrail.__main__ import cli
+from sizetrail.domain.metrics import (
     MetricId,
     StorageMeasurements,
     allocated_bytes_from_stat,
 )
-from fs_monitor.metrics import metric_text, metric_value
-from fs_monitor.models.tree import FSNode
-from fs_monitor.scanner.accounting import finalize_unique_allocated
-from fs_monitor.scanner.engine import ScanEngine
-from fs_monitor.scanner.policy import MountEntry, discover_pseudo_mounts
-from fs_monitor.scanner.walker import scan_directory
+from sizetrail.metrics import metric_text, metric_value
+from sizetrail.models.tree import FSNode
+from sizetrail.scanner.accounting import finalize_unique_allocated
+from sizetrail.scanner.engine import ScanEngine
+from sizetrail.scanner.policy import MountEntry, discover_pseudo_mounts
+from sizetrail.scanner.walker import scan_directory
 
 
 def test_storage_measurements_preserve_unavailable_values():

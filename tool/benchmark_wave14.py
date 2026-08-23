@@ -12,23 +12,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 
-from fs_monitor.cleanup.actions import (
+from sizetrail.cleanup.actions import (
     QuarantineExecutor,
     create_mutation_token,
     identity_from_path,
     mutation_capabilities,
 )
-from fs_monitor.domain.cleanup import (
+from sizetrail.domain.cleanup import (
     CleanupAction,
     CleanupActionKind,
     CleanupExecutionStatus,
     CleanupPlan,
     CleanupPlanStatus,
 )
-from fs_monitor.domain.metrics import MetricId
-from fs_monitor.models.patterns import CleanupRuleActionPolicy, RiskLevel
-from fs_monitor.services.cleanup import CleanupService
-from fs_monitor.storage.database import Database
+from sizetrail.domain.metrics import MetricId
+from sizetrail.models.patterns import CleanupRuleActionPolicy, RiskLevel
+from sizetrail.services.cleanup import CleanupService
+from sizetrail.storage.database import Database
 
 
 AUDIT_BASELINE = {
@@ -171,7 +171,7 @@ def _quarantine_benchmark(root: Path, count: int) -> dict[str, object]:
             create_mutation_token(action.path, action.identity),
         )
     elapsed = perf_counter() - started
-    status = executor.audit(fixture / ".fsmonitor-quarantine")
+    status = executor.audit(fixture / ".sizetrail-quarantine")
     return {
         "actions": count,
         "seconds": round(elapsed, 6),
@@ -182,7 +182,7 @@ def _quarantine_benchmark(root: Path, count: int) -> dict[str, object]:
 
 
 def run(*, repeats: int) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="fsmonitor-wave14-") as directory:
+    with tempfile.TemporaryDirectory(prefix="sizetrail-wave14-") as directory:
         root = Path(directory)
         overlap = [
             _overlap_benchmark(count, repeats)
