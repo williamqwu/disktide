@@ -1,21 +1,21 @@
 # Release Process
 
-sizetrail releases use the locked dependency graph, build both standard Python
+disktide releases use the locked dependency graph, build both standard Python
 distribution formats, verify a clean installation, and publish through PyPI
 Trusted Publishing. The release workflow is defined in
 `.github/workflows/release.yml`.
 
 ## Preconditions
 
-1. The release version matches in `pyproject.toml`, `src/sizetrail/__init__.py`,
+1. The release version matches in `pyproject.toml`, `src/disktide/__init__.py`,
    and `uv.lock`.
 2. `uv sync --locked` succeeds without changing `uv.lock`.
 3. The Python 3.11, 3.12, and 3.13 CI matrix is green.
 4. The minimal wheel environment stays within 20 runtime distributions and
    20 MiB, with no native extension.
-5. `sizetrail doctor`, `sizetrail doctor --json`, a small directory scan, and a
+5. `disktide doctor`, `disktide doctor --json`, a small directory scan, and a
    periodic watch smoke succeed from the core wheel.
-6. A separate clean install of `sizetrail[watch]` discovers the native
+6. A separate clean install of `disktide[watch]` discovers the native
    backend and completes strict `watch --events` smoke.
 7. The full test suite passes in both the locked core environment and a locked
    Python 3.13 environment with the `watch` extra installed.
@@ -39,6 +39,7 @@ namespace required by the local delivery workflow and verify all entry points:
 ```bash
 expected="$(uv run python -c 'from fs_monitor import __version__; print(__version__)')"
 uv tool install --force .
+test "$(disktide --version | awk '{print $NF}')" = "$expected"
 test "$(sizetrail --version | awk '{print $NF}')" = "$expected"
 test "$(fsmonitor --version | awk '{print $NF}')" = "$expected"
 test "$(fsmonitor-cli --version | awk '{print $NF}')" = "$expected"
@@ -51,23 +52,23 @@ environment:
 ```bash
 uv venv --python 3.13 .venv-release-smoke
 uv pip install --python .venv-release-smoke/bin/python \
-  dist/sizetrail-*.whl
+  dist/disktide-*.whl
 uv venv --python 3.13 .venv-release-sdist
 uv pip install --python .venv-release-sdist/bin/python \
-  dist/sizetrail-*.tar.gz
+  dist/disktide-*.tar.gz
 uv venv --python 3.13 .venv-release-watch
-wheel=$(echo dist/sizetrail-*.whl)
+wheel=$(echo dist/disktide-*.whl)
 uv pip install --python .venv-release-watch/bin/python \
-  "sizetrail[watch] @ file://${PWD}/${wheel}"
-mkdir -p /tmp/sizetrail-smoke
-printf 'smoke' > /tmp/sizetrail-smoke/payload
-.venv-release-smoke/bin/sizetrail --version
-.venv-release-smoke/bin/sizetrail doctor --json
-.venv-release-smoke/bin/sizetrail watch /tmp/sizetrail-smoke \
+  "disktide[watch] @ file://${PWD}/${wheel}"
+mkdir -p /tmp/disktide-smoke
+printf 'smoke' > /tmp/disktide-smoke/payload
+.venv-release-smoke/bin/disktide --version
+.venv-release-smoke/bin/disktide doctor --json
+.venv-release-smoke/bin/disktide watch /tmp/disktide-smoke \
   --periodic-only --interval 1h --max-time 1s
-.venv-release-sdist/bin/sizetrail doctor --json
-.venv-release-watch/bin/sizetrail doctor --json
-.venv-release-watch/bin/sizetrail watch /tmp/sizetrail-smoke \
+.venv-release-sdist/bin/disktide doctor --json
+.venv-release-watch/bin/disktide doctor --json
+.venv-release-watch/bin/disktide watch /tmp/disktide-smoke \
   --events --interval 1h --max-time 1s
 .venv-release-smoke/bin/python tool/check_dependency_budget.py
 ```
@@ -92,12 +93,12 @@ After PyPI has indexed the release, verify each supported installer in a clean
 shell:
 
 ```bash
-uvx sizetrail --version
-uvx sizetrail doctor
-uv tool install --force sizetrail
-sizetrail --version
-pipx install --force sizetrail
-pipx run sizetrail doctor --json
+uvx disktide --version
+uvx disktide doctor
+uv tool install --force disktide
+disktide --version
+pipx install --force disktide
+pipx run disktide doctor --json
 ```
 
 Compare the published wheel checksum with `SHA256SUMS`, retain the SBOM and

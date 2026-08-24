@@ -7,11 +7,11 @@ import sqlite3
 
 from click.testing import CliRunner
 
-from sizetrail.__main__ import cli
-from sizetrail.collectors.platform.portable import PortablePlatformAdapter
-from sizetrail.collectors.events.base import EventBackendInfo
-from sizetrail.extensions.capabilities import CapabilityStatus
-from sizetrail.services.doctor import (
+from disktide.__main__ import cli
+from disktide.collectors.platform.portable import PortablePlatformAdapter
+from disktide.collectors.events.base import EventBackendInfo
+from disktide.extensions.capabilities import CapabilityStatus
+from disktide.services.doctor import (
     DOCTOR_SCHEMA_VERSION,
     build_doctor_report,
     render_doctor_report,
@@ -81,7 +81,7 @@ def test_human_report_explains_unavailable_capabilities(tmp_path, monkeypatch):
     report = build_doctor_report(adapter=PortablePlatformAdapter("Windows"))
     output = render_doctor_report(report)
 
-    assert "sizetrail doctor" in output
+    assert "disktide doctor" in output
     assert "Storage metrics" in output
     assert "Platform capabilities" in output
     assert "[NO] Block devices" in output
@@ -95,7 +95,7 @@ def test_doctor_reports_watch_backend_version_and_configured_mode(
 ):
     _set_xdg(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "sizetrail.collectors.events.native.probe_native_event_backend",
+        "disktide.collectors.events.native.probe_native_event_backend",
         lambda: EventBackendInfo(
             name="inotify-simple",
             version="2.0.1",

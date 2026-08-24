@@ -4,7 +4,7 @@ import json
 import subprocess
 from unittest.mock import patch
 
-from sizetrail.scanner.blockdev import (
+from disktide.scanner.blockdev import (
     BlockDevice,
     DeviceStatus,
     list_block_devices,

@@ -12,13 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 
-from sizetrail.domain.metrics import MetricId
-from sizetrail.domain.policy import ScanPolicy
-from sizetrail.domain.scan import ScanRequest
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.provisional import ProvisionalProjectionService
-from sizetrail.services.scan import ScanService
-from sizetrail.services.snapshots import SnapshotService
+from disktide.domain.metrics import MetricId
+from disktide.domain.policy import ScanPolicy
+from disktide.domain.scan import ScanRequest
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.provisional import ProvisionalProjectionService
+from disktide.services.scan import ScanService
+from disktide.services.snapshots import SnapshotService
 
 
 def _create_fixture(root: Path, directories: int, files_per_directory: int) -> None:
@@ -41,7 +41,7 @@ def run_benchmark(
     files_per_directory: int,
     repeats: int,
 ) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="sizetrail-wave15-") as directory:
+    with tempfile.TemporaryDirectory(prefix="disktide-wave15-") as directory:
         base = Path(directory)
         root = base / "tree"
         root.mkdir()

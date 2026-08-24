@@ -7,19 +7,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sizetrail.domain.alerts import AlertEvent
-from sizetrail.domain.metrics import MetricId
-from sizetrail.domain.monitor import (
+from disktide.domain.alerts import AlertEvent
+from disktide.domain.metrics import MetricId
+from disktide.domain.monitor import (
     HistoryPointState,
     MonitorDefinition,
     MonitorHistory,
     MonitorHistoryPoint,
 )
-from sizetrail.app import SizeTrailApp
-from sizetrail.config import AppConfig
-from sizetrail.domain.policy import ScanPolicy
-from sizetrail.domain.snapshot import Snapshot
-from sizetrail.domain.visualization import (
+from disktide.app import DiskTideApp
+from disktide.config import AppConfig
+from disktide.domain.policy import ScanPolicy
+from disktide.domain.snapshot import Snapshot
+from disktide.domain.visualization import (
     HeatmapInterval,
     TrendPoint,
     TrendSeries,
@@ -30,17 +30,17 @@ from sizetrail.domain.visualization import (
     build_growth_heatmap,
     build_trend_model,
 )
-from sizetrail.models.tree import FSNode
-from sizetrail.presentation.tui.viewmodels.visualization import sparkline, visual_token
-from sizetrail.rendering import set_safe_rendering
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.visualization import VisualizationService
-from sizetrail.viz.sunburst import compute_sunburst
-from sizetrail.viz.treemap import compute_layout
-from sizetrail.widgets.trend_chart import TrendChart
-from sizetrail.widgets.growth_heatmap import GrowthHeatmap
-from sizetrail.widgets.treemap_view import TreemapView
-from sizetrail.screens.monitor import MonitorScreen
+from disktide.models.tree import FSNode
+from disktide.presentation.tui.viewmodels.visualization import sparkline, visual_token
+from disktide.rendering import set_safe_rendering
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.visualization import VisualizationService
+from disktide.viz.sunburst import compute_sunburst
+from disktide.viz.treemap import compute_layout
+from disktide.widgets.trend_chart import TrendChart
+from disktide.widgets.growth_heatmap import GrowthHeatmap
+from disktide.widgets.treemap_view import TreemapView
+from disktide.screens.monitor import MonitorScreen
 
 
 def _tree(root_path: str, entries: dict[str, int]) -> FSNode:
@@ -595,7 +595,7 @@ def test_tui_diff_and_monitor_views_keep_highlighted_path(tmp_path):
     repository = SQLiteSnapshotRepository(str(database_path))
 
     async def exercise() -> None:
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(root),
             show_welcome=False,
             config=_app_config(),
@@ -664,7 +664,7 @@ def test_monitor_space_time_degrades_cleanly_at_80x24_no_color(
     repository = SQLiteSnapshotRepository(str(database_path))
 
     async def exercise() -> None:
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(root),
             show_welcome=False,
             config=_app_config(safe=True),

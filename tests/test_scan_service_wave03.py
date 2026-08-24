@@ -10,12 +10,12 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from sizetrail.__main__ import cli
-from sizetrail.app import SizeTrailApp
-from sizetrail.config import AppConfig
-from sizetrail.domain.metrics import MetricId
-from sizetrail.domain.policy import ScanPolicy
-from sizetrail.domain.scan import (
+from disktide.__main__ import cli
+from disktide.app import DiskTideApp
+from disktide.config import AppConfig
+from disktide.domain.metrics import MetricId
+from disktide.domain.policy import ScanPolicy
+from disktide.domain.scan import (
     AccessError,
     NodeAggregateUpdated,
     ScanCancelled,
@@ -27,10 +27,10 @@ from sizetrail.domain.scan import (
     ScanStarted,
     ScanStatus,
 )
-from sizetrail.models.tree import FSNode
-from sizetrail.scanner.progress import ScanProgress
-from sizetrail.services.scan import ScanService
-from sizetrail.services.scan_consumers import (
+from disktide.models.tree import FSNode
+from disktide.scanner.progress import ScanProgress
+from disktide.services.scan import ScanService
+from disktide.services.scan_consumers import (
     ProgressViewModel,
     ScanEventRecorder,
     TreeViewModel,
@@ -388,7 +388,7 @@ def test_cleanup_rejects_invalid_worker_count_with_usage_exit_code(tmp_path):
 
 
 def test_cli_uses_distinct_cancel_and_failure_exit_codes(tmp_path, monkeypatch):
-    from sizetrail.services.scan import ScanService
+    from disktide.services.scan import ScanService
 
     def cancelled(self, run, *, consumers=()):
         run.status = ScanStatus.CANCELLED
@@ -422,7 +422,7 @@ def test_cli_and_tui_use_same_service_result(tmp_path):
         config = AppConfig()
         config.scan.workers = 1
         config.ui.live_scan_render = "off"
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(tmp_path),
             show_welcome=False,
             config=config,
@@ -463,7 +463,7 @@ def test_live_snapshot_does_not_replace_completed_navigation_state(tmp_path):
         config = AppConfig()
         config.scan.workers = 1
         config.ui.live_scan_render = "off"
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(tmp_path),
             show_welcome=False,
             config=config,
@@ -486,9 +486,9 @@ def test_live_snapshot_does_not_replace_completed_navigation_state(tmp_path):
 def test_product_sources_do_not_construct_scan_engine_directly():
     repo = Path(__file__).resolve().parents[1]
     product_sources = (
-        repo / "src/sizetrail/screens/explorer.py",
-        repo / "src/sizetrail/__main__.py",
-        repo / "src/sizetrail/services/monitor.py",
+        repo / "src/disktide/screens/explorer.py",
+        repo / "src/disktide/__main__.py",
+        repo / "src/disktide/services/monitor.py",
     )
 
     for source in product_sources:

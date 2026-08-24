@@ -1,24 +1,24 @@
 # User Guide
 
-SizeTrail is an interactive terminal tool for exploring disk usage, detecting cleanup opportunities, and tracking how directory sizes change over time.
+DiskTide is an interactive terminal tool for exploring disk usage, detecting cleanup opportunities, and tracking how directory sizes change over time.
 
 ## Getting Started
 
 Install and launch:
 
 ```bash
-uv tool install sizetrail
-sizetrail
+uv tool install disktide
+disktide
 ```
 
-For a one-shot launch, use `uvx sizetrail`. `pipx install
-sizetrail` and a normal `pip install sizetrail` inside a virtual
-environment are also supported. The installed command is always `sizetrail`;
-`fsmonitor` and `fsmonitor-cli` remain compatibility aliases.
+For a one-shot launch, use `uvx disktide`. `pipx install
+disktide` and a normal `pip install disktide` inside a virtual
+environment are also supported. The installed command is always `disktide`;
+`sizetrail`, `fsmonitor`, and `fsmonitor-cli` remain compatibility aliases.
 
 The welcome screen shows a single path input with a list of suggested starting directories:
 
-- **Current directory** -- the directory you launched `sizetrail` from
+- **Current directory** -- the directory you launched `disktide` from
 - **Saved default** -- your previously saved default path (if any)
 - **Last visited** -- the most recently explored path (if different from the above)
 - **Recent** -- paths from previous `watch` or `scan --snapshot` runs
@@ -148,9 +148,9 @@ pinned, and rollup state.
 
 Definitions are persistent; execution is not. `enabled · no-host` means the
 definition is ready but no process currently owns it. Press `s` in the TUI or
-run `sizetrail watch --monitor/--all` to host scans. Leaving Monitor Center for
+run `disktide watch --monitor/--all` to host scans. Leaving Monitor Center for
 Explorer keeps the TUI session alive, while quitting the app stops it and
-releases its lease. With `sizetrail[watch]` installed on Linux, `auto` mode
+releases its lease. With `disktide[watch]` installed on Linux, `auto` mode
 attaches inotify to each held lease. Ordinary events trigger bounded local
 reconciliation; startup, restart, overflow, backend loss, manual `g`, and the
 normal interval trigger full reconciliation. Events never replace the periodic
@@ -216,7 +216,7 @@ separate red action and requires typing the exact plan-scoped
 `DELETE <plan-id>` token. Detection-only rules remain visible but cannot enter
 safe apply, permanent deletion, or purge.
 
-Before every action, sizetrail repeats `lstat`, identity, rule, age, directory
+Before every action, disktide repeats `lstat`, identity, rule, age, directory
 content, mount-boundary, and protected-path checks. Changed, missing, replaced,
 or no-longer-matching targets are skipped with a specific audit reason. Parent
 targets subsume matching children so estimated bytes and execution are not
@@ -263,8 +263,8 @@ capabilities, optional extras (including watch backend/version/status), and
 default scan policy:
 
 ```bash
-sizetrail doctor
-sizetrail doctor --json
+disktide doctor
+disktide doctor --json
 ```
 
 The JSON schema is versioned and suitable for attaching to issue reports. App
@@ -277,11 +277,11 @@ scan tree or lists user files.
 One-shot scan with a text summary:
 
 ```bash
-sizetrail scan /path
-sizetrail scan /path --snapshot      # save results to the database
-sizetrail scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
-sizetrail scan /path --metric allocated
-sizetrail scan / --metric unique --one-file-system --exclude-pseudo
+disktide scan /path
+disktide scan /path --snapshot      # save results to the database
+disktide scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
+disktide scan /path --metric allocated
+disktide scan / --metric unique --one-file-system --exclude-pseudo
 ```
 
 `--metric` controls the completion total, sorting, and top-directory bars.
@@ -301,9 +301,9 @@ an explicit coverage line; cancellation never prints a completion summary.
 Compare a target snapshot with a baseline snapshot:
 
 ```bash
-sizetrail compare latest previous /path
-sizetrail compare 42 41
-sizetrail compare --since 7d /path
+disktide compare latest previous /path
+disktide compare 42 41
+disktide compare --since 7d /path
 ```
 
 The first selector is the target and the second is the baseline, so the report
@@ -324,19 +324,19 @@ keeps every incompatibility visible in the output.
 Create and manage the same persistent definitions used by Monitor Center:
 
 ```bash
-sizetrail monitor add /data --label data --interval 6h --capture-now
-sizetrail monitor list
-sizetrail monitor status 1
-sizetrail monitor edit 1 --interval 1h --metric allocated
-sizetrail monitor pause 1
-sizetrail monitor resume 1
-sizetrail monitor run 1
-sizetrail monitor reconcile 1
-sizetrail monitor retention 1          # preview
-sizetrail monitor retention 1 --apply  # run maintenance
-sizetrail monitor pin 42 --label release
-sizetrail monitor unpin 42
-sizetrail monitor remove 1             # archive; keep history
+disktide monitor add /data --label data --interval 6h --capture-now
+disktide monitor list
+disktide monitor status 1
+disktide monitor edit 1 --interval 1h --metric allocated
+disktide monitor pause 1
+disktide monitor resume 1
+disktide monitor run 1
+disktide monitor reconcile 1
+disktide monitor retention 1          # preview
+disktide monitor retention 1 --apply  # run maintenance
+disktide monitor pin 42 --label release
+disktide monitor unpin 42
+disktide monitor remove 1             # archive; keep history
 ```
 
 Monitor identifiers may be numeric ids or labels where the command accepts an
@@ -351,17 +351,17 @@ Alert rules belong to one monitor and share the same repository/service path as
 the TUI Alerts tab:
 
 ```bash
-sizetrail alerts add 1 /data --size 500GiB
-sizetrail alerts add 1 /data/logs --growth 10GiB --window 24h
-sizetrail alerts add 1 /data --percent 20 --cooldown 6h
-sizetrail alerts add 1 /data --free-space 50GiB --severity critical
-sizetrail alerts add 1 /data --inode-free 100000
-sizetrail alerts add 1 /data/incoming --new-large 4GiB
-sizetrail alerts list 1
-sizetrail alerts check 1
-sizetrail alerts disable RULE_ID
-sizetrail alerts enable RULE_ID
-sizetrail alerts remove RULE_ID
+disktide alerts add 1 /data --size 500GiB
+disktide alerts add 1 /data/logs --growth 10GiB --window 24h
+disktide alerts add 1 /data --percent 20 --cooldown 6h
+disktide alerts add 1 /data --free-space 50GiB --severity critical
+disktide alerts add 1 /data --inode-free 100000
+disktide alerts add 1 /data/incoming --new-large 4GiB
+disktide alerts list 1
+disktide alerts check 1
+disktide alerts disable RULE_ID
+disktide alerts enable RULE_ID
+disktide alerts remove RULE_ID
 ```
 
 Rules can evaluate logical, allocated, unique, or file-count measurements.
@@ -376,13 +376,13 @@ Run the shared monitor host in the foreground until interrupted or
 `--max-time` is reached:
 
 ```bash
-sizetrail watch /path                   # transient definition; default 6h
-sizetrail watch /path --interval 1h
-sizetrail watch /path -i 30m -t 12h
-sizetrail watch /path --events          # require sizetrail[watch]
-sizetrail watch /path --periodic-only   # force the dependency-free core path
-sizetrail watch --monitor 1             # host one saved definition
-sizetrail watch --all                   # host all enabled definitions
+disktide watch /path                   # transient definition; default 6h
+disktide watch /path --interval 1h
+disktide watch /path -i 30m -t 12h
+disktide watch /path --events          # require disktide[watch]
+disktide watch /path --periodic-only   # force the dependency-free core path
+disktide watch --monitor 1             # host one saved definition
+disktide watch --all                   # host all enabled definitions
 ```
 
 The default `auto` mode uses the native backend when installed and otherwise
@@ -405,20 +405,20 @@ when it must outlive the current shell:
 ```bash
 # tmux (recommended -- reattach later with `tmux attach -t fsmon`)
 tmux new -s fsmon
-sizetrail watch /path --interval 6h
+disktide watch /path --interval 6h
 
 # nohup (background, no reattach; host every enabled saved monitor)
-nohup sizetrail watch --all > /dev/null 2>&1 &
+nohup disktide watch --all > /dev/null 2>&1 &
 ```
 
 An external systemd user unit can supervise the same foreground host. The
-project ships `docs/examples/sizetrail-watch.service` as a copyable example; it
+project ships `docs/examples/disktide-watch.service` as a copyable example; it
 does not install, enable, or grant cleanup permissions to that unit:
 
 ```ini
-# ~/.config/systemd/user/sizetrail.service
+# ~/.config/systemd/user/disktide.service
 [Service]
-ExecStart=%h/.local/bin/sizetrail watch --all
+ExecStart=%h/.local/bin/disktide watch --all
 Restart=on-failure
 
 [Install]
@@ -426,11 +426,11 @@ WantedBy=default.target
 ```
 
 ```bash
-systemctl --user enable --now sizetrail.service
+systemctl --user enable --now disktide.service
 loginctl enable-linger $USER
 ```
 
-Use `--events` in the unit only after installing `sizetrail[watch]`. Omit it
+Use `--events` in the unit only after installing `disktide[watch]`. Omit it
 for automatic fallback, or use `--periodic-only` to guarantee core-only hosting.
 Every backend start/restart is recorded as requiring full reconciliation, so
 service downtime is never presented as a complete event history.
@@ -440,13 +440,13 @@ service downtime is never presented as a complete event history.
 Cleanup defaults to a persistent, read-only preview:
 
 ```bash
-sizetrail cleanup /path
-sizetrail cleanup --plan PLAN_ID --apply
-sizetrail cleanup history --by category
-sizetrail cleanup undo PLAN_OR_ACTION_ID
-sizetrail cleanup purge PLAN_OR_ACTION_ID
-sizetrail cleanup quarantine audit /path/.sizetrail-quarantine
-sizetrail cleanup quarantine rebuild /path/.sizetrail-quarantine
+disktide cleanup /path
+disktide cleanup --plan PLAN_ID --apply
+disktide cleanup history --by category
+disktide cleanup undo PLAN_OR_ACTION_ID
+disktide cleanup purge PLAN_OR_ACTION_ID
+disktide cleanup quarantine audit /path/.disktide-quarantine
+disktide cleanup quarantine rebuild /path/.disktide-quarantine
 ```
 
 The first command scans, resolves parent/child overlap, saves the plan, and makes
@@ -468,23 +468,23 @@ summary and interrupted transition state without deleting unknown files.
 Manage declarative rule packs from the same configuration used by the TUI:
 
 ```bash
-sizetrail cleanup rules list
-sizetrail cleanup rules validate /path/to/pack.toml
-sizetrail cleanup rules disable node
-sizetrail cleanup rules enable node
+disktide cleanup rules list
+disktide cleanup rules validate /path/to/pack.toml
+disktide cleanup rules disable node
+disktide cleanup rules enable node
 ```
 
 Built-in packs are packaged with the application. Optional user packs load from
-`~/.config/sizetrail/cleanup-rules/*.toml` (respecting `XDG_CONFIG_HOME`).
+`~/.config/disktide/cleanup-rules/*.toml` (respecting `XDG_CONFIG_HOME`).
 Validation is strict: unknown fields, unsupported schema versions, invalid
 identifiers/types, duplicate names, and executable hook fields are rejected.
-One bad pack is isolated and reported by `sizetrail doctor`; valid packs remain
+One bad pack is isolated and reported by `disktide doctor`; valid packs remain
 available.
 
 Permanent deletion is intentionally separate:
 
 ```bash
-sizetrail cleanup --plan PLAN_ID --permanent
+disktide cleanup --plan PLAN_ID --permanent
 ```
 
 The command prints the irreversible warning and requires the exact
@@ -496,12 +496,13 @@ deletion. `--apply` can never select permanent deletion.
 
 ## Configuration
 
-New installations store settings in `~/.config/sizetrail/config.toml`
-(respecting `XDG_CONFIG_HOME`). If the SizeTrail path does not yet contain a
-configuration but `~/.config/fsmonitor-cli/config.toml` already exists,
-SizeTrail continues using that legacy file so upgrades keep their settings and
-user cleanup rules. Edit the active file directly or use the settings screen
-(`?` in the TUI).
+New installations store settings in `~/.config/disktide/config.toml`
+(respecting `XDG_CONFIG_HOME`). If the DiskTide path does not yet contain a
+configuration, DiskTide continues using
+`~/.config/sizetrail/config.toml` or, for older installations,
+`~/.config/fsmonitor-cli/config.toml`. This preserves settings and user cleanup
+rules across both previous names. Edit the active file directly or use the
+settings screen (`?` in the TUI).
 
 ```toml
 [scan]

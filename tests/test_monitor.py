@@ -1,7 +1,7 @@
 """Tests for the legacy in-memory tree comparison helper."""
 
-from sizetrail.models.tree import FSNode
-from sizetrail.monitor.diff import compare_trees
+from disktide.models.tree import FSNode
+from disktide.monitor.diff import compare_trees
 
 
 def make_tree(root_size, child_sizes):

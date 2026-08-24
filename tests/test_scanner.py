@@ -4,8 +4,8 @@ import os
 import tempfile
 
 import pytest
-from sizetrail.scanner.walker import scan_directory
-from sizetrail.scanner.engine import ScanEngine
+from disktide.scanner.walker import scan_directory
+from disktide.scanner.engine import ScanEngine
 
 
 @pytest.fixture

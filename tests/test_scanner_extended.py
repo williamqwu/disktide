@@ -4,8 +4,8 @@ import os
 import tempfile
 
 import pytest
-from sizetrail.scanner.walker import scan_directory
-from sizetrail.scanner.engine import ScanEngine
+from disktide.scanner.walker import scan_directory
+from disktide.scanner.engine import ScanEngine
 
 
 @pytest.fixture
@@ -163,7 +163,7 @@ class TestCancelPropagation:
 
         # Wrap scandir to set the cancel event as soon as the *first* dir
         # entry is yielded, so subsequent recursions must observe it.
-        import sizetrail.scanner.walker as walker_mod
+        import disktide.scanner.walker as walker_mod
         real_scandir = os.scandir
         triggered = {"done": False}
 

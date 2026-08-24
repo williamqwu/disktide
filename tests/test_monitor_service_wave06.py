@@ -8,23 +8,23 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sizetrail.domain.metrics import MetricId
-from sizetrail.domain.monitor import (
+from disktide.domain.metrics import MetricId
+from disktide.domain.monitor import (
     MonitorActivityState,
     MonitorDefinition,
     MonitorDesiredState,
     MonitorHealthState,
 )
-from sizetrail.domain.policy import ScanPolicy
-from sizetrail.models.tree import FSNode
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.monitor import (
+from disktide.domain.policy import ScanPolicy
+from disktide.models.tree import FSNode
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.monitor import (
     MonitorEventKind,
     MonitorLeaseUnavailable,
     MonitorService,
 )
-from sizetrail.services.scan import ScanService
-from sizetrail.storage.migrations import migrate
+from disktide.services.scan import ScanService
+from disktide.storage.migrations import migrate
 
 
 @pytest.fixture

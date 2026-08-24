@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.17
+
+**Renamed to DiskTide**
+
+- **canonical identity** Renamed the product, Python distribution, import package, primary executable, UI title, diagnostics, documentation, service example, and release artifacts to `DiskTide` / `disktide`.
+- **command compatibility** Retained `sizetrail`, `fsmonitor`, and `fsmonitor-cli` as compatibility entry points backed by the same `disktide` CLI, with minimal `sizetrail` and `fs_monitor` import shims for version discovery and `python -m` compatibility.
+- **data continuity** New installations use `~/.config/disktide` and `~/.local/share/disktide`; existing `sizetrail` paths take precedence over older `fsmonitor-cli` paths when DiskTide has not initialized its own namespace.
+- **cleanup continuity** New quarantine roots use `.disktide-quarantine`, while existing `.sizetrail-quarantine` and `.fsmonitor-quarantine` roots remain protected and discoverable for audit, undo, and purge workflows.
+
 ## v0.2.16
 
 **Renamed to SizeTrail**

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sizetrail.domain.cleanup import (
+from disktide.domain.cleanup import (
     CleanupActionKind,
     CleanupPlan,
     CleanupPlanStatus,
 )
-from sizetrail.domain.metrics import MetricId
-from sizetrail.domain.snapshot import Snapshot
-from sizetrail.models.tree import FSNode
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.domain.metrics import MetricId
+from disktide.domain.snapshot import Snapshot
+from disktide.models.tree import FSNode
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
 
 
 def _flat_tree(total_nodes: int) -> FSNode:

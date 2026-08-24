@@ -1,10 +1,12 @@
-"""Compatibility import for the pre-SizeTrail package namespace."""
+"""Compatibility import for the original ``fs_monitor`` namespace."""
 
-from sizetrail import (
+from disktide import (
     APP_NAME,
     CLI_NAME,
     LEGACY_QUARANTINE_DIRECTORY_NAMES,
     LEGACY_STORAGE_NAMESPACE,
+    LEGACY_STORAGE_NAMESPACES,
+    PREVIOUS_STORAGE_NAMESPACE,
     PRODUCT_NAME,
     QUARANTINE_DIRECTORY_NAME,
     STORAGE_NAMESPACE,
@@ -16,6 +18,8 @@ __all__ = [
     "CLI_NAME",
     "LEGACY_QUARANTINE_DIRECTORY_NAMES",
     "LEGACY_STORAGE_NAMESPACE",
+    "LEGACY_STORAGE_NAMESPACES",
+    "PREVIOUS_STORAGE_NAMESPACE",
     "PRODUCT_NAME",
     "QUARANTINE_DIRECTORY_NAME",
     "STORAGE_NAMESPACE",

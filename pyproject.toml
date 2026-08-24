@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sizetrail"
-version = "0.2.16"
+name = "disktide"
+version = "0.2.17"
 description = "Storage intelligence TUI for exploring, tracking, and safely reclaiming disk space"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -42,12 +42,13 @@ Repository = "https://github.com/williamqwu/fsmonitor-cli"
 Issues = "https://github.com/williamqwu/fsmonitor-cli/issues"
 
 [project.scripts]
-sizetrail = "sizetrail.__main__:cli"
-fsmonitor = "sizetrail.__main__:cli"
-fsmonitor-cli = "sizetrail.__main__:cli"
+disktide = "disktide.__main__:cli"
+sizetrail = "disktide.__main__:cli"
+fsmonitor = "disktide.__main__:cli"
+fsmonitor-cli = "disktide.__main__:cli"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sizetrail", "src/fs_monitor"]
+packages = ["src/disktide", "src/sizetrail", "src/fs_monitor"]
 
 [dependency-groups]
 dev = [

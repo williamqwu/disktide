@@ -1,10 +1,10 @@
 """Tests for visualization modules."""
 
 import pytest
-from sizetrail.models.tree import FSNode
-from sizetrail.viz.colors import size_color, depth_color, gradient_color, set_color_scheme
-from sizetrail.viz.treemap import compute_layout, render_line
-from sizetrail.viz.sunburst import compute_sunburst, render_sunburst_line
+from disktide.models.tree import FSNode
+from disktide.viz.colors import size_color, depth_color, gradient_color, set_color_scheme
+from disktide.viz.treemap import compute_layout, render_line
+from disktide.viz.sunburst import compute_sunburst, render_sunburst_line
 
 
 def make_viz_tree():

@@ -8,31 +8,31 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from sizetrail.__main__ import cli
-from sizetrail.app import SizeTrailApp
-from sizetrail.cleanup.actions import (
+from disktide.__main__ import cli
+from disktide.app import DiskTideApp
+from disktide.cleanup.actions import (
     CleanupExecutionError,
     QuarantineExecutor,
     XDGTrashAdapter,
 )
-from sizetrail.cleanup.detector import detect_targets
-from sizetrail.config import AppConfig
-from sizetrail.domain.cleanup import (
+from disktide.cleanup.detector import detect_targets
+from disktide.config import AppConfig
+from disktide.domain.cleanup import (
     CleanupActionKind,
     CleanupAuditKind,
     CleanupExecutionStatus,
     CleanupPlanStatus,
     CleanupValidationStatus,
 )
-from sizetrail.models.patterns import CleanupRule, CleanupTarget, RiskLevel
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.scanner.walker import scan_directory
-from sizetrail.screens.cleanup import CleanupScreen
-from sizetrail.services.cleanup import (
+from disktide.models.patterns import CleanupRule, CleanupTarget, RiskLevel
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.scanner.walker import scan_directory
+from disktide.screens.cleanup import CleanupScreen
+from disktide.services.cleanup import (
     CleanupConfirmationRequired,
     CleanupService,
 )
-from sizetrail.widgets.cleanup_modal import CleanupModal
+from disktide.widgets.cleanup_modal import CleanupModal
 
 
 class _UnavailableTrash:
@@ -170,9 +170,13 @@ def test_scan_root_database_directory_quarantine_and_mount_roots_are_blocked(
 ):
     scan_root = tmp_path / "scan"
     database_dir = scan_root / ".state"
-    quarantine = scan_root / ".sizetrail-quarantine"
+    quarantine_roots = (
+        scan_root / ".disktide-quarantine",
+        scan_root / ".sizetrail-quarantine",
+        scan_root / ".fsmonitor-quarantine",
+    )
     mount_candidate = scan_root / "mount-cache"
-    for path in (database_dir, quarantine, mount_candidate):
+    for path in (database_dir, *quarantine_roots, mount_candidate):
         path.mkdir(parents=True, exist_ok=True)
         (path / "payload").write_bytes(b"x")
     repository = SQLiteSnapshotRepository(str(database_dir / "data.db"))
@@ -180,13 +184,16 @@ def test_scan_root_database_directory_quarantine_and_mount_roots_are_blocked(
     try:
         service = CleanupService(repository)
         monkeypatch.setattr(
-            "sizetrail.services.cleanup.os.path.ismount",
+            "disktide.services.cleanup.os.path.ismount",
             lambda value: Path(value) == mount_candidate,
         )
         targets = [
             _custom_target(scan_root, scan_root),
             _custom_target(database_dir, scan_root),
-            _custom_target(quarantine, scan_root),
+            *(
+                _custom_target(quarantine, scan_root)
+                for quarantine in quarantine_roots
+            ),
             _custom_target(mount_candidate, scan_root),
         ]
 
@@ -195,7 +202,10 @@ def test_scan_root_database_directory_quarantine_and_mount_roots_are_blocked(
         reasons = {action.path: action.validation_detail for action in plan.actions}
         assert "scan root" in (reasons[str(scan_root)] or "")
         assert "protected application path" in (reasons[str(database_dir)] or "")
-        assert "quarantine root" in (reasons[str(quarantine)] or "")
+        assert all(
+            "quarantine root" in (reasons[str(quarantine)] or "")
+            for quarantine in quarantine_roots
+        )
         assert "mount root" in (reasons[str(mount_candidate)] or "")
         assert all(
             action.execution_status is CleanupExecutionStatus.SKIPPED
@@ -399,7 +409,7 @@ def test_tui_preview_safe_apply_and_undo_share_cleanup_service(
         assert predicate()
 
     async def exercise():
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(root),
             show_welcome=False,
             config=config,

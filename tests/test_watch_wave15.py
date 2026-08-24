@@ -10,39 +10,39 @@ from pathlib import Path
 
 import pytest
 
-import sizetrail.scanner.scheduler as scheduler_module
-import sizetrail.services.monitor as monitor_module
-from sizetrail.collectors.events.base import (
+import disktide.scanner.scheduler as scheduler_module
+import disktide.services.monitor as monitor_module
+from disktide.collectors.events.base import (
     EventBackendInfo,
     EventWatch,
     FilesystemEvent,
     FilesystemEventKind,
 )
-from sizetrail.domain.alerts import AlertKind, AlertRule
-from sizetrail.domain.metrics import MetricId, StorageMeasurements
-from sizetrail.domain.monitor import (
+from disktide.domain.alerts import AlertKind, AlertRule
+from disktide.domain.metrics import MetricId, StorageMeasurements
+from disktide.domain.monitor import (
     MonitorDefinition,
     MonitorEventMode,
     MonitorReconciliationState,
     MonitorWatchMode,
     WatchDiagnostics,
 )
-from sizetrail.domain.policy import ScanPolicy
-from sizetrail.domain.provisional import (
+from disktide.domain.policy import ScanPolicy
+from disktide.domain.provisional import (
     ProvisionalConfidence,
     ProvisionalSummary,
 )
-from sizetrail.domain.scan import ScanRequest
-from sizetrail.domain.snapshot import Snapshot
-from sizetrail.extensions.capabilities import CapabilityStatus
-from sizetrail.models.tree import FSNode
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.monitor import MonitorService
-from sizetrail.services.provisional import (
+from disktide.domain.scan import ScanRequest
+from disktide.domain.snapshot import Snapshot
+from disktide.extensions.capabilities import CapabilityStatus
+from disktide.models.tree import FSNode
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.monitor import MonitorService
+from disktide.services.provisional import (
     ProvisionalProjectionRequiresFull,
     ProvisionalProjectionService,
 )
-from sizetrail.services.scan import ScanService
+from disktide.services.scan import ScanService
 
 
 class HandoffEventBackend:

@@ -3,7 +3,7 @@
 import os
 from unittest.mock import patch
 
-from sizetrail.screens.fs_overview import (
+from disktide.screens.fs_overview import (
     FSEntry,
     _usage_bar,
     _build_summary,
@@ -14,7 +14,7 @@ from sizetrail.screens.fs_overview import (
     _block_status_cell,
     _build_block_summary,
 )
-from sizetrail.scanner.blockdev import BlockDevice, DeviceStatus
+from disktide.scanner.blockdev import BlockDevice, DeviceStatus
 
 
 def _entry(mount="/", device="/dev/sda1", total=1000, used=500, free=400,

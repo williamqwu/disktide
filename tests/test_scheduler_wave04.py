@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from sizetrail.domain.live_view import build_live_view, count_live_nodes
-from sizetrail.domain.metrics import MetricId
-from sizetrail.domain.scan import (
+from disktide.domain.live_view import build_live_view, count_live_nodes
+from disktide.domain.metrics import MetricId
+from disktide.domain.scan import (
     DirectoryCompleted,
     DirectoryQueued,
     NodeAggregateUpdated,
@@ -18,16 +18,16 @@ from sizetrail.domain.scan import (
     ScanRequest,
     ScanStatus,
 )
-from sizetrail.models.tree import FSNode
-from sizetrail.scanner import scheduler as scheduler_module
-from sizetrail.scanner.engine import ScanEngine
-from sizetrail.scanner.progress import ScanProgress
-from sizetrail.scanner.walker import scan_directory
-from sizetrail.services.scan import ScanService
-from sizetrail.services.scan_consumers import ScanEventRecorder
-from sizetrail.widgets.size_tree import SizeTree
-from sizetrail.widgets.sunburst_view import SunburstView
-from sizetrail.widgets.treemap_view import TreemapView
+from disktide.models.tree import FSNode
+from disktide.scanner import scheduler as scheduler_module
+from disktide.scanner.engine import ScanEngine
+from disktide.scanner.progress import ScanProgress
+from disktide.scanner.walker import scan_directory
+from disktide.services.scan import ScanService
+from disktide.services.scan_consumers import ScanEventRecorder
+from disktide.widgets.size_tree import SizeTree
+from disktide.widgets.sunburst_view import SunburstView
+from disktide.widgets.treemap_view import TreemapView
 
 
 def test_scheduler_parallelizes_below_a_single_top_level_directory(

@@ -1,8 +1,8 @@
 """Tests for built-in cleanup rules."""
 
 import pytest
-from sizetrail.cleanup.rules import get_rules, get_rule_by_name, BUILTIN_RULES
-from sizetrail.models.patterns import RiskLevel
+from disktide.cleanup.rules import get_rules, get_rule_by_name, BUILTIN_RULES
+from disktide.models.patterns import RiskLevel
 
 
 class TestBuiltinRules:

@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 
 import pytest
-from sizetrail.widgets.trend_chart import _pick_date_form
+from disktide.widgets.trend_chart import _pick_date_form
 
 try:
     import plotext

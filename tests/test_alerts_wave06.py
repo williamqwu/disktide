@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from sizetrail.domain.alerts import AlertKind, AlertRule
-from sizetrail.domain.monitor import MonitorDefinition
-from sizetrail.domain.snapshot import Snapshot
-from sizetrail.models.tree import FSNode
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.alerts import AlertService
+from disktide.domain.alerts import AlertKind, AlertRule
+from disktide.domain.monitor import MonitorDefinition
+from disktide.domain.snapshot import Snapshot
+from disktide.models.tree import FSNode
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.alerts import AlertService
 
 
 @pytest.fixture

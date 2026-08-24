@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from sizetrail.glyphs import DENIED, PARTIAL
-from sizetrail.models.tree import FSNode
-from sizetrail.rendering import (
+from disktide.glyphs import DENIED, PARTIAL
+from disktide.models.tree import FSNode
+from disktide.rendering import (
     bar_chars,
     denied_glyph,
     is_safe_rendering,
     partial_glyph,
     set_safe_rendering,
 )
-from sizetrail.widgets.size_tree import SizeTree
+from disktide.widgets.size_tree import SizeTree
 
 
 @pytest.fixture(autouse=True)

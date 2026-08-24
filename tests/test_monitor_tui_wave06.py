@@ -7,14 +7,14 @@ import inspect
 
 from textual.widgets import Button
 
-from sizetrail.app import SizeTrailApp
-from sizetrail.config import AppConfig
-from sizetrail.domain.monitor import MonitorActivityState, MonitorDefinition
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.screens.explorer import ExplorerScreen
-from sizetrail.screens.monitor import MonitorScreen
-from sizetrail.widgets.alert_editor import AlertEditor
-from sizetrail.widgets.monitor_editor import MonitorEditor
+from disktide.app import DiskTideApp
+from disktide.config import AppConfig
+from disktide.domain.monitor import MonitorActivityState, MonitorDefinition
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.screens.explorer import ExplorerScreen
+from disktide.screens.monitor import MonitorScreen
+from disktide.widgets.alert_editor import AlertEditor
+from disktide.widgets.monitor_editor import MonitorEditor
 
 
 async def _wait_for_explorer(pilot, app) -> None:
@@ -45,7 +45,7 @@ def test_tui_setup_is_visible_to_shared_service_and_alert_editor(tmp_path):
     repository = SQLiteSnapshotRepository(path=str(tmp_path / "tui.db"))
 
     async def exercise() -> None:
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(root),
             show_welcome=False,
             config=_config(),
@@ -124,14 +124,14 @@ def test_monitor_sampling_controls_start_stop_and_persist_auto_start(
     config = _config()
     saved_auto_start: list[bool] = []
     monkeypatch.setattr(
-        "sizetrail.screens.monitor.save_config",
+        "disktide.screens.monitor.save_config",
         lambda current: saved_auto_start.append(
             current.monitor.auto_start_in_tui
         ),
     )
 
     async def exercise() -> None:
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(root),
             show_welcome=False,
             config=config,
@@ -203,7 +203,7 @@ def test_monitor_auto_start_launch_is_reflected_in_controls(tmp_path):
     config.monitor.auto_start_in_tui = True
 
     async def exercise() -> None:
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(root),
             show_welcome=False,
             config=config,
@@ -250,7 +250,7 @@ def test_narrow_monitor_uses_list_detail_and_session_continues_off_screen(
     repository = SQLiteSnapshotRepository(path=str(path))
 
     async def exercise() -> None:
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(root),
             show_welcome=False,
             config=_config(),
@@ -316,7 +316,7 @@ def test_explorer_sets_up_monitor_for_highlighted_directory(tmp_path):
     repository = SQLiteSnapshotRepository(path=str(tmp_path / "explorer.db"))
 
     async def exercise() -> None:
-        app = SizeTrailApp(
+        app = DiskTideApp(
             scan_path=str(root),
             show_welcome=False,
             config=_config(),

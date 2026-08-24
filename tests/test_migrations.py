@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
-from sizetrail.storage.migrations import (
+from disktide.storage.migrations import (
     CURRENT_VERSION,
     MIGRATION_CALLBACKS,
     get_version,

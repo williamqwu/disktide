@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from sizetrail.config import (
+from disktide.config import (
     load_config, save_config, AppConfig, HostPaths,
     get_effective_paths, parse_size, set_effective_paths,
 )
@@ -237,7 +237,7 @@ show_hidden = true
         config = AppConfig()
         assert config.ui.hostname_aware_paths is True
 
-    @patch("sizetrail.config.current_hostname", return_value="myhost")
+    @patch("disktide.config.current_hostname", return_value="myhost")
     def test_get_effective_paths_hostname_aware(self, mock_host):
         config = AppConfig()
         config.host_paths["myhost"] = HostPaths(
@@ -252,7 +252,7 @@ show_hidden = true
         assert paths.default_scan_path == "/data"
         assert paths.last_visited_path == "/data/logs"
 
-    @patch("sizetrail.config.current_hostname", return_value="myhost")
+    @patch("disktide.config.current_hostname", return_value="myhost")
     def test_get_effective_paths_legacy_fallback(self, mock_host):
         """No per-host entry but legacy default_scan_path exists."""
         config = AppConfig()
@@ -262,7 +262,7 @@ show_hidden = true
         assert paths.default_scan_path == "/legacy/path"
         assert paths.last_visited_path is None
 
-    @patch("sizetrail.config.current_hostname", return_value="myhost")
+    @patch("disktide.config.current_hostname", return_value="myhost")
     def test_get_effective_paths_legacy_mode(self, mock_host):
         """hostname_aware_paths=False uses _default key."""
         config = AppConfig()
@@ -274,7 +274,7 @@ show_hidden = true
         paths = get_effective_paths(config)
         assert paths.default_scan_path == "/shared"
 
-    @patch("sizetrail.config.current_hostname", return_value="myhost")
+    @patch("disktide.config.current_hostname", return_value="myhost")
     def test_set_effective_paths(self, mock_host):
         config = AppConfig()
         hp = HostPaths(default_scan_path="/new", last_visited_path="/new/sub")
@@ -364,37 +364,37 @@ class TestResolveLiveScanRender:
     """The auto-gate: terminal-size + cpu_count thresholds."""
 
     def test_on_overrides_gate(self):
-        from sizetrail.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "on", terminal_width=40, terminal_height=10, cpu_count=1
         ) is True
 
     def test_off_overrides_gate(self):
-        from sizetrail.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "off", terminal_width=200, terminal_height=60, cpu_count=16
         ) is False
 
     def test_auto_enabled_on_roomy_terminal(self):
-        from sizetrail.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=100, terminal_height=40, cpu_count=8
         ) is True
 
     def test_auto_disabled_when_terminal_too_narrow(self):
-        from sizetrail.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=60, terminal_height=40, cpu_count=8
         ) is False
 
     def test_auto_disabled_when_terminal_too_short(self):
-        from sizetrail.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=120, terminal_height=15, cpu_count=8
         ) is False
 
     def test_auto_disabled_when_too_few_cpus(self):
-        from sizetrail.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=120, terminal_height=40, cpu_count=2
         ) is False
@@ -402,7 +402,7 @@ class TestResolveLiveScanRender:
     def test_unknown_value_treated_as_auto(self):
         """Any non-on/off value uses the gate, so a future bad config
         value can't permanently disable the feature."""
-        from sizetrail.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "yes-please", terminal_width=120, terminal_height=40, cpu_count=8
         ) is True

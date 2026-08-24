@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 
-from sizetrail.app import SizeTrailApp
-from sizetrail.config import load_config
-from sizetrail.screens.explorer import ExplorerScreen
-from sizetrail.widgets.confirm_modal import ConfirmModal
+from disktide.app import DiskTideApp
+from disktide.config import load_config
+from disktide.screens.explorer import ExplorerScreen
+from disktide.widgets.confirm_modal import ConfirmModal
 
 
 async def _wait_for_explorer(pilot, app) -> None:
@@ -19,8 +19,8 @@ async def _wait_for_explorer(pilot, app) -> None:
             return
 
 
-def _new_app(tmp_path) -> SizeTrailApp:
-    return SizeTrailApp(
+def _new_app(tmp_path) -> DiskTideApp:
+    return DiskTideApp(
         scan_path=str(tmp_path),
         show_welcome=False,
         config=load_config(),

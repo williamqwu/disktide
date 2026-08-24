@@ -4,14 +4,18 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from sizetrail import (
+from disktide import (
     CLI_NAME,
+    LEGACY_QUARANTINE_DIRECTORY_NAMES,
     LEGACY_STORAGE_NAMESPACE,
+    LEGACY_STORAGE_NAMESPACES,
+    PREVIOUS_STORAGE_NAMESPACE,
     PRODUCT_NAME,
+    QUARANTINE_DIRECTORY_NAME,
     STORAGE_NAMESPACE,
     __version__,
 )
-from sizetrail.__main__ import cli
+from disktide.__main__ import cli
 
 
 def test_canonical_and_legacy_commands_share_entrypoint():
@@ -19,10 +23,11 @@ def test_canonical_and_legacy_commands_share_entrypoint():
     project = tomllib.loads(project_file.read_text())
     scripts = project["project"]["scripts"]
 
-    assert project["project"]["name"] == "sizetrail"
-    assert scripts["sizetrail"] == "sizetrail.__main__:cli"
-    assert scripts["fsmonitor"] == scripts["sizetrail"]
-    assert scripts["fsmonitor-cli"] == scripts["sizetrail"]
+    assert project["project"]["name"] == "disktide"
+    assert scripts["disktide"] == "disktide.__main__:cli"
+    assert scripts["sizetrail"] == scripts["disktide"]
+    assert scripts["fsmonitor"] == scripts["disktide"]
+    assert scripts["fsmonitor-cli"] == scripts["disktide"]
     assert project["project"]["version"] == __version__
 
 
@@ -30,19 +35,29 @@ def test_canonical_command_name_appears_in_help():
     result = CliRunner().invoke(cli, ["--help"], prog_name=CLI_NAME)
 
     assert result.exit_code == 0
-    assert "Usage: sizetrail" in result.output
-    assert "Launch TUI: sizetrail" in result.output
+    assert "Usage: disktide" in result.output
+    assert "Launch TUI: disktide" in result.output
 
 
 def test_storage_namespace_stays_compatible():
-    assert PRODUCT_NAME == "SizeTrail"
-    assert STORAGE_NAMESPACE == "sizetrail"
+    assert PRODUCT_NAME == "DiskTide"
+    assert STORAGE_NAMESPACE == "disktide"
+    assert PREVIOUS_STORAGE_NAMESPACE == "sizetrail"
     assert LEGACY_STORAGE_NAMESPACE == "fsmonitor-cli"
+    assert LEGACY_STORAGE_NAMESPACES == ("sizetrail", "fsmonitor-cli")
+    assert QUARANTINE_DIRECTORY_NAME == ".disktide-quarantine"
+    assert LEGACY_QUARANTINE_DIRECTORY_NAMES == (
+        ".sizetrail-quarantine",
+        ".fsmonitor-quarantine",
+    )
 
 
-def test_legacy_python_namespace_exposes_version():
+def test_compatibility_python_namespaces_expose_version():
+    previous = importlib.import_module("sizetrail")
     legacy = importlib.import_module("fs_monitor")
 
+    assert previous.__version__ == __version__
+    assert previous.CLI_NAME == CLI_NAME
     assert legacy.__version__ == __version__
     assert legacy.CLI_NAME == CLI_NAME
 

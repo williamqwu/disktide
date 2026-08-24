@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import mock_open, patch
 
-from sizetrail.collectors.platform.base import PlatformAdapter
-from sizetrail.collectors.platform.linux import LinuxPlatformAdapter
-from sizetrail.collectors.platform.portable import PortablePlatformAdapter
-from sizetrail.extensions.capabilities import CapabilityId, CapabilityStatus
-from sizetrail.screens.fs_overview import _probe_message, probe_fs_entries
+from disktide.collectors.platform.base import PlatformAdapter
+from disktide.collectors.platform.linux import LinuxPlatformAdapter
+from disktide.collectors.platform.portable import PortablePlatformAdapter
+from disktide.extensions.capabilities import CapabilityId, CapabilityStatus
+from disktide.screens.fs_overview import _probe_message, probe_fs_entries
 
 
 def test_portable_adapter_is_conservative_and_explains_unavailable_features():

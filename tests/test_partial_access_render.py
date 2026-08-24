@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from sizetrail.glyphs import DENIED, PARTIAL, VS15, visible_width
-from sizetrail.models.tree import FSNode
-from sizetrail.viz.sunburst import compute_sunburst
-from sizetrail.viz.treemap import _access_glyph, compute_layout
-from sizetrail.widgets.breadcrumb import Breadcrumb
-from sizetrail.widgets.info_panel import InfoPanel
-from sizetrail.widgets.size_tree import SizeTree
+from disktide.glyphs import DENIED, PARTIAL, VS15, visible_width
+from disktide.models.tree import FSNode
+from disktide.viz.sunburst import compute_sunburst
+from disktide.viz.treemap import _access_glyph, compute_layout
+from disktide.widgets.breadcrumb import Breadcrumb
+from disktide.widgets.info_panel import InfoPanel
+from disktide.widgets.size_tree import SizeTree
 
 
 def _node(name: str, size: int = 100, **kw) -> FSNode:

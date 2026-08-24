@@ -6,16 +6,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sizetrail.domain.monitor import (
+from disktide.domain.monitor import (
     MonitorDefinition,
     MonitorHealthState,
     RetentionPolicy,
 )
-from sizetrail.domain.snapshot import Snapshot
-from sizetrail.models.tree import FSNode
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.monitor import MonitorService
-from sizetrail.services.retention import RetentionService
+from disktide.domain.snapshot import Snapshot
+from disktide.models.tree import FSNode
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.monitor import MonitorService
+from disktide.services.retention import RetentionService
 
 
 @pytest.fixture

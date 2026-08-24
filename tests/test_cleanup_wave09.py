@@ -11,34 +11,34 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from sizetrail.__main__ import cli
-from sizetrail.cleanup.detector import detect_targets
-from sizetrail.cleanup.rules import get_rule_catalog
-from sizetrail.cleanup.scoring import score_cleanup_candidate
-from sizetrail.config import load_config
-from sizetrail.domain.alerts import AlertKind, AlertRule
-from sizetrail.domain.cleanup import (
+from disktide.__main__ import cli
+from disktide.cleanup.detector import detect_targets
+from disktide.cleanup.rules import get_rule_catalog
+from disktide.cleanup.scoring import score_cleanup_candidate
+from disktide.config import load_config
+from disktide.domain.alerts import AlertKind, AlertRule
+from disktide.domain.cleanup import (
     CleanupActionKind,
     CleanupExecutionStatus,
     CleanupValidationStatus,
     cleanup_plan_from_dict,
     cleanup_plan_to_dict,
 )
-from sizetrail.domain.snapshot import Snapshot
-from sizetrail.domain.visualization import TrendPoint, VisualState
-from sizetrail.extensions.cleanup_rules import (
+from disktide.domain.snapshot import Snapshot
+from disktide.domain.visualization import TrendPoint, VisualState
+from disktide.extensions.cleanup_rules import (
     RulePackValidationError,
     load_rule_catalog,
     validate_rule_pack,
 )
-from sizetrail.models.patterns import CleanupRule, CleanupTarget, RiskLevel
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.scanner.walker import scan_directory
-from sizetrail.services.alerts import AlertService
-from sizetrail.services.cleanup import CleanupConfirmationRequired, CleanupService
-from sizetrail.services.doctor import build_doctor_report
-from sizetrail.widgets.cleanup_map import build_cleanup_map
-from sizetrail.widgets.trend_chart import TrendChart
+from disktide.models.patterns import CleanupRule, CleanupTarget, RiskLevel
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.scanner.walker import scan_directory
+from disktide.services.alerts import AlertService
+from disktide.services.cleanup import CleanupConfirmationRequired, CleanupService
+from disktide.services.doctor import build_doctor_report
+from disktide.widgets.cleanup_map import build_cleanup_map
+from disktide.widgets.trend_chart import TrendChart
 
 
 @pytest.fixture
@@ -329,7 +329,7 @@ def test_savings_history_separates_isolated_purged_actual_and_undone(
     service.execute(second.id, action=CleanupActionKind.QUARANTINE)
     free_values = iter((1000, 1256))
     monkeypatch.setattr(
-        "sizetrail.services.cleanup.available_bytes",
+        "disktide.services.cleanup.available_bytes",
         lambda path: next(free_values),
     )
     service.purge(
@@ -393,7 +393,7 @@ def test_cleanup_opportunity_alert_uses_plan_summary_without_execution(
     assert event.observed_value == plan.estimated_reclaimable_bytes
     assert "top categories" in event.message
     assert "confidence" in event.message
-    assert f"sizetrail cleanup {root}" in event.message
+    assert f"disktide cleanup {root}" in event.message
     assert cache.exists()
 
 
@@ -420,7 +420,7 @@ def test_cli_rule_pack_management_persists_config(tmp_path):
 
     disabled = runner.invoke(cli, ["cleanup", "rules", "disable", "node"], env=env)
     assert disabled.exit_code == 0, disabled.output
-    config = load_config(tmp_path / "config" / "sizetrail" / "config.toml")
+    config = load_config(tmp_path / "config" / "disktide" / "config.toml")
     assert "node" in config.cleanup.disabled_rule_packs
 
     listed = runner.invoke(cli, ["cleanup", "rules", "list", "--json"], env=env)
@@ -431,13 +431,13 @@ def test_cli_rule_pack_management_persists_config(tmp_path):
 
     enabled = runner.invoke(cli, ["cleanup", "rules", "enable", "node"], env=env)
     assert enabled.exit_code == 0, enabled.output
-    config = load_config(tmp_path / "config" / "sizetrail" / "config.toml")
+    config = load_config(tmp_path / "config" / "disktide" / "config.toml")
     assert "node" not in config.cleanup.disabled_rule_packs
 
 
 def test_doctor_reports_isolated_user_rule_pack(tmp_path, monkeypatch):
     config_home = tmp_path / "config"
-    rules = config_home / "sizetrail" / "cleanup-rules"
+    rules = config_home / "disktide" / "cleanup-rules"
     rules.mkdir(parents=True)
     (rules / "broken.toml").write_text("broken = [", encoding="utf-8")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))

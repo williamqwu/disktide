@@ -36,14 +36,14 @@ still printed for whatever was collected before the cancel.
 Forward-compat contract (kept stable across releases; if you break any
 of these, also update tests/test_tools.py so the breakage is loud):
 
-    from sizetrail.scanner.engine import ScanEngine
+    from disktide.scanner.engine import ScanEngine
     ScanEngine(workers=N, progress_callback=cb).scan(path) -> FSNode
     FSNode.dir_count, .file_count, .size                 # public ints
     ScanProgress.dirs_scanned, .files_scanned,
                   .total_size, .current_path             # public fields
 
 The per-directory hotspot table additionally monkey-patches
-`sizetrail.scanner.walker.scan_directory`; if that symbol or its
+`disktide.scanner.walker.scan_directory`; if that symbol or its
 return type changes, the patch is skipped automatically and the
 heartbeat + summary still work.
 """
@@ -60,7 +60,7 @@ import threading
 import time
 from typing import Optional
 
-from sizetrail.scanner.engine import ScanEngine
+from disktide.scanner.engine import ScanEngine
 
 # --- per-directory timing via monkey-patch (optional) ------------------
 #
@@ -74,8 +74,8 @@ _timings_lock = threading.Lock()
 _hotspot_patch_installed = False
 
 try:
-    from sizetrail.scanner import engine as engine_mod
-    from sizetrail.scanner import walker as walker_mod
+    from disktide.scanner import engine as engine_mod
+    from disktide.scanner import walker as walker_mod
 
     _orig_scan_directory = walker_mod.scan_directory
 
@@ -114,7 +114,7 @@ except Exception as e:
 # ScanProgress is imported defensively too: if it ever goes away we
 # still run, just with degraded heartbeat (None-safe getattr below).
 try:
-    from sizetrail.scanner.progress import ScanProgress
+    from disktide.scanner.progress import ScanProgress
 except Exception:
     ScanProgress = object  # type: ignore[assignment,misc]
 

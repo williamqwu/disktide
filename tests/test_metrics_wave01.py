@@ -9,18 +9,18 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from sizetrail.__main__ import cli
-from sizetrail.domain.metrics import (
+from disktide.__main__ import cli
+from disktide.domain.metrics import (
     MetricId,
     StorageMeasurements,
     allocated_bytes_from_stat,
 )
-from sizetrail.metrics import metric_text, metric_value
-from sizetrail.models.tree import FSNode
-from sizetrail.scanner.accounting import finalize_unique_allocated
-from sizetrail.scanner.engine import ScanEngine
-from sizetrail.scanner.policy import MountEntry, discover_pseudo_mounts
-from sizetrail.scanner.walker import scan_directory
+from disktide.metrics import metric_text, metric_value
+from disktide.models.tree import FSNode
+from disktide.scanner.accounting import finalize_unique_allocated
+from disktide.scanner.engine import ScanEngine
+from disktide.scanner.policy import MountEntry, discover_pseudo_mounts
+from disktide.scanner.walker import scan_directory
 
 
 def test_storage_measurements_preserve_unavailable_values():

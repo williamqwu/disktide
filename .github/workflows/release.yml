@@ -29,11 +29,12 @@ jobs:
           uv build
           .venv/bin/python tool/verify_distribution.py
           uv venv --python 3.13 .venv-release
-          uv pip install --python .venv-release/bin/python dist/sizetrail-*.whl
+          uv pip install --python .venv-release/bin/python dist/disktide-*.whl
           uv venv --python 3.13 .venv-release-sdist
-          uv pip install --python .venv-release-sdist/bin/python dist/sizetrail-*.tar.gz
-          .venv-release/bin/sizetrail doctor --json > doctor.json
-          .venv-release-sdist/bin/sizetrail doctor --json > doctor-sdist.json
+          uv pip install --python .venv-release-sdist/bin/python dist/disktide-*.tar.gz
+          .venv-release/bin/disktide doctor --json > doctor.json
+          .venv-release-sdist/bin/disktide doctor --json > doctor-sdist.json
+          .venv-release/bin/sizetrail --version
           .venv-release/bin/fsmonitor --version
           .venv-release/bin/fsmonitor-cli --version
           .venv-release/bin/python tool/check_dependency_budget.py
@@ -43,7 +44,7 @@ jobs:
           sha256sum dist/* > release-metadata/SHA256SUMS
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
             .venv-release/bin/python tool/generate_sbom.py \
-              --output release-metadata/sizetrail.cdx.json
+              --output release-metadata/disktide.cdx.json
           cp doctor.json release-metadata/doctor.json
           cp doctor-sdist.json release-metadata/doctor-sdist.json
       - name: Attest Python distributions
@@ -71,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/sizetrail
+      url: https://pypi.org/p/disktide
     permissions:
       id-token: write
     steps:

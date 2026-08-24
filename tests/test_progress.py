@@ -3,7 +3,7 @@
 import time
 
 import pytest
-from sizetrail.scanner.progress import ScanProgress, ProgressThrottle
+from disktide.scanner.progress import ScanProgress, ProgressThrottle
 
 
 class TestScanProgress:

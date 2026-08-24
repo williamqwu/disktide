@@ -7,8 +7,8 @@ walker now ticks per directory finished, and the engine folds those
 ticks into shared live counters so Dirs/Files/Size climb continuously.
 """
 
-from sizetrail.scanner.engine import ScanEngine
-from sizetrail.scanner.walker import scan_directory
+from disktide.scanner.engine import ScanEngine
+from disktide.scanner.walker import scan_directory
 
 
 def test_walker_ticks_once_per_directory(tmp_path):

@@ -9,15 +9,15 @@ from unittest.mock import patch
 
 from textual.widgets import Static
 
-from sizetrail.app import SizeTrailApp
-from sizetrail.config import load_config
-from sizetrail.screens.fs_overview import (
+from disktide.app import DiskTideApp
+from disktide.config import load_config
+from disktide.screens.fs_overview import (
     FSOverviewScreen,
     FSDetailModal,
     _format_benchmark,
 )
-from sizetrail.scanner.benchmark import BenchmarkResult
-from sizetrail.widgets.confirm_modal import ConfirmModal
+from disktide.scanner.benchmark import BenchmarkResult
+from disktide.widgets.confirm_modal import ConfirmModal
 
 
 _FAKE = BenchmarkResult(write_bps=2.0e9, read_bps=3.0e9, bytes_io=256 * 1024 * 1024)
@@ -28,8 +28,8 @@ def test_format_benchmark():
     assert "write" in s and "read ~" in s and "probed" in s
 
 
-def _new_app(tmp_path) -> SizeTrailApp:
-    return SizeTrailApp(
+def _new_app(tmp_path) -> DiskTideApp:
+    return DiskTideApp(
         scan_path=str(tmp_path),
         show_welcome=False,
         config=load_config(),
@@ -66,7 +66,7 @@ def test_double_b_confirms_records_and_displays(tmp_path):
     async def go():
         app = _new_app(tmp_path)
         with patch(
-            "sizetrail.screens.fs_overview.benchmark_mount", return_value=_FAKE
+            "disktide.screens.fs_overview.benchmark_mount", return_value=_FAKE
         ):
             async with app.run_test(size=(120, 40)) as pilot:
                 screen = await _wait_for_overview(pilot, app)
@@ -99,7 +99,7 @@ def test_n_cancels_no_benchmark(tmp_path):
     async def go():
         app = _new_app(tmp_path)
         with patch(
-            "sizetrail.screens.fs_overview.benchmark_mount", return_value=_FAKE
+            "disktide.screens.fs_overview.benchmark_mount", return_value=_FAKE
         ) as mocked:
             async with app.run_test(size=(120, 40)) as pilot:
                 screen = await _wait_for_overview(pilot, app)

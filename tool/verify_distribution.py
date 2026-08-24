@@ -19,8 +19,8 @@ def main() -> int:
     dist_dir = Path(args.dist)
     project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
     version = project["version"]
-    wheel = _single(dist_dir.glob(f"sizetrail-{version}-*.whl"), "wheel")
-    sdist = _single(dist_dir.glob(f"sizetrail-{version}.tar.gz"), "sdist")
+    wheel = _single(dist_dir.glob(f"disktide-{version}-*.whl"), "wheel")
+    sdist = _single(dist_dir.glob(f"disktide-{version}.tar.gz"), "sdist")
     _verify_wheel(wheel, version)
     _verify_sdist(sdist, version)
     print(f"distribution verification: PASS ({wheel.name}, {sdist.name})")
@@ -38,69 +38,71 @@ def _verify_wheel(path: Path, version: str) -> None:
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         required = {
+            "disktide/__init__.py",
+            "disktide/assets/default.tcss",
+            "disktide/cleanup/actions.py",
+            "disktide/cleanup/scoring.py",
+            "disktide/cleanup/rulepacks/python.toml",
+            "disktide/cleanup/rulepacks/node.toml",
+            "disktide/cleanup/rulepacks/rust.toml",
+            "disktide/cleanup/rulepacks/general.toml",
+            "disktide/cleanup/rulepacks/ide.toml",
+            "disktide/cleanup/rulepacks/containers.toml",
+            "disktide/collectors/local_scanner.py",
+            "disktide/collectors/events/__init__.py",
+            "disktide/collectors/events/base.py",
+            "disktide/collectors/events/native.py",
+            "disktide/collectors/platform/linux.py",
+            "disktide/domain/alerts.py",
+            "disktide/domain/cleanup.py",
+            "disktide/domain/delta.py",
+            "disktide/domain/live_view.py",
+            "disktide/domain/monitor.py",
+            "disktide/domain/provisional.py",
+            "disktide/domain/scan.py",
+            "disktide/domain/snapshot.py",
+            "disktide/domain/visualization.py",
+            "disktide/extensions/cleanup_rules.py",
+            "disktide/presentation/tui/viewmodels/visualization.py",
+            "disktide/repositories/alerts.py",
+            "disktide/repositories/cleanup.py",
+            "disktide/repositories/monitors.py",
+            "disktide/repositories/snapshots.py",
+            "disktide/repositories/sqlite.py",
+            "disktide/scanner/scheduler.py",
+            "disktide/screens/cleanup.py",
+            "disktide/services/alerts.py",
+            "disktide/services/cleanup.py",
+            "disktide/services/compare.py",
+            "disktide/services/doctor.py",
+            "disktide/services/monitor.py",
+            "disktide/services/provisional.py",
+            "disktide/services/retention.py",
+            "disktide/services/scan.py",
+            "disktide/services/scan_consumers.py",
+            "disktide/services/snapshots.py",
+            "disktide/services/visualization.py",
+            "disktide/services/watch.py",
+            "disktide/viz/layout.py",
+            "disktide/widgets/alert_editor.py",
+            "disktide/widgets/cleanup_modal.py",
+            "disktide/widgets/cleanup_history.py",
+            "disktide/widgets/cleanup_map.py",
+            "disktide/widgets/monitor_editor.py",
+            "disktide/widgets/growth_heatmap.py",
             "sizetrail/__init__.py",
-            "sizetrail/assets/default.tcss",
-            "sizetrail/cleanup/actions.py",
-            "sizetrail/cleanup/scoring.py",
-            "sizetrail/cleanup/rulepacks/python.toml",
-            "sizetrail/cleanup/rulepacks/node.toml",
-            "sizetrail/cleanup/rulepacks/rust.toml",
-            "sizetrail/cleanup/rulepacks/general.toml",
-            "sizetrail/cleanup/rulepacks/ide.toml",
-            "sizetrail/cleanup/rulepacks/containers.toml",
-            "sizetrail/collectors/local_scanner.py",
-            "sizetrail/collectors/events/__init__.py",
-            "sizetrail/collectors/events/base.py",
-            "sizetrail/collectors/events/native.py",
-            "sizetrail/collectors/platform/linux.py",
-            "sizetrail/domain/alerts.py",
-            "sizetrail/domain/cleanup.py",
-            "sizetrail/domain/delta.py",
-            "sizetrail/domain/live_view.py",
-            "sizetrail/domain/monitor.py",
-            "sizetrail/domain/provisional.py",
-            "sizetrail/domain/scan.py",
-            "sizetrail/domain/snapshot.py",
-            "sizetrail/domain/visualization.py",
-            "sizetrail/extensions/cleanup_rules.py",
-            "sizetrail/presentation/tui/viewmodels/visualization.py",
-            "sizetrail/repositories/alerts.py",
-            "sizetrail/repositories/cleanup.py",
-            "sizetrail/repositories/monitors.py",
-            "sizetrail/repositories/snapshots.py",
-            "sizetrail/repositories/sqlite.py",
-            "sizetrail/scanner/scheduler.py",
-            "sizetrail/screens/cleanup.py",
-            "sizetrail/services/alerts.py",
-            "sizetrail/services/cleanup.py",
-            "sizetrail/services/compare.py",
-            "sizetrail/services/doctor.py",
-            "sizetrail/services/monitor.py",
-            "sizetrail/services/provisional.py",
-            "sizetrail/services/retention.py",
-            "sizetrail/services/scan.py",
-            "sizetrail/services/scan_consumers.py",
-            "sizetrail/services/snapshots.py",
-            "sizetrail/services/visualization.py",
-            "sizetrail/services/watch.py",
-            "sizetrail/viz/layout.py",
-            "sizetrail/widgets/alert_editor.py",
-            "sizetrail/widgets/cleanup_modal.py",
-            "sizetrail/widgets/cleanup_history.py",
-            "sizetrail/widgets/cleanup_map.py",
-            "sizetrail/widgets/monitor_editor.py",
-            "sizetrail/widgets/growth_heatmap.py",
+            "sizetrail/__main__.py",
             "fs_monitor/__init__.py",
             "fs_monitor/__main__.py",
-            f"sizetrail-{version}.dist-info/METADATA",
-            f"sizetrail-{version}.dist-info/entry_points.txt",
+            f"disktide-{version}.dist-info/METADATA",
+            f"disktide-{version}.dist-info/entry_points.txt",
         }
         missing = sorted(required - names)
         if missing:
             raise SystemExit(f"wheel missing required files: {missing}")
         forbidden = {
-            "sizetrail/monitor/alerts.py",
-            "sizetrail/monitor/scheduler.py",
+            "disktide/monitor/alerts.py",
+            "disktide/monitor/scheduler.py",
         }
         duplicate_implementations = sorted(forbidden & names)
         if duplicate_implementations:
@@ -115,10 +117,10 @@ def _verify_wheel(path: Path, version: str) -> None:
         if native:
             raise SystemExit(f"wheel contains native extensions: {native}")
         metadata = BytesParser().parsebytes(
-            archive.read(f"sizetrail-{version}.dist-info/METADATA")
+            archive.read(f"disktide-{version}.dist-info/METADATA")
         )
-        if metadata["Name"] != "sizetrail":
-            raise SystemExit("wheel metadata project name is not sizetrail")
+        if metadata["Name"] != "disktide":
+            raise SystemExit("wheel metadata project name is not disktide")
         if metadata["Version"] != version:
             raise SystemExit("wheel metadata version does not match pyproject")
         if "watch" not in metadata.get_all("Provides-Extra", []):
@@ -131,15 +133,20 @@ def _verify_wheel(path: Path, version: str) -> None:
         if not watch_requirements:
             raise SystemExit("wheel metadata missing conditional inotify-simple dependency")
         entry_points = archive.read(
-            f"sizetrail-{version}.dist-info/entry_points.txt"
+            f"disktide-{version}.dist-info/entry_points.txt"
         ).decode()
-        for executable in ("sizetrail =", "fsmonitor =", "fsmonitor-cli ="):
+        for executable in (
+            "disktide =",
+            "sizetrail =",
+            "fsmonitor =",
+            "fsmonitor-cli =",
+        ):
             if executable not in entry_points:
                 raise SystemExit(f"wheel entry point missing: {executable}")
 
 
 def _verify_sdist(path: Path, version: str) -> None:
-    prefix = f"sizetrail-{version}/"
+    prefix = f"disktide-{version}/"
     with tarfile.open(path, "r:gz") as archive:
         names = set(archive.getnames())
     required = {
@@ -157,57 +164,59 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "docs/adr/0012-adaptive-live-scan-engine.md",
         prefix + "docs/adr/0013-cleanup-scale-and-race-safety.md",
         prefix + "docs/adr/0014-event-assisted-provisional-current-state.md",
-        prefix + "src/sizetrail/assets/default.tcss",
-        prefix + "src/sizetrail/cleanup/actions.py",
-        prefix + "src/sizetrail/cleanup/scoring.py",
-        prefix + "src/sizetrail/cleanup/rulepacks/python.toml",
-        prefix + "src/sizetrail/cleanup/rulepacks/node.toml",
-        prefix + "src/sizetrail/cleanup/rulepacks/rust.toml",
-        prefix + "src/sizetrail/cleanup/rulepacks/general.toml",
-        prefix + "src/sizetrail/cleanup/rulepacks/ide.toml",
-        prefix + "src/sizetrail/cleanup/rulepacks/containers.toml",
-        prefix + "src/sizetrail/collectors/local_scanner.py",
-        prefix + "src/sizetrail/collectors/events/__init__.py",
-        prefix + "src/sizetrail/collectors/events/base.py",
-        prefix + "src/sizetrail/collectors/events/native.py",
-        prefix + "src/sizetrail/domain/alerts.py",
-        prefix + "src/sizetrail/domain/cleanup.py",
-        prefix + "src/sizetrail/domain/delta.py",
-        prefix + "src/sizetrail/domain/live_view.py",
-        prefix + "src/sizetrail/domain/monitor.py",
-        prefix + "src/sizetrail/domain/provisional.py",
-        prefix + "src/sizetrail/domain/scan.py",
-        prefix + "src/sizetrail/domain/snapshot.py",
-        prefix + "src/sizetrail/domain/visualization.py",
-        prefix + "src/sizetrail/extensions/cleanup_rules.py",
-        prefix + "src/sizetrail/presentation/tui/viewmodels/visualization.py",
-        prefix + "src/sizetrail/repositories/alerts.py",
-        prefix + "src/sizetrail/repositories/cleanup.py",
-        prefix + "src/sizetrail/repositories/monitors.py",
-        prefix + "src/sizetrail/repositories/snapshots.py",
-        prefix + "src/sizetrail/repositories/sqlite.py",
-        prefix + "src/sizetrail/scanner/scheduler.py",
-        prefix + "src/sizetrail/screens/cleanup.py",
-        prefix + "src/sizetrail/services/alerts.py",
-        prefix + "src/sizetrail/services/cleanup.py",
-        prefix + "src/sizetrail/services/compare.py",
-        prefix + "src/sizetrail/services/doctor.py",
-        prefix + "src/sizetrail/services/monitor.py",
-        prefix + "src/sizetrail/services/provisional.py",
-        prefix + "src/sizetrail/services/retention.py",
-        prefix + "src/sizetrail/services/scan.py",
-        prefix + "src/sizetrail/services/scan_consumers.py",
-        prefix + "src/sizetrail/services/snapshots.py",
-        prefix + "src/sizetrail/services/visualization.py",
-        prefix + "src/sizetrail/services/watch.py",
-        prefix + "src/sizetrail/visualization_formatting.py",
-        prefix + "src/sizetrail/viz/layout.py",
-        prefix + "src/sizetrail/widgets/alert_editor.py",
-        prefix + "src/sizetrail/widgets/cleanup_modal.py",
-        prefix + "src/sizetrail/widgets/cleanup_history.py",
-        prefix + "src/sizetrail/widgets/cleanup_map.py",
-        prefix + "src/sizetrail/widgets/monitor_editor.py",
-        prefix + "src/sizetrail/widgets/growth_heatmap.py",
+        prefix + "src/disktide/assets/default.tcss",
+        prefix + "src/disktide/cleanup/actions.py",
+        prefix + "src/disktide/cleanup/scoring.py",
+        prefix + "src/disktide/cleanup/rulepacks/python.toml",
+        prefix + "src/disktide/cleanup/rulepacks/node.toml",
+        prefix + "src/disktide/cleanup/rulepacks/rust.toml",
+        prefix + "src/disktide/cleanup/rulepacks/general.toml",
+        prefix + "src/disktide/cleanup/rulepacks/ide.toml",
+        prefix + "src/disktide/cleanup/rulepacks/containers.toml",
+        prefix + "src/disktide/collectors/local_scanner.py",
+        prefix + "src/disktide/collectors/events/__init__.py",
+        prefix + "src/disktide/collectors/events/base.py",
+        prefix + "src/disktide/collectors/events/native.py",
+        prefix + "src/disktide/domain/alerts.py",
+        prefix + "src/disktide/domain/cleanup.py",
+        prefix + "src/disktide/domain/delta.py",
+        prefix + "src/disktide/domain/live_view.py",
+        prefix + "src/disktide/domain/monitor.py",
+        prefix + "src/disktide/domain/provisional.py",
+        prefix + "src/disktide/domain/scan.py",
+        prefix + "src/disktide/domain/snapshot.py",
+        prefix + "src/disktide/domain/visualization.py",
+        prefix + "src/disktide/extensions/cleanup_rules.py",
+        prefix + "src/disktide/presentation/tui/viewmodels/visualization.py",
+        prefix + "src/disktide/repositories/alerts.py",
+        prefix + "src/disktide/repositories/cleanup.py",
+        prefix + "src/disktide/repositories/monitors.py",
+        prefix + "src/disktide/repositories/snapshots.py",
+        prefix + "src/disktide/repositories/sqlite.py",
+        prefix + "src/disktide/scanner/scheduler.py",
+        prefix + "src/disktide/screens/cleanup.py",
+        prefix + "src/disktide/services/alerts.py",
+        prefix + "src/disktide/services/cleanup.py",
+        prefix + "src/disktide/services/compare.py",
+        prefix + "src/disktide/services/doctor.py",
+        prefix + "src/disktide/services/monitor.py",
+        prefix + "src/disktide/services/provisional.py",
+        prefix + "src/disktide/services/retention.py",
+        prefix + "src/disktide/services/scan.py",
+        prefix + "src/disktide/services/scan_consumers.py",
+        prefix + "src/disktide/services/snapshots.py",
+        prefix + "src/disktide/services/visualization.py",
+        prefix + "src/disktide/services/watch.py",
+        prefix + "src/disktide/visualization_formatting.py",
+        prefix + "src/disktide/viz/layout.py",
+        prefix + "src/disktide/widgets/alert_editor.py",
+        prefix + "src/disktide/widgets/cleanup_modal.py",
+        prefix + "src/disktide/widgets/cleanup_history.py",
+        prefix + "src/disktide/widgets/cleanup_map.py",
+        prefix + "src/disktide/widgets/monitor_editor.py",
+        prefix + "src/disktide/widgets/growth_heatmap.py",
+        prefix + "src/sizetrail/__init__.py",
+        prefix + "src/sizetrail/__main__.py",
         prefix + "src/fs_monitor/__init__.py",
         prefix + "src/fs_monitor/__main__.py",
         prefix + "tool/benchmark_wave12.py",
@@ -219,8 +228,8 @@ def _verify_sdist(path: Path, version: str) -> None:
     if missing:
         raise SystemExit(f"sdist missing required files: {missing}")
     forbidden = {
-        prefix + "src/sizetrail/monitor/alerts.py",
-        prefix + "src/sizetrail/monitor/scheduler.py",
+        prefix + "src/disktide/monitor/alerts.py",
+        prefix + "src/disktide/monitor/scheduler.py",
     }
     duplicate_implementations = sorted(forbidden & names)
     if duplicate_implementations:

@@ -9,18 +9,18 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from sizetrail.__main__ import cli
-from sizetrail.domain.delta import CompatibilityDecision
-from sizetrail.domain.metrics import MetricId
-from sizetrail.domain.policy import ScanPolicy
-from sizetrail.domain.scan import ScanRequest, ScanRun, ScanStatus
-from sizetrail.domain.snapshot import Snapshot
-from sizetrail.models.tree import FSNode
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.compare import CompareService
-from sizetrail.services.snapshots import SnapshotService
-from sizetrail.storage.database import Database
-from sizetrail.storage.migrations import MIGRATION_CALLBACKS, migrate
+from disktide.__main__ import cli
+from disktide.domain.delta import CompatibilityDecision
+from disktide.domain.metrics import MetricId
+from disktide.domain.policy import ScanPolicy
+from disktide.domain.scan import ScanRequest, ScanRun, ScanStatus
+from disktide.domain.snapshot import Snapshot
+from disktide.models.tree import FSNode
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.compare import CompareService
+from disktide.services.snapshots import SnapshotService
+from disktide.storage.database import Database
+from disktide.storage.migrations import MIGRATION_CALLBACKS, migrate
 
 
 def _file(path: str, size: int) -> FSNode:
@@ -405,7 +405,7 @@ def test_corrupted_database_degrades_without_deleting_original(tmp_path):
         assert not database.read_only
         assert database.recovery_hint
         assert path.read_bytes() == original
-        from sizetrail.storage.migrations import CURRENT_VERSION
+        from disktide.storage.migrations import CURRENT_VERSION
 
         assert database.conn.execute(
             "SELECT version FROM schema_version"
@@ -527,12 +527,12 @@ def test_compare_cli_renders_stable_human_report(tmp_path, monkeypatch):
 def test_product_entry_points_do_not_import_sqlite_backend():
     project_root = Path(__file__).parents[1]
     product_paths = (
-        "src/sizetrail/__main__.py",
-        "src/sizetrail/app.py",
-        "src/sizetrail/screens/monitor.py",
-        "src/sizetrail/screens/settings.py",
+        "src/disktide/__main__.py",
+        "src/disktide/app.py",
+        "src/disktide/screens/monitor.py",
+        "src/disktide/screens/settings.py",
     )
     for relative_path in product_paths:
         source = (project_root / relative_path).read_text()
-        assert "sizetrail.storage.database" not in source
+        assert "disktide.storage.database" not in source
         assert "Database(" not in source

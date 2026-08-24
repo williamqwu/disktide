@@ -13,17 +13,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 
-from sizetrail.domain.live_view import build_live_view, count_live_nodes
-from sizetrail.domain.metrics import MetricId
-from sizetrail.domain.monitor import MonitorDefinition
-from sizetrail.domain.policy import ScanPolicy
-from sizetrail.domain.snapshot import Snapshot
-from sizetrail.models.tree import FSNode
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.monitor import MonitorService
-from sizetrail.services.visualization import VisualizationService
-from sizetrail.viz.sunburst import compute_sunburst
-from sizetrail.viz.treemap import compute_layout
+from disktide.domain.live_view import build_live_view, count_live_nodes
+from disktide.domain.metrics import MetricId
+from disktide.domain.monitor import MonitorDefinition
+from disktide.domain.policy import ScanPolicy
+from disktide.domain.snapshot import Snapshot
+from disktide.models.tree import FSNode
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.monitor import MonitorService
+from disktide.services.visualization import VisualizationService
+from disktide.viz.sunburst import compute_sunburst
+from disktide.viz.treemap import compute_layout
 
 
 def _wide_tree(path: str, nodes: int, *, offset: int = 0) -> FSNode:
@@ -106,7 +106,7 @@ def _timed_peak(callable_):
 
 
 def run(history_nodes: int, snapshots: int, wide_nodes: int) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="sizetrail-wave12-") as directory:
+    with tempfile.TemporaryDirectory(prefix="disktide-wave12-") as directory:
         repository = SQLiteSnapshotRepository(str(Path(directory) / "bench.db"))
         repository.connect()
         monitor = repository.create_monitor(
@@ -159,7 +159,7 @@ def run(history_nodes: int, snapshots: int, wide_nodes: int) -> dict[str, object
     )
     live_peak = _peak_mib(lambda: build_live_view(wide_root, max_children=96))
 
-    with tempfile.TemporaryDirectory(prefix="sizetrail-wave12-wide-") as directory:
+    with tempfile.TemporaryDirectory(prefix="disktide-wave12-wide-") as directory:
         repository = SQLiteSnapshotRepository(str(Path(directory) / "bench.db"))
         repository.connect()
         monitor = repository.create_monitor(

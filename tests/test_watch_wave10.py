@@ -12,31 +12,31 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from sizetrail.__main__ import cli
-from sizetrail.collectors.events.base import (
+from disktide.__main__ import cli
+from disktide.collectors.events.base import (
     EventBackendInfo,
     EventWatch,
     FilesystemEvent,
     FilesystemEventKind,
 )
-from sizetrail.collectors.events.native import (
+from disktide.collectors.events.native import (
     InotifyEventBackend,
     probe_native_event_backend,
 )
-from sizetrail.domain.monitor import (
+from disktide.domain.monitor import (
     MonitorDefinition,
     MonitorEventMode,
     MonitorHealthState,
     MonitorReconciliationState,
     MonitorWatchMode,
 )
-from sizetrail.domain.scan import ScanRequest
-from sizetrail.extensions.capabilities import CapabilityStatus
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.screens.monitor import MonitorScreen
-from sizetrail.services.monitor import MonitorService
-from sizetrail.services.scan import ScanService
-from sizetrail.services.watch import DirtyPathTracker
+from disktide.domain.scan import ScanRequest
+from disktide.extensions.capabilities import CapabilityStatus
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.screens.monitor import MonitorScreen
+from disktide.services.monitor import MonitorService
+from disktide.services.scan import ScanService
+from disktide.services.watch import DirtyPathTracker
 
 
 class FakeEventBackend:
@@ -92,7 +92,7 @@ def _unavailable_backend() -> EventBackendInfo:
         name="inotify-simple",
         status=CapabilityStatus.UNAVAILABLE,
         reason="optional backend is not installed",
-        suggestion="Install with: uv tool install 'sizetrail[watch]'",
+        suggestion="Install with: uv tool install 'disktide[watch]'",
     )
 
 
@@ -441,7 +441,7 @@ def test_cli_events_requires_extra_and_periodic_override_stays_available(
 
     required = runner.invoke(cli, ["watch", str(root), "--events"])
     assert required.exit_code != 0
-    assert "sizetrail[watch]" in required.output
+    assert "disktide[watch]" in required.output
 
     periodic = runner.invoke(cli, ["watch", str(root), "--periodic-only"])
     assert periodic.exit_code == 0, periodic.output

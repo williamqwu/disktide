@@ -1,7 +1,7 @@
 """Extended tests for FSNode — edge cases and deeper functionality."""
 
 import pytest
-from sizetrail.models.tree import FSNode
+from disktide.models.tree import FSNode
 
 
 class TestFSNodeEdgeCases:

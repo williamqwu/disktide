@@ -4,10 +4,10 @@ import os
 import tempfile
 
 import pytest
-from sizetrail.scanner.walker import scan_directory
-from sizetrail.cleanup.detector import detect_targets, group_by_category, total_savings
-from sizetrail.cleanup.actions import delete_targets, CleanupResult
-from sizetrail.models.patterns import CleanupRule, CleanupTarget, RiskLevel
+from disktide.scanner.walker import scan_directory
+from disktide.cleanup.detector import detect_targets, group_by_category, total_savings
+from disktide.cleanup.actions import delete_targets, CleanupResult
+from disktide.models.patterns import CleanupRule, CleanupTarget, RiskLevel
 
 
 class TestDetectorRealFS:

@@ -1,10 +1,27 @@
-"""SizeTrail: terminal storage intelligence."""
+"""Compatibility import for the previous ``sizetrail`` namespace."""
 
-PRODUCT_NAME = "SizeTrail"
-APP_NAME = PRODUCT_NAME
-CLI_NAME = "sizetrail"
-STORAGE_NAMESPACE = "sizetrail"
-LEGACY_STORAGE_NAMESPACE = "fsmonitor-cli"
-QUARANTINE_DIRECTORY_NAME = ".sizetrail-quarantine"
-LEGACY_QUARANTINE_DIRECTORY_NAMES = (".fsmonitor-quarantine",)
-__version__ = "0.2.16"
+from disktide import (
+    APP_NAME,
+    CLI_NAME,
+    LEGACY_QUARANTINE_DIRECTORY_NAMES,
+    LEGACY_STORAGE_NAMESPACE,
+    LEGACY_STORAGE_NAMESPACES,
+    PREVIOUS_STORAGE_NAMESPACE,
+    PRODUCT_NAME,
+    QUARANTINE_DIRECTORY_NAME,
+    STORAGE_NAMESPACE,
+    __version__,
+)
+
+__all__ = [
+    "APP_NAME",
+    "CLI_NAME",
+    "LEGACY_QUARANTINE_DIRECTORY_NAMES",
+    "LEGACY_STORAGE_NAMESPACE",
+    "LEGACY_STORAGE_NAMESPACES",
+    "PREVIOUS_STORAGE_NAMESPACE",
+    "PRODUCT_NAME",
+    "QUARANTINE_DIRECTORY_NAME",
+    "STORAGE_NAMESPACE",
+    "__version__",
+]

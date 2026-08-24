@@ -155,7 +155,7 @@ def test_diag_scan_imports_cleanly_even_if_walker_changes(tmp_path, monkeypatch)
     # walker for monkey-patching, then exec's the script.
     shim = (
         "import sys, runpy; "
-        "from sizetrail.scanner import walker; "
+        "from disktide.scanner import walker; "
         "del walker.scan_directory; "
         f"sys.argv = ['diag_scan.py', {str(tmp_path)!r}, '--workers', '1']; "
         f"runpy.run_path({str(TOOL_DIR / 'diag_scan.py')!r}, run_name='__main__')"

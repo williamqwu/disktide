@@ -13,8 +13,8 @@ from time import perf_counter
 import pytest
 from click.testing import CliRunner
 
-from sizetrail.__main__ import cli
-from sizetrail.cleanup.actions import (
+from disktide.__main__ import cli
+from disktide.cleanup.actions import (
     CleanupExecutionError,
     CleanupMutationCapabilities,
     QuarantineExecutor,
@@ -22,7 +22,7 @@ from sizetrail.cleanup.actions import (
     identity_from_path,
     permanent_delete,
 )
-from sizetrail.domain.cleanup import (
+from disktide.domain.cleanup import (
     CleanupAction,
     CleanupActionKind,
     CleanupExecutionStatus,
@@ -31,17 +31,17 @@ from sizetrail.domain.cleanup import (
     CleanupValidationStatus,
     cleanup_plan_to_dict,
 )
-from sizetrail.domain.metrics import MetricId
-from sizetrail.models.patterns import (
+from disktide.domain.metrics import MetricId
+from disktide.models.patterns import (
     CleanupRule,
     CleanupRuleActionPolicy,
     CleanupTarget,
     RiskLevel,
 )
-from sizetrail.repositories.sqlite import SQLiteSnapshotRepository
-from sizetrail.services.cleanup import CleanupService
-from sizetrail.storage.database import Database
-from sizetrail.storage.migrations import CURRENT_VERSION, migrate
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.services.cleanup import CleanupService
+from disktide.storage.database import Database
+from disktide.storage.migrations import CURRENT_VERSION, migrate
 
 
 def _synthetic_action(
@@ -456,7 +456,7 @@ def test_normal_quarantine_moves_do_not_rescan_manifests(tmp_path, monkeypatch):
         executor.move(action, create_mutation_token(source, action.identity))
 
     assert scans == 0
-    status = executor.audit(tmp_path / ".sizetrail-quarantine")
+    status = executor.audit(tmp_path / ".disktide-quarantine")
     assert status.ledger_matches
     assert status.ledger_items == 40
 
@@ -613,7 +613,7 @@ def test_permanent_delete_is_blocked_without_dir_fd_support(tmp_path, monkeypatc
     identity = identity_from_path(source)
     token = create_mutation_token(source, identity)
     monkeypatch.setattr(
-        "sizetrail.cleanup.actions.mutation_capabilities",
+        "disktide.cleanup.actions.mutation_capabilities",
         lambda: CleanupMutationCapabilities(
             dir_fd_verification=False,
             recoverable_move="path-revalidated recoverable rename",
