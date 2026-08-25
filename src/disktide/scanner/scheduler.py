@@ -985,6 +985,13 @@ class TreeScanScheduler:
     def _mark_settled(self, state: _DirectoryState) -> None:
         current = state
         while current.scanned and current.remaining_children == 0 and not current.settled:
+            # Retire the child cursor before reordering. Settling means every
+            # directory child was handed out and came back, so the only entries
+            # left past the cursor are files -- but the sort below permutes the
+            # list the cursor indexes into, which would otherwise walk it onto a
+            # directory that has already been scanned and hand out a duplicate
+            # job whose parent state is gone by the time it lands.
+            current.next_child_index = len(current.node.children)
             current.node.children.sort(key=lambda child: (child.name, child.path))
             current.node.invalidate_sort()
             current.settled = True

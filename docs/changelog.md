@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.18
+
+**Scan scheduler cursor correctness**
+
+- **duplicate directory jobs** Settling a directory now retires its child cursor before the entries are sorted, so the reordering can no longer walk the cursor onto an already-scanned subdirectory and dispatch it a second time.
+- **aborted scans** Fixed the `KeyError` those duplicate jobs raised when they resolved against a parent that had already left the live state map, which surfaced as `Scan failed: RuntimeError: KeyError: '<path>'` and discarded the whole run on wide real-world trees such as a home directory.
+
 ## v0.2.17
 
 **Renamed to DiskTide**
