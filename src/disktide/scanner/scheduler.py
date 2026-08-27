@@ -31,6 +31,10 @@ from disktide.scanner.walker import (
 _TOP_LEVEL_CLASSIFY_CAP = 100
 _DEFAULT_ENTRY_CHUNK_SIZE = 256
 
+# Generations only ever count up from zero, so this never matches a live one:
+# a state carrying it is always treated as stale and copied before mutation.
+_STALE_GENERATION = -1
+
 
 @dataclass(frozen=True, slots=True)
 class DirectoryJob:
@@ -919,7 +923,13 @@ class TreeScanScheduler:
             self._states[job.path] = _DirectoryState(
                 job=job,
                 node=child,
-                generation=parent.generation,
+                # Not the parent's generation: cloning a parent copies its
+                # children *list*, not the child nodes in it, so this
+                # placeholder can be older than the parent and may already
+                # have gone out in a published frame. Claiming the parent's
+                # generation would let the first entry chunk fill it in place
+                # and rewrite a frame the UI has already drawn.
+                generation=_STALE_GENERATION,
                 parent_index=index,
                 next_checkpoint_publish_at=self._entry_chunk_size,
             )

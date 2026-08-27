@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.19
+
+**Live frame integrity and scheduler invariant coverage**
+
+- **published frames stay frozen** A subdirectory placeholder can go out in a live frame long before the bounded source queue dispatches it; its state inherited the parent's copy-on-write generation, which skipped the clone and let the first entry chunk edit an already-rendered frame in place. Dispatch now stamps the child as stale so it is copied before it is filled in.
+- **scheduler invariants are asserted** The suite now validates the scheduler's positional structure on every state change, so a stale cursor or a mis-addressed parent index fails where it happens instead of surfacing later as an aborted scan.
+- **shapes that reach the hazards** Added fixtures that put a directory's entries in an order the settle-time sort reshuffles while its child cursor is still open, plus a check that the invariants themselves still fail on the historical defect.
+- **randomized soak** Added `tool/soak_scan.py`, which generates adversarial trees and cross-checks scheduler invariants, live-frame immutability, and totals against an independent walker.
+
 ## v0.2.18
 
 **Scan scheduler cursor correctness**

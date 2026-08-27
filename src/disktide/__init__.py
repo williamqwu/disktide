@@ -15,4 +15,4 @@ LEGACY_QUARANTINE_DIRECTORY_NAMES = (
     ".sizetrail-quarantine",
     ".fsmonitor-quarantine",
 )
-__version__ = "0.2.18"
+__version__ = "0.2.19"

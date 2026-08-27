@@ -29,6 +29,10 @@ from disktide.services.scan_consumers import ScanEventRecorder
 from disktide.widgets.size_tree import SizeTree
 from disktide.widgets.sunburst_view import SunburstView
 from disktide.widgets.treemap_view import TreemapView
+from tests.scheduler_invariants import (
+    fingerprint,
+    track_publication_generations,
+)
 
 
 def test_scheduler_parallelizes_below_a_single_top_level_directory(
@@ -589,3 +593,50 @@ def test_settled_directory_does_not_requeue_an_already_scanned_child(
     assert root.file_count == 12
     # root + parent + busy + 2 subdirectories + 8 branches, each scanned once.
     assert engine.scheduler_stats.submitted_tasks == 13
+
+
+def test_published_frame_survives_late_dispatch_of_its_placeholders(
+    tmp_path,
+    monkeypatch,
+):
+    """A placeholder already in a published frame must not be filled in place.
+
+    Cloning a directory copies its children *list*, not the child nodes in it,
+    so a subdirectory placeholder can outlive several published generations
+    before the bounded source queue gets around to dispatching it. Stamping
+    its state with the parent's generation skipped the copy-on-write clone, so
+    the first entry chunk rewrote a frame the UI had already drawn.
+
+    Both halves are asserted: the stamping, which is deterministic, and the
+    frames themselves, which only visibly change on some interleavings.
+    """
+    tracker = track_publication_generations(monkeypatch)
+    for index in range(24):
+        branch = tmp_path / f"branch-{index:02d}"
+        branch.mkdir()
+        (branch / "leaf.bin").write_bytes(b"x" * 64)
+
+    frames: list[tuple[FSNode, tuple]] = []
+
+    ScanEngine(
+        workers=2,
+        scan_path=str(tmp_path),
+        tree_update_callback=lambda update: frames.append(
+            (update.root, fingerprint(update.root))
+        ),
+        tree_callback_interval=0.0,
+        scheduler_queue_capacity=1,
+        scheduler_submission_limit=1,
+    ).scan(str(tmp_path))
+
+    assert len(frames) > 2, "no live frames were published"
+    assert tracker.late_dispatches > 0, (
+        "fixture no longer dispatches any already-published placeholder"
+    )
+    assert tracker.violations == []
+    rewritten = [
+        index
+        for index, (published_root, taken) in enumerate(frames)
+        if fingerprint(published_root) != taken
+    ]
+    assert rewritten == []
