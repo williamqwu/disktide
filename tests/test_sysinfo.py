@@ -6,6 +6,9 @@ from unittest.mock import patch, mock_open
 
 import pytest
 from disktide.scanner.sysinfo import (
+    HostAllocation,
+    count_other_users,
+    detect_host_allocation,
     SystemInfo,
     detect_cpu_count,
     detect_load_average,
@@ -275,7 +278,8 @@ class TestComputeRecommendedWorkers:
         assert workers < 8
         assert workers == 1
 
-    def test_network_fs_caps_at_4(self):
+    def test_network_fs_caps_at_8(self):
+        """8 is where the measured cold-NFS curve flattens; see _LATENCY_WORKER_CAP."""
         workers, reason = _compute_recommended_workers(
             available_cpus=16,
             load_average=(0.0, 0.0, 0.0),
@@ -283,7 +287,7 @@ class TestComputeRecommendedWorkers:
             is_rotational=False,
             available_mb=4096,
         )
-        assert workers <= 4
+        assert workers <= 8
         assert "network filesystem" in reason
 
     def test_hdd_caps_at_4(self):
@@ -386,3 +390,136 @@ class TestDetectSystemInfo:
         assert isinstance(info.fs_type, str)
         assert isinstance(info.is_network_fs, bool)
         assert info.is_rotational is None or isinstance(info.is_rotational, bool)
+
+
+def _allocation(kind, *, total=128, available=10, others=0):
+    return HostAllocation(
+        total_cpus=total,
+        available_cpus=available,
+        batch_job=kind == "allocated",
+        confined=available < total,
+        other_users=others,
+        kind=kind,
+    )
+
+
+class TestHostAllocation:
+    """An allocated slice, a shared login node, and a machine of our own."""
+
+    def test_batch_job_env_reports_allocated(self):
+        with patch.dict(os.environ, {"SLURM_JOB_ID": "12345"}, clear=False):
+            allocation = detect_host_allocation()
+        assert allocation.kind == "allocated"
+        assert allocation.batch_job is True
+
+    def test_cgroup_subset_reports_allocated_without_batch_env(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "disktide.scanner.sysinfo.detect_cpu_count",
+            return_value=(64, 8),
+        ):
+            allocation = detect_host_allocation()
+        assert allocation.confined is True
+        assert allocation.kind == "allocated"
+
+    def test_allocated_host_skips_the_proc_walk(self):
+        """The user count cannot change an allocated verdict, so never pay for it."""
+        with patch("disktide.scanner.sysinfo.detect_cpu_count", return_value=(64, 8)):
+            with patch(
+                "disktide.scanner.sysinfo.count_other_users",
+                side_effect=AssertionError("should not be called"),
+            ):
+                allocation = detect_host_allocation()
+        assert allocation.kind == "allocated"
+
+    def test_unconfined_with_other_users_is_shared(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "disktide.scanner.sysinfo.detect_cpu_count",
+            return_value=(16, 16),
+        ):
+            with patch("disktide.scanner.sysinfo.count_other_users", return_value=4):
+                allocation = detect_host_allocation()
+        assert allocation.kind == "shared"
+        assert allocation.other_users == 4
+
+    def test_unconfined_alone_is_dedicated(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "disktide.scanner.sysinfo.detect_cpu_count",
+            return_value=(16, 16),
+        ):
+            with patch("disktide.scanner.sysinfo.count_other_users", return_value=0):
+                allocation = detect_host_allocation()
+        assert allocation.kind == "dedicated"
+
+    def test_count_other_users_never_raises(self):
+        with patch("os.scandir", side_effect=OSError("nope")):
+            assert count_other_users() == 0
+
+
+class TestAllocationAwareWorkers:
+    """Host load must be compared against the CPUs it was measured across."""
+
+    def test_allocated_slice_ignores_host_wide_load(self):
+        """A busy 128-core node says nothing about our own 10-core allocation."""
+        workers, reason = _compute_recommended_workers(
+            available_cpus=10,
+            load_average=(32.0, 30.0, 28.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            allocation=_allocation("allocated"),
+        )
+        assert workers == 8
+        assert "own CPU allocation" in reason
+
+    def test_shared_host_stays_modest_even_when_idle(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=128,
+            load_average=(1.0, 1.0, 1.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            allocation=_allocation("shared", total=128, available=128, others=5),
+        )
+        assert workers == 2
+        assert "shared host" in reason
+
+    def test_dedicated_host_uses_host_scoped_load_ratio(self):
+        """Load 32 on 128 cores is a quiet machine, not an overloaded one."""
+        workers, reason = _compute_recommended_workers(
+            available_cpus=128,
+            load_average=(32.0, 30.0, 28.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            allocation=_allocation("dedicated", total=128, available=128),
+        )
+        assert workers == 8
+        assert "host load reduced" not in reason
+
+    def test_dedicated_host_still_throttles_when_truly_busy(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=16,
+            load_average=(30.0, 30.0, 30.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            allocation=_allocation("dedicated", total=16, available=16),
+        )
+        assert workers == 4
+        assert "host load reduced parallelism" in reason
+
+    def test_omitting_allocation_preserves_legacy_behaviour(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=16,
+            load_average=(16.0, 8.0, 4.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+        )
+        assert workers == 4
+        assert "host load reduced parallelism" in reason

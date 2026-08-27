@@ -17,6 +17,122 @@ from disktide.domain.scan import ScanWorkerSelection
 _WORKER_SAMPLE_LIMIT = 64
 _WORKER_SAMPLE_BUDGET_SECONDS = 0.075
 
+# Batch schedulers advertise an allocation through the environment. Inside one
+# of these the CPUs we can see are ours for the duration of the job, so the
+# host's overall load says nothing about what we may use.
+_BATCH_JOB_ENV_VARS = (
+    "SLURM_JOB_ID",
+    "SLURM_JOBID",
+    "PBS_JOBID",
+    "LSB_JOBID",
+    "FLUX_JOB_ID",
+    "COBALT_JOBID",
+    "JOB_ID",
+)
+
+# Below this, an account is service infrastructure rather than a person.
+_SYSTEM_UID_CEILING = 1000
+
+# Where the wall-clock gain from network parallelism stops paying for itself.
+# Measured cold on an NFSv4 cluster home (36,888 files, caches expired between
+# runs): 1 worker 8.37s, 2 -> 5.64s, 4 -> 4.23s, 8 -> 3.54s, 16 -> 3.57s,
+# 32 -> 3.37s. Past 8 the curve is flat because the scan stops waiting on the
+# server and starts waiting on the GIL, while CPU keeps climbing -- 8 workers
+# already burn 1.54 cores against 0.42 for one.
+_NETWORK_WORKER_CAP = 8
+
+# Slow *local* metadata gets the older, more conservative bound. The curve
+# above was measured over a network mount; a local mount that samples slow is
+# usually a busy or failing disk, where queueing more concurrent requests is
+# as likely to hurt as help. Raise this only with local measurements to match.
+_SLOW_LOCAL_WORKER_CAP = 4
+
+# What a guest may take on a machine it was given no allocation on. A cluster
+# login node is the case that matters: it is shared by everyone who is not
+# currently inside a job, and a wide metadata walk is felt by all of them.
+_SHARED_HOST_WORKER_CAP = 2
+
+
+@dataclass(frozen=True, slots=True)
+class HostAllocation:
+    """Whether this process was given the CPUs it can see, and who shares them.
+
+    ``kind`` drives scan parallelism policy:
+
+    * ``allocated`` -- a batch job or cgroup carved out a subset of the host for
+      us. That subset is ours; host-wide load reflects other jobs we are
+      isolated from and must not throttle us.
+    * ``shared`` -- no allocation, and other people have processes here. This is
+      the cluster login node case: stay modest whatever the storage suggests.
+    * ``dedicated`` -- no allocation and nobody else is present, so the machine
+      is effectively ours.
+    """
+
+    total_cpus: int
+    available_cpus: int
+    batch_job: bool
+    confined: bool
+    other_users: int
+    kind: str
+
+
+def count_other_users() -> int:
+    """Distinct non-system accounts other than ours with a live process.
+
+    Reads ``/proc`` directly, which costs a few milliseconds and avoids
+    depending on utmp -- a login node reached over SSH may have no utmp entry
+    for a detached process, and containers frequently have no utmp at all.
+    Returns 0 when the count cannot be taken, which biases toward "not shared"
+    so an unreadable ``/proc`` never silently throttles a scan.
+    """
+    ours = os.getuid()
+    uids: set[int] = set()
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    uid = entry.stat().st_uid
+                except OSError:
+                    continue
+                if uid != ours and uid >= _SYSTEM_UID_CEILING:
+                    uids.add(uid)
+    except OSError:
+        return 0
+    return len(uids)
+
+
+def detect_host_allocation(*, count_users: bool = True) -> HostAllocation:
+    """Classify our claim on this host's CPUs. See :class:`HostAllocation`.
+
+    ``other_users`` is only populated when it can change the answer, so it
+    reads 0 on an allocated slice rather than claiming the machine is empty.
+    """
+    total, available = detect_cpu_count()
+    batch_job = any(os.environ.get(name) for name in _BATCH_JOB_ENV_VARS)
+    confined = available < total
+    if batch_job or confined:
+        # Our claim is already settled by the allocation; who else is on the
+        # box cannot change it, so skip walking /proc to find out.
+        return HostAllocation(
+            total_cpus=total,
+            available_cpus=available,
+            batch_job=batch_job,
+            confined=confined,
+            other_users=0,
+            kind="allocated",
+        )
+    other_users = count_other_users() if count_users else 0
+    return HostAllocation(
+        total_cpus=total,
+        available_cpus=available,
+        batch_job=batch_job,
+        confined=confined,
+        other_users=other_users,
+        kind="shared" if other_users > 0 else "dedicated",
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class DirectoryLatencySample:
@@ -54,6 +170,7 @@ class SystemInfo:
     sample_outcome: str
     recommended_workers: int
     recommendation_reason: str
+    allocation: HostAllocation | None = None
 
 
 _NETWORK_FS_TYPES = set(NETWORK_FS_TYPES)
@@ -219,6 +336,7 @@ def _compute_recommended_workers(
     sample_entries: int = 0,
     sample_elapsed_seconds: float = 0.0,
     sample_outcome: str = "not-run",
+    allocation: HostAllocation | None = None,
 ) -> tuple[int, str]:
     """Choose a conservative local default and bounded latency parallelism."""
     cpu_cap = max(1, min(available_cpus, 8))
@@ -231,10 +349,10 @@ def _compute_recommended_workers(
         else 0.0
     )
     if is_network_fs:
-        base = min(cpu_cap, 4)
+        base = min(cpu_cap, _NETWORK_WORKER_CAP)
         reasons.append("network filesystem favors bounded latency parallelism")
     elif sample_entries > 0 and average >= 0.002:
-        base = min(cpu_cap, 4)
+        base = min(cpu_cap, _SLOW_LOCAL_WORKER_CAP)
         reasons.append(
             f"metadata sample is high latency ({average * 1000:.2f} ms/entry)"
         )
@@ -254,11 +372,36 @@ def _compute_recommended_workers(
         else:
             reasons.append(f"conservative {medium} local fallback")
 
+    # Being a guest costs more than being slow. On a machine that handed us no
+    # allocation and that other people are using -- a cluster login node, the
+    # canonical case -- stay modest no matter how much the storage would bear.
+    if allocation is not None and allocation.kind == "shared":
+        if base > _SHARED_HOST_WORKER_CAP:
+            base = _SHARED_HOST_WORKER_CAP
+        reasons.append(
+            f"shared host with no allocation and {allocation.other_users} "
+            "other active user(s) caps parallelism"
+        )
+
     load_1min = load_average[0]
-    load_ratio = load_1min / max(available_cpus, 1)
-    if load_ratio > 0.75 and base > 1:
-        base = max(1, base // 2)
-        reasons.append("host load reduced parallelism")
+    if allocation is not None and allocation.kind == "allocated":
+        # os.getloadavg() is host-wide and cgroups do not virtualize it, so on
+        # an allocated slice the numerator counts jobs we are isolated from
+        # while the denominator counts only our own CPUs. Dividing one by the
+        # other reads a quiet 128-core node as heavily oversubscribed and
+        # throttles a scan that is entitled to every core it can see.
+        reasons.append(
+            "host load not applied; this process has its own CPU allocation"
+        )
+    else:
+        # Compare the load against the CPUs it was actually measured across.
+        load_scope = (
+            allocation.total_cpus if allocation is not None else available_cpus
+        )
+        load_ratio = load_1min / max(load_scope, 1)
+        if load_ratio > 0.75 and base > 1:
+            base = max(1, base // 2)
+            reasons.append("host load reduced parallelism")
 
     if 0 < available_mb < 512:
         base = 1
@@ -312,7 +455,8 @@ def sample_directory_latency(
 
 def detect_system_info(path: str = "/", *, sample: bool = True) -> SystemInfo:
     """Detect system info and compute recommended workers."""
-    cpu_count, available_cpus = detect_cpu_count()
+    allocation = detect_host_allocation(count_users=sample)
+    cpu_count, available_cpus = allocation.total_cpus, allocation.available_cpus
     load_average = detect_load_average()
     memory_total_mb, memory_available_mb = detect_memory()
     fs_type, is_network_fs = detect_fs_type(path)
@@ -331,6 +475,7 @@ def detect_system_info(path: str = "/", *, sample: bool = True) -> SystemInfo:
         sample_entries=latency_sample.entries,
         sample_elapsed_seconds=latency_sample.elapsed_seconds,
         sample_outcome=latency_sample.outcome,
+        allocation=allocation,
     )
 
     return SystemInfo(
@@ -353,6 +498,7 @@ def detect_system_info(path: str = "/", *, sample: bool = True) -> SystemInfo:
         sample_outcome=latency_sample.outcome,
         recommended_workers=recommended_workers,
         recommendation_reason=recommendation_reason,
+        allocation=allocation,
     )
 
 
