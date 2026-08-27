@@ -134,7 +134,12 @@ class _DirectoryState:
     settled: bool = False
 
 
-@dataclass(frozen=True, slots=True)
+# Not frozen: this is a private, write-once aggregate snapshot that the
+# propagation loop builds once per ancestor per entry chunk -- hundreds of
+# thousands of times on a large tree. A frozen dataclass routes every field
+# through object.__setattr__, which costs about 4x a plain slots __init__ and
+# showed up as the top avoidable cost in the scanner profile.
+@dataclass(slots=True)
 class _ChildContribution:
     size: int
     allocated_size: int | None
