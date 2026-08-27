@@ -21,6 +21,7 @@ from disktide.domain.metrics import MetricId, sum_available
 from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate
 from disktide.models.tree import FSNode
+from disktide.scanner.policy import lookup_excluded_mount
 from disktide.scanner.walker import (
     classify_symlink,
     make_file_node,
@@ -267,6 +268,7 @@ def scan_directory_once(
     cancel_event: threading.Event,
     root_device: int | None,
     excluded_mounts: Mapping[str, str],
+    canonical_paths: bool = False,
     checkpoint_callback: Callable[[DirectoryEntryChunk], bool | None] | None = None,
     entry_chunk_size: int = _DEFAULT_ENTRY_CHUNK_SIZE,
     directory_observer: Callable[[str], None] | None = None,
@@ -292,8 +294,9 @@ def scan_directory_once(
     except OSError:
         stat_result = None
 
-    canonical_path = os.path.realpath(job.path)
-    filesystem_type = excluded_mounts.get(canonical_path)
+    filesystem_type = lookup_excluded_mount(
+        job.path, excluded_mounts, canonical_paths=canonical_paths
+    )
     if filesystem_type is not None:
         node.excluded = True
         node.exclusion_reason = f"pseudo filesystem ({filesystem_type})"
@@ -503,6 +506,7 @@ class TreeScanScheduler:
         policy: ScanPolicy,
         cancel_event: threading.Event,
         excluded_mounts: Mapping[str, str],
+        canonical_paths: bool = False,
         metric: MetricId | str = MetricId.LOGICAL,
         progress_callback: Callable[[SchedulerProgress], None] | None = None,
         tree_callback: Callable[[ScanTreeUpdate], None] | None = None,
@@ -519,6 +523,7 @@ class TreeScanScheduler:
         self._policy = policy
         self._cancel_event = cancel_event
         self._excluded_mounts = excluded_mounts
+        self._canonical_paths = canonical_paths
         self._metric = MetricId.parse(metric)
         self._progress_callback = progress_callback
         self._tree_callback = tree_callback
@@ -661,6 +666,7 @@ class TreeScanScheduler:
                         cancel_event=self._cancel_event,
                         root_device=root_device,
                         excluded_mounts=self._excluded_mounts,
+                        canonical_paths=self._canonical_paths,
                         checkpoint_callback=publish_checkpoint,
                         entry_chunk_size=self._entry_chunk_size,
                         directory_observer=self._directory_observer,

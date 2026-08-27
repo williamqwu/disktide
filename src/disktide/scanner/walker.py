@@ -8,6 +8,7 @@ from typing import Callable, Mapping
 
 from disktide.domain.metrics import allocated_bytes_from_stat, sum_available
 from disktide.models.tree import FSNode
+from disktide.scanner.policy import lookup_excluded_mount
 
 
 def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
@@ -103,6 +104,7 @@ def scan_directory(
     root_device: int | None = None,
     one_file_system: bool = False,
     excluded_mounts: Mapping[str, str] | None = None,
+    canonical_paths: bool = False,
 ) -> FSNode:
     """Scan a directory and return an FSNode tree.
 
@@ -133,8 +135,9 @@ def scan_directory(
     except OSError:
         st = None
 
-    canonical_path = os.path.realpath(path)
-    filesystem_type = (excluded_mounts or {}).get(canonical_path)
+    filesystem_type = lookup_excluded_mount(
+        path, excluded_mounts or {}, canonical_paths=canonical_paths
+    )
     if filesystem_type is not None:
         node.excluded = True
         node.exclusion_reason = f"pseudo filesystem ({filesystem_type})"
@@ -218,7 +221,7 @@ def scan_directory(
                     child = scan_directory(
                         entry.path, depth + 1, max_depth, cancel_event,
                         ancestors, on_dir_done, root_device,
-                        one_file_system, excluded_mounts,
+                        one_file_system, excluded_mounts, canonical_paths,
                     )
                     node.children.append(child)
                     dir_count += 1 + child.dir_count

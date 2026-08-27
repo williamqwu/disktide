@@ -11,7 +11,7 @@ from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate, ScanWorkerSelection
 from disktide.models.tree import FSNode
 from disktide.scanner.accounting import finalize_unique_allocated
-from disktide.scanner.policy import discover_pseudo_mounts
+from disktide.scanner.policy import discover_pseudo_mounts, paths_stay_canonical
 from disktide.scanner.progress import ProgressThrottle, ScanProgress
 from disktide.scanner.scheduler import (
     _TOP_LEVEL_CLASSIFY_CAP,
@@ -122,6 +122,7 @@ class ScanEngine:
             policy=self._policy,
             cancel_event=self._cancel_event,
             excluded_mounts=excluded_mounts,
+            canonical_paths=paths_stay_canonical(path),
             metric=self._metric,
             progress_callback=self._on_scheduler_progress,
             tree_callback=(

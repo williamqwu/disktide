@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from disktide.collectors.platform import get_platform_adapter
 
@@ -59,3 +59,37 @@ def discover_pseudo_mounts(
             continue
         result[mountpoint] = entry.filesystem_type
     return result
+
+
+def paths_stay_canonical(scan_root: str) -> bool:
+    """Whether every path the walk produces is already fully resolved.
+
+    Descendant paths are built by joining real directory-entry names onto the
+    scan root, and symlinks are never traversed, so no component below the root
+    can be a symlink. That makes the whole walk canonical exactly when the root
+    itself is — which lets the mountpoint lookup use a plain dict hit instead of
+    paying ``os.path.realpath`` (one lstat per path component) per directory.
+    """
+    try:
+        return os.path.realpath(scan_root) == scan_root
+    except OSError:
+        return False
+
+
+def lookup_excluded_mount(
+    path: str,
+    excluded_mounts: Mapping[str, str],
+    *,
+    canonical_paths: bool,
+) -> str | None:
+    """Return the pseudo filesystem type mounted at ``path``, if any.
+
+    ``excluded_mounts`` is keyed by resolved mountpoint. When the caller has
+    established that its paths are already resolved, this is a dict lookup;
+    otherwise it falls back to resolving ``path`` first.
+    """
+    if not excluded_mounts:
+        return None
+    if canonical_paths:
+        return excluded_mounts.get(path)
+    return excluded_mounts.get(os.path.realpath(path))
