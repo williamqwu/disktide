@@ -294,6 +294,10 @@ progress counter is drawn only when stderr is a terminal.
 Commands that accept `--json` write one JSON document to stdout and nothing
 else, which makes them safe to pipe into `jq`.
 
+The TUI, the one-shot CLI, and periodic `watch` runs all drive the same scan
+service, so a run started from any of them reports the same run id, phase,
+policy, and terminal status.
+
 ### doctor
 
 Report the installed version, Python/Textual versions, active platform adapter,
@@ -331,8 +335,9 @@ Cross-filesystem scanning is the default; `--one-file-system` leaves visible
 default, while an explicitly selected pseudo root is still scanned. Use
 `--include-pseudo` to opt in to descendant pseudo filesystems.
 
-The command reports a short run id, phase, policy, and terminal status on
-stderr, and writes the summary and top-directory table to stdout. Exit codes
+The command reports a short run id, phase, policy, and one explicit terminal
+status (`completed`, `partial`, `cancelled`, or `failed`) on stderr, and writes
+the summary and top-directory table to stdout. Exit codes
 are `0` for complete or partial success, `1` for scan failure, `2` for invalid
 input, and `130` for cancellation. A partial result remains usable but includes
 an explicit coverage line; cancellation never prints a completion summary.
