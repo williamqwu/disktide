@@ -36,7 +36,9 @@ Filesystem-event normalization, dirty coalescing, overflow recovery, optional
 dependency fallback, and MonitorService integration live in
 `tests/test_watch_wave10.py`. Adaptive worker selection, giant-directory chunk
 checkpoints, resource queue cancellation, and Monitor queue projection live in
-`tests/test_scan_wave13.py`.
+`tests/test_scan_wave13.py`. The startup import boundary -- what `import
+disktide.app` is allowed to pull in before the welcome screen -- is asserted in
+`tests/test_startup_imports.py`.
 
 `PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app tests instead wrap an async helper with `asyncio.run(...)` and use `app.run_test()`; follow the style of the nearby tests.
 
@@ -84,6 +86,25 @@ This layering means the scanner, storage, cleanup, and viz modules are testable 
 Declarative policy loaders must never execute user-authored content. Treat rule
 scores as ordering metadata; every filesystem action still passes through
 `CleanupService` identity/boundary revalidation and audit.
+
+### Startup Import Boundary
+
+- `app.py` must not import the mode screens or the services at module scope.
+  The screens are imported inside `_launch_explorer()`; the services are lazy
+  properties on `DiskTideApp` that import their module on first access.
+- Reaching the welcome screen is almost pure import cost, and on shared storage
+  that cost is the startup time: on a cold NFSv4 cluster home a module file
+  measured ~16 ms to fault in against ~0.4 ms once cached, so every module on
+  the pre-welcome path is worth roughly 40x its size on a first launch.
+  Deferring dropped 153 module files from that path, ~2.5 s off a cold launch
+  and ~0.15 s off a warm one.
+- Teardown-only code reads the backing fields (`self.__scan_service`) rather
+  than the properties, so quitting from the welcome screen does not build a
+  service purely to discard it. Follow that pattern for anything else that only
+  needs a service if it already exists.
+- `tests/test_startup_imports.py` enforces the boundary with a budget on the
+  resident `disktide` module count. A failure there means something landed at
+  module scope that belongs at first use.
 
 ### Scan Service and Consumers
 
@@ -194,8 +215,11 @@ default_action = "safe"
 
 1. Create `screens/my_screen.py` subclassing `textual.screen.Screen`.
 2. Define `BINDINGS` and `compose()`.
-3. Install the screen in `app.py` `_launch_explorer()`:
+3. Install the screen in `app.py` `_launch_explorer()`, importing it there
+   rather than at module scope -- see [Startup Import Boundary](#startup-import-boundary):
    ```python
+   from disktide.screens.my_screen import MyScreen
+
    self.install_screen(MyScreen(...), name="myscreen")
    ```
 4. Add a key binding in `DiskTideApp.BINDINGS` and a case in `action_switch_mode()`.

@@ -772,6 +772,26 @@ disktide scan <path>
   -> CLI-only, no TUI
 ```
 
+Everything below the welcome screen is imported at first use rather than at
+`app.py` module scope: the four services are lazy properties on `DiskTideApp`,
+and the five mode screens are imported inside `_launch_explorer`. Reaching the
+welcome screen is almost pure import cost, and on shared storage that cost is
+the startup time -- a module file measured ~16 ms to fault in from a cold NFSv4
+cluster home against ~0.4 ms once the page cache held it, so the first launch on
+a node pays roughly 40x what every later launch pays. Deferring took `import
+disktide.app` from 563 modules and 486 module-file opens to 406 and 333, and 99
+`disktide` modules down to 27: ~0.52 s to ~0.37 s of warm process time, and the
+153 files it no longer faults in are worth roughly 2.5 s more on a node's first
+launch. The monitor screen is the reason `textual-plotext` and `plotext` no
+longer load at startup: they arrive through its trend chart. `_perform_quit`
+reaches the services through their backing fields rather than through the
+properties, so quitting from the welcome screen does not build a service purely
+to shut it down.
+
+Nothing in the code enforces that boundary -- one convenience import at module
+scope silently undoes it -- so `tests/test_startup_imports.py` asserts it, from a
+subprocess, with a budget on the resident `disktide` module count.
+
 ### Screen Management
 
 `DiskTideApp` installs four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings after the welcome screen completes. Screens are installed (not pushed) so they persist when switching among Explorer/Monitor/FS Overview with `1`/`2`/`3`; Cleanup remains on `c` because it is disabled by default and has its own plan/apply workflow.

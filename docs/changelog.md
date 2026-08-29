@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.23
+
+**A welcome screen that no longer pays for the whole application**
+
+- **deferred startup imports** `app.py` imported the four services and the five mode screens at module scope, so launching the TUI built the entire application graph before drawing a screen that uses none of it. The services are now lazy properties on `DiskTideApp` and the screens are imported inside `_launch_explorer()`, which takes `import disktide.app` from 563 modules and 486 module-file opens to 406 and 333 -- 99 `disktide` modules down to 27. `textual-plotext` and `plotext` are the largest thing to go: they arrive through the monitor screen's trend chart and are not needed until that screen exists.
+- **why that matters on shared storage** Reaching the welcome screen is almost pure import cost, and on a network filesystem that cost *is* the startup time. On the NFSv4 cluster home used for benchmarking, a module file measured ~16 ms to fault in cold against ~0.4 ms once the page cache held it, so every module on the pre-welcome path is worth roughly 40x its size on a node's first launch. The 153 files dropped from that path are about 2.5 s off a cold launch; warm process time went from ~0.52 s to ~0.37 s.
+- **teardown no longer builds what it tears down** `_perform_quit` called `stop_session()` and `cancel_all()` unconditionally, which through the new properties would have constructed both services -- and paid for their imports -- purely to shut them down again. It now reads the backing fields and skips whatever was never built, so quitting from the welcome screen costs nothing.
+- **the boundary is asserted** Nothing in the code enforces which modules may load at startup, and one convenience import at module scope silently undoes it. `tests/test_startup_imports.py` reads `sys.modules` from a subprocess -- the suite has long since imported everything by the time any test runs -- and fails if a service, a mode screen, the plot backend, or the cleanup rule loader is resident after `import disktide.app`, with a budget on the resident `disktide` module count.
+
 ## v0.2.22
 
 **A sunburst that is actually a circle, painted with anti-aliased half-blocks**

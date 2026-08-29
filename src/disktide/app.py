@@ -5,34 +5,35 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from textual.app import App
 from textual.binding import Binding
 
 from disktide import APP_NAME
-from disktide.cleanup.actions import QuarantineExecutor
-from disktide.cleanup.rules import get_rule_by_name
 from disktide.config import (
     AppConfig, cleanup_rule_directory, load_config, save_config,
     get_effective_paths, set_effective_paths,
 )
-from disktide.domain.monitor import MonitorDefinition
-from disktide.domain.cleanup import CleanupActionKind
 from disktide.rendering import set_safe_rendering
 from disktide.repositories import default_snapshot_repository
 from disktide.repositories.snapshots import SnapshotRepository
-from disktide.services.scan import ScanService
-from disktide.services.cleanup import CleanupService
-from disktide.services.monitor import MonitorService
-from disktide.services.visualization import VisualizationService
 from disktide.viz.colors import set_color_scheme
-from disktide.screens.explorer import ExplorerScreen
-from disktide.screens.cleanup import CleanupScreen
-from disktide.screens.monitor import MonitorScreen
-from disktide.screens.settings import SettingsScreen
-from disktide.screens.fs_overview import FSOverviewScreen
 from disktide.widgets.confirm_modal import ConfirmModal
 from disktide.widgets.monitor_editor import MonitorEditor, MonitorEditorResult
+
+# The services and the mode screens are imported where they are first
+# used, not here. Drawing the welcome screen needs none of them, and on a
+# network filesystem the modules they pull in are the whole startup cost:
+# a module file costs ~16ms to fault in from a cold NFS mount against
+# ~0.4ms once the page cache holds it.
+if TYPE_CHECKING:
+    from disktide.domain.cleanup import CleanupActionKind
+    from disktide.domain.monitor import MonitorDefinition
+    from disktide.services.cleanup import CleanupService
+    from disktide.services.monitor import MonitorService
+    from disktide.services.scan import ScanService
+    from disktide.services.visualization import VisualizationService
 
 
 class DiskTideApp(App):
@@ -73,41 +74,88 @@ class DiskTideApp(App):
         self._snapshot_repository = (
             snapshot_repository or default_snapshot_repository()
         )
-        self._scan_service = ScanService()
-        self._monitor_service = MonitorService(
-            self._snapshot_repository,
-            scan_service=self._scan_service,
-            host_type="tui",
-            soft_budget_bytes=self._config.monitor.database_soft_budget,
-            hard_budget_bytes=self._config.monitor.database_hard_budget,
-            event_mode=self._config.monitor.event_mode,
-        )
-        self._visualization_service = VisualizationService(
-            self._snapshot_repository
-        )
-        self._cleanup_safe_action = (
-            CleanupActionKind.TRASH
-            if self._config.cleanup.prefer_trash
-            else CleanupActionKind.QUARANTINE
-        )
-        self._cleanup_service = CleanupService(
-            self._snapshot_repository,
-            quarantine=QuarantineExecutor(
-                retention_days=(
-                    self._config.cleanup.quarantine_retention_days
-                ),
-                max_bytes=self._config.cleanup.quarantine_max_bytes,
-            ),
-            rule_provider=lambda name: get_rule_by_name(
-                name,
-                disabled_packs=self._config.cleanup.disabled_rule_packs,
-                user_directory=cleanup_rule_directory(),
-            ),
-        )
+        # Backing fields for the lazy service properties below.
+        self.__scan_service: ScanService | None = None
+        self.__monitor_service: MonitorService | None = None
+        self.__visualization_service: VisualizationService | None = None
+        self.__cleanup_service: CleanupService | None = None
+        self.__cleanup_safe_action: CleanupActionKind | None = None
         self._show_welcome = show_welcome
         # Ensures the "running without persistence" warning is only shown
         # once per session, no matter how many times we check.
         self._warned_degraded = False
+
+    # Services build themselves on first touch. The attribute names are
+    # unchanged, so screens and tests still reach them as `_scan_service`
+    # and friends without knowing they were deferred.
+
+    @property
+    def _scan_service(self) -> ScanService:
+        if self.__scan_service is None:
+            from disktide.services.scan import ScanService
+
+            self.__scan_service = ScanService()
+        return self.__scan_service
+
+    @property
+    def _monitor_service(self) -> MonitorService:
+        if self.__monitor_service is None:
+            from disktide.services.monitor import MonitorService
+
+            self.__monitor_service = MonitorService(
+                self._snapshot_repository,
+                scan_service=self._scan_service,
+                host_type="tui",
+                soft_budget_bytes=self._config.monitor.database_soft_budget,
+                hard_budget_bytes=self._config.monitor.database_hard_budget,
+                event_mode=self._config.monitor.event_mode,
+            )
+        return self.__monitor_service
+
+    @property
+    def _visualization_service(self) -> VisualizationService:
+        if self.__visualization_service is None:
+            from disktide.services.visualization import VisualizationService
+
+            self.__visualization_service = VisualizationService(
+                self._snapshot_repository
+            )
+        return self.__visualization_service
+
+    @property
+    def _cleanup_service(self) -> CleanupService:
+        if self.__cleanup_service is None:
+            from disktide.cleanup.actions import QuarantineExecutor
+            from disktide.cleanup.rules import get_rule_by_name
+            from disktide.services.cleanup import CleanupService
+
+            self.__cleanup_service = CleanupService(
+                self._snapshot_repository,
+                quarantine=QuarantineExecutor(
+                    retention_days=(
+                        self._config.cleanup.quarantine_retention_days
+                    ),
+                    max_bytes=self._config.cleanup.quarantine_max_bytes,
+                ),
+                rule_provider=lambda name: get_rule_by_name(
+                    name,
+                    disabled_packs=self._config.cleanup.disabled_rule_packs,
+                    user_directory=cleanup_rule_directory(),
+                ),
+            )
+        return self.__cleanup_service
+
+    @property
+    def _cleanup_safe_action(self) -> CleanupActionKind:
+        if self.__cleanup_safe_action is None:
+            from disktide.domain.cleanup import CleanupActionKind
+
+            self.__cleanup_safe_action = (
+                CleanupActionKind.TRASH
+                if self._config.cleanup.prefer_trash
+                else CleanupActionKind.QUARANTINE
+            )
+        return self.__cleanup_safe_action
 
     def on_mount(self) -> None:
         set_color_scheme(self._config.ui.color_theme)
@@ -213,6 +261,16 @@ class DiskTideApp(App):
 
     def _launch_explorer(self, scan_path: str) -> None:
         """Install mode screens and push the explorer."""
+        # Deferred to here rather than module scope: between them these
+        # five screens reach about a third of the app's import graph (the
+        # monitor screen alone reaches plotext through the trend chart),
+        # and none of it is needed until the user has picked a path.
+        from disktide.screens.cleanup import CleanupScreen
+        from disktide.screens.explorer import ExplorerScreen
+        from disktide.screens.fs_overview import FSOverviewScreen
+        from disktide.screens.monitor import MonitorScreen
+        from disktide.screens.settings import SettingsScreen
+
         self._scan_path = scan_path
 
         self._explorer = ExplorerScreen(
@@ -323,14 +381,19 @@ class DiskTideApp(App):
             save_config(self._config)
         except OSError:
             pass
-        try:
-            self._monitor_service.stop_session(wait=False)
-        except Exception:
-            pass
+        # Reached through the backing fields, not the properties: quitting
+        # from the welcome screen must not build a service — and pay for
+        # its imports — purely to shut it down again.
+        if self.__monitor_service is not None:
+            try:
+                self.__monitor_service.stop_session(wait=False)
+            except Exception:
+                pass
         try:
             self._explorer.cancel_active_scan()
         except AttributeError:
-            self._scan_service.cancel_all()
+            if self.__scan_service is not None:
+                self.__scan_service.cancel_all()
         self.exit()
 
     def action_switch_mode(self, mode: str) -> None:
