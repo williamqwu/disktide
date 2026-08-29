@@ -188,7 +188,11 @@ class ExplorerScreen(Screen):
         self._pair_index = 0
         self._provisional_summary: ProvisionalSummary | None = None
         self._monitor_projection_id: int | None = None
-        self._sunburst_sync_timer: Timer | None = None
+        self._cursor_settle_timer: Timer | None = None
+        # Where the tree cursor last stopped. The Details panel is only
+        # kept current while its tab is visible, so this is what tab
+        # activation replays into it.
+        self._last_highlighted: FSNode | None = None
 
     @property
     def selected_path(self) -> str:
@@ -236,7 +240,7 @@ class ExplorerScreen(Screen):
         self._start_scan()
 
     def on_unmount(self) -> None:
-        self._cancel_sunburst_sync()
+        self._cancel_cursor_settle()
         if self._monitor_service is not None:
             self._monitor_service.unsubscribe(self._on_monitor_event)
 
@@ -331,10 +335,11 @@ class ExplorerScreen(Screen):
             view.set_live_mode(self._live_render)
         # A path from the previous tree would keep brightening an arc that
         # the new scan may not even contain.
-        self._cancel_sunburst_sync()
+        self._cancel_cursor_settle()
         self.query_one("#sunburst-view", SunburstView).set_selected_path(None)
         # Reset the Details panel too: otherwise the previous scan's
         # detail block stays visible until the user re-highlights.
+        self._last_highlighted = None
         self.query_one("#info-panel", InfoPanel).update_node(None)
         self._run_scan(run)
 
@@ -846,21 +851,20 @@ class ExplorerScreen(Screen):
 
     @on(Tree.NodeHighlighted)
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[FSNode]) -> None:
-        """Update info panel when tree selection changes."""
+        """Record the cursor and defer the work a move only implies."""
         if event.node.data is None:
             return
         node = event.node.data
-        info = self.query_one("#info-panel", InfoPanel)
-        info.update_node(node)
-        if not self._diff_mode:
-            # Diff mode already re-renders the chart on every cursor move
-            # (below), so syncing there would recompute it twice.
-            self._schedule_sunburst_sync()
+        self._last_highlighted = node
+        if self.query_one("#viz-tabs", TabbedContent).active == "tab-details":
+            # Rebuilding the panel behind another tab sorts and formats the
+            # node's children for nobody; `on_tab_activated` replays the
+            # cursor into it when Details comes back.
+            self.query_one("#info-panel", InfoPanel).update_node(node)
+        self._schedule_cursor_settle()
         if self._space_time is not None:
             frame = replace(self._space_time.frame, selected_path=node.path)
             self._space_time = replace(self._space_time, frame=frame)
-            if self._diff_mode:
-                self._update_active_viz(self._current or self._root or node)
             if node.path not in self._space_time.mini_trends:
                 snapshot_ids = tuple(
                     snapshot.id
@@ -873,33 +877,47 @@ class ExplorerScreen(Screen):
                 )
                 self._load_selected_trend(node.path, snapshot_ids, frame.metric.value)
 
-    # One sunburst recompute costs ~40 ms at a typical viewport, so the
-    # cursor's selection is pushed to the chart only once it settles;
-    # holding an arrow key would otherwise recompute per keystroke.
-    _SUNBURST_SYNC_DELAY = 0.12
+    # One chart recompute costs ~40 ms at a typical viewport, so everything
+    # the cursor drives waits for it to settle; holding an arrow key would
+    # otherwise recompute per keystroke. Diff mode (which re-renders the
+    # whole chart per move) and current mode (which only re-highlights an
+    # arc) share the one timer so a move can never queue two recomputes.
+    _CURSOR_SETTLE_DELAY = 0.12
 
-    def _schedule_sunburst_sync(self) -> None:
-        """(Re)start the debounce that mirrors the cursor onto the chart."""
-        self._cancel_sunburst_sync()
+    def _schedule_cursor_settle(self) -> None:
+        """(Re)start the debounce on the chart work a cursor move implies."""
+        self._cancel_cursor_settle()
         if self._scan_in_progress:
             # A live scan already owns the chart's repaint budget, and the
             # cursor cannot navigate while it runs.
             return
-        self._sunburst_sync_timer = self.set_timer(
-            self._SUNBURST_SYNC_DELAY,
-            self._sync_sunburst_selection,
+        self._cursor_settle_timer = self.set_timer(
+            self._CURSOR_SETTLE_DELAY,
+            self._on_cursor_settled,
         )
 
-    def _cancel_sunburst_sync(self) -> None:
-        if self._sunburst_sync_timer is not None:
-            self._sunburst_sync_timer.stop()
-            self._sunburst_sync_timer = None
+    def _cancel_cursor_settle(self) -> None:
+        if self._cursor_settle_timer is not None:
+            self._cursor_settle_timer.stop()
+            self._cursor_settle_timer = None
 
-    def _sync_sunburst_selection(self) -> None:
-        self._sunburst_sync_timer = None
-        if not self.is_mounted or self._diff_mode:
+    def _on_cursor_settled(self) -> None:
+        self._cursor_settle_timer = None
+        if not self.is_mounted:
             return
-        if self.query_one("#viz-tabs", TabbedContent).active != "tab-sunburst":
+        active = self.query_one("#viz-tabs", TabbedContent).active
+        if self._diff_mode:
+            # Both charts read the frame's selected_path, so this branch
+            # is not sunburst-only — but Details is skipped: the panel
+            # already follows the cursor while it is visible, and
+            # `_update_active_viz` would rebuild it from the drilled node.
+            if active == "tab-details":
+                return
+            node = self._current or self._root
+            if node is not None:
+                self._update_active_viz(node)
+            return
+        if active != "tab-sunburst":
             # An inactive tab is not repainted, so the recompute would buy
             # nothing; switching to it re-renders from the current tree.
             return
@@ -986,6 +1004,14 @@ class ExplorerScreen(Screen):
     @on(TabbedContent.TabActivated)
     def on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Refresh viz when switching tabs so the newly visible panel is current."""
+        if self.query_one("#viz-tabs", TabbedContent).active == "tab-details":
+            # Details went unpainted while it was hidden, so it catches up
+            # on the cursor here. Falls back to the drilled node (and then
+            # the scan root) before the first highlight of a scan.
+            node = self._last_highlighted or self._current or self._root
+            if node is not None:
+                self.query_one("#info-panel", InfoPanel).update_node(node)
+            return
         node = self._live_snapshot if self._scan_in_progress else self._current
         if node is None:
             return
@@ -1190,9 +1216,19 @@ class ExplorerScreen(Screen):
         """
         tree = self.query_one("#size-tree", SizeTree)
         quarter = max(1, tree.size.height // 4)
-        move = tree.action_cursor_down if direction == "down" else tree.action_cursor_up
-        for _ in range(quarter):
-            move()
+        # One cursor assignment, not `quarter` single-line moves: each
+        # intermediate line would otherwise post its own NodeHighlighted
+        # and drag the whole per-move pipeline through with it.
+        # `validate_cursor_line` clamps the target at both ends, and the
+        # watcher stays silent when the clamp lands on the current line.
+        if tree.cursor_line == -1:
+            target = 0 if direction == "down" else tree.last_line
+        elif direction == "down":
+            target = tree.cursor_line + quarter
+        else:
+            target = tree.cursor_line - quarter
+        tree.cursor_line = target
+        tree.scroll_to_line(tree.cursor_line, animate=False)
 
     def cancel_active_scan(self) -> None:
         """Public hook to abort the in-flight scan, if any.

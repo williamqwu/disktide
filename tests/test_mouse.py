@@ -518,20 +518,21 @@ def test_selection_sync_is_debounced(tmp_path):
             await _wait_for_explorer(pilot, app)
             screen = app.screen
 
-            screen._schedule_sunburst_sync()
-            first = screen._sunburst_sync_timer
+            screen._schedule_cursor_settle()
+            first = screen._cursor_settle_timer
             assert first is not None
-            screen._schedule_sunburst_sync()
-            assert screen._sunburst_sync_timer is not first
+            screen._schedule_cursor_settle()
+            assert screen._cursor_settle_timer is not first
 
-            screen._cancel_sunburst_sync()
-            assert screen._sunburst_sync_timer is None
+            screen._cancel_cursor_settle()
+            assert screen._cursor_settle_timer is None
 
     asyncio.run(go())
 
 
-def test_diff_mode_does_not_add_a_second_selection_sync(tmp_path):
-    """Diff mode already re-renders the chart per cursor move by design."""
+def test_diff_mode_shares_the_one_settle_timer(tmp_path):
+    """Diff mode re-renders the whole chart per move, so it is debounced
+    through the same timer rather than a second one of its own."""
     _make_tree_dir(tmp_path)
 
     async def go():
@@ -540,12 +541,20 @@ def test_diff_mode_does_not_add_a_second_selection_sync(tmp_path):
             await _wait_for_explorer(pilot, app)
             screen = app.screen
             screen._diff_mode = True
-            screen._cancel_sunburst_sync()
+            screen._cancel_cursor_settle()
 
             await pilot.press("down")
             await pilot.pause()
 
-            assert screen._sunburst_sync_timer is None
+            # One timer, armed by the move; the sunburst selection push is
+            # not reached in diff mode when it fires.
+            timer = screen._cursor_settle_timer
+            assert timer is not None
+            screen._cancel_cursor_settle()
+            view = screen.query_one("#sunburst-view", SunburstView)
+            view._selected_path = "sentinel"
+            screen._on_cursor_settled()
+            assert view._selected_path == "sentinel"
 
     asyncio.run(go())
 

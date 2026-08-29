@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from textual import work
 from textual.app import ComposeResult
 from textual.widget import Widget
 from textual.widgets import Static
@@ -66,20 +67,25 @@ class InfoPanel(Widget):
         table.add_row("Name", node.name)
         table.add_row("Path", node.path)
         if node.is_symlink:
-            # Deeper symlinks defer target classification; fill it in
-            # now so the rows below reflect reality.
-            classify_symlink(node)
             table.add_row("Type", "Symlink")
-            if node.link_target:
-                table.add_row("Target", node.link_target)
-            if node.link_broken:
-                table.add_row(
-                    "Target type", Text("Broken or unreachable", style="bold red")
-                )
-            elif node.link_is_dir:
-                table.add_row("Target type", "Directory  (press i to enter)")
+            if not node.link_classified:
+                # readlink + a following stat are two server round-trips on
+                # a network filesystem with a cold attribute cache. The
+                # panel renders without them and `_classify_node` fills
+                # these rows in off the UI thread.
+                table.add_row("Target", node.link_target or "…")
+                table.add_row("Target type", Text("Resolving…", style="dim"))
             else:
-                table.add_row("Target type", "File")
+                if node.link_target:
+                    table.add_row("Target", node.link_target)
+                if node.link_broken:
+                    table.add_row(
+                        "Target type", Text("Broken or unreachable", style="bold red")
+                    )
+                elif node.link_is_dir:
+                    table.add_row("Target type", "Directory  (press i to enter)")
+                else:
+                    table.add_row("Target type", "File")
         else:
             table.add_row("Type", "Directory" if node.is_dir else "File")
             if node.is_loop:
@@ -204,3 +210,18 @@ class InfoPanel(Widget):
                 table.add_row(f"  {name}", value_str)
 
         self._display.update(table)
+
+        if node.is_symlink and not node.link_classified and self.is_mounted:
+            self._classify_node(node)
+
+    @work(thread=True, exclusive=True, group="info-panel-symlink", exit_on_error=False)
+    def _classify_node(self, node: FSNode) -> None:
+        """Resolve a symlink's target off the UI thread, then re-render."""
+        classify_symlink(node)
+        self.app.call_from_thread(self._apply_classification, node)
+
+    def _apply_classification(self, node: FSNode) -> None:
+        # The cursor can move on while readlink/stat are in flight; only
+        # the node still on display is allowed to repaint the panel.
+        if self.is_mounted and self._node is node:
+            self.update_node(node)

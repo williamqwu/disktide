@@ -69,6 +69,13 @@ class DiskTideApp(App):
         if "NO_COLOR" in os.environ:
             kwargs["ansi_color"] = True
         super().__init__(**kwargs)
+        # Textual's animations cost ~320ms of the ~420ms a viz tab switch
+        # took, and each one is a burst of frames down an ssh pipe — this
+        # tool's home is a login/compute node, not a local terminal.
+        # TEXTUAL_ANIMATIONS is the user's own knob, so any value set there
+        # keeps whatever Textual resolved from it.
+        if not os.environ.get("TEXTUAL_ANIMATIONS"):
+            self.animation_level = "none"
         self._scan_path = str(Path(scan_path).resolve()) if scan_path else None
         self._config = config or load_config()
         self._snapshot_repository = (

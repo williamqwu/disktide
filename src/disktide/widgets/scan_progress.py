@@ -47,7 +47,9 @@ class ScanProgressOverlay(Widget):
         self._run_id: str | None = None
         self._phase: str | None = None
         self._policy: str | None = None
-        # Indeterminate (total=None): the bar pulses to signal activity.
+        # Indeterminate (total=None): the bar signals activity, not
+        # progress — with animations disabled it renders as a static
+        # indeterminate band and the stats line carries the motion.
         # We have no honest progress fraction without a pre-count pass,
         # so a fake percentage that parks at 97% does more harm than good.
         self._bar = ProgressBar(
