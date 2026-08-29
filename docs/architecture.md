@@ -682,7 +682,7 @@ Uses the `squarify` library for squarified layout. Key implementation details:
 - **Adaptive padding**: Top-level rectangles get a 1-cell border for labels when there's room (inner area >= 4x3). Deeper levels skip padding to preserve space.
 - **Depth limiting**: Typically 3 levels deep to prevent visual clutter.
 - **Minimum cell size**: Rectangles that collapse below 1x1 are still rendered as a single cell rather than disappearing.
-- **Coloring**: File-type category determines hue (from the active color scheme), depth modulates luminance (deeper = darker), and directories get distinct border colors.
+- **Coloring**: File-type category determines hue (from the theme-invariant category tables), depth modulates luminance (deeper = darker), and directory leaves take the dominance tint when a `CategoryIndex` is present.
 - **Diff mode**: Area uses the target/current metric, while the shared diverging palette uses normalized delta. Removed paths receive bounded tombstone weight.
 - **Large trees**: Each viewport lays out at most a bounded top-N plus one aggregate remainder. The cursor-selected branch is retained even when it is tiny.
 
@@ -693,7 +693,7 @@ Ring chart where each concentric ring represents a depth level, and arc angles a
 - **Ring width**: `max_radius // (max_depth + 1)`, giving roughly equal thickness per ring.
 - **Arc rendering**: `ColorBrailleCanvas.fill_arc()` fills ring segments densely by sampling many radii per arc.
 - **Labels**: Arcs wider than 30 degrees at depth 1 get labeled. A collision detection pass prevents overlaps.
-- **Legend**: Bottom-left shows file-type categories with their colors.
+- **Legend**: Bottom-left shows file-type categories with their colors, plus each one's byte share when the category index is available.
 - **Growth overlay**: Diff frames replace category hue with shared delta state while preserving path/ring identity. Selected branches remain in the arc model below the normal tiny-arc cutoff.
 - **Narrow fallback**: Canvases below 40x12 render a readable summary and legend instead of a clipped ring chart.
 
