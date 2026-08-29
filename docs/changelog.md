@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.22
+
+**A sunburst that is actually a circle, painted with anti-aliased half-blocks**
+
+- **cell aspect** Every chart assumed a character cell was exactly twice as tall as it is wide, because that is the only ratio at which a braille dot is square. Real cells are not: a 14px monospace face at 1.2 line height gives 7x17 pixels, a ratio of 2.43, and drawing a circle as if it were 2.0 stretched the disc vertically by 21%. The sunburst was a visible ellipse. Most terminals report the pane's pixel size next to its cell size in `TIOCGWINSZ` -- tmux forwards it to every pty it owns -- so the ratio is now measured rather than assumed, and the disc comes out round on any font. `DISKTIDE_CELL_ASPECT=2.43` overrides the measurement; a terminal that reports no pixel size still gets the old 2.0.
+- **half-block renderer** The braille layer is gone. A braille dot is on or off, so a partially covered cell could only be stippled, and against the solid interiors the dotted rim -- and much worse, the dotted walls of every empty wedge, which cut clean through the disc wherever a leaf has no children -- read as dirty plumes rather than edges. The disc is now supersampled into a framebuffer of half-cells, four subsamples each, and every cell resolves to a space over one color or to `▀`/`▄` over two. Rims, wedge walls, and separators all come out as coverage blends. A half-covered cell draws its block as *foreground only*, so the widget's own background shows through and no background estimate can halo the disc. Uniform samples average back to themselves exactly, so ring interiors stay perfectly flat. The whole compute-and-render pass came out about 1.4x faster than the braille path at every pane size.
+- **separators** Sibling directories at one depth were given the identical color -- hue and saturation from the scheme, luminance from depth alone -- with nothing drawn between arcs or between rings, so a run of them merged into one undivided blob. Each ring now carries a hairline of its own darkened color just inside its outer edge, and each boundary between siblings carries one along its length, skipped wherever a neighbour is too narrow to survive it. Both are narrower than the subsample spacing, so each subsample mixes by the fraction of its footprint the seam covers; that conserves the seam's ink and resolves it as an even line instead of a dashed one. Sibling directories also alternate slightly in luminance, which carries the division through the arcs too small for a seam.
+- **treemap squareness** `compute_layout` squarified in doubled-height space with the factor 2 hard-coded, which is the same wrong assumption in the other chart. It now takes the measured cell aspect, so a block that squarify believes is square is square on the viewer's screen. Callers that pass nothing still get 2.0.
+- **drawille** Dropped from the dependencies along with `viz/braille.py`; nothing imports it any more.
+
 ## v0.2.21
 
 **Legible visualizations: a solid sunburst with a braille rim, a treemap without slivers**

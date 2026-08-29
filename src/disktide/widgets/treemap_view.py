@@ -17,6 +17,7 @@ from disktide.metrics import (
 )
 from disktide.models.tree import FSNode
 from disktide.domain.visualization import DiffFrame
+from disktide.viz.cellgeom import detect_cell_aspect
 from disktide.viz.treemap import TreemapLayout, compute_layout, render_line
 
 
@@ -117,6 +118,7 @@ class TreemapView(Widget):
             selected_path=(
                 self._diff.selected_path if self._diff is not None else None
             ),
+            cell_aspect=detect_cell_aspect(),
         )
 
     def render_line(self, y: int) -> Strip:

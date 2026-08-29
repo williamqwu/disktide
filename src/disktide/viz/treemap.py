@@ -20,6 +20,7 @@ from disktide.visualization_formatting import (
     visual_token,
 )
 from disktide.rendering import denied_glyph, partial_glyph
+from disktide.viz.cellgeom import DEFAULT_CELL_ASPECT
 from disktide.viz.colors import (
     delta_background,
     file_category,
@@ -124,10 +125,14 @@ def compute_layout(
     weights: Mapping[str, int] | None = None,
     visuals: Mapping[str, VisualDelta] | None = None,
     selected_path: str | None = None,
+    cell_aspect: float | None = None,
 ) -> TreemapLayout:
     """Compute a squarified treemap layout for the given node.
 
-    `metric` selects what the rectangle areas encode.
+    `metric` selects what the rectangle areas encode.  `cell_aspect` is the
+    pixel height/width ratio of one character cell, which is what makes a
+    "square" rectangle actually square on screen; None keeps the historical
+    2.0 so callers that do not measure their terminal stay deterministic.
     """
     layout = TreemapLayout(width=width, height=height)
 
@@ -135,6 +140,10 @@ def compute_layout(
     if width <= 0 or height <= 0 or root_value is None or root_value <= 0:
         layout.build_grid()
         return layout
+
+    vscale = DEFAULT_CELL_ASPECT if cell_aspect is None else float(cell_aspect)
+    if vscale <= 0.0:
+        vscale = DEFAULT_CELL_ASPECT
 
     _layout_node(
         node,
@@ -149,6 +158,7 @@ def compute_layout(
         weights,
         visuals,
         selected_path,
+        vscale,
     )
     layout.build_grid()
     return layout
@@ -302,17 +312,18 @@ def _strip_groups(
     start: int, stop: int,
     vertical: bool,
     protected: list[bool],
+    vscale: float,
 ) -> list[tuple[int, int]]:
     """Partition one strip into the index ranges that will be emitted."""
     head = local_rects[start]
-    thickness = head["dx"] if vertical else head["dy"] / 2.0
+    thickness = head["dx"] if vertical else head["dy"] / vscale
     fold_whole = (stop - start) >= 2 and thickness < _MIN_STRIP_THICKNESS
 
     groups: list[tuple[int, int]] = []
     run_start = start
     for index in range(start, stop):
         item = local_rects[index]
-        length = item["dy"] / 2.0 if vertical else item["dx"]
+        length = item["dy"] / vscale if vertical else item["dx"]
         # A child on the selected path is never merged away (ADR 0006 keeps
         # the cursor's target addressable); the run splits around it, and
         # the flanks are allowed to come out short.
@@ -420,13 +431,15 @@ def _fold_sub_cell(
     return [item[3] for item in ranked], [item[0] for item in ranked]
 
 
-def _fusible(rect: dict, lo: int, hi: int, protected: list[bool]) -> bool:
+def _fusible(
+    rect: dict, lo: int, hi: int, protected: list[bool], vscale: float
+) -> bool:
     """Whether a piece may be fused with a neighbouring one."""
     if any(protected[lo:hi]):
         return False
     if hi - lo >= 2:
         return True  # already a fold
-    return rect["dx"] * rect["dy"] / 2.0 < 1.0  # sub-cell crumb
+    return rect["dx"] * rect["dy"] / vscale < 1.0  # sub-cell crumb
 
 
 def _consolidate(
@@ -437,6 +450,7 @@ def _consolidate(
     metric: str,
     weights: Mapping[str, int] | None,
     selected_path: str | None,
+    vscale: float,
 ) -> list[tuple[dict, FSNode]]:
     """Fold sub-legible squarify output into labeled aggregate blocks.
 
@@ -457,7 +471,9 @@ def _consolidate(
 
     groups: list[tuple[dict, int, int]] = []
     for vertical, start, stop in _strips(local_rects):
-        for lo, hi in _strip_groups(local_rects, start, stop, vertical, protected):
+        for lo, hi in _strip_groups(
+            local_rects, start, stop, vertical, protected, vscale
+        ):
             rect = (
                 local_rects[lo]
                 if hi - lo == 1
@@ -470,9 +486,11 @@ def _consolidate(
             # screen at all because _snap_rects inflates it to one cell —
             # two of those inflate onto the *same* cell, where the later
             # erases the earlier.  Fusing needs the union to be a rectangle.
-            if groups and _fusible(rect, lo, hi, protected):
+            if groups and _fusible(rect, lo, hi, protected, vscale):
                 prev_rect, prev_lo, prev_hi = groups[-1]
-                if prev_hi == lo and _fusible(prev_rect, prev_lo, prev_hi, protected):
+                if prev_hi == lo and _fusible(
+                    prev_rect, prev_lo, prev_hi, protected, vscale
+                ):
                     fused = _rect_union(prev_rect, rect)
                     if fused is not None:
                         groups[-1] = (fused, prev_lo, hi)
@@ -509,6 +527,7 @@ def _layout_node(
     weights: Mapping[str, int] | None,
     visuals: Mapping[str, VisualDelta] | None,
     selected_path: str | None,
+    vscale: float = DEFAULT_CELL_ASPECT,
 ) -> None:
     """Recursively lay out a node and its children."""
     visual = visuals.get(node.path) if visuals is not None else None
@@ -593,13 +612,14 @@ def _layout_node(
         cells=inner_w * inner_h,
     )
 
-    # Squarify in doubled-height space.  A terminal cell is about twice as
-    # tall as it is wide, so a w x h cell rect reads on screen as w x 2h;
-    # squarifying in raw cell units optimizes the wrong aspect and drops the
-    # remainder into a thin full-height strip.  Local coordinates keep the
-    # doubling out of the caller's frame.
-    normed = squarify.normalize_sizes(sizes, inner_w, inner_h * 2)
-    local_rects = squarify.squarify(normed, 0, 0, inner_w, inner_h * 2)
+    # Squarify in stretched-height space.  A terminal cell is `vscale` times
+    # taller than it is wide, so a w x h cell rect reads on screen as
+    # w x vscale*h; squarifying in raw cell units optimizes the wrong aspect
+    # and drops the remainder into a thin full-height strip.  Local
+    # coordinates keep the stretch out of the caller's frame.
+    stretched_h = inner_h * vscale
+    normed = squarify.normalize_sizes(sizes, inner_w, stretched_h)
+    local_rects = squarify.squarify(normed, 0, 0, inner_w, stretched_h)
 
     pieces = _consolidate(
         local_rects,
@@ -608,14 +628,15 @@ def _layout_node(
         metric=metric,
         weights=weights,
         selected_path=selected_path,
+        vscale=vscale,
     )
 
     float_rects = [
         {
             "x": local["x"],
-            "y": local["y"] / 2.0,
+            "y": local["y"] / vscale,
             "dx": local["dx"],
-            "dy": local["dy"] / 2.0,
+            "dy": local["dy"] / vscale,
         }
         for local, _child in pieces
     ]
@@ -636,6 +657,7 @@ def _layout_node(
             weights,
             visuals,
             selected_path,
+            vscale,
         )
 
 

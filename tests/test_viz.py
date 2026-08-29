@@ -1,12 +1,29 @@
 """Tests for visualization modules."""
 
 import math
+import struct
 
 import pytest
+from disktide.glyphs import visible_width
 from disktide.models.tree import FSNode
+from disktide.viz import cellgeom
 from disktide.viz.colors import size_color, depth_color, gradient_color, set_color_scheme
 from disktide.viz.treemap import compute_layout, render_line
-from disktide.viz.sunburst import compute_sunburst, render_sunburst_line
+from disktide.viz.sunburst import (
+    _arc_color,
+    _parse_rgb,
+    compute_sunburst,
+    render_sunburst_line,
+)
+
+PANEL_BG = (30, 30, 30)
+
+
+class _FakeTTY:
+    """Stand-in for a stream whose descriptor a monkeypatched ioctl reads."""
+
+    def fileno(self) -> int:
+        return 1
 
 
 def _rendered_cells(layout):
@@ -30,19 +47,48 @@ def _label_cells(layout):
     return claimed
 
 
-def _is_braille(ch: str) -> bool:
-    return len(ch) == 1 and "⠀" <= ch <= "⣿"
+def _cell_radius_range(layout, char_x, char_y):
+    """Exact (nearest, farthest) distance from the disc centre to a cell.
+
+    Everything is in units — one unit is a cell *width*, and a cell is
+    ``cell_aspect`` units tall — which is the space the renderer works in.
+    """
+    aspect = layout.cell_aspect
+    x0, x1 = float(char_x), float(char_x + 1)
+    y0, y1 = char_y * aspect, (char_y + 1) * aspect
+    cx, cy = layout.center_x, layout.center_y
+    nearest = math.hypot(
+        min(max(cx, x0), x1) - cx,
+        min(max(cy, y0), y1) - cy,
+    )
+    farthest = max(
+        math.hypot(px - cx, py - cy)
+        for px in (x0, x1)
+        for py in (y0, y1)
+    )
+    return nearest, farthest
 
 
-def _dot_radii(layout, char_x, char_y):
-    """Distance from the disc centre to each of a cell's 8 braille dots."""
-    cx = layout.canvas.pixel_width / 2.0
-    cy = layout.canvas.pixel_height / 2.0
-    return [
-        math.hypot(char_x * 2 + dx + 0.5 - cx, char_y * 4 + dy + 0.5 - cy)
-        for dx in (0, 1)
-        for dy in (0, 1, 2, 3)
-    ]
+def _painted_bbox(layout):
+    """(width, height) in cells of everything the disc pass painted."""
+    xs, ys = [], []
+    for y, row in enumerate(layout.rendered_cells):
+        for x, (_ch, style) in enumerate(row):
+            if style is not None:
+                xs.append(x)
+                ys.append(y)
+    assert xs, "nothing was painted"
+    return max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+
+
+def _style_rgbs(style):
+    """Truecolor triples a style puts on screen."""
+    out = []
+    for color in (style.color, style.bgcolor):
+        if color is not None:
+            triplet = color.get_truecolor()
+            out.append((triplet.red, triplet.green, triplet.blue))
+    return out
 
 
 def _chain_tree():
@@ -51,6 +97,24 @@ def _chain_tree():
     b = FSNode(name="b", path="/r/a/b", size=1000, own_size=0, is_dir=True, depth=2, children=[c])
     a = FSNode(name="a", path="/r/a", size=1000, own_size=0, is_dir=True, depth=1, children=[b])
     return FSNode(name="r", path="/r", size=1000, own_size=0, is_dir=True, depth=0, children=[a])
+
+
+def _split_tree():
+    """Two sibling directories at exactly 50% each, so ring 1 has one seam."""
+    children = []
+    for name in ("left", "right"):
+        leaf = FSNode(
+            name=f"{name}.bin", path=f"/r/{name}/{name}.bin",
+            size=500, own_size=500, is_dir=False, depth=2,
+        )
+        children.append(FSNode(
+            name=name, path=f"/r/{name}", size=500, own_size=0,
+            is_dir=True, depth=1, children=[leaf],
+        ))
+    return FSNode(
+        name="r", path="/r", size=1000, own_size=0,
+        is_dir=True, depth=0, children=children,
+    )
 
 
 def make_viz_tree():
@@ -195,33 +259,21 @@ class TestSunburst:
         assert len(layout.arcs) == 0
 
     def test_sunburst_renders_centered(self):
-        """Sunburst should render braille content in the center rows."""
+        """Sunburst should paint cells in the center rows."""
         root = make_viz_tree()
         layout = compute_sunburst(root, 60, 25)
-        # Collect which rows have non-space content
-        non_empty_rows = []
-        for y in range(layout.char_height):
-            segs = render_sunburst_line(layout, y)
-            text = "".join(s.text for s in segs).rstrip()
-            if text.strip():
-                non_empty_rows.append(y)
+        # A covered cell is usually a space over a background, so "content"
+        # has to be read from the styles rather than from the text.
+        non_empty_rows = [
+            y
+            for y, row in enumerate(layout.rendered_cells)
+            if any(style is not None for _ch, style in row)
+        ]
         assert len(non_empty_rows) > 0, "Sunburst should have visible content"
         # Content should be centered vertically (roughly middle half)
         center = layout.char_height // 2
         assert any(abs(y - center) <= center // 2 for y in non_empty_rows), \
             f"Content should be near center row {center}, got rows {non_empty_rows}"
-
-    def test_sunburst_has_braille_chars(self):
-        """Rendered output should contain actual braille characters."""
-        root = make_viz_tree()
-        layout = compute_sunburst(root, 60, 25)
-        all_text = ""
-        for y in range(layout.char_height):
-            segs = render_sunburst_line(layout, y)
-            all_text += "".join(s.text for s in segs)
-        # Braille block is U+2800..U+28FF
-        braille_chars = [ch for ch in all_text if "\u2800" <= ch <= "\u28ff"]
-        assert len(braille_chars) > 0, "Should contain braille characters"
 
     def test_sunburst_arcs_per_child(self):
         """Should have arcs for root + each child."""
@@ -238,12 +290,12 @@ class TestSunburst:
         segments = render_sunburst_line(layout, 999)
         assert len(segments) == 0
 
-    def test_rendered_rows_cached(self):
-        """rendered_rows property should return same object on repeated calls."""
+    def test_rendered_cells_cached(self):
+        """rendered_cells property should return same object on repeated calls."""
         root = make_viz_tree()
         layout = compute_sunburst(root, 60, 25)
-        rows1 = layout.rendered_rows
-        rows2 = layout.rendered_rows
+        rows1 = layout.rendered_cells
+        rows2 = layout.rendered_cells
         assert rows1 is rows2
 
     def test_sunburst_fills_width(self):
@@ -266,11 +318,10 @@ class TestSunburst:
 
         layout = compute_sunburst(root, 60, 25)
         cols_with_content = set()
-        for y in range(layout.char_height):
-            if y < len(layout.rendered_rows):
-                for x, (ch, _color) in enumerate(layout.rendered_rows[y]):
-                    if ch not in (" ", "\u2800", ""):
-                        cols_with_content.add(x)
+        for row in layout.rendered_cells:
+            for x, (_ch, style) in enumerate(row):
+                if style is not None:
+                    cols_with_content.add(x)
         assert len(cols_with_content) > layout.char_width // 2, \
             f"Chart should use >50% width, only {len(cols_with_content)}/{layout.char_width}"
 
@@ -283,71 +334,239 @@ class TestSunburst:
         assert any("root" in t for t in label_texts), "Should have root label"
 
 
-class TestSunburstFill:
-    """The disc renders solid inside and braille only at the edge.
 
-    Painting every interior cell as a fully-lit braille glyph over a
-    darkened background let the terminal font's inter-dot and inter-line
-    gaps show through the whole chart, which read as a halftone dot grid
-    with horizontal banding.  Painting a full-cell background for every
-    dot a circle merely clipped quantized the silhouette to character
-    cells, giving the rim a staircase halo.
+class TestSunburstFill:
+    """The disc is a circle, filled flat, with anti-aliased edges.
+
+    The braille renderer this replaces could only turn a dot on or off, so
+    it had to assume a cell was exactly 2:1 (the only ratio at which a
+    braille dot is square) and it drew every partially covered cell as
+    stippling.  On a taller cell the disc came out a vertical ellipse, and
+    the dotted rims — especially the walls of the empty wedges that cut
+    through the disc wherever a leaf has no children — read as noise beside
+    the solid interiors.
     """
 
-    def test_interior_cells_are_solid(self):
-        """Cells well inside the outermost ring are ' ' with a background."""
-        layout = compute_sunburst(_chain_tree(), 100, 46, max_depth=4)
-        grid = _rendered_cells(layout)
-        labels = _label_cells(layout)
-        r_outer_max = max(arc.r_outer for arc in layout.arcs)
+    @pytest.fixture(autouse=True)
+    def _use_default_scheme(self):
+        set_color_scheme("default")
+        yield
+        set_color_scheme("default")
+
+    @pytest.mark.parametrize("aspect", [2.0, 2.6])
+    def test_disc_is_round_at_any_cell_aspect(self, aspect):
+        """The painted bbox is `aspect` times wider than tall, in cells.
+
+        A cell that is `aspect` units tall means a circle covers `aspect`
+        times as many columns as rows.  Fixing that ratio at 2.0 — which is
+        what assuming square braille dots amounts to — stretches the disc
+        vertically by aspect/2 on any other font.
+        """
+        layout = compute_sunburst(
+            _chain_tree(), 100, 46, max_depth=4,
+            cell_aspect=aspect, panel_bg=PANEL_BG,
+        )
+        width, height = _painted_bbox(layout)
+        ratio = width / height
+        assert ratio == pytest.approx(aspect, rel=0.15), (
+            f"disc bbox {width}x{height} is ratio {ratio:.2f}; at cell "
+            f"aspect {aspect} a circle must come out {aspect}"
+        )
+
+    def test_interior_cells_are_flat_fills(self):
+        """Cells wholly inside one arc are ' ' over exactly that arc's color.
+
+        Uniform subsamples must average back to their own input, or the
+        interior of every ring would drift a shade off its own color.
+        """
+        layout = compute_sunburst(
+            _chain_tree(), 100, 46, max_depth=4,
+            cell_aspect=2.0, panel_bg=PANEL_BG,
+        )
+        root_arc = next(arc for arc in layout.arcs if arc.depth == 0)
+        expected = _parse_rgb(_arc_color(root_arc))
+        cells = layout.rendered_cells
 
         interior = 0
-        for (x, y), (ch, style) in grid.items():
-            if (x, y) in labels:
-                continue
-            radii = _dot_radii(layout, x, y)
-            # Whole 2x4 block at least 3px inside the rim, and clear of the
-            # unpainted r < 2 pinhole at the centre.
-            if max(radii) > r_outer_max - 3 or min(radii) < 6:
-                continue
-            interior += 1
-            assert ch == " ", (
-                f"interior cell ({x},{y}) rendered {ch!r} — a braille glyph "
-                f"shows the font's dot gaps as halftone texture"
-            )
-            assert style is not None and style.bgcolor is not None, (
-                f"interior cell ({x},{y}) has no background — it would render "
-                f"as a hole"
-            )
-        assert interior > 500, f"only {interior} interior cells sampled"
+        for y, row in enumerate(cells):
+            for x, (ch, style) in enumerate(row):
+                nearest, farthest = _cell_radius_range(layout, x, y)
+                # Clear of the centre hole and of the ring separator that
+                # rides the outer edge of every ring but the last.
+                if nearest < layout.hole_radius + 1 or farthest > root_arc.r_outer - 1:
+                    continue
+                interior += 1
+                assert ch == " ", (
+                    f"interior cell ({x},{y}) rendered {ch!r} — a flat fill "
+                    f"has nothing to draw but its background"
+                )
+                assert style is not None and style.bgcolor is not None, (
+                    f"interior cell ({x},{y}) has no background — it would "
+                    f"render as a hole"
+                )
+                triplet = style.bgcolor.get_truecolor()
+                assert (triplet.red, triplet.green, triplet.blue) == expected, (
+                    f"interior cell ({x},{y}) is {triplet} not {expected} — "
+                    f"blending shifted a uniform sample"
+                )
+        assert interior > 60, f"only {interior} interior cells sampled"
 
-    def test_rim_is_braille_without_background(self):
-        """Partial cells carry the silhouette at 2x4 sub-cell resolution."""
-        layout = compute_sunburst(_chain_tree(), 100, 46, max_depth=4)
-        grid = _rendered_cells(layout)
-        labels = _label_cells(layout)
-        r_outer_max = max(arc.r_outer for arc in layout.arcs)
+    def test_rim_is_antialiased_against_the_panel(self):
+        """The rim resolves as a blend, and nothing is painted past it."""
+        layout = compute_sunburst(
+            _chain_tree(), 100, 46, max_depth=4,
+            cell_aspect=2.0, panel_bg=PANEL_BG,
+        )
+        reach = max(arc.r_outer for arc in layout.arcs)
+        outermost = max(layout.arcs, key=lambda arc: arc.depth)
+        arc_rgb = _parse_rgb(_arc_color(outermost))
+        cells = layout.rendered_cells
 
-        partial = 0
-        for (x, y), (ch, style) in grid.items():
-            if (x, y) in labels or not _is_braille(ch):
-                continue
-            if ch != "⠀":
-                partial += 1
-            assert style is None or style.bgcolor is None, (
-                f"cell ({x},{y}) renders a braille glyph over a background "
-                f"chip — the rim is quantized back to whole cells"
-            )
-        assert partial > 0, "the rim should be drawn with braille glyphs"
+        blended = []
+        for y, row in enumerate(cells):
+            for x, (_ch, style) in enumerate(row):
+                nearest, _farthest = _cell_radius_range(layout, x, y)
+                assert style is None or nearest <= layout.radius + 1, (
+                    f"cell ({x},{y}) sits beyond the disc but is painted"
+                )
+                if style is None or nearest < reach - 1.5:
+                    continue
+                for rgb in _style_rgbs(style):
+                    if all(
+                        min(arc_rgb[i], PANEL_BG[i])
+                        < rgb[i]
+                        < max(arc_rgb[i], PANEL_BG[i])
+                        for i in range(3)
+                    ):
+                        blended.append((x, y, rgb))
+        assert blended, (
+            f"no rim cell blends between the arc {arc_rgb} and the panel "
+            f"{PANEL_BG}: the edge is still quantized"
+        )
 
-        for (x, y), (_ch, style) in grid.items():
-            if (x, y) in labels:
+    def test_rim_uses_half_blocks(self):
+        """Replaces test_sunburst_has_braille_chars, which died with braille.
+
+        A cell the rim crosses horizontally has one half covered and one
+        half not, which is exactly what U+2580/U+2584 express.
+        """
+        layout = compute_sunburst(
+            _chain_tree(), 100, 46, max_depth=4,
+            cell_aspect=2.0, panel_bg=PANEL_BG,
+        )
+        reach = max(arc.r_outer for arc in layout.arcs)
+        halves = [
+            (x, y)
+            for y, row in enumerate(layout.rendered_cells)
+            for x, (ch, _style) in enumerate(row)
+            if ch in ("▀", "▄")
+            and _cell_radius_range(layout, x, y)[1] > reach - 2
+        ]
+        assert halves, "the rim should be drawn with half-block cells"
+
+    def test_seams_divide_siblings_and_rings(self):
+        """Separators darken the boundary between neighbours.
+
+        Sibling directories at one depth are otherwise the same color, and
+        rings run into each other, so without these the chart is one blob
+        with no readable structure.
+        """
+        layout = compute_sunburst(
+            _split_tree(), 100, 46, max_depth=4,
+            cell_aspect=2.0, panel_bg=PANEL_BG,
+        )
+        ring1 = [arc for arc in layout.arcs if arc.depth == 1]
+        assert len(ring1) == 2
+        root_arc = next(arc for arc in layout.arcs if arc.depth == 0)
+        sibling_rgbs = [_parse_rgb(_arc_color(arc)) for arc in ring1]
+        root_rgb = _parse_rgb(_arc_color(root_arc))
+
+        angular, radial = [], []
+        for hy, row in enumerate(layout.frame):
+            for hx, rgb in enumerate(row):
+                if rgb is None:
+                    continue
+                ux = hx + 0.5
+                uy = (hy + 0.5) * layout.cell_aspect / 2.0
+                dx = ux - layout.center_x
+                dy = uy - layout.center_y
+                radius = math.hypot(dx, dy)
+                theta = math.atan2(dy, dx) % (2 * math.pi)
+                on_ring1 = ring1[0].r_inner + 1 < radius < ring1[0].r_outer - 1
+                to_seam = min(
+                    abs(theta), abs(theta - math.pi), abs(theta - 2 * math.pi)
+                )
+                if on_ring1 and to_seam * radius < 1.2:
+                    if sum(rgb) < min(sum(c) for c in sibling_rgbs):
+                        angular.append((hx, hy, rgb))
+                if abs(radius - root_arc.r_outer) < 1.0:
+                    if sum(rgb) < min(
+                        sum(root_rgb), min(sum(c) for c in sibling_rgbs)
+                    ):
+                        radial.append((hx, hy, rgb))
+
+        assert angular, (
+            f"no cell on the boundary between siblings {sibling_rgbs} is "
+            f"darker than both — the two arcs merge into one wedge"
+        )
+        assert radial, (
+            f"no cell on the ring-0/ring-1 boundary is darker than both "
+            f"{root_rgb} and {sibling_rgbs} — the rings merge"
+        )
+
+    def test_dir_siblings_alternate_in_luminance(self):
+        """Even where a seam cannot fit, siblings still differ."""
+        layout = compute_sunburst(
+            _split_tree(), 100, 46, max_depth=4,
+            cell_aspect=2.0, panel_bg=PANEL_BG,
+        )
+        ring1 = [arc for arc in layout.arcs if arc.depth == 1]
+        first, second = (_parse_rgb(_arc_color(arc)) for arc in ring1)
+        assert first != second, (
+            "sibling directories at one depth share a color, so a run of "
+            "them reads as a single undivided blob"
+        )
+
+    def test_arc_label_sits_on_its_arc_at_a_wide_cell(self):
+        """Label placement goes through the same unit transform as the disc."""
+        aspect = 2.6
+        layout = compute_sunburst(
+            make_viz_tree(), 100, 46, max_depth=4,
+            cell_aspect=aspect, panel_bg=PANEL_BG,
+        )
+        wide = [
+            arc
+            for arc in layout.arcs
+            if arc.depth == 1 and arc.angle_span > math.radians(30)
+        ]
+        assert wide, "fixture should produce labellable depth-1 arcs"
+
+        by_name = {label.text: label for label in layout.labels}
+        checked = 0
+        for arc in wide:
+            label = by_name.get(arc.node.name)
+            if label is None:  # lost a collision to a neighbour
                 continue
-            if min(_dot_radii(layout, x, y)) <= r_outer_max + 2:
-                continue
-            assert style is None or style.bgcolor is None, (
-                f"cell ({x},{y}) lies outside the disc but is painted"
+            checked += 1
+            mid_r = (arc.r_inner + arc.r_outer) / 2
+            want_y = (
+                layout.char_height / 2
+                + mid_r * math.sin(arc.angle_mid) / aspect
             )
+            assert abs(label.char_y - want_y) <= 1, (
+                f"label for {arc.node.name!r} is on row {label.char_y}, but "
+                f"its arc runs through row {want_y:.1f}"
+            )
+            # And the row really does land inside the arc's ring.
+            centre_x = label.char_x + visible_width(label.text) / 2
+            dx = centre_x - layout.center_x
+            dy = (label.char_y + 0.5) * aspect - layout.center_y
+            radius = math.hypot(dx, dy)
+            assert arc.r_inner - 1 <= radius <= arc.r_outer + 1, (
+                f"label for {arc.node.name!r} sits at radius {radius:.1f}, "
+                f"outside its ring [{arc.r_inner:.1f}, {arc.r_outer:.1f}]"
+            )
+        assert checked >= 2, f"only {checked} labels checked"
 
     def test_sub_threshold_arcs_leave_no_cracks(self):
         """A sliver too thin to subdivide still owns its slice of the ring.
@@ -371,26 +590,117 @@ class TestSunburstFill:
             name="r", path="/r", size=990 + len(crumbs), own_size=0,
             is_dir=True, depth=0, children=[big] + crumbs,
         )
-        layout = compute_sunburst(root, 100, 46, max_depth=4)
+        layout = compute_sunburst(
+            root, 100, 46, max_depth=4, cell_aspect=2.0, panel_bg=PANEL_BG,
+        )
 
         spans = [arc.angle_span for arc in layout.arcs if arc.depth == 1]
         assert len(spans) == 61, f"expected every child to be recorded, got {len(spans)}"
         assert min(spans) < math.radians(0.5), "fixture should produce sub-0.5deg arcs"
 
         ring = next(arc for arc in layout.arcs if arc.depth == 1)
-        grid = _rendered_cells(layout)
-        labels = _label_cells(layout)
+        cells = layout.rendered_cells
 
         checked = 0
-        for (x, y), (ch, style) in grid.items():
-            if (x, y) in labels:
-                continue
-            radii = _dot_radii(layout, x, y)
-            if min(radii) < ring.r_inner + 1 or max(radii) > ring.r_outer:
-                continue
-            checked += 1
-            assert ch == " " and style is not None and style.bgcolor is not None, (
-                f"ring-1 cell ({x},{y}) rendered {ch!r} — an unowned angular "
-                f"sliver punched a pinhole through the ring"
-            )
+        for y, row in enumerate(cells):
+            for x, (ch, style) in enumerate(row):
+                nearest, farthest = _cell_radius_range(layout, x, y)
+                if nearest < ring.r_inner + 1 or farthest > ring.r_outer - 1:
+                    continue
+                checked += 1
+                assert ch == " " and style is not None and style.bgcolor is not None, (
+                    f"ring-1 cell ({x},{y}) rendered {ch!r} — an unowned "
+                    f"angular sliver punched a pinhole through the ring"
+                )
         assert checked > 20, f"only {checked} ring-1 cells sampled"
+
+
+class TestCellGeometry:
+    """Measuring the terminal's cell instead of assuming it is 2:1."""
+
+    @pytest.fixture(autouse=True)
+    def _no_env(self, monkeypatch):
+        monkeypatch.delenv(cellgeom.ASPECT_ENV_VAR, raising=False)
+
+    @staticmethod
+    def _winsize(rows, cols, xpixel, ypixel):
+        return struct.pack("HHHH", rows, cols, xpixel, ypixel)
+
+    def _fake_tty(self, monkeypatch, packed):
+        monkeypatch.setattr(
+            cellgeom, "_candidate_streams", lambda: iter([_FakeTTY()])
+        )
+        monkeypatch.setattr(
+            cellgeom.fcntl, "ioctl", lambda fd, request, buf: packed
+        )
+
+    def test_env_override_wins(self, monkeypatch):
+        self._fake_tty(monkeypatch, self._winsize(53, 299, 2093, 901))
+        monkeypatch.setenv(cellgeom.ASPECT_ENV_VAR, "3.1")
+        assert cellgeom.detect_cell_aspect() == pytest.approx(3.1)
+
+    def test_env_override_is_clamped(self, monkeypatch):
+        monkeypatch.setenv(cellgeom.ASPECT_ENV_VAR, "9")
+        assert cellgeom.detect_cell_aspect() == cellgeom.MAX_CELL_ASPECT
+        monkeypatch.setenv(cellgeom.ASPECT_ENV_VAR, "0.2")
+        assert cellgeom.detect_cell_aspect() == cellgeom.MIN_CELL_ASPECT
+
+    def test_unparseable_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv(cellgeom.ASPECT_ENV_VAR, "very tall")
+        assert cellgeom.detect_cell_aspect() == cellgeom.DEFAULT_CELL_ASPECT
+
+    def test_reads_pixel_size_from_ioctl(self, monkeypatch):
+        # 299x53 cells over 2093x901 px: a 7x17 cell, aspect 17/7.
+        self._fake_tty(monkeypatch, self._winsize(53, 299, 2093, 901))
+        assert cellgeom.detect_cell_aspect() == pytest.approx(17 / 7)
+
+    def test_ioctl_result_is_clamped(self, monkeypatch):
+        self._fake_tty(monkeypatch, self._winsize(10, 10, 100, 10000))
+        assert cellgeom.detect_cell_aspect() == cellgeom.MAX_CELL_ASPECT
+
+    def test_terminal_without_pixel_size(self, monkeypatch):
+        self._fake_tty(monkeypatch, self._winsize(53, 299, 0, 0))
+        assert cellgeom.detect_cell_aspect() == cellgeom.DEFAULT_CELL_ASPECT
+
+    def test_ioctl_failure_falls_back(self, monkeypatch):
+        monkeypatch.setattr(
+            cellgeom, "_candidate_streams", lambda: iter([_FakeTTY()])
+        )
+
+        def _boom(fd, request, buf):
+            raise OSError(25, "Inappropriate ioctl for device")
+
+        monkeypatch.setattr(cellgeom.fcntl, "ioctl", _boom)
+        assert cellgeom.detect_cell_aspect() == cellgeom.DEFAULT_CELL_ASPECT
+
+    def test_any_exception_falls_back(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("no streams here")
+
+        monkeypatch.setattr(cellgeom, "_candidate_streams", _boom)
+        assert cellgeom.detect_cell_aspect() == cellgeom.DEFAULT_CELL_ASPECT
+
+    def test_treemap_squareness_follows_the_cell(self):
+        """A 'square' rect is square on screen only at the real aspect."""
+        root = FSNode(
+            name="root", path="/root", size=1000,
+            own_size=0, is_dir=True, depth=0,
+            children=[
+                FSNode(name=f"f{i}.py", path=f"/root/f{i}.py", size=size,
+                       own_size=size, is_dir=False, depth=1)
+                for i, size in enumerate((600, 300, 100))
+            ],
+        )
+        wide = compute_layout(root, 60, 24, cell_aspect=3.0)
+        narrow = compute_layout(root, 60, 24, cell_aspect=1.5)
+        default = compute_layout(root, 60, 24)
+        assert compute_layout(root, 60, 24, cell_aspect=None).rects == default.rects
+        shapes = {
+            name: [(r.w, r.h) for r in layout.rects if r.is_leaf]
+            for name, layout in
+            (("wide", wide), ("narrow", narrow), ("default", default))
+        }
+        assert shapes["wide"] != shapes["narrow"], (
+            "the treemap ignored cell_aspect: rectangles that are square at "
+            "3.0 cannot also be square at 1.5"
+        )

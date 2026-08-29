@@ -187,11 +187,10 @@ wheels = [
 
 [[package]]
 name = "disktide"
-version = "0.2.21"
+version = "0.2.22"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
-    { name = "drawille" },
     { name = "humanize" },
     { name = "squarify" },
     { name = "textual" },
@@ -213,7 +212,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
-    { name = "drawille", specifier = ">=0.2.0" },
     { name = "humanize", specifier = ">=4.0" },
     { name = "inotify-simple", marker = "sys_platform == 'linux' and extra == 'watch'", specifier = ">=2,<3" },
     { name = "squarify", specifier = ">=0.4.0" },
@@ -227,15 +225,6 @@ dev = [
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-asyncio", specifier = ">=0.21" },
     { name = "textual-dev", specifier = ">=1.0.0" },
-]
-
-[[package]]
-name = "drawille"
-version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/08/57/1cb2c11bab5bd5b9de979f8a2205216c372f4f531e90cddb2e721871f9b2/drawille-0.2.0.tar.gz", hash = "sha256:815343e1162c58052d4cb652ef970f6771edd90042d549ecc6e453c9736aa1ad", size = 17575, upload-time = "2024-11-13T13:43:11.998Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/52/77a0e35afa13b046c0893125ae6aed6964bfba9d7e6d835e90b9bf6f6274/drawille-0.2.0-py3-none-any.whl", hash = "sha256:01b2dba1019ffc9567985c4c9902bcf9bf37e21d930f3049184b1051db07eeba", size = 16643, upload-time = "2024-11-13T13:43:10.228Z" },
 ]
 
 [[package]]

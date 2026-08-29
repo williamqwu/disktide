@@ -18,7 +18,13 @@ from disktide.metrics import (
 from disktide.models.tree import FSNode
 from disktide.domain.visualization import DiffFrame
 from disktide.presentation.tui.viewmodels.visualization import legend_text
-from disktide.viz.sunburst import SunburstLayout, compute_sunburst, render_sunburst_line
+from disktide.viz.cellgeom import detect_cell_aspect
+from disktide.viz.sunburst import (
+    DEFAULT_PANEL_BG,
+    SunburstLayout,
+    compute_sunburst,
+    render_sunburst_line,
+)
 
 
 class SunburstView(Widget):
@@ -103,6 +109,21 @@ class SunburstView(Widget):
         self._stale = True
         self.refresh()
 
+    def _panel_bg(self) -> tuple[int, int, int]:
+        """The widget's composited background, for the renderer to blend to.
+
+        Only the anti-aliased edges consult it, and a covered half-cell
+        never carries a background chip, so a wrong answer here can shade a
+        rim slightly — it cannot halo the disc.
+        """
+        try:
+            color = self.background_colors[1]
+            if color.a <= 0:
+                return DEFAULT_PANEL_BG
+            return (int(color.r), int(color.g), int(color.b))
+        except Exception:
+            return DEFAULT_PANEL_BG
+
     def _ensure_layout(self) -> None:
         """Recompute layout if stale."""
         if not self._stale:
@@ -123,6 +144,8 @@ class SunburstView(Widget):
             selected_path=(
                 self._diff.selected_path if self._diff is not None else None
             ),
+            cell_aspect=detect_cell_aspect(),
+            panel_bg=self._panel_bg(),
         )
 
     def render_line(self, y: int) -> Strip:
