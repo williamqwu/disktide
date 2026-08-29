@@ -67,6 +67,33 @@ def bounded_children(
     return sorted(selected, key=key)
 
 
+def aggregate_children(
+    parent: FSNode,
+    children: Iterable[FSNode],
+    *,
+    metric: MetricId | str,
+    layout_value: int,
+    key: str | None = None,
+) -> FSNode:
+    """Build the same "… N more" placeholder node `bounded_children` uses.
+
+    Exposed so a visualization can fold siblings together *after* layout —
+    when the geometry, not the child count, is what makes them unreadable —
+    and still produce a node identical in shape to the count-capped
+    remainder.  `key` disambiguates the synthetic path when one parent
+    emits more than one aggregate.
+    """
+    node = _aggregate_node(
+        parent,
+        children,
+        metric=metric if isinstance(metric, MetricId) else MetricId.parse(metric),
+        layout_value=layout_value,
+    )
+    if key:
+        node.path = f"{node.path}-{key}"
+    return node
+
+
 def _aggregate_node(
     parent: FSNode,
     omitted: Iterable[FSNode],

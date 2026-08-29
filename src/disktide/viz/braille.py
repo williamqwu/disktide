@@ -25,10 +25,14 @@ class ColorBrailleCanvas:
         self.pixel_width = width * 2
         self.pixel_height = height * 4
         self._canvas = Canvas()
-        # Track color per cell: (char_x, char_y) -> color name
+        # Resolved dominant color per cell, filled lazily by get_color()
         self._colors: dict[tuple[int, int], str] = {}
         # Track color votes per cell for dominant color
         self._color_votes: dict[tuple[int, int], dict[str, int]] = {}
+        # Bitmask of distinct lit dots per cell, bit = (y % 4) * 2 + (x % 2).
+        # A mask (not a counter) so re-setting the same dot cannot inflate the
+        # coverage count that the renderer uses to pick solid vs. braille.
+        self._dot_masks: dict[tuple[int, int], int] = {}
         # Background color per cell (char_x, char_y) -> color
         self._bg_colors: dict[tuple[int, int], str] = {}
         # Cached rendered rows (invalidated on set/clear)
@@ -41,13 +45,30 @@ class ColorBrailleCanvas:
             cell = (x // 2, y // 4)
             votes = self._color_votes.setdefault(cell, {})
             votes[color] = votes.get(color, 0) + 1
-            # Update dominant color
-            self._colors[cell] = max(votes, key=votes.get)
+            self._dot_masks[cell] = self._dot_masks.get(cell, 0) | (
+                1 << ((y % 4) * 2 + (x % 2))
+            )
+            # Dominant color is resolved lazily; drop any stale resolution.
+            if cell in self._colors:
+                del self._colors[cell]
             self._rendered = None
 
     def get_color(self, char_x: int, char_y: int) -> str:
         """Get the dominant color for a character cell."""
-        return self._colors.get((char_x, char_y), "white")
+        cell = (char_x, char_y)
+        resolved = self._colors.get(cell)
+        if resolved is not None:
+            return resolved
+        votes = self._color_votes.get(cell)
+        if not votes:
+            return "white"
+        resolved = max(votes, key=votes.get)
+        self._colors[cell] = resolved
+        return resolved
+
+    def dot_count(self, char_x: int, char_y: int) -> int:
+        """Number of distinct lit braille dots in a character cell (0..8)."""
+        return self._dot_masks.get((char_x, char_y), 0).bit_count()
 
     def set_bg(self, char_x: int, char_y: int, color: str) -> None:
         """Set background color for a character cell."""
@@ -129,5 +150,6 @@ class ColorBrailleCanvas:
         self._canvas.clear()
         self._colors.clear()
         self._color_votes.clear()
+        self._dot_masks.clear()
         self._bg_colors.clear()
         self._rendered = None

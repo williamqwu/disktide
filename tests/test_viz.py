@@ -1,10 +1,56 @@
 """Tests for visualization modules."""
 
+import math
+
 import pytest
 from disktide.models.tree import FSNode
 from disktide.viz.colors import size_color, depth_color, gradient_color, set_color_scheme
 from disktide.viz.treemap import compute_layout, render_line
 from disktide.viz.sunburst import compute_sunburst, render_sunburst_line
+
+
+def _rendered_cells(layout):
+    """Flatten the sunburst render to {(x, y): (char, style)}."""
+    grid = {}
+    for y in range(layout.char_height):
+        x = 0
+        for seg in render_sunburst_line(layout, y):
+            for ch in seg.text:
+                grid[(x, y)] = (ch, seg.style)
+                x += 1
+    return grid
+
+
+def _label_cells(layout):
+    """Cells claimed by a label, which keeps its own chip background."""
+    claimed = set()
+    for label in layout.labels:
+        for i in range(-1, len(label.text) + 1):
+            claimed.add((label.char_x + i, label.char_y))
+    return claimed
+
+
+def _is_braille(ch: str) -> bool:
+    return len(ch) == 1 and "⠀" <= ch <= "⣿"
+
+
+def _dot_radii(layout, char_x, char_y):
+    """Distance from the disc centre to each of a cell's 8 braille dots."""
+    cx = layout.canvas.pixel_width / 2.0
+    cy = layout.canvas.pixel_height / 2.0
+    return [
+        math.hypot(char_x * 2 + dx + 0.5 - cx, char_y * 4 + dy + 0.5 - cy)
+        for dx in (0, 1)
+        for dy in (0, 1, 2, 3)
+    ]
+
+
+def _chain_tree():
+    """root -> a -> b -> c, each 100% of its parent: every ring is a full disc."""
+    c = FSNode(name="c", path="/r/a/b/c", size=1000, own_size=1000, is_dir=False, depth=3)
+    b = FSNode(name="b", path="/r/a/b", size=1000, own_size=0, is_dir=True, depth=2, children=[c])
+    a = FSNode(name="a", path="/r/a", size=1000, own_size=0, is_dir=True, depth=1, children=[b])
+    return FSNode(name="r", path="/r", size=1000, own_size=0, is_dir=True, depth=0, children=[a])
 
 
 def make_viz_tree():
@@ -235,3 +281,116 @@ class TestSunburst:
         assert len(layout.labels) > 0, "Sunburst should have labels"
         label_texts = [lb.text for lb in layout.labels]
         assert any("root" in t for t in label_texts), "Should have root label"
+
+
+class TestSunburstFill:
+    """The disc renders solid inside and braille only at the edge.
+
+    Painting every interior cell as a fully-lit braille glyph over a
+    darkened background let the terminal font's inter-dot and inter-line
+    gaps show through the whole chart, which read as a halftone dot grid
+    with horizontal banding.  Painting a full-cell background for every
+    dot a circle merely clipped quantized the silhouette to character
+    cells, giving the rim a staircase halo.
+    """
+
+    def test_interior_cells_are_solid(self):
+        """Cells well inside the outermost ring are ' ' with a background."""
+        layout = compute_sunburst(_chain_tree(), 100, 46, max_depth=4)
+        grid = _rendered_cells(layout)
+        labels = _label_cells(layout)
+        r_outer_max = max(arc.r_outer for arc in layout.arcs)
+
+        interior = 0
+        for (x, y), (ch, style) in grid.items():
+            if (x, y) in labels:
+                continue
+            radii = _dot_radii(layout, x, y)
+            # Whole 2x4 block at least 3px inside the rim, and clear of the
+            # unpainted r < 2 pinhole at the centre.
+            if max(radii) > r_outer_max - 3 or min(radii) < 6:
+                continue
+            interior += 1
+            assert ch == " ", (
+                f"interior cell ({x},{y}) rendered {ch!r} — a braille glyph "
+                f"shows the font's dot gaps as halftone texture"
+            )
+            assert style is not None and style.bgcolor is not None, (
+                f"interior cell ({x},{y}) has no background — it would render "
+                f"as a hole"
+            )
+        assert interior > 500, f"only {interior} interior cells sampled"
+
+    def test_rim_is_braille_without_background(self):
+        """Partial cells carry the silhouette at 2x4 sub-cell resolution."""
+        layout = compute_sunburst(_chain_tree(), 100, 46, max_depth=4)
+        grid = _rendered_cells(layout)
+        labels = _label_cells(layout)
+        r_outer_max = max(arc.r_outer for arc in layout.arcs)
+
+        partial = 0
+        for (x, y), (ch, style) in grid.items():
+            if (x, y) in labels or not _is_braille(ch):
+                continue
+            if ch != "⠀":
+                partial += 1
+            assert style is None or style.bgcolor is None, (
+                f"cell ({x},{y}) renders a braille glyph over a background "
+                f"chip — the rim is quantized back to whole cells"
+            )
+        assert partial > 0, "the rim should be drawn with braille glyphs"
+
+        for (x, y), (_ch, style) in grid.items():
+            if (x, y) in labels:
+                continue
+            if min(_dot_radii(layout, x, y)) <= r_outer_max + 2:
+                continue
+            assert style is None or style.bgcolor is None, (
+                f"cell ({x},{y}) lies outside the disc but is painted"
+            )
+
+    def test_sub_threshold_arcs_leave_no_cracks(self):
+        """A sliver too thin to subdivide still owns its slice of the ring.
+
+        Arcs spanning under half a degree used to be dropped before they
+        were recorded, so nothing claimed their angle and the rasterizer
+        left a hairline of unpainted dots running through the ring.
+        """
+        big = FSNode(
+            name="big", path="/r/big", size=990, own_size=990,
+            is_dir=False, depth=1,
+        )
+        crumbs = [
+            FSNode(
+                name=f"c{i:02d}", path=f"/r/c{i:02d}", size=1, own_size=1,
+                is_dir=False, depth=1,
+            )
+            for i in range(60)
+        ]
+        root = FSNode(
+            name="r", path="/r", size=990 + len(crumbs), own_size=0,
+            is_dir=True, depth=0, children=[big] + crumbs,
+        )
+        layout = compute_sunburst(root, 100, 46, max_depth=4)
+
+        spans = [arc.angle_span for arc in layout.arcs if arc.depth == 1]
+        assert len(spans) == 61, f"expected every child to be recorded, got {len(spans)}"
+        assert min(spans) < math.radians(0.5), "fixture should produce sub-0.5deg arcs"
+
+        ring = next(arc for arc in layout.arcs if arc.depth == 1)
+        grid = _rendered_cells(layout)
+        labels = _label_cells(layout)
+
+        checked = 0
+        for (x, y), (ch, style) in grid.items():
+            if (x, y) in labels:
+                continue
+            radii = _dot_radii(layout, x, y)
+            if min(radii) < ring.r_inner + 1 or max(radii) > ring.r_outer:
+                continue
+            checked += 1
+            assert ch == " " and style is not None and style.bgcolor is not None, (
+                f"ring-1 cell ({x},{y}) rendered {ch!r} — an unowned angular "
+                f"sliver punched a pinhole through the ring"
+            )
+        assert checked > 20, f"only {checked} ring-1 cells sampled"

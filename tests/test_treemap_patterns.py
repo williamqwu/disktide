@@ -82,6 +82,27 @@ def _count_parent_bleed(layout: TreemapLayout, max_depth: int = 3) -> int:
     return bleed
 
 
+def _owned_cells(layout: TreemapLayout) -> dict[int, int]:
+    """Map id(rect) -> number of grid cells that actually point at it."""
+    owned: dict[int, int] = {}
+    for row in layout.grid:
+        for cell in row:
+            if cell is not None:
+                owned[id(cell)] = owned.get(id(cell), 0) + 1
+    return owned
+
+
+def _aggregate_count(name: str) -> int:
+    """Number of children folded into an '… N more' aggregate node."""
+    return int(name.split()[1].replace(",", ""))
+
+
+def _visual_aspect(rect) -> float:
+    """Aspect ratio as it appears on screen: a cell is ~2x taller than wide."""
+    w, vh = rect.w, rect.h * 2
+    return max(w, vh) / min(w, vh)
+
+
 def _border_ratio(layout: TreemapLayout) -> float:
     """Fraction of cells showing border (non-leaf) rects or None."""
     total = layout.width * layout.height
@@ -110,6 +131,7 @@ def assert_layout_integrity(
     4. Every segment carries a bgcolor (no unstyled gaps).
     5. All rects lie within the grid bounds.
     6. No parent bleeding in padded inner areas.
+    7. No leaf rect is fragmented or hidden by an overlapping neighbour.
     """
     w, h = layout.width, layout.height
 
@@ -147,6 +169,34 @@ def assert_layout_integrity(
         f"{bleed} cells show parent rect in padded inner area — "
         f"border color where content should be"
     )
+
+    # --- no fragmentation ---
+    # Rects tile their parent, so every leaf should own every cell it
+    # covers.  The one legitimate loss is _snap_rects inflating a
+    # zero-width neighbour to the minimum 1 cell, which can shave a single
+    # row or column off this rect — at most max(w, h) cells.  More than
+    # that means rects are overlapping and drawing over each other, which
+    # shows as broken blocks and vanished files.  Skipped on viewports too
+    # small to lay anything out, where inflation is the whole story.
+    if w >= 8 and h >= 6:
+        owned = _owned_cells(layout)
+        for rect in layout.rects:
+            if not rect.is_leaf:
+                continue
+            rw, rh = int(rect.w), int(rect.h)
+            area = rw * rh
+            if area <= 0:
+                continue
+            visible = owned.get(id(rect), 0)
+            assert visible > 0, (
+                f"Leaf {rect.node.name!r} ({rw}x{rh} at "
+                f"{int(rect.x)},{int(rect.y)}) claims cells but shows none — "
+                f"an overlapping rect was drawn over all of it"
+            )
+            assert visible >= area - max(rw, rh), (
+                f"Leaf {rect.node.name!r} ({rw}x{rh}, area {area}) shows only "
+                f"{visible} cells — fragmented by an overlapping neighbour"
+            )
 
     # --- rendered lines ---
     for y in range(h):
@@ -634,7 +684,7 @@ class TestNonUniformSiblings:
 # ---------------------------------------------------------------------------
 
 class TestNoDroppedChildren:
-    """Children with very small sub-rects must still produce leaf rects.
+    """Children too small for their own rect must still be represented.
 
     Bug: _layout_node returns early when w < 1 or h < 1, completely
     dropping the child. Its allocated cells show as parent border color.
@@ -646,19 +696,37 @@ class TestNoDroppedChildren:
         smalls = [_make_file(f"s{i}.txt", 500) for i in range(100)]
         return _wrap_root([big] + smalls)
 
-    def test_all_children_produce_rects(self):
-        """Every sized child should generate at least one rect."""
+    def test_every_child_is_represented(self):
+        """No sized child is silently dropped.
+
+        This used to demand that at least 10 of the 100 sub-cell files each
+        get a rect of their own.  Meeting that required inflating zero-area
+        rects to a full cell, and consecutive inflations landed on the same
+        cells: build_grid draws later over earlier, so the survivors were
+        fragments and the rest were invisible.  The honest invariant is
+        representation — individually, or by an aggregate that accounts for
+        them — not a rect count.
+        """
         tree = self._tree()
         layout = compute_layout(tree, 80, 24)
-        leaf_names = {r.node.name for r in layout.rects if r.is_leaf}
-        # The dominant file must be present
-        assert "database.sqlite" in leaf_names
-        # At least some of the small files should produce rects
-        small_leaves = {n for n in leaf_names if n.startswith("s") and n.endswith(".txt")}
-        assert len(small_leaves) >= 10, (
-            f"Only {len(small_leaves)} of 100 small files produced rects — "
-            f"tiny children are being dropped"
+        assert_layout_integrity(layout)
+
+        leaves = [r for r in layout.rects if r.is_leaf]
+        assert any(r.node.name == "database.sqlite" for r in leaves)
+
+        aggregates = [r for r in leaves if "more" in r.node.name]
+        individual = [r for r in leaves if "more" not in r.node.name]
+
+        represented = len(individual) + sum(
+            _aggregate_count(r.node.name) for r in aggregates
         )
+        assert represented == 101, (
+            f"{represented} of 101 children are represented — the rest were "
+            f"silently dropped"
+        )
+        # ...and the aggregates carry their children's real bytes, so the
+        # picture still adds up to the root's size.
+        assert sum(r.node.size for r in leaves) == tree.size
 
     @pytest.mark.parametrize("w,h", VIEWPORTS)
     def test_no_parent_bleed(self, w, h):
@@ -826,17 +894,189 @@ class TestHighlySkewedDistribution:
         layout = compute_layout(self._tree(), w, h)
         assert_layout_integrity(layout)
 
-    def test_no_extreme_aspect_ratios(self):
-        """Leaf rects should not have aspect ratios worse than 20:1."""
-        layout = compute_layout(self._tree(), 80, 24)
+    @pytest.mark.parametrize("w,h", VIEWPORTS)
+    def test_no_extreme_visual_aspect_ratios(self, w, h):
+        """Bound the aspect ratio as it appears on screen.
+
+        The old check bounded raw cell dimensions at 20:1 and passed only
+        because the overlapping inflated rects had collapsed all 50 slivers
+        into 1x1s, half of them invisible.  A terminal cell is about twice
+        as tall as it is wide, so a w x h rect reads as w x 2h; that is the
+        ratio squarify now optimizes and the one worth asserting.
+
+        The crumbs are consolidated into a single "… N more" block per
+        parent.  Its thickness is set by the metric it honestly encodes,
+        not by the layout, so it is exempt — but only one such block per
+        parent is allowed, otherwise the sliver stack is simply back.
+        """
+        layout = compute_layout(self._tree(), w, h)
+        thin_aggregates: dict[str, int] = {}
         for rect in layout.rects:
-            if not rect.is_leaf or rect.w < 1 or rect.h < 1:
+            if not rect.is_leaf:
                 continue
-            ratio = max(rect.w / rect.h, rect.h / rect.w)
-            assert ratio <= 20, (
-                f"Rect {rect.node.name} has aspect ratio {ratio:.1f} "
-                f"({rect.w}x{rect.h})"
+            if rect.w < 1 or rect.h < 1 or int(rect.w) * int(rect.h) < 4:
+                continue
+            ratio = _visual_aspect(rect)
+            if "more" in rect.node.name and ratio > 4:
+                parent = rect.node.path.rsplit("/", 1)[0]
+                thin_aggregates[parent] = thin_aggregates.get(parent, 0) + 1
+                continue
+            assert ratio <= 4, (
+                f"Rect {rect.node.name} has visual aspect ratio {ratio:.1f} "
+                f"({rect.w}x{rect.h} cells)"
             )
+        for parent, count in thin_aggregates.items():
+            assert count == 1, (
+                f"{parent} emitted {count} thin aggregate strips — "
+                f"consolidation should leave at most one"
+            )
+
+
+class TestSkewedRealisticProject:
+    """The shape that produced the broken screenshot: one dominant subtree
+    per level plus a tail of crumbs, at a full-screen viewport.
+
+    Before consolidation this laid 'bin' out as a 1x35 strip, overwrote 13
+    of 'share''s 14 cells with a neighbour's inflated rect, and rendered
+    'd.tcss' and 'pyproject.toml' nowhere at all.
+    """
+
+    KIB = 1024
+    MIB = 1024 * 1024
+
+    @classmethod
+    def _tree(cls):
+        KiB, MiB = cls.KIB, cls.MIB
+        venv = _make_dir(".venv", [
+            _make_dir("lib", [
+                _make_file("python3.12", int(29.9 * MiB), "/p/.venv/lib", 3),
+            ], "/p/.venv", 2),
+            _make_file("bin", 300 * KiB, "/p/.venv", 2),
+            _make_file("share", 120 * KiB, "/p/.venv", 2),
+            _make_file("pyvenv.cfg", 1 * KiB, "/p/.venv", 2),
+        ], "/p", 1)
+        git = _make_dir(".git", [
+            _make_file("pack", int(4.9 * MiB), "/p/.git", 2),
+            _make_file("objects", 300 * KiB, "/p/.git", 2),
+            _make_file("refs", 40 * KiB, "/p/.git", 2),
+        ], "/p", 1)
+        src = _make_dir("src", [
+            _make_file("rest.py", 1600 * KiB, "/p/src", 2),
+            _make_file("screens.py", 409 * KiB, "/p/src", 2),
+            _make_file("storage.py", 336 * KiB, "/p/src", 2),
+            _make_file("viz.py", 250 * KiB, "/p/src", 2),
+            _make_file("app.py", 200 * KiB, "/p/src", 2),
+        ], "/p", 1)
+        tests = _make_dir("tests", [
+            _make_file("golden.png", int(2.2 * MiB), "/p/tests", 2),
+            _make_file("t1.py", 200 * KiB, "/p/tests", 2),
+            _make_file("t2.py", 200 * KiB, "/p/tests", 2),
+        ], "/p", 1)
+        docs = _make_dir("docs", [
+            _make_file("a.jpg", 700 * KiB, "/p/docs", 2),
+            _make_file("b.jpg", 500 * KiB, "/p/docs", 2),
+            _make_file("c.md", 300 * KiB, "/p/docs", 2),
+        ], "/p", 1)
+        children = [
+            venv, git, src, tests, docs,
+            _make_file("uv.lock", 223 * KiB, "/p", 1),
+            _make_dir("tool", [_make_file("x.py", 106 * KiB, "/p/tool", 2)], "/p", 1),
+            _make_dir(
+                ".pytest_cache",
+                [_make_file("v", 68 * KiB, "/p/.pytest_cache", 2)], "/p", 1,
+            ),
+            _make_file("README.md", 9 * KiB, "/p", 1),
+            _make_dir(
+                ".github",
+                [_make_file("ci.yml", 7 * KiB, "/p/.github", 2)], "/p", 1,
+            ),
+            _make_dir(
+                "assets",
+                [_make_file("d.tcss", 2 * KiB, "/p/assets", 2)], "/p", 1,
+            ),
+            _make_file("pyproject.toml", int(1.5 * KiB), "/p", 1),
+            _make_file(".gitignore", 304, "/p", 1),
+        ]
+        return _wrap_root(children, name="p")
+
+    @pytest.mark.parametrize("w,h", VIEWPORTS + [(128, 53)])
+    def test_integrity(self, w, h):
+        layout = compute_layout(self._tree(), w, h)
+        assert_layout_integrity(layout)
+
+    def test_no_fragmented_or_hidden_leaves(self):
+        """Every leaf owns every cell of its snapped rect."""
+        layout = compute_layout(self._tree(), 128, 53)
+        owned = _owned_cells(layout)
+        fragmented, hidden = [], []
+        for rect in layout.rects:
+            if not rect.is_leaf:
+                continue
+            area = int(rect.w) * int(rect.h)
+            if area <= 0:
+                continue
+            visible = owned.get(id(rect), 0)
+            if visible == 0:
+                hidden.append((rect.node.name, int(rect.w), int(rect.h)))
+            elif visible < area:
+                fragmented.append(
+                    (rect.node.name, int(rect.w), int(rect.h), visible)
+                )
+        assert hidden == [], f"leaves rendered nowhere: {hidden}"
+        assert fragmented == [], f"leaves partly overwritten: {fragmented}"
+
+    def test_no_adjacent_sibling_slivers(self):
+        """No two 1-cell-thin siblings sit side by side — no sliver stacks."""
+        layout = compute_layout(self._tree(), 128, 53)
+        thin = [
+            r for r in layout.rects
+            if r.is_leaf and min(int(r.w), int(r.h)) <= 1
+        ]
+        for i, a in enumerate(thin):
+            for b in thin[i + 1:]:
+                if a.node.path.rsplit("/", 1)[0] != b.node.path.rsplit("/", 1)[0]:
+                    continue
+                touch_x = (
+                    int(a.x) + int(a.w) == int(b.x)
+                    or int(b.x) + int(b.w) == int(a.x)
+                )
+                touch_y = (
+                    int(a.y) + int(a.h) == int(b.y)
+                    or int(b.y) + int(b.h) == int(a.y)
+                )
+                overlap_y = (
+                    int(a.y) < int(b.y) + int(b.h)
+                    and int(b.y) < int(a.y) + int(a.h)
+                )
+                overlap_x = (
+                    int(a.x) < int(b.x) + int(b.w)
+                    and int(b.x) < int(a.x) + int(a.w)
+                )
+                assert not ((touch_x and overlap_y) or (touch_y and overlap_x)), (
+                    f"sliver stack: {a.node.name!r} "
+                    f"({int(a.w)}x{int(a.h)} at {int(a.x)},{int(a.y)}) is "
+                    f"adjacent to {b.node.name!r} "
+                    f"({int(b.w)}x{int(b.h)} at {int(b.x)},{int(b.y)})"
+                )
+
+    def test_crumbs_are_consolidated_and_labeled(self):
+        """The crumb-heavy parents get a labeled '… N more' block."""
+        layout = compute_layout(self._tree(), 128, 53)
+        aggregates = {
+            r.node.path.rsplit("/", 1)[0]: r
+            for r in layout.rects
+            if r.is_leaf and "more" in r.node.name
+        }
+        # .venv (bin/share/pyvenv.cfg behind a 29.9 MiB sibling) and the
+        # root's tail of sub-10 KiB entries are the crumb-heavy parents.
+        assert "/p/.venv" in aggregates, f"no aggregate under /p/.venv: {aggregates}"
+        assert "/p" in aggregates, f"no aggregate at the root: {aggregates}"
+        for parent, rect in aggregates.items():
+            assert _aggregate_count(rect.node.name) >= 2
+            assert rect.node.is_dir, "aggregates use the neutral dir-leaf color"
+        # The wide ones are wide enough to actually show their label.
+        wide = [r for r in aggregates.values() if r.w >= 8]
+        assert wide and all(r.label for r in wide)
 
 
 class TestIntegerCoordinates:

@@ -80,6 +80,42 @@ class TestColorBrailleCanvas:
         c.clear()
         assert c.get_bg_color(0, 0) is None
 
+    def test_dot_count(self):
+        """dot_count reports distinct lit dots, so 0..8 per cell."""
+        c = ColorBrailleCanvas(10, 10)
+        assert c.dot_count(0, 0) == 0
+        c.set(0, 0, "red")
+        assert c.dot_count(0, 0) == 1
+        c.set(1, 3, "red")
+        assert c.dot_count(0, 0) == 2
+        # cell (0, 0) is pixels x 0..1, y 0..3
+        for x in (0, 1):
+            for y in range(4):
+                c.set(x, y, "red")
+        assert c.dot_count(0, 0) == 8
+        assert c.dot_count(1, 0) == 0
+
+    def test_dot_count_ignores_repeat_sets(self):
+        """Re-setting a dot must not inflate the coverage count."""
+        c = ColorBrailleCanvas(10, 10)
+        for _ in range(5):
+            c.set(0, 0, "red")
+            c.set(0, 0, "blue")
+        assert c.dot_count(0, 0) == 1
+
+    def test_dot_count_out_of_bounds(self):
+        c = ColorBrailleCanvas(10, 10)
+        c.set(-1, -1, "red")
+        c.set(100, 100, "red")
+        assert c.dot_count(-1, -1) == 0
+        assert c.dot_count(50, 50) == 0
+
+    def test_dot_count_cleared(self):
+        c = ColorBrailleCanvas(10, 10)
+        c.set(0, 0, "red")
+        c.clear()
+        assert c.dot_count(0, 0) == 0
+
     def test_bg_color_out_of_bounds(self):
         c = ColorBrailleCanvas(10, 10)
         # Should not raise

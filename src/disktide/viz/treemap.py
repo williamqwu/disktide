@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import floor
 from typing import Mapping
 
 import squarify
@@ -25,7 +26,7 @@ from disktide.viz.colors import (
     get_color_scheme,
     hsl_to_rgb,
 )
-from disktide.viz.layout import bounded_children
+from disktide.viz.layout import aggregate_children, bounded_children
 
 
 def _rect_bg(
@@ -153,38 +154,350 @@ def compute_layout(
     return layout
 
 
+# Slack absorbed when snapping an endpoint, so that a boundary two rects
+# compute by different but algebraically equal routes still lands on one
+# integer.  Far below any meaningful fraction of a cell.
+_SNAP_SLACK = 1e-9
+
+
 def _snap_rects(
     float_rects: list[dict],
     cx: int, cy: int, cw: int, ch: int,
 ) -> list[dict]:
     """Snap squarify float output to integer grid coordinates.
 
+    `float_rects` are in cell units local to the parent's inner box, whose
+    origin sits at (cx, cy) in the grid; going through absolute coordinates
+    and subtracting the offset again would re-round the very endpoints this
+    relies on.
+
     Rounds endpoints (not widths) so adjacent rects that share a float
     boundary produce the same integer — no gaps or overlaps.  Guarantees
     every rect is at least 1×1 when there is room, so tiny children are
     never silently dropped.
     """
-    result = []
+    boxes: list[list[int]] = []
+    inflated: list[int] = []
     for sr in float_rects:
-        x0 = int(round(sr["x"] - cx))
-        y0 = int(round(sr["y"] - cy))
-        x1 = int(round(sr["x"] - cx + sr["dx"]))
-        y1 = int(round(sr["y"] - cy + sr["dy"]))
+        # floor(v + 0.5), not round(): halving the doubled-height layout puts
+        # exact .5 endpoints everywhere, and banker's rounding would send two
+        # rects that share such a boundary to different integers.
+        x0 = int(floor(sr["x"] + 0.5 + _SNAP_SLACK))
+        y0 = int(floor(sr["y"] + 0.5 + _SNAP_SLACK))
+        x1 = int(floor(sr["x"] + sr["dx"] + 0.5 + _SNAP_SLACK))
+        y1 = int(floor(sr["y"] + sr["dy"] + 0.5 + _SNAP_SLACK))
         x0, y0 = max(0, min(x0, cw)), max(0, min(y0, ch))
         x1, y1 = max(x0, min(x1, cw)), max(y0, min(y1, ch))
         # Ensure minimum 1-cell size when there is room
+        grew = False
         if x1 == x0:
+            grew = True
             if x1 < cw:
                 x1 = x0 + 1
             elif x0 > 0:
                 x0 = x1 - 1
         if y1 == y0:
+            grew = True
             if y1 < ch:
                 y1 = y0 + 1
             elif y0 > 0:
                 y0 = y1 - 1
-        result.append({"x": cx + x0, "y": cy + y0, "dx": x1 - x0, "dy": y1 - y0})
+        boxes.append([x0, y0, x1, y1])
+        if grew:
+            inflated.append(len(boxes) - 1)
+
+    _yield_to_inflation(boxes, inflated)
+    return [
+        {"x": cx + b[0], "y": cy + b[1], "dx": b[2] - b[0], "dy": b[3] - b[1]}
+        for b in boxes
+    ]
+
+
+def _yield_to_inflation(boxes: list[list[int]], inflated: list[int]) -> None:
+    """Shrink the neighbour an inflated rect took its cell from.
+
+    Every other boundary is consistent, because endpoints — not widths —
+    are rounded.  Growing a zero-size rect to the 1-cell minimum is the one
+    move that shifts a boundary the neighbour does not know about: left
+    alone, both claim the cell and whichever is drawn later simply wins.
+    When the neighbour is a *parent* rect, that repaints a whole subtree
+    out of existence.  Trimming is skipped where it would split the
+    neighbour in two or leave it with nothing.
+    """
+    if not inflated:
+        return
+    minimal = set(inflated)
+    for index in inflated:
+        ix0, iy0, ix1, iy1 = boxes[index]
+        for other, box in enumerate(boxes):
+            if other == index or other in minimal:
+                continue
+            ox0, oy0, ox1, oy1 = box
+            if ox1 <= ix0 or ox0 >= ix1 or oy1 <= iy0 or oy0 >= iy1:
+                continue
+            if ox0 >= ix0 and ox1 > ix1:
+                box[0] = ix1
+            elif ox1 <= ix1 and ox0 < ix0:
+                box[2] = ix0
+            elif oy0 >= iy0 and oy1 > iy1:
+                box[1] = iy1
+            elif oy1 <= iy1 and oy0 < iy0:
+                box[3] = iy0
+
+
+# A strip thinner than this many cells cannot carry a readable label on any
+# row, so the whole strip folds into one aggregate block.
+_MIN_STRIP_THICKNESS = 1.5
+# An item shorter than this many cells along its strip cannot show even a
+# two-character name, so consecutive runs of them fold together.
+_MIN_ITEM_LENGTH = 2.0
+
+
+def _same(a: float, b: float) -> bool:
+    return abs(a - b) <= 1e-9
+
+
+def _strips(local_rects: list[dict]) -> list[tuple[bool, int, int]]:
+    """Recover squarify's strips from its output order.
+
+    `squarify.layoutrow` emits rects sharing x and dx — a vertical strip
+    with items stacked along y — and `layoutcol` emits rects sharing y and
+    dy, a horizontal strip with items laid along x.  A maximal run of
+    consecutive output sharing one of those pairs came from one such call.
+
+    Returns (vertical, start, stop) triples covering `local_rects` in order.
+    """
+    result: list[tuple[bool, int, int]] = []
+    index = 0
+    count = len(local_rects)
+    while index < count:
+        head = local_rects[index]
+        stop = index + 1
+        vertical: bool | None = None
+        while stop < count:
+            other = local_rects[stop]
+            same_col = _same(head["x"], other["x"]) and _same(head["dx"], other["dx"])
+            same_row = _same(head["y"], other["y"]) and _same(head["dy"], other["dy"])
+            if vertical is None:
+                if same_col:
+                    vertical = True
+                elif same_row:
+                    vertical = False
+                else:
+                    break
+            elif not (same_col if vertical else same_row):
+                break
+            stop += 1
+        if vertical is None:
+            # A lone rect: orientation only picks which dimension counts as
+            # thickness, and a one-item strip is never merged either way.
+            vertical = head["dy"] >= head["dx"]
+        result.append((vertical, index, stop))
+        index = stop
     return result
+
+
+def _strip_groups(
+    local_rects: list[dict],
+    start: int, stop: int,
+    vertical: bool,
+    protected: list[bool],
+) -> list[tuple[int, int]]:
+    """Partition one strip into the index ranges that will be emitted."""
+    head = local_rects[start]
+    thickness = head["dx"] if vertical else head["dy"] / 2.0
+    fold_whole = (stop - start) >= 2 and thickness < _MIN_STRIP_THICKNESS
+
+    groups: list[tuple[int, int]] = []
+    run_start = start
+    for index in range(start, stop):
+        item = local_rects[index]
+        length = item["dy"] / 2.0 if vertical else item["dx"]
+        # A child on the selected path is never merged away (ADR 0006 keeps
+        # the cursor's target addressable); the run splits around it, and
+        # the flanks are allowed to come out short.
+        if protected[index] or not (fold_whole or length < _MIN_ITEM_LENGTH):
+            if run_start < index:
+                groups.append((run_start, index))
+            groups.append((index, index + 1))
+            run_start = index + 1
+    if run_start < stop:
+        groups.append((run_start, stop))
+    return groups
+
+
+def _union(local_rects: list[dict], lo: int, hi: int, vertical: bool) -> dict:
+    """Exact union of adjacent segments of one strip — always a rectangle."""
+    first = local_rects[lo]
+    last = local_rects[hi - 1]
+    if vertical:
+        return {
+            "x": first["x"], "y": first["y"],
+            "dx": first["dx"],
+            "dy": last["y"] + last["dy"] - first["y"],
+        }
+    return {
+        "x": first["x"], "y": first["y"],
+        "dx": last["x"] + last["dx"] - first["x"],
+        "dy": first["dy"],
+    }
+
+
+def _rect_union(a: dict, b: dict) -> dict | None:
+    """Union of two rects when it is itself a rectangle, else None."""
+    if _same(a["x"], b["x"]) and _same(a["dx"], b["dx"]):
+        lo, hi = (a, b) if a["y"] <= b["y"] else (b, a)
+        if _same(lo["y"] + lo["dy"], hi["y"]):
+            return {
+                "x": a["x"], "y": lo["y"], "dx": a["dx"],
+                "dy": hi["y"] + hi["dy"] - lo["y"],
+            }
+    if _same(a["y"], b["y"]) and _same(a["dy"], b["dy"]):
+        lo, hi = (a, b) if a["x"] <= b["x"] else (b, a)
+        if _same(lo["x"] + lo["dx"], hi["x"]):
+            return {
+                "x": lo["x"], "y": a["y"],
+                "dx": hi["x"] + hi["dx"] - lo["x"], "dy": a["dy"],
+            }
+    return None
+
+
+def _fold_sub_cell(
+    parent: FSNode,
+    children: list[FSNode],
+    values: list[int],
+    *,
+    metric: str,
+    weights: Mapping[str, int] | None,
+    selected_path: str | None,
+    cells: int,
+) -> tuple[list[FSNode], list[int]]:
+    """Fold children whose share of the parent is under one cell.
+
+    `bounded_children` aggregates only past a *count* cap, so a cramped
+    viewport still hands squarify a dozen siblings that between them cannot
+    fill a single cell.  Each then demands a rect that `_snap_rects` has to
+    inflate to the 1-cell minimum, several of them onto the same cell,
+    where whichever is drawn last erases the rest.  Folding by area first
+    leaves one honest "… N more" block instead.  Area still encodes the
+    metric (ADR 0006): the block carries the sum of what it replaced.
+    """
+    total = sum(values)
+    if total <= 0 or cells <= 0 or len(children) < 3:
+        return children, values
+
+    threshold = total / cells  # the metric value worth exactly one cell
+    crumbs: list[FSNode] = []
+    kept: list[FSNode] = []
+    for child, value in zip(children, values):
+        keep = value >= threshold or (
+            bool(selected_path)
+            and (
+                child.path == selected_path
+                or selected_path.startswith(child.path.rstrip("/") + "/")
+            )
+        )
+        (kept if keep else crumbs).append(child)
+    if len(crumbs) < 2:
+        return children, values
+
+    kept.append(aggregate_children(
+        parent,
+        crumbs,
+        metric=metric,
+        layout_value=sum(
+            _layout_value(child, metric, weights) for child in crumbs
+        ),
+        key="crumbs",
+    ))
+    ranked = sorted(
+        (
+            (_layout_value(child, metric, weights), child.name, child.path, child)
+            for child in kept
+        ),
+        key=lambda item: (-item[0], item[1], item[2]),
+    )
+    return [item[3] for item in ranked], [item[0] for item in ranked]
+
+
+def _fusible(rect: dict, lo: int, hi: int, protected: list[bool]) -> bool:
+    """Whether a piece may be fused with a neighbouring one."""
+    if any(protected[lo:hi]):
+        return False
+    if hi - lo >= 2:
+        return True  # already a fold
+    return rect["dx"] * rect["dy"] / 2.0 < 1.0  # sub-cell crumb
+
+
+def _consolidate(
+    local_rects: list[dict],
+    children: list[FSNode],
+    parent: FSNode,
+    *,
+    metric: str,
+    weights: Mapping[str, int] | None,
+    selected_path: str | None,
+) -> list[tuple[dict, FSNode]]:
+    """Fold sub-legible squarify output into labeled aggregate blocks.
+
+    Rectangle area still encodes the metric (ADR 0006) — nothing is inflated
+    to make it visible.  What changes is that a run of siblings too small to
+    render as anything but 1-cell crumbs is represented by one honest
+    "… N more" block carrying their combined size, instead of N rects that
+    the integer snap has to overlap onto each other.
+    """
+    protected = [
+        bool(selected_path)
+        and (
+            child.path == selected_path
+            or selected_path.startswith(child.path.rstrip("/") + "/")
+        )
+        for child in children
+    ]
+
+    groups: list[tuple[dict, int, int]] = []
+    for vertical, start, stop in _strips(local_rects):
+        for lo, hi in _strip_groups(local_rects, start, stop, vertical, protected):
+            rect = (
+                local_rects[lo]
+                if hi - lo == 1
+                else _union(local_rects, lo, hi, vertical)
+            )
+            # Squarify can leave crumbs in strips of their own, so a second
+            # fuse runs across strip boundaries: two consecutive folds land
+            # side by side and read as exactly the sliver stack the fold
+            # exists to remove, and a lone sub-cell item only reaches the
+            # screen at all because _snap_rects inflates it to one cell —
+            # two of those inflate onto the *same* cell, where the later
+            # erases the earlier.  Fusing needs the union to be a rectangle.
+            if groups and _fusible(rect, lo, hi, protected):
+                prev_rect, prev_lo, prev_hi = groups[-1]
+                if prev_hi == lo and _fusible(prev_rect, prev_lo, prev_hi, protected):
+                    fused = _rect_union(prev_rect, rect)
+                    if fused is not None:
+                        groups[-1] = (fused, prev_lo, hi)
+                        continue
+            groups.append((rect, lo, hi))
+
+    pieces: list[tuple[dict, FSNode]] = []
+    for rect, lo, hi in groups:
+        if hi - lo == 1:
+            pieces.append((rect, children[lo]))
+            continue
+        merged = children[lo:hi]
+        pieces.append((
+            rect,
+            aggregate_children(
+                parent,
+                merged,
+                metric=metric,
+                layout_value=sum(
+                    _layout_value(child, metric, weights) for child in merged
+                ),
+                key=str(lo),
+            ),
+        ))
+    return pieces
 
 
 def _layout_node(
@@ -269,15 +582,46 @@ def _layout_node(
 
     # Compute sub-rectangles using squarify
     sizes = [_layout_value(c, metric, weights) for c in sized]
-    total = sum(sizes)
-    if total <= 0:
+    if sum(sizes) <= 0:
         return
 
-    normed = squarify.normalize_sizes(sizes, inner_w, inner_h)
-    float_rects = squarify.squarify(normed, x + pad, y + pad, inner_w, inner_h)
+    sized, sizes = _fold_sub_cell(
+        node, sized, sizes,
+        metric=metric,
+        weights=weights,
+        selected_path=selected_path,
+        cells=inner_w * inner_h,
+    )
+
+    # Squarify in doubled-height space.  A terminal cell is about twice as
+    # tall as it is wide, so a w x h cell rect reads on screen as w x 2h;
+    # squarifying in raw cell units optimizes the wrong aspect and drops the
+    # remainder into a thin full-height strip.  Local coordinates keep the
+    # doubling out of the caller's frame.
+    normed = squarify.normalize_sizes(sizes, inner_w, inner_h * 2)
+    local_rects = squarify.squarify(normed, 0, 0, inner_w, inner_h * 2)
+
+    pieces = _consolidate(
+        local_rects,
+        sized,
+        node,
+        metric=metric,
+        weights=weights,
+        selected_path=selected_path,
+    )
+
+    float_rects = [
+        {
+            "x": local["x"],
+            "y": local["y"] / 2.0,
+            "dx": local["dx"],
+            "dy": local["dy"] / 2.0,
+        }
+        for local, _child in pieces
+    ]
     sub_rects = _snap_rects(float_rects, x + pad, y + pad, inner_w, inner_h)
 
-    for sr, child in zip(sub_rects, sized):
+    for sr, (_local, child) in zip(sub_rects, pieces):
         sw, sh = sr["dx"], sr["dy"]
         # Skip children whose rect collapsed to zero area after snapping
         if sw <= 0 or sh <= 0:

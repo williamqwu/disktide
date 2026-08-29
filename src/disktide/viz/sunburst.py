@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -145,15 +146,7 @@ def compute_sunburst(
     )
 
     # Render arcs to canvas with file-type coloring
-    for arc in layout.arcs:
-        color = _arc_color(arc)
-        bg_color = darken_rgb(color, 0.4)
-        _fill_arc(
-            canvas, cx, cy,
-            arc.r_inner, arc.r_outer,
-            arc.angle_start, arc.angle_end,
-            color, bg_color,
-        )
+    _rasterize_arcs(canvas, layout.arcs, ring_width)
 
     # Compute labels
     _compute_labels(layout, node, cx, cy, metric, visuals)
@@ -178,28 +171,106 @@ def _arc_color(arc: ArcSegment) -> str:
     return file_type_color(node.name, depth, is_dir=False)
 
 
-def _fill_arc(
+# Angular slack, in radians, below which two arcs that are adjacent by
+# construction are treated as touching.  Child spans are accumulated in
+# floating point, so a parent's last child can end a few ULPs short of the
+# next parent's first child; a gap that small is ~10 orders of magnitude
+# under one pixel but would still leave an unowned hairline.
+_SEAM = 1e-9
+
+
+def _rasterize_arcs(
     canvas: ColorBrailleCanvas,
-    cx: int, cy: int,
-    r_inner: int, r_outer: int,
-    angle_start: float, angle_end: float,
-    color: str,
-    bg_color: str,
+    arcs: list[ArcSegment],
+    ring_width: int,
 ) -> None:
-    """Fill an arc on the canvas with fg and bg colors."""
-    for r in range(r_inner, r_outer + 1):
-        circumference = max(
-            1,
-            int(r * abs(angle_end - angle_start)),
-        )
-        steps = max(circumference * 2, 1)
-        for i in range(steps + 1):
-            t = i / steps
-            angle = angle_start + (angle_end - angle_start) * t
-            x = int(cx + r * math.cos(angle))
-            y = int(cy + r * math.sin(angle))
-            canvas.set(x, y, color)
-            canvas.set_bg(x // 2, y // 4, bg_color)
+    """Scan-convert the whole disc, setting every covered dot exactly once.
+
+    The previous renderer stroked concentric integer-radius circles per arc
+    and truncated each sample to a pixel.  That both oversampled (many
+    writes landing on the same dot) and undersampled (pixels between two
+    strokes never written), and it painted a full character-cell background
+    for every dot it touched, quantizing the silhouette to whole cells.
+
+    Here the disc is walked pixel by pixel instead: a pixel's radius selects
+    the ring, its angle selects the arc within that ring by binary search
+    over the ring's half-open ``[angle_start, angle_end)`` intervals.
+    """
+    if not arcs or ring_width <= 0:
+        return
+
+    two_pi = 2.0 * math.pi
+
+    # Per-depth interval lists.  Arcs are appended depth-first, so within a
+    # depth they already ascend by angle_start; sort defensively anyway.
+    max_depth = max(arc.depth for arc in arcs)
+    rings: list[tuple[list[float], list[float], list[str], int, int] | None]
+    collected: dict[int, tuple[list[float], list[float], list[str]]] = {}
+    radii: dict[int, tuple[int, int]] = {}
+    for arc in arcs:
+        starts, ends, colors = collected.setdefault(arc.depth, ([], [], []))
+        starts.append(arc.angle_start)
+        ends.append(arc.angle_end)
+        colors.append(_arc_color(arc))
+        radii[arc.depth] = (arc.r_inner, arc.r_outer)
+
+    rings = [None] * (max_depth + 1)
+    for depth, (starts, ends, colors) in collected.items():
+        if any(starts[i] > starts[i + 1] for i in range(len(starts) - 1)):
+            order = sorted(range(len(starts)), key=starts.__getitem__)
+            starts = [starts[i] for i in order]
+            ends = [ends[i] for i in order]
+            colors = [colors[i] for i in order]
+        for i in range(len(ends) - 1):
+            gap = starts[i + 1] - ends[i]
+            if 0.0 < gap < _SEAM:
+                ends[i] = starts[i + 1]
+        if ends and 0.0 < two_pi - ends[-1] < _SEAM:
+            ends[-1] = two_pi
+        r_inner, r_outer = radii[depth]
+        rings[depth] = (starts, ends, colors, r_inner, r_outer)
+
+    cxf = canvas.pixel_width / 2.0
+    cyf = canvas.pixel_height / 2.0
+    reach = max(arc.r_outer for arc in arcs) + 1
+
+    hypot = math.hypot
+    atan2 = math.atan2
+    sqrt = math.sqrt
+    set_dot = canvas.set
+    ring_count = len(rings)
+    px_max = canvas.pixel_width - 1
+
+    py_lo = max(0, int(cyf - reach))
+    py_hi = min(canvas.pixel_height - 1, int(cyf + reach) + 1)
+    for py in range(py_lo, py_hi + 1):
+        dy = py + 0.5 - cyf
+        chord_sq = reach * reach - dy * dy
+        if chord_sq <= 0.0:
+            continue
+        half = sqrt(chord_sq)
+        px_lo = max(0, int(cxf - half))
+        px_hi = min(px_max, int(cxf + half) + 1)
+        for px in range(px_lo, px_hi + 1):
+            dx = px + 0.5 - cxf
+            radius = int(hypot(dx, dy))
+            if radius < 2:
+                continue
+            depth = (radius - 2) // ring_width
+            if depth >= ring_count:
+                continue
+            ring = rings[depth]
+            if ring is None:
+                continue
+            starts, ends, colors, r_inner, r_outer = ring
+            if radius < r_inner or radius > r_outer:
+                continue
+            theta = atan2(dy, dx)
+            if theta < 0.0:
+                theta += two_pi
+            index = bisect_right(starts, theta) - 1
+            if index >= 0 and theta < ends[index]:
+                set_dot(px, py, colors[index])
 
 
 def _build_arcs(
@@ -226,9 +297,6 @@ def _build_arcs(
             or selected_path.startswith(node.path.rstrip("/") + "/")
         )
     )
-    if span < math.radians(0.5) and not selected_branch:
-        return
-
     r_inner = depth * ring_width + 2
     r_outer = r_inner + ring_width - 1
 
@@ -242,6 +310,13 @@ def _build_arcs(
         visual=visuals.get(node.path) if visuals is not None else None,
         selected=node.path == selected_path,
     ))
+
+    if span < math.radians(0.5) and not selected_branch:
+        # Too thin to subdivide, but the segment is still emitted so its
+        # slice of the ring is owned and painted.  Dropping it left the
+        # slice unclaimed, which the rasterizer renders as a hairline crack
+        # running through the ring.
+        return
 
     sized = bounded_children(
         node,
@@ -520,6 +595,7 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
 
     segments: list[Segment] = []
     row = rows[y]
+    dot_count = layout.canvas.dot_count
 
     for x, (ch, fg_color) in enumerate(row):
         if x in legend_chars:
@@ -528,8 +604,16 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
         elif x in label_chars:
             lch, lfg, lbg = label_chars[x]
             segments.append(Segment(lch, Style(color=lfg, bgcolor=lbg)))
+        elif dot_count(x, y) == 8:
+            # Every dot in the cell belongs to an arc: paint it as a solid
+            # block of the arc's own color.  A fully-lit braille glyph shows
+            # the font's inter-dot and inter-line gaps, which turned the
+            # interior of the disc into a halftone grid.
+            segments.append(Segment(" ", Style(bgcolor=fg_color)))
         else:
-            bg_color = layout.canvas.get_bg_color(x, y)
-            segments.append(Segment(ch, Style(color=fg_color, bgcolor=bg_color)))
+            # Partially covered (or empty): the braille glyph carries the
+            # silhouette at 2x4 sub-cell resolution.  No background chip —
+            # one would quantize the rim back to whole character cells.
+            segments.append(Segment(ch, Style(color=fg_color)))
 
     return segments
