@@ -36,6 +36,7 @@ from disktide.domain.monitor import (
     RetentionPreview,
 )
 from disktide.domain.visualization import MonitorSpaceTime
+from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
 from disktide.services.monitor import (
     MonitorEvent,
     MonitorEventKind,
@@ -58,7 +59,7 @@ class _MonitorServiceEventMessage(Message):
         self.event = event
 
 
-class MonitorScreen(Screen):
+class MonitorScreen(RenderEpochRefreshMixin, Screen):
     """Unified TUI management surface over :class:`MonitorService`."""
 
     BINDINGS = [
@@ -222,7 +223,13 @@ class MonitorScreen(Screen):
     MonitorScreen.narrow #monitor-session-help {
         display: none;
     }
-    """
+    """ + scrollbar_css(
+        "#monitor-list",
+        "#monitor-history-table",
+        "#monitor-alert-rules",
+        "#monitor-alert-events",
+        "#monitor-retention-table",
+    )
 
     def __init__(
         self,
@@ -446,8 +453,17 @@ class MonitorScreen(Screen):
         self._retention = retention
         self._space_time = space_time
         self._space_time_error = space_time_error
-        if self._session_stopping and not dashboard.session_running:
-            self._session_stopping = False
+        if self._session_stopping:
+            if not dashboard.session_running:
+                self._session_stopping = False
+            else:
+                # This load raced the stop and read the dashboard before the
+                # session threads exited. A session stopped with no scan in
+                # flight emits nothing afterwards, so no event will schedule
+                # another load: re-arm one until the stop is visible, or the
+                # "Stopping & cancelling…" label sticks forever. The load
+                # worker group is exclusive, so re-arms cannot stack.
+                self.set_timer(0.25, self._load_data)
         self._render_banner()
         self._render_sampling_controls()
         self._render_monitor_list()
@@ -1377,7 +1393,12 @@ class MonitorScreen(Screen):
     def _show_error(self, message: str) -> None:
         if not self.is_mounted:
             return
-        self.query_one("#monitor-overview", Static).update(message)
+        try:
+            self.query_one("#monitor-overview", Static).update(message)
+        except NoMatches:
+            # A load worker can outlive the screen's children during app
+            # teardown; there is nobody left to read the message.
+            return
         self.app.notify(message, severity="error", timeout=8)
 
     def _notify_error(self, exc: Exception) -> None:

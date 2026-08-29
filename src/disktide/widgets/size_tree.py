@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from textual import events
 from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
+from rich.cells import cell_len
 from rich.text import Text
 
 from disktide.metrics import (
@@ -36,6 +38,12 @@ class SizeTree(Tree[FSNode]):
     }
     """
 
+    BAR_WIDTH = 15
+    """Cells the proportional bar uses when the row has room for it."""
+
+    MIN_BAR_WIDTH = 6
+    """Narrowest bar still worth drawing; below this the bar is dropped."""
+
     def __init__(
         self,
         root_node: FSNode | None = None,
@@ -53,6 +61,7 @@ class SizeTree(Tree[FSNode]):
         self._visuals: dict[str, VisualDelta] = {}
         self._mini_trends: dict[str, tuple[int | None, ...]] = {}
         self._diff_mode = False
+        self._fitted_width = -1
         if root_node is not None:
             self._tree_nodes[root_node.path] = self.root
         if root_node:
@@ -358,7 +367,9 @@ class SizeTree(Tree[FSNode]):
 
         trend = self._mini_trends.get(node.path)
         if trend:
-            text.append(f"  {sparkline(trend)}", style="dim cyan")
+            spark = sparkline(trend)
+            if spark:
+                text.append(f"  {spark}", style="dim cyan")
 
         if node.is_hardlink:
             if node.is_hardlink_duplicate and node.hardlink_owner_path:
@@ -376,30 +387,106 @@ class SizeTree(Tree[FSNode]):
         elif node.depth_limited:
             text.append("  [max-depth]", style="bold yellow")
 
+        # Accessibility indicators (full denial vs partial). Rendered last,
+        # but resolved here so the bar can reserve room for them: they sit
+        # on the same rows as the bar and would otherwise push the percent
+        # off the right edge.
+        indicator: tuple[str, str] | None = None
+        if node.error:
+            indicator = (f" {denied_glyph()}", "bold red")
+        elif node.inaccessible_count > 0:
+            indicator = (
+                f" {partial_glyph()} {node.inaccessible_count} hidden",
+                "bold yellow",
+            )
+        elif node.is_dir and node.inaccessible_subtree_count > 0:
+            # Some descendant somewhere below has hidden state — dim hint
+            indicator = (f" {partial_glyph()}", "dim yellow")
+
         # Proportional bar for directories (share of the scan root total)
         if node.is_dir:
             ratio = self._metric_ratio(node)
             if ratio is not None:
-                bar_width = 15
-                filled = int(ratio * bar_width)
-                filled_ch, empty_ch = bar_chars()
-                bar = filled_ch * filled + empty_ch * (bar_width - filled)
-                pct = ratio * 100
-                text.append(f"  {bar} {pct:.1f}%", style="green")
+                reserved = cell_len(indicator[0]) if indicator else 0
+                self._append_share(text, node, ratio, reserved)
 
-        # Accessibility indicators (full denial vs partial)
-        if node.error:
-            text.append(f" {denied_glyph()}", style="bold red")
-        elif node.inaccessible_count > 0:
-            text.append(
-                f" {partial_glyph()} {node.inaccessible_count} hidden",
-                style="bold yellow",
-            )
-        elif node.is_dir and node.inaccessible_subtree_count > 0:
-            # Some descendant somewhere below has hidden state — dim hint
-            text.append(f" {partial_glyph()}", style="dim yellow")
+        if indicator is not None:
+            text.append(indicator[0], style=indicator[1])
 
         return text
+
+    def _append_share(
+        self,
+        text: Text,
+        node: FSNode,
+        ratio: float,
+        reserved: int,
+    ) -> None:
+        """Append the bar and percent, degrading to whatever the row fits.
+
+        The percent is the payload and is never truncated: the bar gives up
+        cells first (down to `MIN_BAR_WIDTH`), then disappears, and only
+        then does the percent itself go. Textual crops a label at the panel
+        edge, so an over-wide tail would otherwise render as a fragment
+        like "16." with the digits and sign shorn off.
+        """
+        percent = f"{ratio * 100:.1f}%"
+        room = self._tail_room(node, text, reserved)
+
+        if room is None:
+            bar_width = self.BAR_WIDTH
+        else:
+            # "  " + bar + " " + percent
+            bar_width = min(self.BAR_WIDTH, room - 3 - len(percent))
+
+        if bar_width >= self.MIN_BAR_WIDTH:
+            filled = int(ratio * bar_width)
+            filled_ch, empty_ch = bar_chars()
+            bar = filled_ch * filled + empty_ch * (bar_width - filled)
+            text.append(f"  {bar} {percent}", style="green")
+        elif room is None or room >= 2 + len(percent):
+            text.append(f"  {percent}", style="green")
+
+    def _tail_room(self, node: FSNode, text: Text, reserved: int) -> int | None:
+        """Cells left on `node`'s row for the bar and percent.
+
+        The rendered row is the tree's guide indentation, plus the
+        expand glyph `Tree.render_label` prepends to expandable nodes,
+        plus the label built so far — and the trailing access indicator
+        still to come, passed in as `reserved`.
+
+        Returns None when the widget has no usable width yet (before the
+        first layout), so the caller emits the full-width tail and the
+        resize handler re-fits it once a real width is known.
+        """
+        width = self.scrollable_content_region.width
+        if width <= 0:
+            return None
+        root = self._fs_root
+        depth = node.depth - root.depth if root is not None else node.depth
+        indent = max(0, depth) * self.guide_depth
+        # Only expandable nodes carry the glyph; both states are the same
+        # width, but take the wider one so a toggle can never overflow.
+        glyph = (
+            max(cell_len(self.ICON_NODE), cell_len(self.ICON_NODE_EXPANDED))
+            if node.is_dir
+            else 0
+        )
+        return width - indent - glyph - text.cell_len - reserved
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-fit labels whenever the usable width changes.
+
+        Guarded on the width the labels were last fitted to: setting a
+        label changes the tree's virtual size, which posts another resize,
+        so an unguarded refresh would spin. The event's size covers the
+        scrollbar columns, so the fitting width comes from the region.
+        """
+        width = self.scrollable_content_region.width
+        if width <= 0 or width == self._fitted_width:
+            return
+        self._fitted_width = width
+        self._refresh_labels()
 
     def _metric_ratio(self, node: FSNode) -> float | None:
         """Return `node`'s share of the scan root for the active metric.

@@ -23,13 +23,14 @@ from disktide.models.patterns import (
     RiskLevel,
 )
 from disktide.models.tree import FSNode
+from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
 from disktide.services.cleanup import CleanupError, CleanupService
 from disktide.widgets.cleanup_map import CleanupMap
 from disktide.widgets.cleanup_history import CleanupHistoryModal
 from disktide.widgets.cleanup_modal import CleanupModal, CleanupModalResult
 
 
-class CleanupScreen(Screen):
+class CleanupScreen(RenderEpochRefreshMixin, Screen):
     """Review detected candidates without exposing a direct-delete path."""
 
     BINDINGS = [
@@ -56,7 +57,7 @@ class CleanupScreen(Screen):
     #cleanup-table {
         height: 1fr;
     }
-    """
+    """ + scrollbar_css("#cleanup-table")
 
     def __init__(
         self,

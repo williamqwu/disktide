@@ -62,15 +62,26 @@ def sparkline(values: tuple[int | None, ...] | list[int | None]) -> str:
         return ""
     valid = [value for value in values if value is not None]
     if not valid:
-        return "?" * len(values)
+        # A gap inside a series is worth marking; a series that is all
+        # gaps says nothing, and a row of "?" reads as a glitch (a path
+        # younger than the sampled window hits this constantly).
+        return ""
     low = min(valid)
     high = max(valid)
     glyphs = ".:-=+*#" if is_safe_rendering() else "▁▂▃▄▅▆▇█"
     span = high - low
+    # "?" is for a hole in the middle of a series. Points outside the
+    # first and last real values are not holes — the path simply did not
+    # exist yet (or no longer does) — so they render as blank lead-in
+    # rather than a run of question marks in front of every young file.
+    first = next(i for i, value in enumerate(values) if value is not None)
+    last = len(values) - 1 - next(
+        i for i, value in enumerate(reversed(values)) if value is not None
+    )
     result = []
-    for value in values:
+    for position, value in enumerate(values):
         if value is None:
-            result.append("?")
+            result.append("?" if first < position < last else " ")
         elif span <= 0:
             result.append(glyphs[len(glyphs) // 2])
         else:

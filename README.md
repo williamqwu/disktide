@@ -2,10 +2,10 @@
 
 <h1>DiskTide</h1>
 
-<h3><code>&nbsp;measure,&nbsp;compare,&nbsp;reclaim&nbsp;</code></h3>
+<h3><code>&nbsp;ebb,&nbsp;flow,&nbsp;reclaim&nbsp;</code></h3>
 
 <p>
-  <b>Storage intelligence for the terminal: explore current usage, understand how it changed, and reclaim space through reviewable, reversible plans.</b><br>
+  <b>Storage intelligence for the terminal.</b><br>
   Built with Python and <a href="https://github.com/Textualize/textual">Textual</a>.
 </p>
 
@@ -22,8 +22,6 @@
      src="docs/images/sunburst.png" width="49%">
 <img alt="Monitor Center: the Space-Time Trend of the disktide codebase growing from March to August 2026, one snapshot per commit"
      src="docs/images/monitor.png" width="49%">
-
-<p><i>Both shots are real terminal captures of DiskTide reading its own repository.</i></p>
 
 <p>
   <a href="#installation"><b>Install</b></a> &nbsp;·&nbsp;

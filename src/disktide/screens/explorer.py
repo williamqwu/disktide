@@ -40,6 +40,7 @@ from disktide.metrics import METRIC_EXPLANATIONS, METRIC_NAMES, metric_text
 from disktide.rendering import denied_glyph, partial_glyph
 from disktide.models.tree import FSNode
 from disktide.scanner.walker import classify_symlink
+from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
 from disktide.services.scan import ScanService
 from disktide.services.monitor import MonitorEvent, MonitorEventKind, MonitorService
 from disktide.services.visualization import VisualizationService
@@ -59,7 +60,7 @@ class _ExplorerMonitorEventMessage(Message):
         self.event = event
 
 
-class ExplorerScreen(Screen):
+class ExplorerScreen(RenderEpochRefreshMixin, Screen):
     """Main filesystem explorer screen."""
 
     BINDINGS = [
@@ -149,7 +150,7 @@ class ExplorerScreen(Screen):
     #tree-panel.scanning.live-tree #size-tree {
         display: block;
     }
-    """
+    """ + scrollbar_css("#size-tree")
 
     def __init__(
         self,

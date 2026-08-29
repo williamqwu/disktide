@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 
 from textual.widgets import Button
 
@@ -31,6 +32,40 @@ async def _wait_for_monitor_load(pilot, screen: MonitorScreen) -> None:
             return
 
 
+async def _settle(pilot, predicate, timeout: float = 8.0) -> None:
+    """Pump the message loop until ``predicate`` holds or ``timeout`` lapses.
+
+    Service flags flip on worker threads before the callbacks that rewrite the
+    UI reach the Textual message loop, so a single fixed pause is not a
+    synchronisation point on a busy (2-CPU CI) host. Callers re-assert the same
+    condition right after, which keeps a genuine regression reporting the real
+    value instead of hiding it behind a timeout error.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        await pilot.pause(0.05)
+        if predicate():
+            return
+        if time.monotonic() >= deadline:
+            return
+
+
+async def _drain_monitor_loads(pilot, app) -> None:
+    """Let in-flight Monitor Center reloads finish before the app tears down.
+
+    MonitorScreen._load_data runs on a thread worker; one still populating
+    widgets while run_test() unmounts the screen fails with NoMatches, which
+    Textual reports as a WorkerFailed crash rather than as a test assertion.
+    """
+    await _settle(
+        pilot,
+        lambda: not any(
+            worker.group == "monitor-load" and worker.is_running
+            for worker in app.workers
+        ),
+    )
+
+
 def _config() -> AppConfig:
     config = AppConfig()
     config.scan.workers = 1
@@ -54,10 +89,15 @@ def test_tui_setup_is_visible_to_shared_service_and_alert_editor(tmp_path):
         async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_explorer(pilot, app)
             await pilot.press("2")
-            await pilot.pause(0.2)
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             screen = app.screen
             assert isinstance(screen, MonitorScreen)
             await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot,
+                lambda: "No monitor definition"
+                in str(screen.query_one("#monitor-history-summary").render()),
+            )
             assert screen.query_one("#monitor-tabs").active == "monitor-history-tab"
             assert screen.query_one("#monitor-session-toggle", Button).disabled
             assert "No monitor definition" in str(
@@ -68,14 +108,17 @@ def test_tui_setup_is_visible_to_shared_service_and_alert_editor(tmp_path):
             )
 
             await pilot.press("n")
-            await pilot.pause()
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorEditor))
             assert isinstance(app.screen, MonitorEditor)
             app.screen.query_one("#monitor-interval").value = "10m"
             await pilot.press("ctrl+s")
-            await pilot.pause(0.3)
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             screen = app.screen
             assert isinstance(screen, MonitorScreen)
             await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot, lambda: screen.query_one("#monitor-list").row_count == 1
+            )
 
             definitions = app._monitor_service.list_monitors()
             assert len(definitions) == 1
@@ -85,18 +128,24 @@ def test_tui_setup_is_visible_to_shared_service_and_alert_editor(tmp_path):
             assert not screen.query_one("#monitor-session-toggle", Button).disabled
 
             await pilot.press("a")
-            await pilot.pause()
+            await _settle(pilot, lambda: isinstance(app.screen, AlertEditor))
             assert isinstance(app.screen, AlertEditor)
             app.screen.query_one("#alert-threshold").value = "1B"
             await pilot.press("ctrl+s")
-            await pilot.pause(0.3)
+            await _settle(
+                pilot,
+                lambda: len(
+                    app._monitor_service.list_alert_rules(definitions[0].id)
+                )
+                == 1,
+            )
             assert len(app._monitor_service.list_alert_rules(definitions[0].id)) == 1
 
             await pilot.press("e")
-            await pilot.pause()
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorEditor))
             assert isinstance(app.screen, MonitorEditor)
             await pilot.press("escape")
-            await pilot.pause()
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             assert isinstance(app.screen, MonitorScreen)
 
         app._monitor_service.shutdown(wait=True)
@@ -140,7 +189,7 @@ def test_monitor_sampling_controls_start_stop_and_persist_auto_start(
         async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_explorer(pilot, app)
             await pilot.press("2")
-            await pilot.pause(0.2)
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             screen = app.screen
             assert isinstance(screen, MonitorScreen)
             await _wait_for_monitor_load(pilot, screen)
@@ -149,32 +198,38 @@ def test_monitor_sampling_controls_start_stop_and_persist_auto_start(
             auto_start_button = screen.query_one(
                 "#monitor-auto-start-toggle", Button
             )
+            await _settle(
+                pilot, lambda: session_button.label.plain == "Start sampling [S]"
+            )
             assert session_button.label.plain == "Start sampling [S]"
             assert auto_start_button.label.plain == "Auto-start: Off"
 
             auto_start_button.press()
-            await pilot.pause()
+            await _settle(
+                pilot, lambda: auto_start_button.label.plain == "Auto-start: On"
+            )
             assert config.monitor.auto_start_in_tui is True
             assert saved_auto_start == [True]
             assert auto_start_button.label.plain == "Auto-start: On"
 
             session_button.press()
-            for _ in range(80):
-                await pilot.pause(0.025)
-                if app._monitor_service.session_running:
-                    break
+            await _settle(pilot, lambda: app._monitor_service.session_running)
             assert app._monitor_service.session_running
             await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot, lambda: session_button.label.plain == "Stop & cancel [S]"
+            )
             assert session_button.label.plain == "Stop & cancel [S]"
 
             session_button.press()
-            for _ in range(120):
-                await pilot.pause(0.025)
-                if not app._monitor_service.session_running:
-                    break
+            await _settle(pilot, lambda: not app._monitor_service.session_running)
             assert not app._monitor_service.session_running
             await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot, lambda: session_button.label.plain == "Start sampling [S]"
+            )
             assert session_button.label.plain == "Start sampling [S]"
+            await _drain_monitor_loads(pilot, app)
             status = repository.get_monitor_status(monitor.id)
             assert status.activity is MonitorActivityState.NO_HOST
             assert status.host_id is None
@@ -211,12 +266,20 @@ def test_monitor_auto_start_launch_is_reflected_in_controls(tmp_path):
         )
         async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_explorer(pilot, app)
+            await _settle(pilot, lambda: app._monitor_service.session_running)
             assert app._monitor_service.session_running
             await pilot.press("2")
-            await pilot.pause(0.2)
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             screen = app.screen
             assert isinstance(screen, MonitorScreen)
             await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot,
+                lambda: screen.query_one(
+                    "#monitor-session-toggle", Button
+                ).label.plain
+                == "Stop & cancel [S]",
+            )
             assert (
                 screen.query_one("#monitor-session-toggle", Button).label.plain
                 == "Stop & cancel [S]"
@@ -259,10 +322,15 @@ def test_narrow_monitor_uses_list_detail_and_session_continues_off_screen(
         async with app.run_test(size=(80, 24)) as pilot:
             await _wait_for_explorer(pilot, app)
             await pilot.press("2")
-            await pilot.pause(0.2)
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             screen = app.screen
             assert isinstance(screen, MonitorScreen)
             await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot,
+                lambda: "no active host"
+                in str(screen.query_one("#monitor-history-summary").render()),
+            )
             assert screen.has_class("narrow")
             assert screen.query_one("#monitor-tabs").active == "monitor-history-tab"
             assert "no active host" in str(
@@ -283,19 +351,25 @@ def test_narrow_monitor_uses_list_detail_and_session_continues_off_screen(
             )
             screen.query_one("#monitor-list").focus()
             await pilot.press("enter")
-            await pilot.pause()
+            await _settle(pilot, lambda: screen.has_class("detail"))
             assert screen.has_class("detail")
             await pilot.press("escape")
+            await _settle(pilot, lambda: not screen.has_class("detail"))
             assert not screen.has_class("detail")
 
             await pilot.press("s")
-            await pilot.pause(0.2)
+            await _settle(pilot, lambda: app._monitor_service.session_running)
             assert app._monitor_service.session_running
             await pilot.press("1")
-            await pilot.pause()
+            await _settle(pilot, lambda: isinstance(app.screen, ExplorerScreen))
             assert isinstance(app.screen, ExplorerScreen)
             assert app._monitor_service.session_running
+            previous_dashboard = screen._dashboard
             app._monitor_service.stop_session(wait=True)
+            await _settle(
+                pilot, lambda: screen._dashboard is not previous_dashboard
+            )
+            await _drain_monitor_loads(pilot, app)
             status = repository.get_monitor_status(monitor.id)
             assert status.activity is MonitorActivityState.NO_HOST
             assert status.host_id is None
@@ -326,17 +400,23 @@ def test_explorer_sets_up_monitor_for_highlighted_directory(tmp_path):
             await _wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree")
             await pilot.press("down")
-            await pilot.pause()
+            await _settle(
+                pilot,
+                lambda: getattr(tree.cursor_node.data, "path", None) == str(selected),
+            )
             assert tree.cursor_node.data.path == str(selected)
 
             await pilot.press("shift+m")
-            await pilot.pause()
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorEditor))
             assert isinstance(app.screen, MonitorEditor)
             assert app.screen.query_one("#monitor-path").value == str(selected)
 
             await pilot.press("ctrl+s")
-            await pilot.pause(0.3)
+            await _settle(pilot, lambda: isinstance(app.screen, ExplorerScreen))
             assert isinstance(app.screen, ExplorerScreen)
+            await _settle(
+                pilot, lambda: len(app._monitor_service.list_monitors()) == 1
+            )
             definitions = app._monitor_service.list_monitors()
             assert len(definitions) == 1
             assert definitions[0].root_path == str(selected)

@@ -75,6 +75,7 @@ class SunburstView(Widget):
         self._layout: SunburstLayout | None = None
         self._stale = True
         self._layout_epoch = -1
+        self._invalidate_scheduled = False
         self._live_mode = False
         self._live_update_count = 0
         self._diff: DiffFrame | None = None
@@ -213,6 +214,22 @@ class SunburstView(Widget):
         except Exception:
             return DEFAULT_PANEL_BG
 
+    def _fits_current_size(self) -> bool:
+        """Whether the cached layout was built for the size we paint into.
+
+        on_resize invalidates, but a screen suspended across a resize is
+        resumed with a layout built for the old viewport and nothing that
+        marked it stale, so the geometry has to be re-checked where it is
+        used rather than only where it changes.
+        """
+        layout = self._layout
+        if layout is None:
+            # No layout means the node was None when we last built; there
+            # is no geometry to disagree with the widget.
+            return True
+        size = self.size
+        return layout.char_width == size.width and layout.char_height == size.height
+
     def _ensure_layout(self) -> None:
         """Recompute layout if stale, or if a global render change made it so.
 
@@ -220,10 +237,52 @@ class SunburstView(Widget):
         cells on top of that, so switching colour scheme or safe rendering
         changes nothing this widget can see locally. The render epoch is
         the signal that it did.
+
+        Only `_stale` may rebuild from here.  Textual repaints partially:
+        render_line runs once per *dirty* row, so swapping in a new layout
+        part-way through a pass leaves every clean row showing strips drawn
+        from the old one.  Two disc geometries then interleave on screen and
+        stay there, because nothing marked the clean rows dirty.  `_stale`
+        is only ever set alongside a refresh(), which dirties every row, so
+        that path is safe; an epoch or size change arriving from elsewhere
+        is not, and is deferred to after the paint instead.
         """
         epoch = render_epoch()
-        if not self._stale and epoch == self._layout_epoch:
+        if not self._stale:
+            if epoch == self._layout_epoch and self._fits_current_size():
+                return
+            # One more frame from the old layout is harmless — out-of-range
+            # rows render empty and Textual crops over-wide strips — and it
+            # buys a wholly consistent frame right after it.
+            self._invalidate_after_paint()
             return
+        self._build_layout(epoch)
+
+    def _invalidate_after_paint(self) -> None:
+        """Queue a full rebuild for once the current paint pass is over.
+
+        call_next runs the callback immediately after the message being
+        processed finishes, which is the first moment no render_line of
+        this pass can still be pending.  An unmounted widget has no message
+        pump to run it on — and no compositor mid-paint either — so there
+        the rebuild is simply done inline.
+        """
+        if not self.is_running:
+            self._build_layout(render_epoch())
+            return
+        if self._invalidate_scheduled:
+            return
+        self._invalidate_scheduled = True
+        self.call_next(self._apply_invalidation)
+
+    def _apply_invalidation(self) -> None:
+        """Drop the layout and dirty every row, the paint now being over."""
+        self._invalidate_scheduled = False
+        self._stale = True
+        self.refresh()
+
+    def _build_layout(self, epoch: int) -> None:
+        """Rebuild the cached layout at the widget's current size."""
         self._stale = False
         self._layout_epoch = epoch
         if self._node is None:

@@ -68,6 +68,7 @@ class TreemapView(Widget):
         self._layout: TreemapLayout | None = None
         self._stale = True
         self._layout_epoch = -1
+        self._invalidate_scheduled = False
         self._live_mode = False
         self._live_update_count = 0
         self._diff: DiffFrame | None = None
@@ -170,16 +171,68 @@ class TreemapView(Widget):
         share = self._layout.area_share(rect) if self._layout else 0.0
         return f"{node.name}\n{metric_text(node, self._metric)} · {share:.0%}"
 
+    def _fits_current_size(self) -> bool:
+        """Whether the cached layout was tiled for the size we paint into.
+
+        Mirrors SunburstView: on_resize invalidates, but a screen suspended
+        across a resize comes back holding a layout built for the old
+        viewport with nothing having marked it stale.
+        """
+        layout = self._layout
+        if layout is None:
+            return True
+        size = self.size
+        return layout.width == size.width and layout.height == size.height
+
     def _ensure_layout(self) -> None:
         """Recompute layout if stale, or if a global render change made it so.
 
         Mirrors SunburstView: the layout carries the colours it was built
         with, so a scheme or safe-rendering change is only visible through
         the render epoch.
+
+        And, as there, only `_stale` may rebuild from here.  Textual paints
+        per dirty row, so a layout swapped in mid-pass tiles the rows after
+        it while the untouched rows keep strips from the previous tiling —
+        a mixture that then persists, since nothing dirtied those rows.
+        `_stale` always arrives with a refresh() that dirties them all; an
+        epoch or size change from elsewhere does not, so it waits.
         """
         epoch = render_epoch()
-        if not self._stale and epoch == self._layout_epoch:
+        if not self._stale:
+            if epoch == self._layout_epoch and self._fits_current_size():
+                return
+            # Serving the old tiling for the rest of this frame is safe —
+            # rows past its height render empty and over-wide strips are
+            # cropped — and the next frame is drawn wholly from one layout.
+            self._invalidate_after_paint()
             return
+        self._build_layout(epoch)
+
+    def _invalidate_after_paint(self) -> None:
+        """Queue a full rebuild for once the current paint pass is over.
+
+        call_next fires immediately after the message being processed,
+        which is the first point at which no render_line of this pass can
+        still be pending.  Unmounted there is neither a pump to run it nor
+        a paint to split, so the rebuild happens inline.
+        """
+        if not self.is_running:
+            self._build_layout(render_epoch())
+            return
+        if self._invalidate_scheduled:
+            return
+        self._invalidate_scheduled = True
+        self.call_next(self._apply_invalidation)
+
+    def _apply_invalidation(self) -> None:
+        """Drop the layout and dirty every row, the paint now being over."""
+        self._invalidate_scheduled = False
+        self._stale = True
+        self.refresh()
+
+    def _build_layout(self, epoch: int) -> None:
+        """Rebuild the cached layout at the widget's current size."""
         self._stale = False
         self._layout_epoch = epoch
         if self._node is None:

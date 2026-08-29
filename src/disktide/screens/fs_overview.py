@@ -31,6 +31,7 @@ from disktide.scanner.sysinfo import (
 from disktide.scanner.blockdev import idle_summary
 from disktide.scanner.benchmark import benchmark_mount, BenchmarkResult
 from disktide.scanner.policy import PSEUDO_FS_TYPES
+from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
 from disktide.widgets.confirm_modal import ConfirmModal
 
 
@@ -497,7 +498,7 @@ class FSDetailModal(ModalScreen):
         margin-top: 1;
         text-align: center;
     }
-    """
+    """ + scrollbar_css("#fs-detail-dialog")
 
     def __init__(
         self, entry: FSEntry, benchmark: BenchmarkResult | None = None, **kwargs
@@ -663,7 +664,7 @@ class BlockDeviceModal(ModalScreen):
             yield Static("  Press Esc or Enter to close", classes="detail-hint")
 
 
-class FSOverviewScreen(Screen):
+class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
     """Overview of all mounted real filesystems."""
 
     BINDINGS = [
@@ -705,7 +706,7 @@ class FSOverviewScreen(Screen):
     #fs-overview-block-table {
         height: 1fr;
     }
-    """
+    """ + scrollbar_css("#fs-overview-table", "#fs-overview-block-table")
 
     def __init__(
         self,
