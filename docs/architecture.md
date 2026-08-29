@@ -11,7 +11,7 @@ src/disktide/
   config.py              TOML config load/save, dataclasses
   glyphs.py              Unicode/ASCII glyph selection
   metrics.py             Size vs. file-count view metric helpers
-  rendering.py           Process-wide safe-rendering state
+  rendering.py           Process-wide safe-rendering state and render epoch
 
   domain/
     alerts.py            Alert rule/event contracts
@@ -669,8 +669,19 @@ worker. Redraw, resize, tab, theme, and cursor events consume cached models.
 
 The rendering-neutral `visualization_formatting.py` module owns shared labels,
 glyphs, delta formatting, sparklines, and legends. The old TUI view-model module
-is a compatibility re-export only. Safe rendering substitutes ASCII glyphs;
-`NO_COLOR` uses grayscale backgrounds while preserving the same state tokens.
+is a compatibility re-export only. Safe rendering substitutes ASCII glyphs and
+drops block elements from the charts — the sunburst folds each cell's two
+half-cells into one background colour instead of drawing `▀`/`▄`, and its legend
+swatch becomes `#`; `NO_COLOR` uses grayscale backgrounds while preserving the
+same state tokens.
+
+Both chart widgets cache a fully-coloured layout, and neither the active colour
+scheme nor safe rendering is a CSS property Textual can see change, so
+`rendering.py` keeps a monotonic **render epoch**: `set_safe_rendering()` and
+`set_color_scheme()` bump it, `SunburstView`/`TreemapView` record it beside the
+layout they built and treat a moved epoch as stale. The Settings screen notes
+the epoch on mount and, if it moved by the time the screen is dismissed,
+repaints the revealed screen so the choice lands without a restart.
 
 Both spatial charts size their areas by a selectable *metric*: total bytes (the default) or file count. `compute_layout` and `compute_sunburst` take a `metric` argument, and the size tree, treemap, sunburst, and Details panel all read it so a toggle (`t` in the explorer) keeps every view consistent. `disktide/metrics.py` centralises the vocabulary: `metric_value()` selects the FSNode field and `metric_text()` formats it. Both fields are aggregated bottom-up during the scan, so switching is a re-layout of in-memory data with no extra filesystem work.
 
@@ -745,11 +756,11 @@ terminal tree:
 
 ### Color Schemes
 
-Five built-in schemes: `default`, `cold`, `warm`, `vivid`, `mono`. Each scheme defines:
+Four built-in schemes: `warm` (the default), `default`, `cold`, `mono`. Settings lists `warm` first and labels `default` "Neutral"; the config key stays `default`. Each scheme defines:
 
 - Size category thresholds with Rich color names
 - Depth hue rotation cycle (8 levels)
-- Which category table it draws from (`default`, `vivid`, or none for the achromatic `mono`)
+- Which category table it draws from (`default`, or none for the achromatic `mono`)
 - Which neutral directory ladder it uses — this is where a theme's temperature lives
 - Gradient hue range for ratio-based coloring
 - Border and directory-leaf colors

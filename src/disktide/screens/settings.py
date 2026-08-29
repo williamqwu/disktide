@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+from rich.style import Style
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Static, Switch, Label, Input, Select
+from textual.widgets import (
+    Collapsible,
+    Footer,
+    Header,
+    Input,
+    Label,
+    Select,
+    Static,
+    Switch,
+)
 
 from disktide.config import (
     AppConfig,
@@ -19,9 +30,78 @@ from disktide.config import (
 )
 from disktide.cleanup.rules import get_rule_catalog
 from disktide.models.patterns import RiskLevel
+from disktide.rendering import is_safe_rendering, render_epoch
 from disktide.scanner.sysinfo import storage_class
 from disktide.repositories.snapshots import SnapshotRepository
-from disktide.viz.colors import SCHEMES, set_color_scheme
+from disktide.viz.colors import (
+    CATEGORIES,
+    CATEGORY_LEGEND_RGB,
+    NEUTRAL_DIR_RGB,
+    OTHER_FILE_RGB,
+    SCHEMES,
+    set_color_scheme,
+)
+
+
+# Display order and labels for the colour-theme picker. Warm leads because
+# it is the default. "Neutral" is the display name for the scheme whose
+# internal key is "default": the key is what lands in the config file and
+# renaming it would break every config already written.
+THEME_OPTIONS: list[tuple[str, str]] = [
+    ("Warm", "warm"),
+    ("Neutral", "default"),
+    ("Cold", "cold"),
+    ("Mono", "mono"),
+]
+_THEME_FALLBACK = "warm"
+
+
+def sanitize_theme(name: str | None) -> str:
+    """A theme key the picker can actually show.
+
+    `Select(value=...)` raises on a value that is not one of its options,
+    and a config file is free to hold anything — a hand-typed name, or
+    `vivid` from before it was retired.
+    """
+    known = {key for _label, key in THEME_OPTIONS}
+    return name if name in known else _THEME_FALLBACK
+
+
+def theme_preview(name: str) -> Text:
+    """Swatches drawn from *name*'s own tables, not the active scheme.
+
+    Reads as the chart does: the three shallowest directory neutrals (which
+    is where a theme's temperature actually lives) then the six category
+    swatches, over the theme's own panel colour.
+    """
+    scheme = SCHEMES.get(sanitize_theme(name), SCHEMES[_THEME_FALLBACK])
+    glyph = "##" if is_safe_rendering() else "██"
+    background = scheme.border_bg
+    legend = (
+        CATEGORY_LEGEND_RGB.get(scheme.category_key)
+        if scheme.category_key is not None
+        else None
+    )
+
+    def swatch(rgb: tuple[int, int, int]) -> tuple[str, Style]:
+        return glyph, Style(
+            color=f"rgb({rgb[0]},{rgb[1]},{rgb[2]})",
+            bgcolor=background,
+        )
+
+    # Exactly 20 cells wide, which is what the row has left at an
+    # 80-column terminal.
+    preview = Text()
+    preview.append(" ", Style(bgcolor=background))
+    neutrals = NEUTRAL_DIR_RGB[scheme.neutral_key]
+    for depth in (0, 1, 2):
+        preview.append(*swatch(neutrals[depth]))
+    preview.append(" ", Style(bgcolor=background))
+    for category in CATEGORIES[:-1]:  # "other" has no legend swatch
+        preview.append(*swatch(
+            OTHER_FILE_RGB[2] if legend is None else legend[category]
+        ))
+    return preview
 
 
 class SettingsScreen(Screen):
@@ -65,6 +145,32 @@ class SettingsScreen(Screen):
         width: 20;
     }
 
+    .theme-preview {
+        width: 20;
+        height: 3;
+        content-align: left middle;
+    }
+
+    /* Cleanup and Monitor fold away: both are long, both are visited far
+       less often than the settings above them. Styled to read as the same
+       kind of section heading as the Statics, not as a card — hence the
+       class selector, which outranks Collapsible's own default rules. */
+    .section-fold {
+        background: transparent;
+        border-top: none;
+        padding: 1 0 0 0;
+    }
+
+    Collapsible > CollapsibleTitle {
+        text-style: bold;
+        color: $primary;
+        padding: 0;
+    }
+
+    Collapsible Contents {
+        padding: 0;
+    }
+
     #settings-container {
         padding: 1 2;
         height: 1fr;
@@ -88,6 +194,7 @@ class SettingsScreen(Screen):
         self._repository = repository
         self._scan_path = scan_path
         self._system_info = None
+        self._entry_epoch = render_epoch()
         self._rule_catalog = get_rule_catalog(
             disabled_packs=self._config.cleanup.disabled_rule_packs,
             user_directory=cleanup_rule_directory(),
@@ -142,125 +249,6 @@ class SettingsScreen(Screen):
                 )
 
             yield Static("")
-            yield Static("Cleanup Settings", classes="section-title")
-            with Horizontal(classes="setting-row"):
-                yield Label("Show Cleanup mode", classes="setting-label")
-                yield Switch(value=self._config.ui.show_cleanup, id="show-cleanup")
-            yield Static(
-                "  Cleanup defaults to plan preview and recoverable Trash/quarantine.",
-                classes="sysinfo-value",
-            )
-            yield Static("  Declarative rule packs", classes="sysinfo-value")
-            risk_order = {
-                RiskLevel.SAFE: 0,
-                RiskLevel.MODERATE: 1,
-                RiskLevel.DANGEROUS: 2,
-            }
-            for pack in self._rule_catalog.packs:
-                maximum = max(
-                    (rule.risk for rule in pack.rules),
-                    key=lambda risk: risk_order[risk],
-                    default=RiskLevel.SAFE,
-                )
-                with Horizontal(classes="setting-row"):
-                    yield Label(
-                        f"{pack.name} v{pack.version}",
-                        classes="setting-label",
-                    )
-                    yield Switch(
-                        value=pack.enabled,
-                        id=f"cleanup-pack-{pack.name}",
-                    )
-                    yield Label(
-                        f"{len(pack.rules)} rules · {pack.source} · max {maximum.value}",
-                        classes="input-hint",
-                    )
-            if self._rule_catalog.issues:
-                yield Static(
-                    "  "
-                    + "; ".join(
-                        f"isolated {issue.path}: {issue.error}"
-                        for issue in self._rule_catalog.issues
-                    ),
-                    classes="sysinfo-value",
-                )
-
-            yield Static("")
-            yield Static("Monitor Settings", classes="section-title")
-            with Horizontal(classes="setting-row"):
-                yield Label("Default interval", classes="setting-label")
-                yield Input(
-                    value=format_duration(self._config.monitor.default_interval),
-                    id="interval-input",
-                    classes="setting-input",
-                )
-                yield Label("(e.g., 6h, 30m, 1d)", classes="input-hint")
-
-            with Horizontal(classes="setting-row"):
-                yield Label("Max watch time", classes="setting-label")
-                yield Input(
-                    placeholder="unlimited",
-                    id="max-watch-time-input",
-                    classes="setting-input",
-                )
-                yield Label("(e.g., 2h, 1d; blank = unlimited)", classes="input-hint")
-
-            with Horizontal(classes="setting-row"):
-                yield Label("Filesystem events", classes="setting-label")
-                yield Select(
-                    [
-                        ("Auto", "auto"),
-                        ("Require events", "events"),
-                        ("Periodic only", "periodic"),
-                    ],
-                    value=self._config.monitor.event_mode,
-                    id="monitor-event-mode",
-                    classes="viz-select",
-                    allow_blank=False,
-                )
-                yield Label("([watch] extra on Linux)", classes="input-hint")
-
-            with Horizontal(classes="setting-row"):
-                yield Label("Database soft budget", classes="setting-label")
-                yield Input(
-                    value=(
-                        str(self._config.monitor.database_soft_budget)
-                        if self._config.monitor.database_soft_budget is not None
-                        else ""
-                    ),
-                    placeholder="unlimited",
-                    id="monitor-soft-budget",
-                    classes="setting-input",
-                )
-                yield Label("(bytes or 2GiB)", classes="input-hint")
-
-            with Horizontal(classes="setting-row"):
-                yield Label("Database hard budget", classes="setting-label")
-                yield Input(
-                    value=(
-                        str(self._config.monitor.database_hard_budget)
-                        if self._config.monitor.database_hard_budget is not None
-                        else ""
-                    ),
-                    placeholder="unlimited",
-                    id="monitor-hard-budget",
-                    classes="setting-input",
-                )
-                yield Label("(blocks new snapshots)", classes="input-hint")
-
-            with Horizontal(classes="setting-row"):
-                yield Label("Auto-start TUI session", classes="setting-label")
-                yield Switch(
-                    value=self._config.monitor.auto_start_in_tui,
-                    id="monitor-auto-start",
-                )
-            yield Static(
-                "  Per-monitor paths, schedules, policies, retention, pins, "
-                "and alerts are managed in Monitor Center (2).",
-                classes="sysinfo-value",
-            )
-
-            yield Static("")
             yield Static("UI Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
                 yield Label("Default visualization", classes="setting-label")
@@ -278,18 +266,18 @@ class SettingsScreen(Screen):
 
             with Horizontal(classes="setting-row"):
                 yield Label("Color theme", classes="setting-label")
+                theme = sanitize_theme(self._config.ui.color_theme)
                 yield Select(
-                    [
-                        ("Default", "default"),
-                        ("Cold", "cold"),
-                        ("Warm", "warm"),
-                        ("Vivid", "vivid"),
-                        ("Mono", "mono"),
-                    ],
-                    value=self._config.ui.color_theme,
+                    THEME_OPTIONS,
+                    value=theme,
                     id="color-theme",
                     classes="viz-select",
                     allow_blank=False,
+                )
+                yield Static(
+                    theme_preview(theme),
+                    id="theme-preview",
+                    classes="theme-preview",
                 )
 
             with Horizontal(classes="setting-row"):
@@ -310,7 +298,7 @@ class SettingsScreen(Screen):
                     id="safe-rendering",
                 )
                 yield Label(
-                    "(ASCII bars and glyphs)",
+                    "(ASCII glyphs, plain charts)",
                     classes="input-hint",
                 )
 
@@ -343,9 +331,144 @@ class SettingsScreen(Screen):
                     classes="input-hint",
                 )
 
+            with Collapsible(
+                title="Cleanup Settings",
+                collapsed=True,
+                classes="section-fold",
+            ):
+                with Horizontal(classes="setting-row"):
+                    yield Label("Show Cleanup mode", classes="setting-label")
+                    yield Switch(value=self._config.ui.show_cleanup, id="show-cleanup")
+                yield Static(
+                    "  Cleanup defaults to plan preview and recoverable "
+                    "Trash/quarantine.",
+                    classes="sysinfo-value",
+                )
+                yield Static("  Declarative rule packs", classes="sysinfo-value")
+                risk_order = {
+                    RiskLevel.SAFE: 0,
+                    RiskLevel.MODERATE: 1,
+                    RiskLevel.DANGEROUS: 2,
+                }
+                for pack in self._rule_catalog.packs:
+                    maximum = max(
+                        (rule.risk for rule in pack.rules),
+                        key=lambda risk: risk_order[risk],
+                        default=RiskLevel.SAFE,
+                    )
+                    with Horizontal(classes="setting-row"):
+                        yield Label(
+                            f"{pack.name} v{pack.version}",
+                            classes="setting-label",
+                        )
+                        yield Switch(
+                            value=pack.enabled,
+                            id=f"cleanup-pack-{pack.name}",
+                        )
+                        yield Label(
+                            f"{len(pack.rules)} rules · {pack.source} · "
+                            f"max {maximum.value}",
+                            classes="input-hint",
+                        )
+                if self._rule_catalog.issues:
+                    yield Static(
+                        "  "
+                        + "; ".join(
+                            f"isolated {issue.path}: {issue.error}"
+                            for issue in self._rule_catalog.issues
+                        ),
+                        classes="sysinfo-value",
+                    )
+
+            with Collapsible(
+                title="Monitor Settings",
+                collapsed=True,
+                classes="section-fold",
+            ):
+                with Horizontal(classes="setting-row"):
+                    yield Label("Default interval", classes="setting-label")
+                    yield Input(
+                        value=format_duration(self._config.monitor.default_interval),
+                        id="interval-input",
+                        classes="setting-input",
+                    )
+                    yield Label("(e.g., 6h, 30m, 1d)", classes="input-hint")
+
+                with Horizontal(classes="setting-row"):
+                    yield Label("Max watch time", classes="setting-label")
+                    yield Input(
+                        placeholder="unlimited",
+                        id="max-watch-time-input",
+                        classes="setting-input",
+                    )
+                    yield Label(
+                        "(e.g., 2h, 1d; blank = unlimited)",
+                        classes="input-hint",
+                    )
+
+                with Horizontal(classes="setting-row"):
+                    yield Label("Filesystem events", classes="setting-label")
+                    yield Select(
+                        [
+                            ("Auto", "auto"),
+                            ("Require events", "events"),
+                            ("Periodic only", "periodic"),
+                        ],
+                        value=self._config.monitor.event_mode,
+                        id="monitor-event-mode",
+                        classes="viz-select",
+                        allow_blank=False,
+                    )
+                    yield Label("([watch] extra on Linux)", classes="input-hint")
+
+                with Horizontal(classes="setting-row"):
+                    yield Label("Database soft budget", classes="setting-label")
+                    yield Input(
+                        value=(
+                            str(self._config.monitor.database_soft_budget)
+                            if self._config.monitor.database_soft_budget is not None
+                            else ""
+                        ),
+                        placeholder="unlimited",
+                        id="monitor-soft-budget",
+                        classes="setting-input",
+                    )
+                    yield Label("(bytes or 2GiB)", classes="input-hint")
+
+                with Horizontal(classes="setting-row"):
+                    yield Label("Database hard budget", classes="setting-label")
+                    yield Input(
+                        value=(
+                            str(self._config.monitor.database_hard_budget)
+                            if self._config.monitor.database_hard_budget is not None
+                            else ""
+                        ),
+                        placeholder="unlimited",
+                        id="monitor-hard-budget",
+                        classes="setting-input",
+                    )
+                    yield Label("(blocks new snapshots)", classes="input-hint")
+
+                with Horizontal(classes="setting-row"):
+                    yield Label("Auto-start TUI session", classes="setting-label")
+                    yield Switch(
+                        value=self._config.monitor.auto_start_in_tui,
+                        id="monitor-auto-start",
+                    )
+                yield Static(
+                    "  Per-monitor paths, schedules, policies, retention, pins, "
+                    "and alerts are managed in Monitor Center (2).",
+                    classes="sysinfo-value",
+                )
+
         yield Footer()
 
     def on_mount(self) -> None:
+        # Anything that moves the render epoch while this screen is open
+        # (theme, safe rendering) has left the screen underneath drawing
+        # stale content; `action_dismiss_settings` compares against this.
+        self._entry_epoch = render_epoch()
+
         # Pre-fill inputs from config
         if self._config.scan.workers is not None:
             self.query_one("#workers-input", Input).value = str(self._config.scan.workers)
@@ -449,7 +572,37 @@ class SettingsScreen(Screen):
                 severity="warning",
                 timeout=8,
             )
+        repaint = render_epoch() != self._entry_epoch
         self.app.pop_screen()
+        if repaint:
+            self._repaint_screen_below()
+
+    def _repaint_screen_below(self) -> None:
+        """Redraw the revealed screen's content after a global render change.
+
+        Textual invalidates a widget's rendered lines when its styles or
+        its size change, and colour scheme and safe rendering are neither:
+        they are read inside `render_line`. Resuming a screen repaints it
+        from those cached lines, which would restore the old picture
+        exactly. Nothing here knows what the screen holds — every widget
+        is simply asked to draw itself again, once, and only when the
+        epoch says something under it moved.
+        """
+        try:
+            screen = self.app.screen
+        except Exception:
+            return
+        screen.refresh(layout=True)
+        for widget in screen.query("*"):
+            widget.refresh()
+
+    def _refresh_theme_preview(self) -> None:
+        """Redraw the swatch row for the theme the picker currently shows."""
+        try:
+            preview = self.query_one("#theme-preview", Static)
+        except Exception:
+            return
+        preview.update(theme_preview(self._config.ui.color_theme))
 
     def action_focus_next_field(self) -> None:
         """Move focus to the next form field (arrow-down)."""
@@ -510,10 +663,12 @@ class SettingsScreen(Screen):
         elif event.switch.id == "safe-rendering":
             self._config.ui.safe_rendering = event.value
             # Apply immediately so any new renders pick up the choice
-            # without requiring a restart.
+            # without requiring a restart. set_safe_rendering bumps the
+            # render epoch, which gets the charts' cached layouts rebuilt
+            # with (or without) block glyphs when this screen is dismissed.
             from disktide.rendering import set_safe_rendering
             set_safe_rendering(event.value)
-            self.app.refresh()
+            self._refresh_theme_preview()
         elif event.switch.id == "mouse-support":
             self._config.ui.mouse = event.value
             # Textual negotiates mouse reporting once, when the driver
@@ -549,8 +704,13 @@ class SettingsScreen(Screen):
         elif event.select.id == "default-viz":
             self._config.ui.default_viz = str(event.value)
         elif event.select.id == "color-theme":
-            self._config.ui.color_theme = str(event.value)
-            set_color_scheme(str(event.value))
+            theme = sanitize_theme(str(event.value))
+            self._config.ui.color_theme = theme
+            # set_color_scheme bumps the render epoch, so the charts drop
+            # the layouts they baked the old colours into and repaint in
+            # the new scheme as soon as this screen is dismissed.
+            set_color_scheme(theme)
+            self._refresh_theme_preview()
         elif event.select.id == "live-scan-render":
             value = str(event.value)
             if value in ("auto", "on", "off"):

@@ -39,7 +39,7 @@ from disktide.visualization_formatting import (
     format_visual_delta,
     visual_token,
 )
-from disktide.rendering import denied_glyph, partial_glyph
+from disktide.rendering import denied_glyph, is_safe_rendering, partial_glyph
 from disktide.viz.categories import CategoryIndex
 from disktide.viz.cellgeom import DEFAULT_CELL_ASPECT
 from disktide.viz.colors import (
@@ -603,6 +603,53 @@ def _rasterize_arcs(
                 row[hx] = (total_r >> 2, total_g >> 2, total_b >> 2)
 
 
+def _render_safe_cells(
+    layout: SunburstLayout,
+) -> list[list[tuple[str, Style | None]]]:
+    """Fold the framebuffer into background colour alone, no glyphs.
+
+    Safe rendering exists for terminals whose font has no block elements,
+    which is exactly what the half-block pass draws every rim and wedge
+    wall with.  A cell here is always a space, so the two half-cells have
+    to be resolved into one colour: identical halves keep it, differing
+    halves average, and a lone covered half averages with the panel
+    background so a half-covered cell still reads as half-covered.  The
+    disc loses vertical resolution and keeps its shape, its colours, and
+    its edges.
+    """
+    frame = layout.frame
+    width = layout.char_width
+    panel = layout.panel_bg
+    styles: dict[RGB, Style] = {}
+    rows: list[list[tuple[str, Style | None]]] = []
+
+    for y in range(layout.char_height):
+        top_row = frame[2 * y] if 2 * y < len(frame) else None
+        bottom_row = frame[2 * y + 1] if 2 * y + 1 < len(frame) else None
+        row: list[tuple[str, Style | None]] = []
+        for x in range(width):
+            top = top_row[x] if top_row is not None else None
+            bottom = bottom_row[x] if bottom_row is not None else None
+            if top is None and bottom is None:
+                row.append((" ", None))
+                continue
+            if top is None:
+                color = _mix_rgb(bottom, panel, 0.5)
+            elif bottom is None:
+                color = _mix_rgb(top, panel, 0.5)
+            elif top == bottom:
+                color = top
+            else:
+                color = _mix_rgb(top, bottom, 0.5)
+            cached = styles.get(color)
+            if cached is None:
+                cached = Style(bgcolor=Color.from_rgb(*color))
+                styles[color] = cached
+            row.append((" ", cached))
+        rows.append(row)
+    return rows
+
+
 def _render_cells(layout: SunburstLayout) -> list[list[tuple[str, Style | None]]]:
     """Fold the half-cell framebuffer into one (glyph, style) per cell.
 
@@ -612,6 +659,9 @@ def _render_cells(layout: SunburstLayout) -> list[list[tuple[str, Style | None]]
     real background shows through the other half and an imperfect estimate
     of the panel colour cannot ring the disc with a halo.
     """
+    if is_safe_rendering():
+        return _render_safe_cells(layout)
+
     frame = layout.frame
     width = layout.char_width
     styles: dict[tuple[RGB | None, RGB | None], Style] = {}
@@ -885,11 +935,14 @@ def _compute_legend(
         layout.legend_start_y = layout.char_height - len(lines)
         return
 
+    # The swatch is a geometric shape (U+25A0), which is the kind of glyph
+    # safe rendering exists to avoid.
+    swatch = "#" if is_safe_rendering() else "■"
     if category_index is not None:
         # Shares are already sorted largest first, so the cap keeps the
         # categories that actually account for the disc.
         entries = [
-            (f"■ {cat} {share:.0%}", cat)
+            (f"{swatch} {cat} {share:.0%}", cat)
             for cat, share in category_index.shares(root.path)
         ][:_LEGEND_MAX_ENTRIES]
     else:
@@ -899,7 +952,7 @@ def _compute_legend(
             if not arc.node.is_dir
         }
         entries = [
-            (f"■ {cat}", cat)
+            (f"{swatch} {cat}", cat)
             for cat in CATEGORIES
             if cat in categories
         ][:_LEGEND_MAX_ENTRIES]

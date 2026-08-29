@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from rich.color import Color
 
 from disktide.domain.visualization import VisualState
+from disktide.rendering import bump_render_epoch
 
 
 # ---------------------------------------------------------------------------
@@ -101,23 +102,6 @@ _WARM = ColorScheme(
     dir_leaf_bg="rgb(75,55,40)",
 )
 
-_VIVID = ColorScheme(
-    name="vivid",
-    size_categories=[
-        (1_000_000, "bright_cyan"),
-        (100_000_000, "bright_green"),
-        (1_000_000_000, "bright_yellow"),
-        (10_000_000_000, "bright_red"),
-        (float("inf"), "bright_magenta"),
-    ],
-    depth_hues=[0, 60, 120, 180, 240, 300, 30, 270],
-    category_key="vivid",
-    neutral_key="vivid",
-    gradient_hue_range=(120, 0),  # green -> red
-    border_bg="rgb(40,40,40)",
-    dir_leaf_bg="rgb(60,60,60)",
-)
-
 _MONO = ColorScheme(
     name="mono",
     size_categories=[
@@ -135,7 +119,7 @@ _MONO = ColorScheme(
 )
 
 SCHEMES: dict[str, ColorScheme] = {
-    s.name: s for s in [_DEFAULT, _COLD, _WARM, _VIVID, _MONO]
+    s.name: s for s in [_WARM, _DEFAULT, _COLD, _MONO]
 }
 
 # Module-level active scheme
@@ -143,9 +127,18 @@ _active: ColorScheme = _DEFAULT
 
 
 def set_color_scheme(name: str) -> None:
-    """Set the active color scheme by name."""
+    """Set the active color scheme by name.
+
+    Bumps the render epoch so chart layouts that baked the old scheme's
+    RGB into a cache are rebuilt on the next paint instead of surviving
+    the change.
+    """
     global _active
-    _active = SCHEMES.get(name, _DEFAULT)
+    scheme = SCHEMES.get(name, _DEFAULT)
+    if scheme is _active:
+        return
+    _active = scheme
+    bump_render_epoch()
 
 
 def get_color_scheme() -> ColorScheme:
@@ -288,14 +281,6 @@ CATEGORY_FILE_RGB = {
         "archive": {0: (194, 136, 51), 1: (194, 136, 51), 2: (187, 130, 44), 3: (177, 121, 31), 4: (168, 112, 16)},
         "ephemeral": {0: (172, 67, 25), 1: (172, 67, 25), 2: (165, 61, 17), 3: (155, 51, 1), 4: (141, 47, 4)},
     },
-    "vivid": {
-        "code": {0: (25, 123, 87), 1: (25, 123, 87), 2: (13, 117, 82), 3: (20, 107, 75), 4: (2, 98, 67)},
-        "docs": {0: (0, 102, 200), 1: (0, 102, 200), 2: (15, 98, 185), 3: (0, 89, 175), 4: (5, 81, 158)},
-        "data": {0: (144, 129, 245), 1: (144, 129, 245), 2: (139, 123, 238), 3: (130, 114, 228), 4: (121, 104, 218)},
-        "media": {0: (240, 84, 142), 1: (240, 84, 142), 2: (233, 77, 136), 3: (222, 67, 127), 4: (211, 56, 119)},
-        "archive": {0: (200, 133, 15), 1: (200, 133, 15), 2: (193, 127, 0), 3: (180, 120, 15), 4: (166, 112, 25)},
-        "ephemeral": {0: (175, 64, 14), 1: (175, 64, 14), 2: (168, 57, 2), 3: (153, 54, 9), 4: (143, 44, 0)},
-    },
 }
 
 # uncategorized files, and every category under the mono theme
@@ -311,14 +296,6 @@ CATEGORY_DIR_RGB = {
         "archive": {0: (172, 124, 56), 1: (150, 103, 33), 2: (128, 83, 0), 3: (111, 70, 0), 4: (96, 60, 0)},
         "ephemeral": {0: (196, 105, 73), 1: (173, 84, 52), 2: (150, 64, 31), 3: (134, 49, 13), 4: (121, 37, 0)},
     },
-    "vivid": {
-        "code": {0: (62, 154, 116), 1: (36, 132, 96), 2: (0, 112, 76), 3: (11, 95, 65), 4: (9, 82, 56)},
-        "docs": {0: (58, 135, 227), 1: (34, 113, 203), 2: (0, 91, 180), 3: (0, 77, 157), 4: (0, 67, 138)},
-        "data": {0: (130, 118, 214), 1: (110, 97, 191), 2: (91, 76, 168), 3: (78, 62, 152), 4: (67, 50, 139)},
-        "media": {0: (211, 82, 128), 1: (186, 59, 108), 2: (162, 35, 88), 3: (145, 11, 74), 4: (128, 5, 64)},
-        "archive": {0: (177, 121, 36), 1: (155, 101, 0), 2: (127, 83, 7), 3: (109, 71, 3), 4: (95, 61, 4)},
-        "ephemeral": {0: (204, 99, 61), 1: (181, 78, 39), 2: (157, 56, 11), 3: (136, 46, 4), 4: (119, 38, 2)},
-    },
 }
 
 # theme-tempered neutral directory ladder
@@ -326,13 +303,11 @@ NEUTRAL_DIR_RGB = {
     "default": {0: (134, 134, 134), 1: (113, 113, 113), 2: (93, 93, 93), 3: (80, 80, 80), 4: (69, 69, 69)},
     "warm": {0: (144, 131, 123), 1: (123, 111, 103), 2: (103, 91, 83), 3: (89, 77, 70), 4: (78, 66, 59)},
     "cold": {0: (126, 135, 145), 1: (106, 115, 124), 2: (86, 95, 104), 3: (73, 81, 90), 4: (62, 70, 79)},
-    "vivid": {0: (134, 134, 134), 1: (113, 113, 113), 2: (93, 93, 93), 3: (80, 80, 80), 4: (69, 69, 69)},
 }
 
 # legend swatches: file color at mid ladder (depth 2)
 CATEGORY_LEGEND_RGB = {
     "default": {"code": (0, 118, 81), "docs": (5, 97, 188), "data": (138, 127, 226), "media": (223, 90, 137), "archive": (187, 130, 44), "ephemeral": (165, 61, 17)},
-    "vivid": {"code": (13, 117, 82), "docs": (15, 98, 185), "data": (139, 123, 238), "media": (233, 77, 136), "archive": (193, 127, 0), "ephemeral": (168, 57, 2)},
 }
 
 MAX_COLOR_DEPTH = 4

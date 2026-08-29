@@ -53,6 +53,15 @@ safe_rendering = true
         assert config.ui.default_viz == "sunburst"
         assert config.ui.safe_rendering is True
 
+    def test_retired_vivid_theme_loads_as_default(self, tmp_path):
+        """0.2.25 dropped `vivid`; a config naming it must still open."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[ui]
+color_theme = "vivid"
+""")
+        assert load_config(str(config_file)).ui.color_theme == "default"
+
     def test_partial_config(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("""

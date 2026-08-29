@@ -19,6 +19,7 @@ from disktide.metrics import (
 )
 from disktide.models.tree import FSNode
 from disktide.domain.visualization import DiffFrame
+from disktide.rendering import render_epoch
 from disktide.viz.categories import CategoryIndex
 from disktide.viz.cellgeom import detect_cell_aspect
 from disktide.viz.layout import is_aggregate_path
@@ -66,6 +67,7 @@ class TreemapView(Widget):
         self._metric = DEFAULT_METRIC
         self._layout: TreemapLayout | None = None
         self._stale = True
+        self._layout_epoch = -1
         self._live_mode = False
         self._live_update_count = 0
         self._diff: DiffFrame | None = None
@@ -169,10 +171,17 @@ class TreemapView(Widget):
         return f"{node.name}\n{metric_text(node, self._metric)} · {share:.0%}"
 
     def _ensure_layout(self) -> None:
-        """Recompute layout if stale."""
-        if not self._stale:
+        """Recompute layout if stale, or if a global render change made it so.
+
+        Mirrors SunburstView: the layout carries the colours it was built
+        with, so a scheme or safe-rendering change is only visible through
+        the render epoch.
+        """
+        epoch = render_epoch()
+        if not self._stale and epoch == self._layout_epoch:
             return
         self._stale = False
+        self._layout_epoch = epoch
         if self._node is None:
             self._layout = None
             return

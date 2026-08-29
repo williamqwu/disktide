@@ -198,7 +198,7 @@ Every row exposes pack/version, category, reason, age, score, confidence, risk,
 default action policy, and rebuild guidance. These rules and scores are
 heuristics, not a guarantee that a path is safe to remove.
 
-Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in the Settings screen (`?`). Once enabled, press `c` to switch to it.
+Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in the Settings screen (`?`) — a collapsed section near the bottom; move to its title and press Enter to open it. Once enabled, press `c` to switch to it.
 
 The Age/Size Map places age on the vertical axis and size on the horizontal
 axis, with glyph/color conveying risk and the selected point synchronized with
@@ -579,10 +579,10 @@ quarantine_max_bytes = 10737418240        # 10 GiB capacity policy
 map_max_points = 80                       # bounded Age/Size Map (10–500)
 
 [ui]
-color_theme = "warm"                     # default, cold, warm, vivid, mono
+color_theme = "warm"                     # warm, default, cold, mono
 default_viz = "sunburst"                 # treemap, sunburst, details
 # show_cleanup = true                    # enable Cleanup mode (disabled by default)
-# safe_rendering = true                  # ASCII bars and glyphs for web shells
+# safe_rendering = true                  # ASCII glyphs and block-free charts for web shells
 # mouse = false                          # default true; --no-mouse overrides per session
 # live_scan_render = "auto"              # auto | on | off — draw viz live during scan
 # default_scan_path = "/home/user/data" # pre-fill welcome screen
@@ -632,4 +632,4 @@ Six is the ceiling at which the colors stay distinguishable from each other in a
 
 The sunburst legend (bottom-left corner) lists the categories present with each one's share of the scanned bytes, largest first (`■ data 46%`), capped at six entries.
 
-Switch color schemes with `color_theme` in config or the Settings screen (`?`). Category colors are the same in `default`, `warm`, and `cold` — a theme changes the *temperature of the neutrals* (the gray of an undominated directory), not what a category means, so you do not have to relearn the chart when you change themes. `vivid` pushes the same six hues to higher chroma, and `mono` drops color entirely: files render a shade lighter than directories so shapes still separate.
+Switch color schemes with `color_theme` in config or the Settings screen (`?`), where a swatch row beside the picker previews the theme and the choice applies as soon as you leave the screen. Category colors are the same in `warm` (the default), `default` — shown as "Neutral" in Settings — and `cold`: a theme changes the *temperature of the neutrals* (the gray of an undominated directory), not what a category means, so you do not have to relearn the chart when you change themes. `mono` drops color entirely: files render a shade lighter than directories so shapes still separate. A `vivid` theme existed until 0.2.25 and was retired as a measured duplicate of `default`; configs naming it now load `default`.

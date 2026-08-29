@@ -30,9 +30,14 @@ THEME_NEUTRAL = {
     "default": (0.000, 0.0),
     "warm": (0.020, 55.0),
     "cold": (0.018, 250.0),
-    "vivid": (0.000, 0.0),
 }
-VIVID_C_SCALE = 1.15
+# Themes that draw category colours from a table of their own. There is one:
+# a theme sets the temperature of the neutrals, not what a hue means. The
+# retired `vivid` theme was the exception and it did not survive measurement
+# — scaling anchor chroma by 1.15 shrank straight back inside the gamut in
+# `lch_rgb`, leaving a mean OKLab dE of 0.0137 against `default` where a
+# just-noticeable difference is about 0.02.
+CATEGORY_THEMES = ("default",)
 
 
 def _oklab_to_linear(L: float, a: float, b: float) -> tuple[float, float, float]:
@@ -67,12 +72,11 @@ def emit() -> str:
     lines = []
     lines.append("# file arcs: {theme: {category: {depth: (r, g, b)}}}")
     lines.append("CATEGORY_FILE_RGB = {")
-    for theme in ("default", "vivid"):
-        cs = VIVID_C_SCALE if theme == "vivid" else 1.0
+    for theme in CATEGORY_THEMES:
         lines.append(f'    "{theme}": {{')
         for cat, (L, C, H) in ANCHORS.items():
             row = ", ".join(
-                f"{d}: {lch_rgb(L + dl, C * cs, H)}" for d, dl in FILE_DL.items()
+                f"{d}: {lch_rgb(L + dl, C, H)}" for d, dl in FILE_DL.items()
             )
             lines.append(f'        "{cat}": {{{row}}},')
         lines.append("    },")
@@ -84,12 +88,11 @@ def emit() -> str:
     lines.append("")
     lines.append("# category re-leveled to the directory ladder, for dominance tints")
     lines.append("CATEGORY_DIR_RGB = {")
-    for theme in ("default", "vivid"):
-        cs = VIVID_C_SCALE if theme == "vivid" else 1.0
+    for theme in CATEGORY_THEMES:
         lines.append(f'    "{theme}": {{')
         for cat, (_L, C, H) in ANCHORS.items():
             row = ", ".join(
-                f"{d}: {lch_rgb(dL, C * cs * 0.85, H)}" for d, dL in DIR_L.items()
+                f"{d}: {lch_rgb(dL, C * 0.85, H)}" for d, dL in DIR_L.items()
             )
             lines.append(f'        "{cat}": {{{row}}},')
         lines.append("    },")
@@ -104,10 +107,9 @@ def emit() -> str:
     lines.append("")
     lines.append("# legend swatches: file color at mid ladder (depth 2)")
     lines.append("CATEGORY_LEGEND_RGB = {")
-    for theme in ("default", "vivid"):
-        cs = VIVID_C_SCALE if theme == "vivid" else 1.0
+    for theme in CATEGORY_THEMES:
         row = ", ".join(
-            f'"{cat}": {lch_rgb(L, C * cs, H)}'
+            f'"{cat}": {lch_rgb(L, C, H)}'
             for cat, (L, C, H) in ANCHORS.items()
         )
         lines.append(f'    "{theme}": {{{row}}},')

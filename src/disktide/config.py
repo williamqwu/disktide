@@ -97,8 +97,10 @@ class UIConfig:
     default_scan_path: str | None = None  # legacy flat field
     hostname_aware_paths: bool = True
     # When true, swap "fancy" Unicode characters (block-drawing bars,
-    # accessibility glyphs) for ASCII fallbacks. Useful in web-based
-    # shells whose fonts don't ship the full Unicode block range.
+    # accessibility glyphs) for ASCII fallbacks, and paint the charts
+    # without block glyphs at all — the sunburst's disc becomes pure
+    # background colour. Useful in web-based shells whose fonts don't
+    # ship the full Unicode block range.
     safe_rendering: bool = False
     # Mouse reporting is negotiated once, when the Textual driver enters
     # application mode, so this is read at launch and cannot be flipped
@@ -333,7 +335,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     if "ui" in data:
         ui = data["ui"]
-        config.ui.color_theme = ui.get("color_theme", "warm")
+        theme = ui.get("color_theme", "warm")
+        # `vivid` was retired in 0.2.25 as a perceptual duplicate of the
+        # neutral theme; configs written before then land on it.
+        config.ui.color_theme = "default" if theme == "vivid" else theme
         config.ui.default_viz = ui.get("default_viz", "sunburst")
         config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.safe_rendering = ui.get("safe_rendering", False)
