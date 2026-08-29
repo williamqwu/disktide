@@ -36,7 +36,8 @@ def test_canonical_command_name_appears_in_help():
 
     assert result.exit_code == 0
     assert "Usage: disktide" in result.output
-    assert "Launch TUI: disktide" in result.output
+    # The label column is padded so "Launch TUI" and "Subcommands" align.
+    assert "Launch TUI:  disktide" in result.output
 
 
 def test_storage_namespace_stays_compatible():

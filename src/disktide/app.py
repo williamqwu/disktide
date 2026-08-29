@@ -294,9 +294,9 @@ class DiskTideApp(App):
 
         On confirm, the real teardown runs in `_perform_quit`. The
         scanner checks the service cancellation token at every directory
-        boundary, so the worker thread bails out quickly. The terminal
-        side prints "Exiting..." after TUI teardown and joins the
-        scanner thread before printing the final goodbye — see
+        boundary, so the worker thread bails out quickly. Once the TUI
+        has torn down, the terminal side cancels the scan, closes the
+        database, and exits without printing anything — see
         disktide.__main__.
         """
         # If a modal (e.g. the quit prompt itself) is already on top,

@@ -4,12 +4,28 @@ from __future__ import annotations
 
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import click
 
-from disktide import APP_NAME, __version__
+from disktide import __version__
+
+
+def _stdio_is_interactive() -> bool:
+    """Whether both halves of the terminal the TUI needs are actually there.
+
+    A closed or replaced stream can raise instead of answering, so a
+    failed check counts as not-a-terminal.
+    """
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            if stream is None or not stream.isatty():
+                return False
+        except (AttributeError, ValueError, OSError):
+            return False
+    return True
 
 
 @click.group(invoke_without_command=True)
@@ -36,8 +52,9 @@ def cli(
 ):
     """Interactive terminal disk usage explorer.
 
-    Launch TUI: disktide
-    Subcommands: scan, watch, cleanup
+    \b
+    Launch TUI:  disktide
+    Subcommands: scan, watch, cleanup, compare, monitor, alerts, doctor
     """
     ctx.ensure_object(dict)
     ctx.obj["max_depth"] = max_depth
@@ -46,6 +63,17 @@ def cli(
     ctx.obj["exclude_pseudo"] = exclude_pseudo
 
     if ctx.invoked_subcommand is None:
+        if not _stdio_is_interactive():
+            # Textual would otherwise sit forever waiting on a keypress
+            # that a pipe or a redirect can never deliver, which reads as
+            # a hang in CI and in `disktide > file`.
+            raise click.ClickException(
+                "the TUI needs an interactive terminal, but stdin and stdout "
+                "are not both a TTY. Use a subcommand for non-interactive "
+                "runs, e.g. 'disktide scan PATH' (add --json for "
+                "machine-readable output)."
+            )
+
         from disktide.app import DiskTideApp
         from disktide.config import load_config
 
@@ -62,22 +90,20 @@ def cli(
         app = DiskTideApp(show_welcome=True, config=config)
         app.run(mouse=False)
 
-        # Print "Exiting..." first so the user sees feedback, then run
-        # the necessary cleanup (cancel scan + close SQLite), print the
-        # goodbye, and hard-exit. See `_force_teardown` for why we skip
-        # Python's natural shutdown sequence on the way out.
-        click.echo("Exiting...", nl=True)
-        sys.stdout.flush()
+        # Quitting is silent: the TUI restores the terminal and the
+        # shell prompt is the only acknowledgement a user needs. Run
+        # the cleanup that matters (cancel scan + close SQLite), then
+        # hard-exit -- see `_force_teardown` for why we skip Python's
+        # natural shutdown sequence on the way out.
         _force_teardown(app)
-        click.echo(f"{APP_NAME} closed. Goodbye!")
         sys.stdout.flush()
+        sys.stderr.flush()
         # Bypass Python's interpreter teardown: gc of the in-memory
         # FSNode tree + atexit + module cleanup adds tens of seconds on
         # a multi-million-file scan, all spent freeing memory the kernel
         # is about to reclaim anyway. All cleanup that matters for
         # correctness (cancel + DB close) has already run above, and
-        # the goodbye text was flushed via sys.stdout.flush() right
-        # before this block.
+        # both streams were flushed right before this block.
         import os as _os
         _os._exit(0)
 
@@ -174,6 +200,7 @@ def doctor(json_output: bool, show_paths: bool) -> None:
     show_default=True,
     help="Exclude pseudo-filesystem mountpoints below the scan root",
 )
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 @click.pass_context
 def scan(
     ctx,
@@ -184,8 +211,14 @@ def scan(
     metric: str,
     one_file_system: bool,
     exclude_pseudo: bool,
+    json_output: bool,
 ):
-    """Scan a directory and display results."""
+    """Scan a directory and display results.
+
+    Run status goes to stderr; stdout carries the report alone, so
+    `disktide scan PATH > report.txt` captures the result and nothing else.
+    """
+    import json as json_module
     from disktide.domain.metrics import MetricId
     from disktide.domain.policy import ScanPolicy
     from disktide.domain.scan import (
@@ -230,26 +263,44 @@ def scan(
         raise click.BadParameter(str(exc), param_hint="path") from exc
 
     class Reporter:
-        def __init__(self):
+        """Narrate the run on stderr, leaving stdout for the report.
+
+        Everything here is transient status about a scan in flight --
+        queue position, phase changes, the live counter. None of it is
+        the result the caller asked for, so redirecting stdout must not
+        capture it.
+        """
+
+        def __init__(self, *, quiet: bool) -> None:
+            self.quiet = quiet
+            # The counter is a carriage-return redraw. Against a pipe or
+            # a file every refresh would survive as another \r-separated
+            # copy, so it is emitted only when stderr is a terminal that
+            # can overwrite the line.
+            self.live = not quiet and sys.stderr.isatty()
             self.progress_written = False
+
+        def _status(self, message: str) -> None:
+            if not self.quiet:
+                click.echo(message, err=True)
 
         def _finish_progress_line(self) -> None:
             if self.progress_written:
-                click.echo()
+                click.echo(err=True)
                 self.progress_written = False
 
         def __call__(self, event) -> None:
             if isinstance(event, ScanQueued):
                 self._finish_progress_line()
-                click.echo(
+                self._status(
                     f"Scan {event.run_id[:8]} queued at position "
                     f"{event.position}: {event.reason}"
                 )
             elif isinstance(event, ScanStarted):
-                click.echo(f"Scan {event.run_id[:8]} started")
-                click.echo(f"  Path: {event.request.path}")
-                click.echo(f"  Phase: {event.phase.value}")
-                click.echo(f"  Policy: {event.policy.summary()}")
+                self._status(f"Scan {event.run_id[:8]} started")
+                self._status(f"  Path: {event.request.path}")
+                self._status(f"  Phase: {event.phase.value}")
+                self._status(f"  Policy: {event.policy.summary()}")
                 if event.worker_selection is not None:
                     selection = event.worker_selection
                     requested = (
@@ -257,14 +308,16 @@ def scan(
                         if selection.requested_workers is None
                         else str(selection.requested_workers)
                     )
-                    click.echo(
+                    self._status(
                         f"  Workers: requested={requested}, "
                         f"effective={selection.effective_workers}"
                     )
-                    click.echo(f"  Worker reason: {selection.reason}")
+                    self._status(f"  Worker reason: {selection.reason}")
                 if event.resource_slot is not None:
-                    click.echo(f"  Resource slot: {event.resource_slot}")
+                    self._status(f"  Resource slot: {event.resource_slot}")
             elif isinstance(event, ScanProgressUpdated):
+                if not self.live:
+                    return
                 progress = event.progress
                 click.echo(
                     f"\r  Run {event.run_id[:8]} [{event.phase.value}] "
@@ -272,12 +325,13 @@ def scan(
                     f"{progress.files_scanned:,} files, logical "
                     f"{humanize.naturalsize(progress.logical_bytes, binary=True)}",
                     nl=False,
+                    err=True,
                 )
                 self.progress_written = True
             elif isinstance(event, ScanPhaseChanged):
                 if event.phase.value == "finalizing":
                     self._finish_progress_line()
-                    click.echo(f"  Phase: {event.phase.value}")
+                    self._status(f"  Phase: {event.phase.value}")
             elif isinstance(event, ScanCancelled):
                 self._finish_progress_line()
                 click.echo(
@@ -294,17 +348,100 @@ def scan(
             elif isinstance(event, ScanCompleted):
                 self._finish_progress_line()
 
-    reporter = Reporter()
+    reporter = Reporter(quiet=json_output)
     run = service.execute(run, consumers=(reporter,))
-    if run.status is ScanStatus.CANCELLED:
-        ctx.exit(130)
-    if run.status is ScanStatus.FAILED or run.root is None:
-        ctx.exit(1)
+    if run.status is ScanStatus.CANCELLED or run.status is ScanStatus.FAILED or run.root is None:
+        # A JSON caller still gets a parseable document describing the
+        # outcome; the exit code carries the same verdict either way.
+        if json_output:
+            click.echo(
+                json_module.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": run.run_id,
+                        "status": run.status.value,
+                        "path": run.request.path,
+                        "metric": run.request.metric.value,
+                        "error_type": run.error_type,
+                        "error_message": run.error_message,
+                        "cancellation_reason": run.cancellation_reason,
+                    },
+                    sort_keys=True,
+                )
+            )
+        ctx.exit(130 if run.status is ScanStatus.CANCELLED else 1)
 
     root = run.root
     metric = run.request.metric.value
     status_label = "partial" if run.partial else "complete"
-    click.echo(f"\nScan {run.run_id[:8]} {status_label} in {run.duration_seconds:.1f}s")
+    duplicate_links = sum(1 for node in root.walk() if node.is_hardlink_duplicate)
+    children = sorted(
+        (child for child in root.children if child.is_dir),
+        key=lambda child: (-metric_value_or_zero(child, metric), child.name),
+    )
+    total_value = metric_value(root, metric)
+
+    if json_output:
+        payload = {
+            "schema_version": 1,
+            "run_id": run.run_id,
+            "status": run.status.value,
+            "partial": run.partial,
+            "path": run.request.path,
+            "metric": metric,
+            "duration_seconds": round(run.duration_seconds, 3),
+            "policy": (
+                root.scan_policy.summary() if root.scan_policy is not None else None
+            ),
+            "resource_wait_seconds": round(run.resource_wait_seconds, 3),
+            "capability_warnings": list(run.capability_warnings),
+            "totals": {
+                "logical_bytes": metric_value(root, "logical"),
+                "allocated_bytes": metric_value(root, "allocated"),
+                "unique_bytes": metric_value(root, "unique"),
+                "file_count": root.file_count,
+                "dir_count": root.dir_count,
+            },
+            "coverage": {
+                "inaccessible_subtrees": root.inaccessible_subtree_count,
+                "excluded_subtrees": root.excluded_subtree_count,
+                "depth_limited_subtrees": root.depth_limited_subtree_count,
+                "hardlink_duplicates": duplicate_links,
+            },
+            "workers": (
+                None
+                if run.worker_selection is None
+                else {
+                    "requested": run.worker_selection.requested_workers,
+                    "effective": run.worker_selection.effective_workers,
+                    "mode": run.worker_selection.mode,
+                    "reason": run.worker_selection.reason,
+                }
+            ),
+            # Direct child directories only. That is the "where did the
+            # space go" answer, and its length is bounded by the root's
+            # subdirectory count rather than by its file count.
+            "children": [
+                {
+                    "name": child.name,
+                    "path": child.path,
+                    "logical_bytes": metric_value(child, "logical"),
+                    "allocated_bytes": metric_value(child, "allocated"),
+                    "unique_bytes": metric_value(child, "unique"),
+                    "file_count": child.file_count,
+                    "dir_count": child.dir_count,
+                }
+                for child in children
+            ],
+        }
+        if snapshot:
+            payload["snapshot"] = _save_scan_snapshot(run)
+        click.echo(json_module.dumps(payload, sort_keys=True))
+        return
+
+    # No leading blank line: the report is the first thing on stdout now
+    # that the run narration goes to stderr.
+    click.echo(f"Scan {run.run_id[:8]} {status_label} in {run.duration_seconds:.1f}s")
     click.echo(f"  Status: {run.status.value}")
     metric_name = METRIC_NAMES[metric]
     click.echo(f"  Metric: {metric_name} — {METRIC_EXPLANATIONS[metric]}")
@@ -335,17 +472,11 @@ def scan(
             f"  Scoped out: {root.excluded_subtree_count:,} policy-excluded, "
             f"{root.depth_limited_subtree_count:,} depth-limited"
         )
-    duplicate_links = sum(1 for node in root.walk() if node.is_hardlink_duplicate)
     if duplicate_links:
         click.echo(f"  Hardlinks deduplicated in Unique: {duplicate_links:,}")
 
     # Show top directories
     click.echo(f"\nTop directories by {metric_name.lower()}:")
-    total_value = metric_value(root, metric)
-    children = sorted(
-        (child for child in root.children if child.is_dir),
-        key=lambda child: (-metric_value_or_zero(child, metric), child.name),
-    )
     for child in children[:15]:
         child_value = metric_value(child, metric)
         pct = (
@@ -361,32 +492,54 @@ def scan(
         )
 
     if snapshot:
-        from disktide.repositories import default_snapshot_repository
-        from disktide.services.snapshots import SnapshotService
+        outcome = _save_scan_snapshot(run)
+        if outcome["saved"]:
+            click.echo(f"\nSnapshot saved (id={outcome['id']})")
+        elif outcome["kind"] == "unwritable":
+            click.echo(
+                "\nCould not save snapshot: the storage database is "
+                f"unavailable or read-only. {outcome['error']}".rstrip(),
+                err=True,
+            )
+        else:
+            click.echo(
+                "\nCould not save snapshot; the scan result is "
+                f"still valid: {outcome['error']}",
+                err=True,
+            )
 
-        repository = default_snapshot_repository()
-        repository.connect()
+
+def _save_scan_snapshot(run) -> dict:
+    """Persist a scan run and report the outcome instead of printing it.
+
+    The human report and the JSON document both need this result but
+    place it differently, so saving is kept separate from rendering.
+    """
+    from disktide.repositories import default_snapshot_repository
+    from disktide.services.snapshots import SnapshotService
+
+    repository = default_snapshot_repository()
+    repository.connect()
+    try:
+        if not repository.status.writable:
+            return {
+                "saved": False,
+                "id": None,
+                "kind": "unwritable",
+                "error": (repository.status.reason or "").strip(),
+            }
         try:
-            if not repository.status.writable:
-                click.echo(
-                    "\nCould not save snapshot: the storage database is "
-                    "unavailable or read-only. "
-                    f"{repository.status.reason or ''}".rstrip(),
-                    err=True,
-                )
-            else:
-                try:
-                    saved = SnapshotService(repository).save_run(run)
-                except Exception as exc:
-                    click.echo(
-                        "\nCould not save snapshot; the scan result is "
-                        f"still valid: {type(exc).__name__}: {exc}",
-                        err=True,
-                    )
-                else:
-                    click.echo(f"\nSnapshot saved (id={saved.id})")
-        finally:
-            repository.close()
+            saved = SnapshotService(repository).save_run(run)
+        except Exception as exc:
+            return {
+                "saved": False,
+                "id": None,
+                "kind": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        return {"saved": True, "id": saved.id, "kind": "saved", "error": None}
+    finally:
+        repository.close()
 
 
 @cli.command()
@@ -411,7 +564,7 @@ def compare(
 ) -> None:
     """Compare snapshots: TARGET BASELINE [PATH].
 
-    Examples: ``compare latest previous /data`` or ``compare 42 41``.
+    Examples: "compare latest previous /data" or "compare 42 41".
     """
     from datetime import timedelta
 
@@ -1539,7 +1692,9 @@ def alerts_check(monitor_id: int | None, json_output: bool) -> None:
     is_flag=True,
     help="Disable filesystem events for this foreground host",
 )
+@click.pass_context
 def watch(
+    ctx,
     path: Path | None,
     monitor_identifier: str | None,
     watch_all: bool,
@@ -1551,8 +1706,8 @@ def watch(
 ) -> None:
     """Run the shared monitor host in the foreground.
 
-    ``watch PATH`` is transient and does not create a saved definition.
-    ``watch --monitor ID`` and ``watch --all`` host persisted definitions.
+    "watch PATH" is transient and does not create a saved definition.
+    "watch --monitor ID" and "watch --all" host persisted definitions.
     """
     import humanize
 
@@ -1684,7 +1839,10 @@ def watch(
                     f"{result.run.root.file_count:,} files"
                 )
     except KeyboardInterrupt:
-        click.echo("\nStopped watching.")
+        # 128 + SIGINT. A caller has to be able to tell "the user pressed
+        # Ctrl-C" apart from "the host reached --max-time and returned".
+        click.echo("\nStopped watching.", err=True)
+        ctx.exit(130)
     except click.ClickException:
         raise
     except Exception as exc:
@@ -1694,131 +1852,52 @@ def watch(
         repository.close()
 
 
-@cli.command(context_settings={"allow_extra_args": False})
-@click.argument("arguments", nargs=-1, type=click.UNPROCESSED)
-@click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
-@click.option("--apply", "apply_safe", is_flag=True, help="Move targets to Trash/quarantine")
-@click.option("--plan", "plan_id", help="Load an existing cleanup plan")
-@click.option("--permanent", is_flag=True, help="Use the separate permanent-delete flow")
-@click.option("--confirm", help="Exact permanent-delete confirmation token")
-@click.option(
-    "--by",
-    "history_group",
-    type=click.Choice(["category", "pack", "path"]),
-    help="Group cleanup savings history",
-)
-@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
-def cleanup(
-    arguments: tuple[str, ...],
-    workers: int | None,
-    apply_safe: bool,
-    plan_id: str | None,
-    permanent: bool,
-    confirm: str | None,
-    history_group: str | None,
-    json_output: bool,
-):
-    """Create, apply, inspect, or undo a persistent CleanupPlan.
+_HELP_FLAGS = frozenset({"--help", "-h"})
 
-    PATH defaults to the current directory. Use ``cleanup history`` or
-    ``cleanup undo PLAN_OR_ACTION_ID`` for persisted audit operations.
+
+class _DefaultCommandGroup(click.Group):
+    """A group whose bare arguments fall through to one default subcommand.
+
+    ``disktide cleanup /srv`` has to keep working now that ``cleanup`` is
+    a group, so a leading token that is not a subcommand name is routed
+    to the default subcommand instead. Flag options written ahead of a
+    subcommand -- ``cleanup --json history`` -- are hoisted along with
+    it.
+
+    The scan stops at the first bare token, so an option that takes a
+    value has to follow its subcommand (``cleanup history --by
+    category``, not ``cleanup --by category history``). Arity is a
+    property of the subcommand's own parameters, which are not known
+    until the subcommand has been picked, and guessing wrong would route
+    an option's value as a command name.
     """
-    import json
-    import humanize
 
-    from disktide.cleanup.actions import (
-        CleanupExecutionError,
-        QuarantineExecutor,
-    )
-    from disktide.cleanup.detector import detect_targets
-    from disktide.cleanup.rules import get_rule_by_name, get_rule_catalog
-    from disktide.config import (
-        cleanup_rule_directory,
-        load_config,
-        save_config,
-    )
-    from disktide.domain.cleanup import (
-        CleanupActionKind,
-        CleanupExecutionStatus,
-        cleanup_plan_to_dict,
-    )
-    from disktide.domain.metrics import MetricId
-    from disktide.domain.policy import ScanPolicy
-    from disktide.domain.scan import ScanRequest, ScanRequestError, ScanStatus
-    from disktide.repositories import default_snapshot_repository
-    from disktide.extensions.cleanup_rules import (
-        RulePackValidationError,
-        validate_rule_pack,
-    )
-    from disktide.services.cleanup import (
-        CleanupConfirmationRequired,
-        CleanupError,
-        CleanupService,
-    )
-    from disktide.services.scan import ScanService
+    def __init__(self, *args, default_command: str, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.default_command = default_command
 
-    if apply_safe and permanent:
-        raise click.UsageError("--apply and --permanent are mutually exclusive")
-    if arguments and arguments[0] == "rules":
-        if plan_id or apply_safe or permanent or history_group:
-            raise click.UsageError("cleanup rules does not accept plan/apply/history options")
-        if len(arguments) < 2 or arguments[1] not in {
-            "list",
-            "validate",
-            "enable",
-            "disable",
-        }:
-            raise click.UsageError(
-                "usage: disktide cleanup rules "
-                "list|validate PATH|enable PACK|disable PACK"
-            )
-        rule_operation = arguments[1]
-        expected = 2 if rule_operation == "list" else 3
-        if len(arguments) != expected:
-            raise click.UsageError(
-                f"cleanup rules {rule_operation} expects "
-                + ("no operand" if expected == 2 else "one operand")
-            )
-        operation = f"rules-{rule_operation}"
-        operand = arguments[2] if expected == 3 else None
-    elif arguments and arguments[0] == "history":
-        if len(arguments) != 1 or plan_id or apply_safe or permanent:
-            raise click.UsageError("cleanup history does not accept path/apply options")
-        operation = "history"
-        operand = None
-    elif arguments and arguments[0] == "undo":
-        if len(arguments) != 2 or plan_id or apply_safe or permanent:
-            raise click.UsageError("usage: disktide cleanup undo PLAN_OR_ACTION_ID")
-        operation = "undo"
-        operand = arguments[1]
-    elif arguments and arguments[0] == "purge":
-        if len(arguments) != 2 or plan_id or apply_safe or permanent or history_group:
-            raise click.UsageError("usage: disktide cleanup purge PLAN_OR_ACTION_ID")
-        operation = "purge"
-        operand = arguments[1]
-    elif arguments and arguments[0] == "quarantine":
-        if (
-            len(arguments) != 3
-            or arguments[1] not in {"audit", "rebuild"}
-            or plan_id
-            or apply_safe
-            or permanent
-            or history_group
-        ):
-            raise click.UsageError(
-                "usage: disktide cleanup quarantine audit|rebuild ROOT"
-            )
-        operation = f"quarantine-{arguments[1]}"
-        operand = arguments[2]
-    else:
-        if history_group is not None:
-            raise click.UsageError("--by is only valid with cleanup history")
-        if len(arguments) > 1:
-            raise click.UsageError(
-                "cleanup accepts one PATH, or history/undo/purge/rules"
-            )
-        operation = "plan"
-        operand = arguments[0] if arguments else None
+    def parse_args(self, ctx, args):
+        return super().parse_args(ctx, self._route(list(args)))
+
+    def _route(self, args: list[str]) -> list[str]:
+        for index, argument in enumerate(args):
+            if argument == "--":
+                break
+            if argument in _HELP_FLAGS:
+                # Group-level help, not the default subcommand's help.
+                return args
+            if argument.startswith("-"):
+                continue
+            if argument in self.commands:
+                return [argument, *args[:index], *args[index + 1 :]]
+            break
+        return [self.default_command, *args]
+
+
+def _cleanup_catalog():
+    """Load the config and rule catalog every cleanup subcommand starts from."""
+    from disktide.cleanup.rules import get_rule_catalog
+    from disktide.config import cleanup_rule_directory, load_config
 
     config = load_config()
     rule_directory = cleanup_rule_directory()
@@ -1826,121 +1905,20 @@ def cleanup(
         disabled_packs=config.cleanup.disabled_rule_packs,
         user_directory=rule_directory,
     )
-    if operation.startswith("rules-"):
-        rule_operation = operation.removeprefix("rules-")
-        if rule_operation == "validate":
-            try:
-                pack = validate_rule_pack(operand or "")
-            except RulePackValidationError as exc:
-                raise click.ClickException(str(exc)) from exc
-            payload = {
-                "name": pack.name,
-                "version": pack.version,
-                "schema_version": pack.schema_version,
-                "source": pack.source,
-                "enabled": pack.enabled,
-                "rule_count": len(pack.rules),
-            }
-            if json_output:
-                click.echo(json.dumps(payload, sort_keys=True))
-            else:
-                click.echo(
-                    f"VALID {pack.name} v{pack.version} · schema "
-                    f"{pack.schema_version} · {len(pack.rules)} rule(s)"
-                )
-            return
-        if rule_operation in {"enable", "disable"}:
-            pack_name = operand or ""
-            known_pack = catalog.get_pack(pack_name)
-            if known_pack is None and not any(
-                issue.pack_name == pack_name for issue in catalog.issues
-            ):
-                raise click.ClickException(f"unknown cleanup rule pack: {pack_name}")
-            disabled = set(config.cleanup.disabled_rule_packs)
-            if rule_operation == "enable":
-                disabled.discard(pack_name)
-            else:
-                disabled.add(pack_name)
-            config.cleanup.disabled_rule_packs = sorted(disabled)
-            save_config(config)
-            state = "enabled" if rule_operation == "enable" else "disabled"
-            click.echo(f"Cleanup rule pack '{pack_name}' {state}.")
-            return
-        payload = {
-            "schema_version": 1,
-            "packs": [
-                {
-                    "name": pack.name,
-                    "version": pack.version,
-                    "schema_version": pack.schema_version,
-                    "description": pack.description,
-                    "source": pack.source,
-                    "enabled": pack.enabled,
-                    "rule_count": len(pack.rules),
-                    "rules": [rule.name for rule in pack.rules],
-                }
-                for pack in catalog.packs
-            ],
-            "issues": [
-                {
-                    "pack": issue.pack_name,
-                    "source": issue.source,
-                    "path": issue.path,
-                    "error": issue.error,
-                }
-                for issue in catalog.issues
-            ],
-        }
-        if json_output:
-            click.echo(json.dumps(payload, sort_keys=True))
-        else:
-            for pack in catalog.packs:
-                state = "enabled" if pack.enabled else "disabled"
-                click.echo(
-                    f"{pack.name:<12} {state:<8} v{pack.version:<8} "
-                    f"{pack.source:<7} {len(pack.rules):>2} rule(s)"
-                )
-            for issue in catalog.issues:
-                click.echo(
-                    f"INVALID      isolated {issue.path}: {issue.error}",
-                    err=True,
-                )
-        return
+    return config, rule_directory, catalog
 
-    if operation.startswith("quarantine-"):
-        executor = QuarantineExecutor(
-            retention_days=config.cleanup.quarantine_retention_days,
-            max_bytes=config.cleanup.quarantine_max_bytes,
-        )
-        try:
-            status = executor.audit(
-                operand or "",
-                rebuild=operation == "quarantine-rebuild",
-            )
-        except CleanupExecutionError as exc:
-            raise click.ClickException(str(exc)) from exc
-        payload = status.to_dict()
-        if json_output:
-            click.echo(json.dumps(payload, sort_keys=True))
-        else:
-            verdict = "MATCH" if status.ledger_matches else "MISMATCH"
-            click.echo(f"Quarantine ledger {verdict}: {status.root}")
-            click.echo(
-                f"  Ledger: {status.ledger_items} items / "
-                f"{humanize.naturalsize(status.ledger_bytes, binary=True)}"
-            )
-            click.echo(
-                f"  Manifests: {status.manifest_items} items / "
-                f"{humanize.naturalsize(status.manifest_bytes, binary=True)}"
-            )
-            click.echo(f"  Pending reservations: {status.pending_items}")
-            if status.rebuilt:
-                click.echo("  Ledger rebuilt from recovery manifests.")
-            for recovery in status.recoveries:
-                click.echo(f"  RECOVERED: {recovery}")
-            for issue in status.issues:
-                click.echo(f"  ISSUE: {issue}")
-        return
+
+@contextmanager
+def _cleanup_session(config, rule_directory):
+    """Open a repository-backed CleanupService and always close the handle."""
+    from disktide.cleanup.actions import QuarantineExecutor
+    from disktide.cleanup.rules import get_rule_by_name
+    from disktide.repositories import default_snapshot_repository
+    from disktide.services.cleanup import (
+        CleanupConfirmationRequired,
+        CleanupError,
+        CleanupService,
+    )
 
     repository = default_snapshot_repository()
     repository.connect()
@@ -1957,114 +1935,84 @@ def cleanup(
         ),
     )
     try:
-        if operation == "history":
-            if history_group is not None:
-                summaries = service.savings_history(group_by=history_group)
-                if json_output:
-                    click.echo(
-                        json.dumps(
-                            [item.to_dict() for item in summaries],
-                            sort_keys=True,
-                        )
-                    )
-                elif not summaries:
-                    click.echo("No cleanup savings history recorded.")
-                else:
-                    click.echo(
-                        f"Cleanup savings history grouped by {history_group}:"
-                    )
-                    for item in summaries:
-                        click.echo(
-                            f"{item.key:<28} {item.action_count:>3} actions  "
-                            f"estimated {humanize.naturalsize(item.estimated_bytes, binary=True):>9}  "
-                            f"isolated {humanize.naturalsize(item.isolated_bytes, binary=True):>9}  "
-                            f"purged {humanize.naturalsize(item.purged_bytes, binary=True):>9}  "
-                            f"actual {humanize.naturalsize(item.actual_reclaimed_bytes, binary=True):>9}  "
-                            f"undone {humanize.naturalsize(item.undone_bytes, binary=True):>9}"
-                        )
-                return
-            plans = service.history(limit=100)
-            if json_output:
-                click.echo(json.dumps([cleanup_plan_to_dict(item) for item in plans]))
-            elif not plans:
-                click.echo("No cleanup plans recorded.")
-            else:
-                for item in plans:
-                    click.echo(
-                        f"{item.id}  {item.status.value:<9}  "
-                        f"{len(item.active_actions):>3} targets  "
-                        f"estimated {humanize.naturalsize(item.estimated_reclaimable_bytes, binary=True)}  "
-                        f"actual {humanize.naturalsize(item.actual_reclaimed_bytes, binary=True)}  "
-                        f"{item.scan_root}"
-                    )
-            return
+        yield repository, service
+    except (CleanupConfirmationRequired, CleanupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        repository.close()
 
-        if operation == "purge":
-            plan = repository.get_cleanup_plan(operand or "")
-            if plan is None:
-                plan = repository.get_cleanup_plan_for_action(operand or "")
-            if plan is None:
-                raise click.ClickException(
-                    f"cleanup plan or action '{operand}' does not exist"
-                )
-            token = service.purge_confirmation(plan.id)
-            if confirm is None:
-                click.echo(
-                    "PURGE permanently removes quarantined content and cannot be undone."
-                )
-                confirm = click.prompt(
-                    f'Type "{token}" to continue',
-                    default="",
-                    show_default=False,
-                )
-            result = service.purge(operand or "", confirmation=confirm)
-            if json_output:
-                click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
-            else:
-                click.echo(
-                    f"Purge {result.plan.id}: {result.plan.purged_count} purged; "
-                    f"actual reclaimed "
-                    f"{humanize.naturalsize(result.plan.actual_reclaimed_bytes, binary=True)}."
-                )
-            return
 
-        if operation == "undo":
-            result = service.undo(operand or "")
-            if json_output:
-                click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
-            else:
-                restored = sum(
-                    action.execution_status is CleanupExecutionStatus.UNDONE
-                    for action in result.plan.actions
-                )
-                click.echo(
-                    f"Undo {result.plan.id}: restored {restored} item(s); "
-                    f"status {result.plan.status.value}."
-                )
-                for action in result.plan.actions:
-                    if action.error:
-                        click.echo(f"  skipped {action.path}: {action.error}")
-            return
+@cli.group("cleanup", cls=_DefaultCommandGroup, default_command="plan")
+def cleanup() -> None:
+    """Create, apply, inspect, or undo a persistent CleanupPlan.
 
+    \b
+    "disktide cleanup PATH" is shorthand for "disktide cleanup plan PATH",
+    and PATH itself defaults to the current directory.
+    """
+
+
+@cleanup.command("plan")
+@click.argument("path", required=False)
+@click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
+@click.option(
+    "--apply", "apply_safe", is_flag=True, help="Move targets to Trash/quarantine"
+)
+@click.option("--plan", "plan_id", help="Load an existing cleanup plan")
+@click.option("--permanent", is_flag=True, help="Use the separate permanent-delete flow")
+@click.option("--confirm", help="Exact permanent-delete confirmation token")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup_plan(
+    path: str | None,
+    workers: int | None,
+    apply_safe: bool,
+    plan_id: str | None,
+    permanent: bool,
+    confirm: str | None,
+    json_output: bool,
+) -> None:
+    """Scan PATH for cleanup targets, then preview or apply the plan.
+
+    Without --apply or --permanent this only previews; nothing on disk
+    is touched.
+    """
+    import json
+
+    import humanize
+
+    from disktide.cleanup.detector import detect_targets
+    from disktide.domain.cleanup import CleanupActionKind, cleanup_plan_to_dict
+    from disktide.domain.metrics import MetricId
+    from disktide.domain.policy import ScanPolicy
+    from disktide.domain.scan import ScanRequest, ScanRequestError, ScanStatus
+    from disktide.services.scan import ScanService
+
+    if apply_safe and permanent:
+        raise click.UsageError("--apply and --permanent are mutually exclusive")
+
+    config, rule_directory, catalog = _cleanup_catalog()
+    with _cleanup_session(config, rule_directory) as (_, service):
         if plan_id:
             plan = service.get_plan(plan_id)
-            if operand is not None:
-                requested_root = str(Path(operand).expanduser().resolve())
+            if path is not None:
+                requested_root = str(Path(path).expanduser().resolve())
                 if requested_root != plan.scan_root:
                     raise click.UsageError(
                         f"PATH does not match plan root {plan.scan_root}"
                     )
         else:
-            path_value = operand or "."
-            path_object = Path(path_value).expanduser()
+            path_object = Path(path or ".").expanduser()
             if not path_object.exists():
                 raise click.BadParameter("Path does not exist", param_hint="PATH")
             if not path_object.is_dir():
                 raise click.BadParameter("Not a directory", param_hint="PATH")
-            path = str(path_object.resolve())
-            click.echo(f"Scanning {path} for cleanup targets...")
+            scan_root = str(path_object.resolve())
+            # Status, not result: a --json caller must get JSON alone on
+            # stdout, and a human redirecting the report does not want it
+            # either.
+            click.echo(f"Scanning {scan_root} for cleanup targets...", err=True)
             request = ScanRequest(
-                path=path,
+                path=scan_root,
                 metric=MetricId.LOGICAL,
                 policy=ScanPolicy(
                     one_file_system=config.scan.one_file_system,
@@ -2092,7 +2040,20 @@ def cleanup(
                     err=True,
                 )
             if not targets:
-                click.echo("No cleanup targets found.")
+                if json_output:
+                    click.echo(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "scan_root": scan_root,
+                                "targets": 0,
+                                "plan": None,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                else:
+                    click.echo("No cleanup targets found.")
                 return
             requested = (
                 CleanupActionKind.PERMANENT
@@ -2106,7 +2067,7 @@ def cleanup(
                 else CleanupActionKind.PREVIEW
             )
             plan = service.create_plan(
-                path,
+                scan_root,
                 targets,
                 requested_action=requested,
                 scan_run_id=scan_run.run_id,
@@ -2129,7 +2090,9 @@ def cleanup(
         if permanent:
             token = service.permanent_confirmation(plan.id)
             if confirm is None:
-                click.echo("PERMANENT DELETE bypasses Trash and cannot be undone.")
+                click.echo(
+                    "PERMANENT DELETE bypasses Trash and cannot be undone.", err=True
+                )
                 confirm = click.prompt(
                     f'Type "{token}" to continue',
                     default="",
@@ -2137,49 +2100,345 @@ def cleanup(
                 )
             action_kind = CleanupActionKind.PERMANENT
         else:
-            token = None
             action_kind = (
                 CleanupActionKind.TRASH
                 if config.cleanup.prefer_trash
                 else CleanupActionKind.QUARANTINE
             )
-        result = service.execute(
-            plan,
-            action=action_kind,
-            confirmation=confirm,
+        result = service.execute(plan, action=action_kind, confirmation=confirm)
+        if json_output:
+            click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
+            return
+        click.echo(
+            f"Plan {result.plan.id}: {result.plan.status.value}; "
+            f"{result.plan.succeeded_count} succeeded, "
+            f"{result.plan.skipped_count} skipped, "
+            f"{result.plan.failed_count} failed."
         )
+        click.echo(
+            "  Estimated: "
+            f"{humanize.naturalsize(result.plan.estimated_reclaimable_bytes, binary=True)}"
+        )
+        click.echo(
+            "  Validated: "
+            f"{humanize.naturalsize(result.plan.validated_reclaimable_bytes, binary=True)}"
+        )
+        click.echo(
+            "  Actual reclaimed: "
+            f"{humanize.naturalsize(result.plan.actual_reclaimed_bytes, binary=True)}"
+        )
+        if any(action.undo_available for action in result.plan.actions):
+            click.echo(f"  Undo: disktide cleanup undo {result.plan.id}")
+        for item in result.plan.actions:
+            if item.error:
+                click.echo(f"  {item.path}: {item.error}", err=True)
+
+
+@cleanup.command("history")
+@click.option(
+    "--by",
+    "history_group",
+    type=click.Choice(["category", "pack", "path"]),
+    help="Group cleanup savings history",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup_history(history_group: str | None, json_output: bool) -> None:
+    """List recorded cleanup plans, or grouped savings with --by."""
+    import json
+
+    import humanize
+
+    from disktide.domain.cleanup import cleanup_plan_to_dict
+
+    config, rule_directory, _ = _cleanup_catalog()
+    with _cleanup_session(config, rule_directory) as (_, service):
+        if history_group is not None:
+            summaries = service.savings_history(group_by=history_group)
+            if json_output:
+                click.echo(
+                    json.dumps([item.to_dict() for item in summaries], sort_keys=True)
+                )
+            elif not summaries:
+                click.echo("No cleanup savings history recorded.")
+            else:
+                click.echo(f"Cleanup savings history grouped by {history_group}:")
+                for item in summaries:
+                    click.echo(
+                        f"{item.key:<28} {item.action_count:>3} actions  "
+                        f"estimated {humanize.naturalsize(item.estimated_bytes, binary=True):>9}  "
+                        f"isolated {humanize.naturalsize(item.isolated_bytes, binary=True):>9}  "
+                        f"purged {humanize.naturalsize(item.purged_bytes, binary=True):>9}  "
+                        f"actual {humanize.naturalsize(item.actual_reclaimed_bytes, binary=True):>9}  "
+                        f"undone {humanize.naturalsize(item.undone_bytes, binary=True):>9}"
+                    )
+            return
+
+        plans = service.history(limit=100)
+        if json_output:
+            click.echo(json.dumps([cleanup_plan_to_dict(item) for item in plans]))
+        elif not plans:
+            click.echo("No cleanup plans recorded.")
+        else:
+            for item in plans:
+                click.echo(
+                    f"{item.id}  {item.status.value:<9}  "
+                    f"{len(item.active_actions):>3} targets  "
+                    f"estimated {humanize.naturalsize(item.estimated_reclaimable_bytes, binary=True)}  "
+                    f"actual {humanize.naturalsize(item.actual_reclaimed_bytes, binary=True)}  "
+                    f"{item.scan_root}"
+                )
+
+
+@cleanup.command("undo")
+@click.argument("plan_or_action_id")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup_undo(plan_or_action_id: str, json_output: bool) -> None:
+    """Restore quarantined content from a plan or a single action."""
+    import json
+
+    from disktide.domain.cleanup import CleanupExecutionStatus, cleanup_plan_to_dict
+
+    config, rule_directory, _ = _cleanup_catalog()
+    with _cleanup_session(config, rule_directory) as (_, service):
+        result = service.undo(plan_or_action_id)
+        if json_output:
+            click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
+            return
+        restored = sum(
+            action.execution_status is CleanupExecutionStatus.UNDONE
+            for action in result.plan.actions
+        )
+        click.echo(
+            f"Undo {result.plan.id}: restored {restored} item(s); "
+            f"status {result.plan.status.value}."
+        )
+        for action in result.plan.actions:
+            if action.error:
+                click.echo(f"  skipped {action.path}: {action.error}", err=True)
+
+
+@cleanup.command("purge")
+@click.argument("plan_or_action_id")
+@click.option("--confirm", help="Exact permanent-delete confirmation token")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup_purge(
+    plan_or_action_id: str, confirm: str | None, json_output: bool
+) -> None:
+    """Permanently remove quarantined content. This cannot be undone."""
+    import json
+
+    import humanize
+
+    from disktide.domain.cleanup import cleanup_plan_to_dict
+
+    config, rule_directory, _ = _cleanup_catalog()
+    with _cleanup_session(config, rule_directory) as (repository, service):
+        plan = repository.get_cleanup_plan(plan_or_action_id)
+        if plan is None:
+            plan = repository.get_cleanup_plan_for_action(plan_or_action_id)
+        if plan is None:
+            raise click.ClickException(
+                f"cleanup plan or action '{plan_or_action_id}' does not exist"
+            )
+        token = service.purge_confirmation(plan.id)
+        if confirm is None:
+            click.echo(
+                "PURGE permanently removes quarantined content and cannot be undone.",
+                err=True,
+            )
+            confirm = click.prompt(
+                f'Type "{token}" to continue',
+                default="",
+                show_default=False,
+            )
+        result = service.purge(plan_or_action_id, confirmation=confirm)
         if json_output:
             click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
         else:
             click.echo(
-                f"Plan {result.plan.id}: {result.plan.status.value}; "
-                f"{result.plan.succeeded_count} succeeded, "
-                f"{result.plan.skipped_count} skipped, "
-                f"{result.plan.failed_count} failed."
+                f"Purge {result.plan.id}: {result.plan.purged_count} purged; "
+                f"actual reclaimed "
+                f"{humanize.naturalsize(result.plan.actual_reclaimed_bytes, binary=True)}."
             )
-            click.echo(
-                "  Estimated: "
-                f"{humanize.naturalsize(result.plan.estimated_reclaimable_bytes, binary=True)}"
-            )
-            click.echo(
-                "  Validated: "
-                f"{humanize.naturalsize(result.plan.validated_reclaimable_bytes, binary=True)}"
-            )
-            click.echo(
-                "  Actual reclaimed: "
-                f"{humanize.naturalsize(result.plan.actual_reclaimed_bytes, binary=True)}"
-            )
-            if any(action.undo_available for action in result.plan.actions):
-                click.echo(f"  Undo: disktide cleanup undo {result.plan.id}")
-            for item in result.plan.actions:
-                if item.error:
-                    click.echo(f"  {item.path}: {item.error}")
-    except CleanupConfirmationRequired as exc:
+
+
+@cleanup.group("rules")
+def cleanup_rules() -> None:
+    """Inspect, validate, and toggle cleanup rule packs."""
+
+
+@cleanup_rules.command("list")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup_rules_list(json_output: bool) -> None:
+    """List rule packs and any packs isolated by a load error."""
+    import json
+
+    _, _, catalog = _cleanup_catalog()
+    payload = {
+        "schema_version": 1,
+        "packs": [
+            {
+                "name": pack.name,
+                "version": pack.version,
+                "schema_version": pack.schema_version,
+                "description": pack.description,
+                "source": pack.source,
+                "enabled": pack.enabled,
+                "rule_count": len(pack.rules),
+                "rules": [rule.name for rule in pack.rules],
+            }
+            for pack in catalog.packs
+        ],
+        "issues": [
+            {
+                "pack": issue.pack_name,
+                "source": issue.source,
+                "path": issue.path,
+                "error": issue.error,
+            }
+            for issue in catalog.issues
+        ],
+    }
+    if json_output:
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
+    for pack in catalog.packs:
+        state = "enabled" if pack.enabled else "disabled"
+        click.echo(
+            f"{pack.name:<12} {state:<8} v{pack.version:<8} "
+            f"{pack.source:<7} {len(pack.rules):>2} rule(s)"
+        )
+    for issue in catalog.issues:
+        click.echo(f"INVALID      isolated {issue.path}: {issue.error}", err=True)
+
+
+@cleanup_rules.command("validate")
+@click.argument("path")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup_rules_validate(path: str, json_output: bool) -> None:
+    """Check that the rule pack at PATH loads and conforms to the schema."""
+    import json
+
+    from disktide.extensions.cleanup_rules import (
+        RulePackValidationError,
+        validate_rule_pack,
+    )
+
+    try:
+        pack = validate_rule_pack(path)
+    except RulePackValidationError as exc:
         raise click.ClickException(str(exc)) from exc
-    except CleanupError as exc:
+    payload = {
+        "name": pack.name,
+        "version": pack.version,
+        "schema_version": pack.schema_version,
+        "source": pack.source,
+        "enabled": pack.enabled,
+        "rule_count": len(pack.rules),
+    }
+    if json_output:
+        click.echo(json.dumps(payload, sort_keys=True))
+    else:
+        click.echo(
+            f"VALID {pack.name} v{pack.version} · schema "
+            f"{pack.schema_version} · {len(pack.rules)} rule(s)"
+        )
+
+
+def _toggle_cleanup_rule_pack(pack_name: str, *, enable: bool) -> None:
+    """Flip a pack's enabled state in the persisted config."""
+    from disktide.config import save_config
+
+    config, _, catalog = _cleanup_catalog()
+    known_pack = catalog.get_pack(pack_name)
+    if known_pack is None and not any(
+        issue.pack_name == pack_name for issue in catalog.issues
+    ):
+        raise click.ClickException(f"unknown cleanup rule pack: {pack_name}")
+    disabled = set(config.cleanup.disabled_rule_packs)
+    if enable:
+        disabled.discard(pack_name)
+    else:
+        disabled.add(pack_name)
+    config.cleanup.disabled_rule_packs = sorted(disabled)
+    save_config(config)
+    click.echo(
+        f"Cleanup rule pack '{pack_name}' {'enabled' if enable else 'disabled'}."
+    )
+
+
+@cleanup_rules.command("enable")
+@click.argument("pack")
+def cleanup_rules_enable(pack: str) -> None:
+    """Re-enable a previously disabled rule pack."""
+    _toggle_cleanup_rule_pack(pack, enable=True)
+
+
+@cleanup_rules.command("disable")
+@click.argument("pack")
+def cleanup_rules_disable(pack: str) -> None:
+    """Stop a rule pack from contributing cleanup targets."""
+    _toggle_cleanup_rule_pack(pack, enable=False)
+
+
+@cleanup.group("quarantine")
+def cleanup_quarantine() -> None:
+    """Inspect the quarantine ledger that backs undo and purge."""
+
+
+def _run_quarantine_audit(root: str, *, rebuild: bool, json_output: bool) -> None:
+    """Audit a quarantine root, optionally rebuilding its ledger first."""
+    import json
+
+    import humanize
+
+    from disktide.cleanup.actions import CleanupExecutionError, QuarantineExecutor
+
+    config, _, _ = _cleanup_catalog()
+    executor = QuarantineExecutor(
+        retention_days=config.cleanup.quarantine_retention_days,
+        max_bytes=config.cleanup.quarantine_max_bytes,
+    )
+    try:
+        status = executor.audit(root, rebuild=rebuild)
+    except CleanupExecutionError as exc:
         raise click.ClickException(str(exc)) from exc
-    finally:
-        repository.close()
+    if json_output:
+        click.echo(json.dumps(status.to_dict(), sort_keys=True))
+        return
+    verdict = "MATCH" if status.ledger_matches else "MISMATCH"
+    click.echo(f"Quarantine ledger {verdict}: {status.root}")
+    click.echo(
+        f"  Ledger: {status.ledger_items} items / "
+        f"{humanize.naturalsize(status.ledger_bytes, binary=True)}"
+    )
+    click.echo(
+        f"  Manifests: {status.manifest_items} items / "
+        f"{humanize.naturalsize(status.manifest_bytes, binary=True)}"
+    )
+    click.echo(f"  Pending reservations: {status.pending_items}")
+    if status.rebuilt:
+        click.echo("  Ledger rebuilt from recovery manifests.")
+    for recovery in status.recoveries:
+        click.echo(f"  RECOVERED: {recovery}")
+    for issue in status.issues:
+        click.echo(f"  ISSUE: {issue}")
+
+
+@cleanup_quarantine.command("audit")
+@click.argument("root")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup_quarantine_audit(root: str, json_output: bool) -> None:
+    """Compare the ledger at ROOT against the on-disk recovery manifests."""
+    _run_quarantine_audit(root, rebuild=False, json_output=json_output)
+
+
+@cleanup_quarantine.command("rebuild")
+@click.argument("root")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def cleanup_quarantine_rebuild(root: str, json_output: bool) -> None:
+    """Rebuild the ledger at ROOT from its recovery manifests, then audit."""
+    _run_quarantine_audit(root, rebuild=True, json_output=json_output)
 
 
 def _render_cleanup_plan(plan, humanize_module) -> None:

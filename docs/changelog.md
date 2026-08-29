@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.20
+
+**CLI conventions: silent quit, stream discipline, discoverable subcommands**
+
+- **silent quit** Quitting the TUI no longer prints `Exiting...` or `DiskTide closed. Goodbye!`. Both dated from the era when teardown took tens of seconds and the user needed telling that the process was still working; since the `os._exit(0)` shutdown landed in v0.1.6 the whole exit is ~200 ms, so the messages were noise scrolled into the user's shell history. A terminal program that exits successfully says nothing -- `htop`, `ncdu`, `less`, and `vim` all return you to the prompt in silence. The only bytes written after the TUI tears down are now the terminal-restore escapes.
+- **scan streams** `disktide scan` wrote its progress counter to stdout without checking for a terminal, so `disktide scan / > report.txt` captured `\r`-separated redraw frames inside the report. Run narration -- queue position, start banner, phase changes, worker selection -- now goes to stderr with the rest of the status, stdout carries the report alone, and the carriage-returned counter is drawn only when stderr is a terminal.
+- **scan --json** Added machine-readable scan output, matching `doctor`, `cleanup`, `monitor`, and `alerts`. The document is versioned and carries the run id, status, policy, worker selection, all three byte totals, coverage counts, and the root's direct child directories sorted by the selected metric. A cancelled or failed run still emits a parseable document alongside its non-zero exit code.
+- **cleanup --json** `disktide cleanup PATH --json` prefixed its document with `Scanning ... for cleanup targets...` on stdout, and answered `No cleanup targets found.` in plain text, so neither case parsed. The notice moved to stderr and the empty case now returns a document.
+- **cleanup subcommands** `cleanup` was one flat command that hand-dispatched `rules`, `history`, `undo`, `purge`, and `quarantine` out of an `UNPROCESSED` argument tuple, so `disktide cleanup rules --help` printed the parent help and no subcommand appeared in any help output. It is now a real command group -- like `monitor` and `alerts` already were -- with per-subcommand help and options. `disktide cleanup PATH` still routes to the default `plan` subcommand, and flag options written before a subcommand (`cleanup --json history`) are hoisted along with it. An option that takes a value has to follow its subcommand (`cleanup history --by category`): the router cannot know an option's arity before it has picked the command, so it stops at the first bare token rather than risk routing an option's value as a subcommand name.
+- **watch exit code** Ctrl-C out of `disktide watch` printed to stdout and exited `0`, so a caller could not distinguish an interrupt from a host that reached `--max-time`. It now reports on stderr and exits `130`, matching what `scan` already did.
+- **TUI without a terminal** `disktide` with stdin or stdout redirected sat forever waiting on a keypress that a pipe can never deliver. It now fails immediately with an explicit message and exit `1`, pointing at the subcommands for non-interactive use.
+- **help text** Three docstrings doing double duty as Sphinx source rendered their ``literal`` markup verbatim in `--help`; the top-level docstring lost its line breaks to Click's paragraph rewrapping. Both are fixed.
+
 ## v0.2.19
 
 **Live frame integrity and scheduler invariant coverage**

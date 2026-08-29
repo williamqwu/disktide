@@ -253,7 +253,13 @@ bytes as zero until the data is purged.
 
 ## CLI Commands
 
-These commands run outside the TUI and print results to stdout.
+These commands run outside the TUI. Results go to stdout; run status,
+progress, warnings, and errors go to stderr, so `disktide scan / > report.txt`
+captures the report alone and still shows progress on the terminal. The live
+progress counter is drawn only when stderr is a terminal.
+
+Commands that accept `--json` write one JSON document to stdout and nothing
+else, which makes them safe to pipe into `jq`.
 
 ### doctor
 
@@ -282,6 +288,7 @@ disktide scan /path --snapshot      # save results to the database
 disktide scan /path -d 5 -w 4       # limit depth to 5, use 4 threads
 disktide scan /path --metric allocated
 disktide scan / --metric unique --one-file-system --exclude-pseudo
+disktide scan /path --json          # machine-readable, stdout only
 ```
 
 `--metric` controls the completion total, sorting, and top-directory bars.
@@ -291,10 +298,17 @@ Cross-filesystem scanning is the default; `--one-file-system` leaves visible
 default, while an explicitly selected pseudo root is still scanned. Use
 `--include-pseudo` to opt in to descendant pseudo filesystems.
 
-The command prints a short run id, phase, policy, and terminal status. Exit codes
+The command reports a short run id, phase, policy, and terminal status on
+stderr, and writes the summary and top-directory table to stdout. Exit codes
 are `0` for complete or partial success, `1` for scan failure, `2` for invalid
 input, and `130` for cancellation. A partial result remains usable but includes
 an explicit coverage line; cancellation never prints a completion summary.
+
+`--json` replaces the text report with a versioned document carrying the run
+id, status, policy, worker selection, all three byte totals, coverage counts,
+and the direct child directories sorted by the selected metric. It silences the
+stderr narration, and a cancelled or failed run still yields a parseable
+document alongside its non-zero exit code.
 
 ### compare
 
@@ -436,6 +450,11 @@ Every backend start/restart is recorded as requiring full reconciliation, so
 service downtime is never presented as a complete event history.
 
 ### cleanup
+
+`cleanup` is a command group. `disktide cleanup PATH` is shorthand for
+`disktide cleanup plan PATH`, and `disktide cleanup --help` lists every
+subcommand (`plan`, `history`, `undo`, `purge`, `rules`, `quarantine`), each
+with its own `--help`.
 
 Cleanup defaults to a persistent, read-only preview:
 

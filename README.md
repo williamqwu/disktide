@@ -147,6 +147,7 @@ disktide doctor --json
 
 # Scan a directory directly
 disktide scan /path --metric allocated --snapshot
+disktide scan /path --json          # machine-readable, stdout only
 
 # Stay on one filesystem and skip pseudo-filesystem mounts
 disktide scan / --metric unique --one-file-system --exclude-pseudo
@@ -198,6 +199,10 @@ disktide cleanup --plan PLAN_ID --permanent
 Each scan reports a short run id, active phase and policy, and one explicit
 terminal status (`completed`, `partial`, `cancelled`, or `failed`). The TUI,
 one-shot CLI, and periodic watch use the same scan service and result semantics.
+
+Results go to stdout and run status goes to stderr, so `disktide scan / > report.txt`
+captures the report alone. `disktide cleanup --help` lists the cleanup
+subcommands, each of which has its own `--help`.
 
 ## Documentation
 
