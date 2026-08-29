@@ -20,12 +20,14 @@ from disktide.visualization_formatting import (
     visual_token,
 )
 from disktide.rendering import denied_glyph, partial_glyph
+from disktide.viz.categories import CategoryIndex
 from disktide.viz.cellgeom import DEFAULT_CELL_ASPECT
 from disktide.viz.colors import (
+    category_dir_tint,
+    category_file_color,
     delta_background,
     file_category,
     get_color_scheme,
-    hsl_to_rgb,
 )
 from disktide.viz.layout import aggregate_children, bounded_children
 
@@ -35,25 +37,21 @@ def _rect_bg(
     depth: int,
     is_leaf: bool,
     visual: VisualDelta | None = None,
+    category_index: CategoryIndex | None = None,
 ) -> str:
     """Background color based on file-type category and depth."""
     if visual is not None:
         return delta_background(visual.state, _delta_intensity(visual))
-    scheme = get_color_scheme()
     if not is_leaf:
-        return scheme.border_bg
+        return get_color_scheme().border_bg
     if node.is_dir:
-        return scheme.dir_leaf_bg
-    cat = file_category(node.name)
-    hue = scheme.category_hues.get(cat, 90)
-    sat = scheme.category_saturation
-    if depth <= 1:
-        lum = 40
-    elif depth == 2:
-        lum = 55
-    else:
-        lum = 65
-    return f"rgb({hsl_to_rgb(hue, sat, lum)})"
+        if category_index is not None:
+            dominant = category_index.dominant(node.path)
+            # "other"-dominated is exactly what the neutral already says.
+            if dominant is not None and dominant[0] != "other":
+                return category_dir_tint(dominant[0], dominant[1], depth)
+        return get_color_scheme().dir_leaf_bg
+    return category_file_color(file_category(node.name), depth)
 
 
 def _access_glyph(node: FSNode) -> str:
@@ -63,13 +61,6 @@ def _access_glyph(node: FSNode) -> str:
     if node.inaccessible_count > 0 or node.inaccessible_subtree_count > 0:
         return partial_glyph()
     return ""
-
-
-def _label_fg(depth: int) -> str:
-    """Foreground color for labels: white on dark, dark on light."""
-    if depth <= 2:
-        return "white"
-    return "rgb(20,20,20)"
 
 
 @dataclass
@@ -95,6 +86,9 @@ class TreemapLayout:
     height: int
     rects: list[TreemapRect] = field(default_factory=list)
     grid: list[list[TreemapRect | None]] = field(default_factory=list)
+    # Rect backgrounds are resolved at render time, so the rollup the
+    # directory tints need has to ride along on the layout.
+    category_index: CategoryIndex | None = None
 
     def build_grid(self) -> None:
         """Build a 2D lookup grid from rectangles."""
@@ -115,6 +109,18 @@ class TreemapLayout:
             return self.grid[y][x]
         return None
 
+    def area_share(self, rect: TreemapRect) -> float:
+        """Fraction of the whole treemap a rectangle covers.
+
+        Area is what the treemap encodes (ADR 0006), so this is the honest
+        reading of the picture even where the snapped integer box differs
+        from the node's exact metric share by a fraction of a cell.
+        """
+        total = self.width * self.height
+        if total <= 0:
+            return 0.0
+        return max(0.0, min(1.0, (rect.w * rect.h) / total))
+
 
 def compute_layout(
     node: FSNode,
@@ -126,6 +132,7 @@ def compute_layout(
     visuals: Mapping[str, VisualDelta] | None = None,
     selected_path: str | None = None,
     cell_aspect: float | None = None,
+    category_index: CategoryIndex | None = None,
 ) -> TreemapLayout:
     """Compute a squarified treemap layout for the given node.
 
@@ -133,8 +140,11 @@ def compute_layout(
     pixel height/width ratio of one character cell, which is what makes a
     "square" rectangle actually square on screen; None keeps the historical
     2.0 so callers that do not measure their terminal stay deterministic.
+    `category_index` tints directory-leaf rects by what dominates them.
     """
-    layout = TreemapLayout(width=width, height=height)
+    layout = TreemapLayout(
+        width=width, height=height, category_index=category_index
+    )
 
     root_value = _layout_value(node, metric, weights)
     if width <= 0 or height <= 0 or root_value is None or root_value <= 0:
@@ -681,11 +691,16 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
         while x + run < layout.width and layout.rect_at(x + run, y) is rect:
             run += 1
 
-        bg = _rect_bg(rect.node, rect.depth, rect.is_leaf, rect.visual)
-        fg = _label_fg(rect.depth)
+        bg = _rect_bg(
+            rect.node, rect.depth, rect.is_leaf, rect.visual,
+            layout.category_index,
+        )
+        # Every rect background on the category ladders is mid-to-dark, so
+        # labels are white throughout — the old dark-on-light rule for deep
+        # rects would now print near-black on near-black.
         style = Style(
             bgcolor=bg,
-            color=fg,
+            color="white",
             bold=rect.selected,
             underline=rect.selected,
         )

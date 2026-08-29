@@ -167,10 +167,21 @@ class SizeTree(Tree[FSNode]):
             child_tree = self._tree_nodes.get(child_fs.path)
             if child_tree is None:
                 return False
-            if child_fs.is_dir:
-                current_tree.expand()
+            # Expand the *parent*, whatever the child is: a node only gets
+            # a line — and so only becomes selectable — once every ancestor
+            # is open. Skipping this for file children left the cursor on
+            # the root whenever the target was a file.
+            current_tree.expand()
             current_fs = child_fs
             current_tree = child_tree
+        # Expanding a node only invalidates the tree's line cache; a node
+        # learns its line number when that cache is next rebuilt, and
+        # `select_node` reads that number directly. Reading a property
+        # backed by the cache rebuilds it here, so a node expanded a moment
+        # ago resolves to its real line rather than -1 — which
+        # `validate_cursor_line` would clamp straight back to the root.
+        if self.last_line < 0:
+            return False
         self.select_node(current_tree)
         return True
 

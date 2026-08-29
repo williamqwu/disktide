@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
+
 from rich.segment import Segment
 from rich.style import Style
-from textual.events import Resize
+from textual.events import Click, Leave, MouseMove, Resize
+from textual.message import Message
 from textual.strip import Strip
 from textual.widget import Widget
 
@@ -13,14 +16,18 @@ from disktide.metrics import (
     DEFAULT_METRIC,
     METRIC_NAMES,
     metric_available,
+    metric_text,
     normalize_metric,
 )
 from disktide.models.tree import FSNode
 from disktide.domain.visualization import DiffFrame
 from disktide.presentation.tui.viewmodels.visualization import legend_text
+from disktide.viz.categories import CategoryIndex
 from disktide.viz.cellgeom import detect_cell_aspect
+from disktide.viz.layout import is_aggregate_path
 from disktide.viz.sunburst import (
     DEFAULT_PANEL_BG,
+    ArcSegment,
     SunburstLayout,
     compute_sunburst,
     render_sunburst_line,
@@ -28,7 +35,14 @@ from disktide.viz.sunburst import (
 
 
 class SunburstView(Widget):
-    """Widget that renders a sunburst (ring chart) visualization."""
+    """Widget that renders a sunburst (ring chart) visualization.
+
+    Mouse handling is deliberately asymmetric: hovering only hit-tests and
+    rewrites the tooltip, while a click posts a message the screen turns
+    into the same navigation a keypress would.  Recomputing the chart costs
+    ~40 ms at a typical viewport, which is fine once per click and
+    impossible at the 60+ events/s a moving pointer produces.
+    """
 
     DEFAULT_CSS = """
     SunburstView {
@@ -36,6 +50,15 @@ class SunburstView(Widget):
         height: 1fr;
     }
     """
+
+    class ArcClicked(Message):
+        """A real (non-aggregate) arc was clicked."""
+
+        def __init__(self, path: str, is_dir: bool, depth: int):
+            super().__init__()
+            self.path = path
+            self.is_dir = is_dir
+            self.depth = depth
 
     # Outer rings stop being meaningful while data is still arriving (a
     # subtree's child sizes can land last and dominate the chart). During
@@ -53,13 +76,26 @@ class SunburstView(Widget):
         self._live_mode = False
         self._live_update_count = 0
         self._diff: DiffFrame | None = None
+        self._category_index: CategoryIndex | None = None
+        self._selected_path: str | None = None
+        self._hover_path: str | None = None
 
     def set_node(self, node: FSNode | LiveViewNode | None) -> None:
         """Set the root node. Layout recomputed on next render."""
         self._node = node
         self._diff = None
+        if node is None:
+            # A cleared view means a new scan: the old tree's rollup would
+            # tint the new one's directories from paths that no longer exist.
+            self._category_index = None
         if self._live_mode and node is not None:
             self._live_update_count += 1
+        self._stale = True
+        self.refresh()
+
+    def set_category_index(self, index: CategoryIndex | None) -> None:
+        """Supply (or drop) the dominant-content rollup for directory tints."""
+        self._category_index = index
         self._stale = True
         self.refresh()
 
@@ -105,9 +141,60 @@ class SunburstView(Widget):
         self._stale = True
         self.refresh()
 
+    def set_selected_path(self, path: str | None) -> None:
+        """Brighten the arc for `path` (and its ancestry) on the next paint.
+
+        Diff mode carries its own selection on the frame, so the value is
+        remembered but not acted on until the view leaves diff mode.
+        """
+        if path == self._selected_path:
+            return
+        self._selected_path = path
+        if self._diff is not None:
+            return
+        self._stale = True
+        self.refresh()
+
     def on_resize(self, event: Resize) -> None:
         self._stale = True
         self.refresh()
+
+    def _arc_at(self, char_x: int, char_y: int) -> ArcSegment | None:
+        layout = self._layout
+        if layout is None:
+            return None
+        return layout.hit_test(char_x, char_y)
+
+    def on_click(self, event: Click) -> None:
+        arc = self._arc_at(event.x, event.y)
+        if arc is None or is_aggregate_path(arc.node.path):
+            # A "… N more" arc stands for several directories at once, so
+            # there is nothing to navigate to.
+            return
+        self.post_message(
+            self.ArcClicked(arc.node.path, arc.node.is_dir, arc.depth)
+        )
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        arc = self._arc_at(event.x, event.y)
+        path = arc.node.path if arc is not None else None
+        if path == self._hover_path:
+            return
+        self._hover_path = path
+        self.tooltip = None if arc is None else self._arc_tooltip(arc)
+
+    def on_leave(self, event: Leave) -> None:
+        self._hover_path = None
+        self.tooltip = None
+
+    def _arc_tooltip(self, arc: ArcSegment) -> str:
+        node = arc.node
+        if is_aggregate_path(node.path):
+            return node.name
+        # Angles are laid out from the chart root's total, so an arc's span
+        # is its share of the whole disc at any depth.
+        share = arc.angle_span / (2.0 * math.pi)
+        return f"{node.name}\n{metric_text(node, self._metric)} · {share:.0%}"
 
     def _panel_bg(self) -> tuple[int, int, int]:
         """The widget's composited background, for the renderer to blend to.
@@ -142,10 +229,13 @@ class SunburstView(Widget):
             weights=self._diff.weights if self._diff is not None else None,
             visuals=self._diff.visuals if self._diff is not None else None,
             selected_path=(
-                self._diff.selected_path if self._diff is not None else None
+                self._diff.selected_path
+                if self._diff is not None
+                else self._selected_path
             ),
             cell_aspect=detect_cell_aspect(),
             panel_bg=self._panel_bg(),
+            category_index=self._category_index,
         )
 
     def render_line(self, y: int) -> Strip:

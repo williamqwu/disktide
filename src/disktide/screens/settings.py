@@ -315,6 +315,17 @@ class SettingsScreen(Screen):
                 )
 
             with Horizontal(classes="setting-row"):
+                yield Label("Mouse support", classes="setting-label")
+                yield Switch(
+                    value=self._config.ui.mouse,
+                    id="mouse-support",
+                )
+                yield Label(
+                    "(applies on next launch)",
+                    classes="input-hint",
+                )
+
+            with Horizontal(classes="setting-row"):
                 yield Label("Live scan rendering", classes="setting-label")
                 yield Select(
                     [
@@ -503,6 +514,18 @@ class SettingsScreen(Screen):
             from disktide.rendering import set_safe_rendering
             set_safe_rendering(event.value)
             self.app.refresh()
+        elif event.switch.id == "mouse-support":
+            self._config.ui.mouse = event.value
+            # Textual negotiates mouse reporting once, when the driver
+            # enters application mode; there is no supported way to turn
+            # tracking on or off under a running app.
+            self.app.notify(
+                "Mouse support "
+                f"{'enabled' if event.value else 'disabled'} — "
+                "takes effect the next time DiskTide starts.",
+                title="Mouse support",
+                timeout=5,
+            )
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "monitor-event-mode":

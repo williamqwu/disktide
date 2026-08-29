@@ -100,6 +100,12 @@ class UIConfig:
     # accessibility glyphs) for ASCII fallbacks. Useful in web-based
     # shells whose fonts don't ship the full Unicode block range.
     safe_rendering: bool = False
+    # Mouse reporting is negotiated once, when the Textual driver enters
+    # application mode, so this is read at launch and cannot be flipped
+    # mid-session. Turning it off hands clicks and drags back to the
+    # terminal emulator, which is what a user wants when their terminal's
+    # own selection/paste is more valuable than in-app hit testing.
+    mouse: bool = True
     # "auto" | "on" | "off". Controls whether the active viz tab (sunburst
     # or treemap) redraws live with partial scan data, vs. waiting for the
     # scan to finish and rendering once. `auto` enables it on a roomy
@@ -234,6 +240,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append("show_cleanup = true")
     if config.ui.safe_rendering:
         lines.append("safe_rendering = true")
+    if not config.ui.mouse:
+        lines.append("mouse = false")
     if config.ui.live_scan_render != "auto":
         lines.append(f'live_scan_render = "{config.ui.live_scan_render}"')
     if config.ui.default_scan_path is not None:
@@ -329,6 +337,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.default_viz = ui.get("default_viz", "sunburst")
         config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.safe_rendering = ui.get("safe_rendering", False)
+        config.ui.mouse = bool(ui.get("mouse", True))
         raw_live = ui.get("live_scan_render", "auto")
         config.ui.live_scan_render = (
             raw_live if raw_live in ("auto", "on", "off") else "auto"

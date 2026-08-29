@@ -120,6 +120,13 @@ disktide
 | `?` | Settings |
 | `q` | Quit |
 
+Mouse support is on by default. Click a tree row, a sunburst arc, or a treemap
+rectangle to navigate there; click the sunburst centre to go up one level. The
+wheel scrolls, and hovering a chart shape shows its name, size, and share. Hold
+Shift while dragging to reach your terminal's own text selection. Launch with
+`--no-mouse` for one session, or set `mouse = false` under `[ui]` (Settings ▸
+Mouse support) to opt out permanently.
+
 Inside Monitor Center, use `n` to create a monitor, `e` to edit it, `p` to
 pause/resume, `R` to run now, `g` to request a trusted full reconciliation, and
 `s` to start/stop the current TUI host. The

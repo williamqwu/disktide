@@ -540,7 +540,7 @@ class TestTypicalProject:
 
 
 class TestBuildArtifactHeavy:
-    """Project dominated by build artifacts — tests the 'build' category."""
+    """Project dominated by build artifacts — tests the 'ephemeral' category."""
 
     @staticmethod
     def _tree():
@@ -613,50 +613,69 @@ class TestFileCategoryMapping:
     """Verify the extension → category mapping covers expected cases."""
 
     @pytest.mark.parametrize("name,expected", [
-        ("report.pdf", "document"),
-        ("REPORT.PDF", "document"),
-        ("doc.epub", "document"),
-        ("slides.pptx", "document"),
-        ("photo.jpeg", "image"),
-        ("icon.heic", "image"),
+        ("report.pdf", "docs"),
+        ("REPORT.PDF", "docs"),
+        ("doc.epub", "docs"),
+        ("slides.pptx", "docs"),
+        ("photo.jpeg", "media"),
+        ("icon.heic", "media"),
         ("style.css", "code"),
         ("component.tsx", "code"),
         ("notebook.ipynb", "code"),
-        ("settings.toml", "config"),
-        ("app.conf", "config"),
+        ("settings.toml", "docs"),
+        ("app.conf", "docs"),
         ("dump.sql", "data"),
         ("data.h5", "data"),
         ("dataset.hdf5", "data"),
         ("features.npz", "data"),
-        ("model.pt", "model"),
-        ("weights.safetensors", "model"),
-        ("checkpoint.ckpt", "model"),
+        ("model.pt", "data"),
+        ("weights.safetensors", "data"),
+        ("checkpoint.ckpt", "data"),
         ("archive.7z", "archive"),
         ("pkg.deb", "archive"),
         ("video.mkv", "media"),
         ("stream.ogg", "media"),
-        ("module.whl", "build"),
-        ("library.dll", "build"),
-        ("training.log", "log"),
-        ("output.out", "log"),
-        ("errors.err", "log"),
+        ("module.whl", "ephemeral"),
+        ("library.dll", "ephemeral"),
+        ("training.log", "ephemeral"),
+        ("output.out", "ephemeral"),
+        ("errors.err", "ephemeral"),
         ("Makefile", "other"),
         ("no_extension", "other"),
         (".hidden", "other"),
         ("multi.tar.gz", "archive"),  # uses last extension
+        # versioned shared libraries: numeric suffixes peel off (HPC trees
+        # are full of libfoo.so.N and would otherwise render as "other")
+        ("libcudnn.so.9", "ephemeral"),
+        ("libfoo.so.1.2.3", "ephemeral"),
+        ("liblapack.so.3", "ephemeral"),
+        ("data.1", "other"),  # all-numeric suffixes with no real extension
     ])
     def test_category(self, name, expected):
         assert _file_category(name) == expected
 
-    def test_all_schemes_cover_all_categories(self):
-        """Every color scheme must have a hue for every known category."""
-        from disktide.viz.colors import SCHEMES, EXT_CATEGORIES
+    def test_every_category_has_a_color_in_every_scheme(self):
+        """No theme may leave a known category without a distinct fill."""
+        from disktide.viz.colors import (
+            CATEGORIES,
+            EXT_CATEGORIES,
+            SCHEMES,
+            category_file_color,
+            set_color_scheme,
+        )
         all_cats = set(EXT_CATEGORIES.values()) | {"other"}
-        for name, scheme in SCHEMES.items():
-            for cat in all_cats:
-                assert cat in scheme.category_hues, (
-                    f"{name} scheme missing hue for '{cat}'"
-                )
+        assert all_cats == set(CATEGORIES)
+        try:
+            for name in SCHEMES:
+                set_color_scheme(name)
+                colors = {cat: category_file_color(cat, 2) for cat in CATEGORIES}
+                assert all(colors.values()), f"{name} scheme missing a fill"
+                if name != "mono":
+                    assert len(set(colors.values())) == len(CATEGORIES), (
+                        f"{name} scheme reuses a fill across categories: {colors}"
+                    )
+        finally:
+            set_color_scheme("default")
 
 
 class TestNonUniformSiblings:

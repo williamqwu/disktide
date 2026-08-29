@@ -40,14 +40,17 @@ from disktide.visualization_formatting import (
     visual_token,
 )
 from disktide.rendering import denied_glyph, partial_glyph
+from disktide.viz.categories import CategoryIndex
 from disktide.viz.cellgeom import DEFAULT_CELL_ASPECT
 from disktide.viz.colors import (
+    CATEGORIES,
+    category_dir_tint,
+    category_file_color,
+    category_legend_color,
     darken_rgb,
     delta_background,
     file_category,
-    file_type_color,
-    get_color_scheme,
-    hsl_to_rgb,
+    neutral_dir_color,
 )
 from disktide.viz.layout import bounded_children
 
@@ -88,7 +91,15 @@ _FOOTPRINT_HALF = _SAMPLE_FOOTPRINT / 2.0
 # a run of them merges into one blob.  Odd siblings get a nudge in
 # luminance; seams carry the structure wherever they fit, this carries it
 # where they don't.
-_DIR_ZEBRA_LUM = 3
+_DIR_ZEBRA_GAIN = 1.06
+
+# Selection in current mode is a lift towards white: the arc keeps the hue
+# that says what it holds, and diff mode keeps its own selection encoding.
+_SELECTED_MIX: RGB = (255, 255, 255)
+_SELECTED_WEIGHT = 0.22
+
+# Three rows of two, below which the legend starts crowding the disc.
+_LEGEND_MAX_ENTRIES = 6
 
 _HALF_TOP = "▀"  # ▀ upper half block
 _HALF_BOTTOM = "▄"  # ▄ lower half block
@@ -132,6 +143,9 @@ class _Label:
 
 class _Ring(NamedTuple):
     """One depth's arcs, prepared for point lookup."""
+    # Index-aligned with the parallel lists below, so a bisect on `starts`
+    # names an ArcSegment as well as a colour.
+    arcs: list[ArcSegment]
     starts: list[float]
     ends: list[float]
     colors: list[RGB]
@@ -166,6 +180,9 @@ class SunburstLayout:
     legend_lines: list[list[tuple[str, str]]] = field(default_factory=list)
     legend_start_y: int = 0
     diff_mode: bool = False
+    # The rasterizer's per-depth lookup tables, kept so a mouse position
+    # resolves to an arc by the same geometry that painted it.
+    _rings: list[_Ring | None] = field(default_factory=list, repr=False)
     _cells_cache: list[list[tuple[str, Style | None]]] | None = field(
         default=None, repr=False
     )
@@ -191,6 +208,47 @@ class SunburstLayout:
             self._cells_cache = _render_cells(self)
         return self._cells_cache or []
 
+    def hit_test(self, char_x: int, char_y: int) -> ArcSegment | None:
+        """The arc drawn at a character cell, or None outside the disc.
+
+        Runs once per mouse-move, so it repeats the rasterizer's radius /
+        angle arithmetic for a single point rather than consulting the
+        framebuffer: O(log n) in the arcs of one ring, and no per-call
+        allocation beyond the cell centre.
+        """
+        rings = self._rings
+        if not rings or self.ring_width <= 0.0:
+            return None
+
+        x, y = self.cell_center(char_x, char_y)
+        dx = x - self.center_x
+        dy = y - self.center_y
+        radius = math.hypot(dx, dy)
+
+        if radius < self.hole_radius:
+            # The unpainted centre reads as the chart root, which is the
+            # arc filling the innermost ring.
+            root = rings[0]
+            return root.arcs[0] if root is not None and root.arcs else None
+
+        depth = int((radius - self.hole_radius) / self.ring_width)
+        if depth >= len(rings):
+            return None
+        ring = rings[depth]
+        if ring is None:
+            return None
+        if ring.full:
+            return ring.arcs[0]
+
+        theta = math.atan2(dy, dx)
+        if theta < 0.0:
+            theta += 2.0 * math.pi
+        index = bisect_right(ring.starts, theta) - 1
+        if index < 0 or theta >= ring.ends[index]:
+            # An empty wedge: this ring's parent has no child here.
+            return None
+        return ring.arcs[index]
+
 
 def compute_sunburst(
     node: FSNode,
@@ -203,6 +261,7 @@ def compute_sunburst(
     selected_path: str | None = None,
     cell_aspect: float | None = None,
     panel_bg: RGB | None = None,
+    category_index: CategoryIndex | None = None,
 ) -> SunburstLayout:
     """Compute and render a sunburst chart.
 
@@ -210,7 +269,8 @@ def compute_sunburst(
     height/width ratio of one character cell; None keeps the historical 2.0
     so callers that do not measure their terminal stay deterministic.
     `panel_bg` is the widget's own background, which subsamples that miss
-    every arc blend towards.
+    every arc blend towards.  `category_index` tints directory arcs by what
+    dominates them; without it they stay neutral.
     """
     aspect = DEFAULT_CELL_ASPECT if cell_aspect is None else float(cell_aspect)
     layout = SunburstLayout(
@@ -258,14 +318,17 @@ def compute_sunburst(
         ordinal=0,
     )
 
-    _rasterize_arcs(layout, ring_width)
-    _compute_labels(layout, node, metric, visuals)
-    _compute_legend(layout)
+    _rasterize_arcs(layout, ring_width, category_index)
+    _compute_labels(layout, node, metric, visuals, category_index)
+    _compute_legend(layout, node, category_index)
 
     return layout
 
 
-def _arc_color(arc: ArcSegment) -> str:
+def _arc_color(
+    arc: ArcSegment,
+    category_index: CategoryIndex | None = None,
+) -> str:
     """Determine color for an arc segment based on file type."""
     if arc.visual is not None:
         intensity = 4 if arc.selected else _delta_intensity(arc.visual)
@@ -273,12 +336,24 @@ def _arc_color(arc: ArcSegment) -> str:
     node = arc.node
     depth = arc.depth
     if node.is_dir:
-        scheme = get_color_scheme()
-        lum = max(30, 55 - depth * 10)
-        if arc.ordinal % 2:
-            lum += _DIR_ZEBRA_LUM
-        return f"rgb({hsl_to_rgb(scheme.dir_hue, scheme.dir_saturation, lum)})"
-    return file_type_color(node.name, depth, is_dir=False)
+        color = neutral_dir_color(depth)
+        if category_index is not None:
+            dominant = category_index.dominant(node.path)
+            # "other"-dominated is exactly what the neutral already says.
+            if dominant is not None and dominant[0] != "other":
+                color = category_dir_tint(dominant[0], dominant[1], depth)
+        zebra = bool(arc.ordinal % 2)
+    else:
+        color = category_file_color(file_category(node.name), depth)
+        zebra = False
+    if not zebra and not arc.selected:
+        return color
+    rgb = _parse_rgb(color)
+    if zebra:
+        rgb = _scale_rgb(rgb, _DIR_ZEBRA_GAIN)
+    if arc.selected:
+        rgb = _mix_rgb(rgb, _SELECTED_MIX, _SELECTED_WEIGHT)
+    return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
 
 
 def _parse_rgb(color: str) -> RGB:
@@ -299,9 +374,17 @@ def _parse_rgb(color: str) -> RGB:
 
 def _scale_rgb(color: RGB, factor: float) -> RGB:
     return (
-        int(color[0] * factor),
-        int(color[1] * factor),
-        int(color[2] * factor),
+        min(255, int(color[0] * factor)),
+        min(255, int(color[1] * factor)),
+        min(255, int(color[2] * factor)),
+    )
+
+
+def _mix_rgb(color: RGB, target: RGB, weight: float) -> RGB:
+    return (
+        int(color[0] + (target[0] - color[0]) * weight),
+        int(color[1] + (target[1] - color[1]) * weight),
+        int(color[2] + (target[2] - color[2]) * weight),
     )
 
 
@@ -313,7 +396,10 @@ def _scale_rgb(color: RGB, factor: float) -> RGB:
 _SEAM = 1e-9
 
 
-def _build_rings(arcs: list[ArcSegment]) -> list[_Ring | None]:
+def _build_rings(
+    arcs: list[ArcSegment],
+    category_index: CategoryIndex | None = None,
+) -> list[_Ring | None]:
     """Group arcs by depth into point-lookup tables."""
     two_pi = 2.0 * math.pi
     collected: dict[int, list[ArcSegment]] = {}
@@ -340,7 +426,7 @@ def _build_rings(arcs: list[ArcSegment]) -> list[_Ring | None]:
         if ends and 0.0 < two_pi - ends[-1] < _SEAM:
             ends[-1] = two_pi
 
-        colors = [_parse_rgb(_arc_color(arc)) for arc in group]
+        colors = [_parse_rgb(_arc_color(arc, category_index)) for arc in group]
         seam_colors = [_scale_rgb(color, _SEAM_DARKEN) for color in colors]
 
         count = len(group)
@@ -363,6 +449,7 @@ def _build_rings(arcs: list[ArcSegment]) -> list[_Ring | None]:
             boundary_start[0] = narrowest
 
         rings[depth] = _Ring(
+            arcs=group,
             starts=starts,
             ends=ends,
             colors=colors,
@@ -376,7 +463,11 @@ def _build_rings(arcs: list[ArcSegment]) -> list[_Ring | None]:
     return rings
 
 
-def _rasterize_arcs(layout: SunburstLayout, ring_width: float) -> None:
+def _rasterize_arcs(
+    layout: SunburstLayout,
+    ring_width: float,
+    category_index: CategoryIndex | None = None,
+) -> None:
     """Supersample the disc into the half-cell framebuffer.
 
     Each half-cell takes four subsamples at its quarter points in unit
@@ -389,7 +480,8 @@ def _rasterize_arcs(layout: SunburstLayout, ring_width: float) -> None:
     if not arcs or ring_width <= 0.0:
         return
 
-    rings = _build_rings(arcs)
+    rings = _build_rings(arcs, category_index)
+    layout._rings = rings
     ring_count = len(rings)
     reach = max(arc.r_outer for arc in arcs)
     hole = layout.hole_radius
@@ -681,6 +773,7 @@ def _compute_labels(
     root: FSNode,
     metric: str,
     visuals: Mapping[str, VisualDelta] | None,
+    category_index: CategoryIndex | None = None,
 ) -> None:
     """Compute text labels for center and large arcs."""
     labels = layout.labels
@@ -697,7 +790,8 @@ def _compute_labels(
         else metric_text(root, metric)
     )
 
-    center_bg = "rgb(30,30,30)"
+    panel = layout.panel_bg
+    center_bg = f"rgb({panel[0]},{panel[1]},{panel[2]})"
     _place_label(labels, occupied, center_cx, center_cy, root_name, "white", center_bg)
     _place_label(
         labels, occupied, center_cx, center_cy + 1, size_text, "bright_white", center_bg,
@@ -728,7 +822,7 @@ def _compute_labels(
             name = f"{name} {denied_glyph()}"
         elif arc.node.inaccessible_count > 0 or arc.node.inaccessible_subtree_count > 0:
             name = f"{name} {partial_glyph()}"
-        arc_col = _arc_color(arc)
+        arc_col = _arc_color(arc, category_index)
         bg = darken_rgb(arc_col, 0.4)
         _place_label(labels, occupied, char_x, char_y, name, "white", bg)
 
@@ -755,7 +849,11 @@ def _place_label(
     labels.append(_Label(char_x=start_x, char_y=y, text=text, fg=fg, bg=bg))
 
 
-def _compute_legend(layout: SunburstLayout) -> None:
+def _compute_legend(
+    layout: SunburstLayout,
+    root: FSNode,
+    category_index: CategoryIndex | None = None,
+) -> None:
     """Build a compact file-type legend for the bottom-left corner."""
     if layout.char_height <= 10:
         return
@@ -787,33 +885,36 @@ def _compute_legend(layout: SunburstLayout) -> None:
         layout.legend_start_y = layout.char_height - len(lines)
         return
 
-    categories: set[str] = set()
-    for arc in layout.arcs:
-        if not arc.node.is_dir:
-            categories.add(file_category(arc.node.name))
-
-    if not categories:
+    if category_index is not None:
+        # Shares are already sorted largest first, so the cap keeps the
+        # categories that actually account for the disc.
+        entries = [
+            (f"■ {cat} {share:.0%}", cat)
+            for cat, share in category_index.shares(root.path)
+        ][:_LEGEND_MAX_ENTRIES]
+    else:
+        categories = {
+            file_category(arc.node.name)
+            for arc in layout.arcs
+            if not arc.node.is_dir
+        }
+        entries = [
+            (f"■ {cat}", cat)
+            for cat in CATEGORIES
+            if cat in categories
+        ][:_LEGEND_MAX_ENTRIES]
+    if not entries:
         return
 
-    cat_order = [
-        "code", "document", "image", "data", "model",
-        "config", "media", "archive", "build", "log", "other",
-    ]
-    present = [c for c in cat_order if c in categories]
-    if not present:
-        return
-
-    scheme = get_color_scheme()
+    # One column width for the whole legend, so the second entry of every
+    # row starts at the same x.
+    column = max(len(text) for text, _cat in entries) + 1
     lines: list[list[tuple[str, str]]] = []
-    for i in range(0, len(present), 2):
-        row: list[tuple[str, str]] = []
-        for j in range(2):
-            if i + j < len(present):
-                cat = present[i + j]
-                hue = scheme.category_hues.get(cat, 90)
-                color = f"rgb({hsl_to_rgb(hue, scheme.category_saturation, 50)})"
-                row.append((f"■ {cat:<10}", color))
-        lines.append(row)
+    for index in range(0, len(entries), 2):
+        lines.append([
+            (text.ljust(column), category_legend_color(cat))
+            for text, cat in entries[index : index + 2]
+        ])
 
     layout.legend_lines = lines
     layout.legend_start_y = layout.char_height - len(lines)

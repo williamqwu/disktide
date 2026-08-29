@@ -9,6 +9,22 @@ from disktide.domain.metrics import MetricId
 from disktide.models.tree import FSNode
 
 
+# Path infixes that mark a synthetic rollup rather than a real directory.
+# The first is minted below; the second by `build_live_view`, which cannot
+# import this module (domain does not depend on viz).  Both are pinned by
+# tests so the two spellings cannot drift apart.
+_AGGREGATE_MARKERS = ("/.disktide-other-", "/.disktide-live-other")
+
+
+def is_aggregate_path(path: str) -> bool:
+    """Whether a path names a "… N more" placeholder node.
+
+    Such a node stands for several siblings at once, so it has no entry on
+    disk: navigation and cross-view selection have to refuse it.
+    """
+    return any(marker in path for marker in _AGGREGATE_MARKERS)
+
+
 def bounded_children(
     node: FSNode,
     *,

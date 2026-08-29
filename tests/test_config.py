@@ -322,6 +322,36 @@ show_hidden = true
         assert loaded.ui.show_cleanup is False
 
 
+class TestMouseSupport:
+    """Round-trip for `ui.mouse`, which is read once at TUI launch."""
+
+    def test_default_is_enabled(self):
+        assert AppConfig().ui.mouse is True
+
+    def test_enabled_is_omitted_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        save_config(AppConfig(), config_file)
+        assert "mouse" not in config_file.read_text()
+
+    def test_disabled_roundtrips(self, tmp_path):
+        config = AppConfig()
+        config.ui.mouse = False
+
+        config_file = tmp_path / "config.toml"
+        save_config(config, config_file)
+
+        assert "mouse = false" in config_file.read_text()
+        assert load_config(config_file).ui.mouse is False
+
+    def test_missing_key_in_an_older_config_stays_enabled(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[ui]
+color_theme = "warm"
+""")
+        assert load_config(config_file).ui.mouse is True
+
+
 class TestLiveScanRender:
     """Round-trip + auto-gate for `ui.live_scan_render`."""
 

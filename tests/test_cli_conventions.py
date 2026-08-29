@@ -148,6 +148,25 @@ def test_tui_refuses_a_non_interactive_terminal_instead_of_hanging():
     assert "disktide scan PATH" in result.stderr
 
 
+# --- session overrides -----------------------------------------------------
+
+
+def test_no_mouse_is_an_accepted_root_option():
+    """It reaches the same TTY check `disktide` alone does, not a parse error."""
+    result = CliRunner().invoke(cli, ["--no-mouse"])
+
+    assert result.exit_code == 1
+    assert "no such option" not in result.output.lower()
+    assert "interactive terminal" in result.stderr
+
+
+def test_no_mouse_is_discoverable_from_help():
+    result = CliRunner().invoke(cli, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--no-mouse" in result.output
+
+
 # --- help text -------------------------------------------------------------
 
 

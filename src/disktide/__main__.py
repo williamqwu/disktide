@@ -41,6 +41,12 @@ def _stdio_is_interactive() -> bool:
     default=None,
     help="Exclude pseudo-filesystem mountpoints below the scan root",
 )
+@click.option(
+    "--no-mouse",
+    is_flag=True,
+    default=False,
+    help="Launch the TUI without mouse support (this session only)",
+)
 @click.version_option(version=__version__)
 @click.pass_context
 def cli(
@@ -49,6 +55,7 @@ def cli(
     workers: int | None,
     one_file_system: bool | None,
     exclude_pseudo: bool | None,
+    no_mouse: bool,
 ):
     """Interactive terminal disk usage explorer.
 
@@ -61,6 +68,7 @@ def cli(
     ctx.obj["workers"] = workers
     ctx.obj["one_file_system"] = one_file_system
     ctx.obj["exclude_pseudo"] = exclude_pseudo
+    ctx.obj["no_mouse"] = no_mouse
 
     if ctx.invoked_subcommand is None:
         if not _stdio_is_interactive():
@@ -88,7 +96,9 @@ def cli(
             config.scan.exclude_pseudo_filesystems = exclude_pseudo
 
         app = DiskTideApp(show_welcome=True, config=config)
-        app.run(mouse=False)
+        # --no-mouse is a session override, not a preference: it never
+        # writes back to the config the settings screen owns.
+        app.run(mouse=config.ui.mouse and not no_mouse)
 
         # Quitting is silent: the TUI restores the terminal and the
         # shell prompt is the only acknowledgement a user needs. Run

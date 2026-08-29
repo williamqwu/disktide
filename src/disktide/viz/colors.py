@@ -1,4 +1,12 @@
-"""Size-category palettes, depth-based hue rotation, and color schemes."""
+"""Content-type palette, size-category palettes, and color schemes.
+
+The category colours are theme-independent by design: a theme sets the
+*temperature of the neutrals*, not what a hue means, so `docs` is the same
+blue whether the chart is warm or cold and the reader never has to relearn
+it. They come out of precomputed tables rather than an HSL formula because
+the six hues were fitted together — against each other and against a
+colorblind simulation — and a formula cannot preserve that fit.
+"""
 
 from __future__ import annotations
 
@@ -25,24 +33,24 @@ class ColorScheme:
     # Hue rotation cycle for depth-based coloring (0-360)
     depth_hues: list[int]
 
-    # File-type category hue mapping (0-360)
-    category_hues: dict[str, int]
+    # Which precomputed category table this theme draws file/dir colors
+    # from. None is achromatic: categories collapse onto the neutral
+    # ladders, which is the whole of what `mono` means.
+    category_key: str | None = "default"
+
+    # Which neutral directory ladder this theme uses. Themes carry their
+    # temperature here rather than in the category hues, so warm/cold stay
+    # theme choices and the data encoding stays constant across them.
+    neutral_key: str = "default"
 
     # Gradient endpoint hues: (large_ratio_hue, small_ratio_hue)
     gradient_hue_range: tuple[int, int] = (200, 20)  # blue -> red
-
-    # Default saturation for file-type colors
-    category_saturation: int = 60
 
     # Treemap border background
     border_bg: str = "rgb(50,50,50)"
 
     # Treemap directory-leaf background
     dir_leaf_bg: str = "rgb(70,70,70)"
-
-    # Directory hue/saturation (used in file_type_color and sunburst arcs)
-    dir_hue: int = 0
-    dir_saturation: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -59,11 +67,6 @@ _DEFAULT = ColorScheme(
         (float("inf"), "medium_purple"),
     ],
     depth_hues=[200, 140, 40, 20, 280, 320, 100, 180],
-    category_hues={
-        "document": 210, "image": 30, "code": 140, "config": 170,
-        "data": 270, "model": 240, "archive": 50, "media": 320,
-        "build": 0, "log": 105, "other": 90,
-    },
 )
 
 _COLD = ColorScheme(
@@ -76,17 +79,10 @@ _COLD = ColorScheme(
         (float("inf"), "blue_violet"),
     ],
     depth_hues=[210, 190, 230, 170, 250, 200, 160, 240],
-    category_hues={
-        "document": 220, "image": 195, "code": 170, "config": 240,
-        "data": 260, "model": 230, "archive": 200, "media": 180,
-        "build": 250, "log": 185, "other": 210,
-    },
+    neutral_key="cold",
     gradient_hue_range=(240, 170),  # indigo -> teal
-    category_saturation=55,
     border_bg="rgb(30,40,55)",
     dir_leaf_bg="rgb(45,55,70)",
-    dir_hue=210,
-    dir_saturation=15,
 )
 
 _WARM = ColorScheme(
@@ -99,17 +95,10 @@ _WARM = ColorScheme(
         (float("inf"), "deep_pink2"),
     ],
     depth_hues=[30, 10, 50, 350, 40, 0, 20, 45],
-    category_hues={
-        "document": 35, "image": 15, "code": 50, "config": 40,
-        "data": 5, "model": 60, "archive": 25, "media": 345,
-        "build": 0, "log": 340, "other": 55,
-    },
+    neutral_key="warm",
     gradient_hue_range=(50, 350),  # gold -> crimson
-    category_saturation=65,
     border_bg="rgb(55,35,25)",
     dir_leaf_bg="rgb(75,55,40)",
-    dir_hue=25,
-    dir_saturation=20,
 )
 
 _VIVID = ColorScheme(
@@ -122,13 +111,9 @@ _VIVID = ColorScheme(
         (float("inf"), "bright_magenta"),
     ],
     depth_hues=[0, 60, 120, 180, 240, 300, 30, 270],
-    category_hues={
-        "document": 220, "image": 30, "code": 120, "config": 180,
-        "data": 280, "model": 250, "archive": 60, "media": 310,
-        "build": 0, "log": 150, "other": 90,
-    },
+    category_key="vivid",
+    neutral_key="vivid",
     gradient_hue_range=(120, 0),  # green -> red
-    category_saturation=80,
     border_bg="rgb(40,40,40)",
     dir_leaf_bg="rgb(60,60,60)",
 )
@@ -143,13 +128,8 @@ _MONO = ColorScheme(
         (float("inf"), "bright_white"),
     ],
     depth_hues=[0, 0, 0, 0, 0, 0, 0, 0],
-    category_hues={
-        "document": 0, "image": 0, "code": 0, "config": 0,
-        "data": 0, "model": 0, "archive": 0, "media": 0,
-        "build": 0, "log": 0, "other": 0,
-    },
+    category_key=None,
     gradient_hue_range=(0, 0),
-    category_saturation=0,
     border_bg="rgb(35,35,35)",
     dir_leaf_bg="rgb(55,55,55)",
 )
@@ -183,7 +163,6 @@ def get_color_scheme() -> ColorScheme:
 
 SIZE_CATEGORIES = _DEFAULT.size_categories
 DEPTH_HUES = _DEFAULT.depth_hues
-CATEGORY_HUES = _DEFAULT.category_hues
 
 
 def size_color(size: int) -> str:
@@ -238,7 +217,7 @@ def gradient_color(ratio: float, depth: int = 0) -> str:
     hi, lo = _active.gradient_hue_range
     hue = int(hi - ratio * (hi - lo))
     hue = (hue + depth * 60) % 360
-    sat = 70 if _active.category_saturation > 0 else 0
+    sat = 0 if _active.category_key is None else 70
     lum = max(30, 60 - depth * 8)
     return f"rgb({hsl_to_rgb(hue, sat, lum)})"
 
@@ -247,48 +226,184 @@ def gradient_color(ratio: float, depth: int = 0) -> str:
 # Shared file-type category mapping (used by treemap and sunburst)
 # ---------------------------------------------------------------------------
 
+# Six content types plus a fallback.  Eleven categories could not be given
+# hues that survive a colorblind simulation pairwise; six can, and each of
+# the merges below is triage-equivalent for the question the chart answers
+# ("is this subtree worth reclaiming?").
+CATEGORIES: tuple[str, ...] = (
+    "code", "docs", "data", "media", "archive", "ephemeral", "other",
+)
+
 EXT_CATEGORIES: dict[str, str] = {}
 
 for _cat, _exts in [
-    ("document", "pdf doc docx odt tex txt md rst rtf epub ppt pptx xls xlsx"),
-    ("image", "png jpg jpeg gif svg bmp webp ico tiff tif heic avif raw"),
     ("code", "py js ts c cpp h java go rs rb sh css html"
              " tsx jsx vue kt swift lua r php scala ipynb"),
-    ("config", "json yaml yml toml xml ini cfg env conf properties lock"),
+    ("docs", "pdf doc docx odt tex txt md rst rtf epub ppt pptx xls xlsx"
+             " json yaml yml toml xml ini cfg env conf properties lock"),
     ("data", "csv sqlite db sql parquet npy"
-             " npz h5 hdf5 pkl pickle jsonl arrow feather tfrecord lmdb"),
+             " npz h5 hdf5 pkl pickle jsonl arrow feather tfrecord lmdb"
+             " pt pth ckpt onnx safetensors pb tflite savedmodel"),
+    ("media", "png jpg jpeg gif svg bmp webp ico tiff tif heic avif raw"
+              " mp3 mp4 wav avi mkv flac ogg aac mov webm m4a m4v"),
     ("archive", "zip tar gz bz2 xz 7z rar zst lz4 deb rpm iso"),
-    ("media", "mp3 mp4 wav avi mkv flac ogg aac mov webm m4a m4v"),
-    ("build", "o so pyc class whl egg dll lib a obj jar war"),
-    ("model", "pt pth ckpt onnx safetensors pb tflite savedmodel"),
-    ("log", "log out err"),
+    ("ephemeral", "o so pyc class whl egg dll lib a obj jar war log out err"),
 ]:
     for _ext in _exts.split():
         EXT_CATEGORIES[_ext] = _cat
 
 
 def file_category(name: str) -> str:
-    """Determine file-type category from filename extension."""
+    """Determine file-type category from filename extension.
+
+    Purely numeric suffixes are peeled off first so versioned shared
+    libraries (`libcudnn.so.9`, `libfoo.so.1.2.3`) classify by the real
+    extension instead of falling through to "other".
+    """
     dot = name.rfind(".")
-    if dot >= 0:
+    while dot >= 0:
         ext = name[dot + 1:].lower()
-        return EXT_CATEGORIES.get(ext, "other")
+        if not ext.isdigit():
+            return EXT_CATEGORIES.get(ext, "other")
+        name = name[:dot]
+        dot = name.rfind(".")
     return "other"
+
+
+# ---------------------------------------------------------------------------
+# Category palette — generated, do not hand-edit
+#
+# Regenerate with `python tool/gen_palette.py`, which holds the OKLCH anchors
+# and the lightness ladders these tables are rendered from.  Depth keys run
+# 0..4; callers clamp anything deeper onto 4.
+# ---------------------------------------------------------------------------
+
+# file arcs: {theme: {category: {depth: (r, g, b)}}}
+CATEGORY_FILE_RGB = {
+    "default": {
+        "code": {0: (16, 124, 87), 1: (16, 124, 87), 2: (0, 118, 81), 3: (7, 108, 74), 4: (12, 98, 68)},
+        "docs": {0: (17, 103, 195), 1: (17, 103, 195), 2: (5, 97, 188), 3: (9, 89, 171), 4: (0, 80, 162)},
+        "data": {0: (144, 133, 233), 1: (144, 133, 233), 2: (138, 127, 226), 3: (130, 118, 216), 4: (121, 109, 206)},
+        "media": {0: (230, 97, 143), 1: (230, 97, 143), 2: (223, 90, 137), 3: (212, 81, 128), 4: (202, 71, 119)},
+        "archive": {0: (194, 136, 51), 1: (194, 136, 51), 2: (187, 130, 44), 3: (177, 121, 31), 4: (168, 112, 16)},
+        "ephemeral": {0: (172, 67, 25), 1: (172, 67, 25), 2: (165, 61, 17), 3: (155, 51, 1), 4: (141, 47, 4)},
+    },
+    "vivid": {
+        "code": {0: (25, 123, 87), 1: (25, 123, 87), 2: (13, 117, 82), 3: (20, 107, 75), 4: (2, 98, 67)},
+        "docs": {0: (0, 102, 200), 1: (0, 102, 200), 2: (15, 98, 185), 3: (0, 89, 175), 4: (5, 81, 158)},
+        "data": {0: (144, 129, 245), 1: (144, 129, 245), 2: (139, 123, 238), 3: (130, 114, 228), 4: (121, 104, 218)},
+        "media": {0: (240, 84, 142), 1: (240, 84, 142), 2: (233, 77, 136), 3: (222, 67, 127), 4: (211, 56, 119)},
+        "archive": {0: (200, 133, 15), 1: (200, 133, 15), 2: (193, 127, 0), 3: (180, 120, 15), 4: (166, 112, 25)},
+        "ephemeral": {0: (175, 64, 14), 1: (175, 64, 14), 2: (168, 57, 2), 3: (153, 54, 9), 4: (143, 44, 0)},
+    },
+}
+
+# uncategorized files, and every category under the mono theme
+OTHER_FILE_RGB = {0: (140, 140, 140), 1: (140, 140, 140), 2: (134, 134, 134), 3: (125, 125, 125), 4: (116, 116, 116)}
+
+# category re-leveled to the directory ladder, for dominance tints
+CATEGORY_DIR_RGB = {
+    "default": {
+        "code": {0: (76, 152, 118), 1: (54, 130, 98), 2: (29, 109, 78), 3: (3, 95, 65), 4: (0, 83, 56)},
+        "docs": {0: (71, 135, 215), 1: (50, 114, 192), 2: (27, 93, 169), 3: (5, 78, 153), 4: (2, 67, 134)},
+        "data": {0: (130, 121, 204), 1: (110, 100, 181), 2: (90, 80, 159), 3: (77, 65, 143), 4: (67, 54, 130)},
+        "media": {0: (202, 91, 129), 1: (178, 70, 108), 2: (155, 48, 89), 3: (138, 32, 75), 4: (125, 16, 64)},
+        "archive": {0: (172, 124, 56), 1: (150, 103, 33), 2: (128, 83, 0), 3: (111, 70, 0), 4: (96, 60, 0)},
+        "ephemeral": {0: (196, 105, 73), 1: (173, 84, 52), 2: (150, 64, 31), 3: (134, 49, 13), 4: (121, 37, 0)},
+    },
+    "vivid": {
+        "code": {0: (62, 154, 116), 1: (36, 132, 96), 2: (0, 112, 76), 3: (11, 95, 65), 4: (9, 82, 56)},
+        "docs": {0: (58, 135, 227), 1: (34, 113, 203), 2: (0, 91, 180), 3: (0, 77, 157), 4: (0, 67, 138)},
+        "data": {0: (130, 118, 214), 1: (110, 97, 191), 2: (91, 76, 168), 3: (78, 62, 152), 4: (67, 50, 139)},
+        "media": {0: (211, 82, 128), 1: (186, 59, 108), 2: (162, 35, 88), 3: (145, 11, 74), 4: (128, 5, 64)},
+        "archive": {0: (177, 121, 36), 1: (155, 101, 0), 2: (127, 83, 7), 3: (109, 71, 3), 4: (95, 61, 4)},
+        "ephemeral": {0: (204, 99, 61), 1: (181, 78, 39), 2: (157, 56, 11), 3: (136, 46, 4), 4: (119, 38, 2)},
+    },
+}
+
+# theme-tempered neutral directory ladder
+NEUTRAL_DIR_RGB = {
+    "default": {0: (134, 134, 134), 1: (113, 113, 113), 2: (93, 93, 93), 3: (80, 80, 80), 4: (69, 69, 69)},
+    "warm": {0: (144, 131, 123), 1: (123, 111, 103), 2: (103, 91, 83), 3: (89, 77, 70), 4: (78, 66, 59)},
+    "cold": {0: (126, 135, 145), 1: (106, 115, 124), 2: (86, 95, 104), 3: (73, 81, 90), 4: (62, 70, 79)},
+    "vivid": {0: (134, 134, 134), 1: (113, 113, 113), 2: (93, 93, 93), 3: (80, 80, 80), 4: (69, 69, 69)},
+}
+
+# legend swatches: file color at mid ladder (depth 2)
+CATEGORY_LEGEND_RGB = {
+    "default": {"code": (0, 118, 81), "docs": (5, 97, 188), "data": (138, 127, 226), "media": (223, 90, 137), "archive": (187, 130, 44), "ephemeral": (165, 61, 17)},
+    "vivid": {"code": (13, 117, 82), "docs": (15, 98, 185), "data": (139, 123, 238), "media": (233, 77, 136), "archive": (193, 127, 0), "ephemeral": (168, 57, 2)},
+}
+
+MAX_COLOR_DEPTH = 4
+
+# Below half the bytes there is no dominant type worth naming, and even a
+# clear majority only tints: a directory arc has to stay readable as a
+# directory, not be mistaken for a file of that category.
+_TINT_MIN_SHARE = 0.5
+_TINT_FLOOR = 0.25
+_TINT_RANGE = 0.55
+
+
+def _rgb_text(color: tuple[int, int, int]) -> str:
+    return f"rgb({color[0]},{color[1]},{color[2]})"
+
+
+def _level(depth: int) -> int:
+    if depth <= 0:
+        return 0
+    return depth if depth < MAX_COLOR_DEPTH else MAX_COLOR_DEPTH
+
+
+def category_file_color(category: str, depth: int) -> str:
+    """File-arc fill for a content category at a ring depth."""
+    level = _level(depth)
+    key = _active.category_key
+    if key is not None:
+        ladder = CATEGORY_FILE_RGB[key].get(category)
+        if ladder is not None:
+            return _rgb_text(ladder[level])
+    return _rgb_text(OTHER_FILE_RGB[level])
+
+
+def neutral_dir_color(depth: int) -> str:
+    """Untinted directory fill at a ring depth, in the theme's temperature."""
+    return _rgb_text(NEUTRAL_DIR_RGB[_active.neutral_key][_level(depth)])
+
+
+def category_dir_tint(category: str, share: float, depth: int) -> str:
+    """Directory fill pulled towards the category that dominates it."""
+    level = _level(depth)
+    neutral = NEUTRAL_DIR_RGB[_active.neutral_key][level]
+    key = _active.category_key
+    ladder = CATEGORY_DIR_RGB[key].get(category) if key is not None else None
+    if ladder is None or share < _TINT_MIN_SHARE:
+        return _rgb_text(neutral)
+    weight = _TINT_FLOOR + _TINT_RANGE * (2.0 * share - 1.0)
+    tint = ladder[level]
+    return _rgb_text(tuple(
+        int(neutral[i] + (tint[i] - neutral[i]) * weight) for i in range(3)
+    ))
+
+
+def category_legend_color(category: str) -> str:
+    """Swatch colour for a legend entry."""
+    key = _active.category_key
+    if key is not None:
+        swatch = CATEGORY_LEGEND_RGB[key].get(category)
+        if swatch is not None:
+            return _rgb_text(swatch)
+    return _rgb_text(OTHER_FILE_RGB[2])
 
 
 def file_type_color(name: str, depth: int, is_dir: bool) -> str:
     """Get an RGB color string based on file type and depth.
 
-    Directories get neutral/tinted gray; files get hue from their category.
+    Directories get the neutral ladder; files get their category's colour.
     """
     if is_dir:
-        lum = max(30, 50 - depth * 5)
-        return f"rgb({hsl_to_rgb(_active.dir_hue, _active.dir_saturation, lum)})"
-    cat = file_category(name)
-    hue = _active.category_hues.get(cat, 90)
-    sat = _active.category_saturation
-    lum = max(30, 55 - depth * 5)
-    return f"rgb({hsl_to_rgb(hue, sat, lum)})"
+        return neutral_dir_color(depth)
+    return category_file_color(file_category(name), depth)
 
 
 def darken_rgb(color: str, factor: float = 0.4) -> str:

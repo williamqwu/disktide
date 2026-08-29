@@ -12,6 +12,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import Screen
+from textual.timer import Timer
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 
 from disktide.config import AppConfig, resolve_live_scan_render
@@ -42,6 +43,7 @@ from disktide.scanner.walker import classify_symlink
 from disktide.services.scan import ScanService
 from disktide.services.monitor import MonitorEvent, MonitorEventKind, MonitorService
 from disktide.services.visualization import VisualizationService
+from disktide.viz.categories import CategoryIndex, build_category_index
 from disktide.widgets.size_tree import SizeTree
 from disktide.widgets.breadcrumb import Breadcrumb
 from disktide.widgets.confirm_modal import ConfirmModal
@@ -186,6 +188,7 @@ class ExplorerScreen(Screen):
         self._pair_index = 0
         self._provisional_summary: ProvisionalSummary | None = None
         self._monitor_projection_id: int | None = None
+        self._sunburst_sync_timer: Timer | None = None
 
     @property
     def selected_path(self) -> str:
@@ -233,6 +236,7 @@ class ExplorerScreen(Screen):
         self._start_scan()
 
     def on_unmount(self) -> None:
+        self._cancel_sunburst_sync()
         if self._monitor_service is not None:
             self._monitor_service.unsubscribe(self._on_monitor_event)
 
@@ -325,6 +329,10 @@ class ExplorerScreen(Screen):
             view = self.query_one(view_id, view_cls)
             view.set_node(None)
             view.set_live_mode(self._live_render)
+        # A path from the previous tree would keep brightening an arc that
+        # the new scan may not even contain.
+        self._cancel_sunburst_sync()
+        self.query_one("#sunburst-view", SunburstView).set_selected_path(None)
         # Reset the Details panel too: otherwise the previous scan's
         # detail block stays visible until the user re-highlights.
         self.query_one("#info-panel", InfoPanel).update_node(None)
@@ -479,6 +487,28 @@ class ExplorerScreen(Screen):
         self._update_active_viz(root)
         self._update_status()
         self._request_space_time_context()
+        self._build_category_index(root)
+
+    @work(thread=True, exclusive=True, group="explorer-category-index")
+    def _build_category_index(self, root: FSNode) -> None:
+        """Roll the finished tree up into per-directory content shares.
+
+        Only completed trees get one: a live scan's partial aggregates
+        would name a dominant category from whatever happened to land first.
+        """
+        index = build_category_index(root)
+        self.app.call_from_thread(self._apply_category_index, root, index)
+
+    def _apply_category_index(self, root: FSNode, index: CategoryIndex) -> None:
+        # A newer scan can land while the pass is running; its own worker
+        # will supply the matching index.
+        if not self.is_mounted or self._root is not root:
+            return
+        for view_id, view_cls in (
+            ("#sunburst-view", SunburstView),
+            ("#treemap-view", TreemapView),
+        ):
+            self.query_one(view_id, view_cls).set_category_index(index)
 
     def _request_space_time_context(self) -> None:
         service = self._visualization_service
@@ -791,6 +821,8 @@ class ExplorerScreen(Screen):
         )
         self._update_active_viz(self._current)
         self._update_status()
+        self._build_category_index(root)
+
     def _update_tree_indicator(self) -> None:
         """Refresh the indicator above the tree (sort order and bar metric)."""
         tree = self.query_one("#size-tree", SizeTree)
@@ -820,6 +852,10 @@ class ExplorerScreen(Screen):
         node = event.node.data
         info = self.query_one("#info-panel", InfoPanel)
         info.update_node(node)
+        if not self._diff_mode:
+            # Diff mode already re-renders the chart on every cursor move
+            # (below), so syncing there would recompute it twice.
+            self._schedule_sunburst_sync()
         if self._space_time is not None:
             frame = replace(self._space_time.frame, selected_path=node.path)
             self._space_time = replace(self._space_time, frame=frame)
@@ -836,6 +872,44 @@ class ExplorerScreen(Screen):
                     if snapshot.id is not None
                 )
                 self._load_selected_trend(node.path, snapshot_ids, frame.metric.value)
+
+    # One sunburst recompute costs ~40 ms at a typical viewport, so the
+    # cursor's selection is pushed to the chart only once it settles;
+    # holding an arrow key would otherwise recompute per keystroke.
+    _SUNBURST_SYNC_DELAY = 0.12
+
+    def _schedule_sunburst_sync(self) -> None:
+        """(Re)start the debounce that mirrors the cursor onto the chart."""
+        self._cancel_sunburst_sync()
+        if self._scan_in_progress:
+            # A live scan already owns the chart's repaint budget, and the
+            # cursor cannot navigate while it runs.
+            return
+        self._sunburst_sync_timer = self.set_timer(
+            self._SUNBURST_SYNC_DELAY,
+            self._sync_sunburst_selection,
+        )
+
+    def _cancel_sunburst_sync(self) -> None:
+        if self._sunburst_sync_timer is not None:
+            self._sunburst_sync_timer.stop()
+            self._sunburst_sync_timer = None
+
+    def _sync_sunburst_selection(self) -> None:
+        self._sunburst_sync_timer = None
+        if not self.is_mounted or self._diff_mode:
+            return
+        if self.query_one("#viz-tabs", TabbedContent).active != "tab-sunburst":
+            # An inactive tab is not repainted, so the recompute would buy
+            # nothing; switching to it re-renders from the current tree.
+            return
+        selected = self.query_one("#size-tree", SizeTree).selected_path
+        root = self._current or self._root
+        if root is not None and selected == root.path:
+            # The chart root is the whole disc; brightening it says nothing
+            # and would still cost a recompute.
+            selected = None
+        self.query_one("#sunburst-view", SunburstView).set_selected_path(selected)
 
     @work(thread=True, exclusive=True, group="explorer-path-trend")
     def _load_selected_trend(
@@ -882,6 +956,33 @@ class ExplorerScreen(Screen):
             selected = current
         self._drill_into(selected)
 
+    @on(SunburstView.ArcClicked)
+    def on_sunburst_arc_clicked(self, event: SunburstView.ArcClicked) -> None:
+        self._navigate_from_chart(event.path, event.depth)
+
+    @on(TreemapView.RectClicked)
+    def on_treemap_rect_clicked(self, event: TreemapView.RectClicked) -> None:
+        self._navigate_from_chart(event.path, event.depth)
+
+    def _navigate_from_chart(self, path: str, depth: int) -> None:
+        """Route a click on a chart shape into ordinary tree navigation.
+
+        Everything below the chart root goes through `select_path`, so a
+        click reuses `NodeSelected`'s drill flow and all of its guards
+        rather than a second path into the same state.
+        """
+        if self._scan_in_progress:
+            # Same reason keyboard navigation is gated: the live tree's
+            # aggregates are still settling.
+            return
+        if depth == 0:
+            # The chart root: step out one level. Unlike `u`, this never
+            # rescans from the parent directory — a mis-click must not be
+            # able to start a long scan.
+            self._go_up_one_level()
+            return
+        self.query_one("#size-tree", SizeTree).select_path(path)
+
     @on(TabbedContent.TabActivated)
     def on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Refresh viz when switching tabs so the newly visible panel is current."""
@@ -912,6 +1013,23 @@ class ExplorerScreen(Screen):
             return "partial"
         return "full"
 
+    def _go_up_one_level(self) -> bool:
+        """Drill out to the parent within the scanned tree, if there is one.
+
+        False means the current node is the scan root, where going further
+        up needs a new scan rather than a navigation.
+        """
+        if (
+            self._current is not None
+            and self._root is not None
+            and self._current.path != self._root.path
+        ):
+            parent = self._root.find(self._current.parent_path)
+            if parent:
+                self._drill_into(parent)
+                return True
+        return False
+
     def action_go_up(self) -> None:
         """Navigate up one directory level, rescanning from parent if at scan root."""
         if self._scan_in_progress:
@@ -921,16 +1039,8 @@ class ExplorerScreen(Screen):
                 timeout=3,
             )
             return
-        if (
-            self._current is not None
-            and self._root is not None
-            and self._current.path != self._root.path
-        ):
-            parent_path = self._current.parent_path
-            parent = self._root.find(parent_path)
-            if parent:
-                self._drill_into(parent)
-                return
+        if self._go_up_one_level():
+            return
         # At scan root: rescan from parent directory
         parent_dir = str(Path(self._scan_path).parent)
         if parent_dir != self._scan_path:

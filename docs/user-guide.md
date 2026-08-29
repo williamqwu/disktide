@@ -223,6 +223,39 @@ targets subsume matching children so estimated bytes and execution are not
 double counted. Trash/quarantine isolates data but reports actual reclaimed
 bytes as zero until the data is purged.
 
+### Mouse
+
+Mouse support is on by default and never replaces a keyboard path -- every
+click routes into the same navigation a keystroke would, with the same guards.
+
+| Gesture | Action |
+|---------|--------|
+| Click a tree row | Move the cursor there; a directory drills in |
+| Click a sunburst arc / treemap rectangle | Select that path in the tree; a directory drills in |
+| Click the sunburst centre | Go up one level within the scanned tree |
+| Wheel | Scroll the tree and the Details panel |
+| Hover a chart shape | Show its name, size, and share of the chart |
+| Click a tab, button, or footer entry | Activate it |
+| Shift+drag | Your terminal's own text selection |
+
+Clicking the sunburst centre never rescans. The keyboard `u` deliberately
+rescans from the parent directory once you are at the scan root; a stray click
+must not be able to start a long scan, so at the scan root a centre click does
+nothing. Clicks are ignored while a scan is in flight, for the same reason
+keyboard navigation is: the live tree's aggregates are still settling. An
+aggregate "… N more" arc or block stands for several directories at once and is
+not a navigation target.
+
+Hovering only hit-tests the chart and updates the tooltip; it never recomputes
+the layout. Moving the tree cursor brightens the matching arc once the cursor
+settles, so holding an arrow key does not pay for a chart rebuild per repeat.
+
+To turn it off, launch with `disktide --no-mouse` for a single session, or set
+`mouse = false` under `[ui]`. The **Mouse support** switch in Settings writes
+the same key. Mouse reporting is negotiated once, when the terminal enters
+application mode, so the switch takes effect the next time DiskTide starts --
+Textual offers no supported way to change it under a running app.
+
 ### Key Binding Reference
 
 | Key | Scope | Action |
@@ -550,6 +583,7 @@ color_theme = "warm"                     # default, cold, warm, vivid, mono
 default_viz = "sunburst"                 # treemap, sunburst, details
 # show_cleanup = true                    # enable Cleanup mode (disabled by default)
 # safe_rendering = true                  # ASCII bars and glyphs for web shells
+# mouse = false                          # default true; --no-mouse overrides per session
 # live_scan_render = "auto"              # auto | on | off — draw viz live during scan
 # default_scan_path = "/home/user/data" # pre-fill welcome screen
 # hostname_aware_paths = false           # store paths per hostname (default: true)
@@ -578,22 +612,24 @@ used exactly. CLI and Monitor status show the effective count and reason.
 
 ## File-Type Categories
 
-The treemap and sunburst visualizations color files by category. Each file's extension determines its category, which maps to a hue in the active color scheme.
+The treemap and sunburst visualizations color files by category. Each file's extension determines its category; six categories carry a color, and anything unrecognized stays a neutral gray.
 
 | Category | Extensions | Typical use |
 |----------|-----------|-------------|
 | code | py, js, ts, tsx, jsx, vue, c, cpp, h, java, go, rs, rb, sh, css, html, kt, swift, lua, r, php, scala, ipynb | Source code and notebooks |
-| document | pdf, doc, docx, odt, tex, txt, md, rst, rtf, epub, ppt, pptx, xls, xlsx | Documents and presentations |
-| image | png, jpg, jpeg, gif, svg, bmp, webp, ico, tiff, tif, heic, avif, raw | Image files |
-| data | csv, sqlite, db, sql, parquet, npy, npz, h5, hdf5, pkl, pickle, jsonl, arrow, feather, tfrecord, lmdb | Datasets and serialized data |
-| model | pt, pth, ckpt, onnx, safetensors, pb, tflite, savedmodel | ML model checkpoints and weights |
-| config | json, yaml, yml, toml, xml, ini, cfg, env, conf, properties, lock | Configuration and lock files |
-| media | mp3, mp4, wav, avi, mkv, flac, ogg, aac, mov, webm, m4a, m4v | Audio and video |
+| docs | pdf, doc, docx, odt, tex, txt, md, rst, rtf, epub, ppt, pptx, xls, xlsx, json, yaml, yml, toml, xml, ini, cfg, env, conf, properties, lock | Documents, presentations, configuration |
+| data | csv, sqlite, db, sql, parquet, npy, npz, h5, hdf5, pkl, pickle, jsonl, arrow, feather, tfrecord, lmdb, pt, pth, ckpt, onnx, safetensors, pb, tflite, savedmodel | Datasets, serialized data, model checkpoints |
+| media | png, jpg, jpeg, gif, svg, bmp, webp, ico, tiff, tif, heic, avif, raw, mp3, mp4, wav, avi, mkv, flac, ogg, aac, mov, webm, m4a, m4v | Images, audio, video |
 | archive | zip, tar, gz, bz2, xz, 7z, rar, zst, lz4, deb, rpm, iso | Compressed archives and packages |
-| build | o, so, pyc, class, whl, egg, dll, lib, a, obj, jar, war | Compiled artifacts |
-| log | log, out, err | Log and output files |
+| ephemeral | o, so, pyc, class, whl, egg, dll, lib, a, obj, jar, war, log, out, err | Build artifacts, caches, logs — the reclaimable stuff |
 | other | *(everything else)* | Unrecognized extensions |
 
 Files without an extension (e.g., `Makefile`, `Dockerfile`) are classified as "other".
 
-Each of the five built-in color schemes (`default`, `cold`, `warm`, `vivid`, `mono`) assigns a distinct hue to every category. Switch schemes with `color_theme` in config or the Settings screen (`?`). The `mono` scheme uses zero saturation, so all categories appear as shades of gray. The sunburst legend (bottom-left corner) shows which categories are present in the current view.
+Six is the ceiling at which the colors stay distinguishable from each other in a colorblind simulation as well as in normal vision, so pairs that call for the same cleanup decision share one color: documents with configuration, datasets with model checkpoints, images with audio and video, build output with logs.
+
+**Directories are colored too.** A directory is tinted towards whatever content type accounts for most of its bytes, and the more one-sided the subtree, the stronger the tint; a directory with no clear majority (under half its bytes in one category) stays neutral. That is what makes a fat wedge in the sunburst readable as "all checkpoints" or "all build output" without drilling into it. The tint is computed once per completed scan — a scan still in flight leaves directories neutral, because partial totals would name the wrong winner.
+
+The sunburst legend (bottom-left corner) lists the categories present with each one's share of the scanned bytes, largest first (`■ data 46%`), capped at six entries.
+
+Switch color schemes with `color_theme` in config or the Settings screen (`?`). Category colors are the same in `default`, `warm`, and `cold` — a theme changes the *temperature of the neutrals* (the gray of an undominated directory), not what a category means, so you do not have to relearn the chart when you change themes. `vivid` pushes the same six hues to higher chroma, and `mono` drops color entirely: files render a shade lighter than directories so shapes still separate.
