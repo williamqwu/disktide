@@ -139,6 +139,136 @@ class TestCategoryIndex:
         assert index.dominant(root.path) == ("code", 1.0)
 
 
+def _venv_tree() -> FSNode:
+    """A checkout holding a virtualenv beside a directory the user owns.
+
+    By extension the venv is 80% code, because installed third-party `.py`
+    files are still `.py`.  That is the split — a real one measures closer
+    to an even tie — that used to leave every level of a venv under the
+    tint threshold and render the whole interior neutral gray.
+    """
+    site = "/r/.venv/lib/python3.12/site-packages"
+    pkg = _dir("pkg", site, 5, [
+        _file("__init__.py", 400, f"{site}/pkg", 6),
+        _file("core.py", 1200, f"{site}/pkg", 6),
+        _file("_speed.so", 400, f"{site}/pkg", 6),
+    ])
+    venv = _dir(".venv", "/r", 1, [
+        _dir("lib", "/r/.venv", 2, [
+            _dir("python3.12", "/r/.venv/lib", 3, [
+                _dir("site-packages", "/r/.venv/lib/python3.12", 4, [pkg]),
+            ]),
+        ]),
+    ])
+    vendor = _dir("vendor", "/r", 1, [
+        _file("shim.py", 1000, "/r/vendor", 2),
+    ])
+    return _dir("r", "", 0, [venv, vendor])
+
+
+class TestEphemeralContainers:
+    """Tool-minted containers classify wholesale, not by extension."""
+
+    _VENV_LEVELS = (
+        "/r/.venv",
+        "/r/.venv/lib",
+        "/r/.venv/lib/python3.12",
+        "/r/.venv/lib/python3.12/site-packages",
+        "/r/.venv/lib/python3.12/site-packages/pkg",
+    )
+
+    def test_every_level_of_a_venv_is_wholly_ephemeral(self):
+        index = build_category_index(_venv_tree())
+        for path in self._VENV_LEVELS:
+            assert index.dominant(path) == ("ephemeral", 1.0), path
+
+    def test_the_root_books_the_venvs_python_bytes_as_ephemeral(self):
+        index = build_category_index(_venv_tree())
+        shares = dict(index.shares("/r"))
+        # All 2000 venv bytes, the 1600 of them that are `.py` included.
+        assert shares["ephemeral"] == pytest.approx(2000 / 3000)
+        assert shares["code"] == pytest.approx(1000 / 3000)
+
+    def test_a_directory_off_the_list_keeps_its_extensions(self):
+        """`vendor` is a name a user owns; only tool-minted names qualify."""
+        index = build_category_index(_venv_tree())
+        assert index.dominant("/r/vendor") == ("code", 1.0)
+
+    def test_the_scan_root_itself_can_be_the_container(self):
+        """Pointing disktide straight at ~/.venv must not lose the verdict."""
+        root = _dir(".venv", "/home/u", 0, [
+            _dir("bin", "/home/u/.venv", 1, [
+                _file("activate.sh", 500, "/home/u/.venv/bin", 2),
+            ]),
+            _file("pyvenv.cfg", 500, "/home/u/.venv", 1),
+        ])
+        index = build_category_index(root)
+        assert index.dominant("/home/u/.venv") == ("ephemeral", 1.0)
+        assert index.dominant("/home/u/.venv/bin") == ("ephemeral", 1.0)
+
+    def test_contained_directories_are_named_for_leaf_colouring(self):
+        index = build_category_index(_venv_tree())
+        assert set(index.ephemeral_dirs) == set(self._VENV_LEVELS)
+        assert index.file_is_ephemeral(f"{self._VENV_LEVELS[-1]}/core.py")
+        assert not index.file_is_ephemeral("/r/vendor/shim.py")
+
+    def test_ordinary_trees_gain_no_containers(self):
+        """`junk` and `nested` read like caches but are not on the list."""
+        index = build_category_index(_sample_tree())
+        assert index.ephemeral_dirs == frozenset()
+        assert not index.file_is_ephemeral("/r/junk/build.log")
+
+
+class TestContainerLeavesRenderEphemeral:
+    """A venv wedge stays one colour instead of splitting into `.py` slivers."""
+
+    @staticmethod
+    def _pkg_file(tree: FSNode) -> FSNode:
+        node = tree.children[0]
+        while node.is_dir:
+            node = node.children[0]
+        return node
+
+    def test_a_file_arc_inside_the_container_takes_the_container_colour(self):
+        tree = _venv_tree()
+        index = build_category_index(tree)
+        layout = compute_sunburst(
+            tree, 100, 46, max_depth=6, panel_bg=PANEL_BG, category_index=index,
+        )
+        arc = next(
+            arc for arc in layout.arcs
+            if arc.node.path.endswith("/pkg/core.py")
+        )
+        assert _arc_color(arc, index) == category_file_color("ephemeral", arc.depth)
+
+    def test_the_same_arc_without_an_index_keeps_its_extension(self):
+        tree = _venv_tree()
+        layout = compute_sunburst(tree, 100, 46, max_depth=6, panel_bg=PANEL_BG)
+        arc = next(
+            arc for arc in layout.arcs
+            if arc.node.path.endswith("/pkg/core.py")
+        )
+        assert _arc_color(arc) == category_file_color("code", arc.depth)
+
+    def test_a_file_rect_inside_the_container_takes_the_container_colour(self):
+        tree = _venv_tree()
+        index = build_category_index(tree)
+        leaf = self._pkg_file(tree)
+        assert _rect_bg(leaf, 4, True, None, index) == category_file_color(
+            "ephemeral", 4
+        )
+
+    def test_the_same_rect_without_an_index_keeps_its_extension(self):
+        leaf = self._pkg_file(_venv_tree())
+        assert _rect_bg(leaf, 4, True) == category_file_color("code", 4)
+
+    def test_a_file_outside_the_container_is_untouched(self):
+        tree = _venv_tree()
+        index = build_category_index(tree)
+        shim = tree.children[1].children[0]
+        assert _rect_bg(shim, 2, True, None, index) == category_file_color("code", 2)
+
+
 class TestDirectoryTint:
     def test_below_half_the_bytes_stays_neutral(self):
         assert category_dir_tint("code", 0.49, 2) == neutral_dir_color(2)

@@ -25,11 +25,20 @@ DIR_L = {0: 0.62, 1: 0.55, 2: 0.48, 3: 0.43, 4: 0.39}
 # uncategorized files: the file ladder with no chroma, kept above DIR_L so a
 # file still reads lighter than the directory it sits in
 OTHER_L = 0.62
-# neutral chroma/hue per theme temperature
+# Neutral chroma/hue per theme temperature — the only thing a theme is
+# free to say, since the category hues are shared. The first pass held
+# these at 0.020/0.018, which is under a just-noticeable difference: users
+# switched theme and reported that nothing happened, and they were right.
+# Chroma now clears a gate in both directions — at every depth 0..2 a
+# theme's neutral differs from `default` and from the other temperature by
+# at least 25 on some sRGB channel — while staying under half the lowest
+# category anchor (0.108), so a tempered gray never reads as a dominance
+# tint. Directories are most of a chart's area, so this is where a theme
+# is seen.
 THEME_NEUTRAL = {
     "default": (0.000, 0.0),
-    "warm": (0.020, 55.0),
-    "cold": (0.018, 250.0),
+    "warm": (0.052, 55.0),
+    "cold": (0.048, 250.0),
 }
 # Themes that draw category colours from a table of their own. There is one:
 # a theme sets the temperature of the neutrals, not what a hue means. The

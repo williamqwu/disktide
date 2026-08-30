@@ -51,6 +51,11 @@ def _rect_bg(
             if dominant is not None and dominant[0] != "other":
                 return category_dir_tint(dominant[0], dominant[1], depth)
         return get_color_scheme().dir_leaf_bg
+    if category_index is not None and category_index.file_is_ephemeral(node.path):
+        # Inside a venv or a cache the extension describes what the tool
+        # wrote, not whether keeping it is a choice; the container reads as
+        # one reclaimable block only if its leaves agree with it.
+        return category_file_color("ephemeral", depth)
     return category_file_color(file_category(node.name), depth)
 
 

@@ -18,9 +18,9 @@
   <img alt="Textual TUI" src="https://img.shields.io/badge/TUI-Textual-5A2CA0">
 </p>
 
-<img alt="Explorer: the file tree of the disktide checkout on the left, its anti-aliased sunburst on the right, legend reading code 57%, media 28%, docs 15%"
+<img alt="Explorer: the file tree of a disktide working checkout on the left, led by .venv/ at 50.3% of 7.7 MiB, its anti-aliased sunburst on the right with the virtualenv a rust wedge through every ring, legend reading ephemeral 55%, code 28%, media 10%, docs 7%"
      src="docs/images/sunburst.png" width="49%">
-<img alt="Monitor Center: the Space-Time Trend of the disktide codebase growing from March to August 2026, one snapshot per commit"
+<img alt="Monitor Center: the Space-Time Trend of the disktide codebase growing from March to August 2026, 162 snapshots, one per commit"
      src="docs/images/monitor.png" width="49%">
 
 <p>

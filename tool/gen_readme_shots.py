@@ -10,6 +10,10 @@ git log into the snapshot store -- one scan per commit, stamped with that
 commit's date. The trend chart is therefore DiskTide's real growth curve,
 measured by DiskTide.
 
+The Explorer shot needs the opposite: a checkout as it is worked in, not as
+it is tracked. A virtualenv and the byte-caches are put back from a fixed
+manifest before the last scan -- see EPHEMERA.
+
 Everything lives in a throwaway XDG root and a staging directory that are
 removed on the way out; the developer's own database and config are never
 touched.
@@ -123,6 +127,183 @@ def export_tree(sha: str) -> None:
     )
     subprocess.run(["tar", "-x", "-C", str(STAGE)], stdin=archive.stdout, check=True)
     archive.wait()
+
+
+# A `git archive` export is tracked files only, and a tree of nothing but
+# tracked files is not what anyone's disk looks like: the disc came out all
+# code, which is the one picture that misrepresents both the checkout and
+# the tool. On a working checkout the ephemeral mass -- a virtualenv, the
+# byte-caches, the test cache -- outweighs everything a human wrote, and
+# that is the story a disk-usage tool exists to tell. So it is put back.
+#
+# From a table, though, and never by copying the developer's own .venv: the
+# README's alt text quotes the legend percentages, so a manifest that moved
+# with whatever happens to be installed would turn that alt text into a lie
+# on the next reshoot. Only names and sizes matter here -- the bytes are
+# filler -- and the sizes are picked to land the disc on ephemeral 55% /
+# code 28% / media 10% / docs 7%, which is close to what this repository's
+# real working checkout reports, with `.venv/` at about half the tree so
+# the tree panel leads with it the way a real one does.
+#
+# Seeded onto the final HEAD export only. `build_history` has to keep
+# scanning tracked files alone, or every point on the trend would carry the
+# same constant 4 MiB and the curve would stop being the repository's own.
+_SITE = ".venv/lib/python3.12/site-packages/"
+EPHEMERA: tuple[tuple[str, int], ...] = (
+    (".venv/pyvenv.cfg", 189),
+    (".venv/bin/activate", 2_063),
+    (".venv/bin/disktide", 251),
+    (".venv/bin/pytest", 268),
+
+    (_SITE + "textual/__init__.py", 6_142),
+    (_SITE + "textual/app.py", 148_820),
+    (_SITE + "textual/widget.py", 96_437),
+    (_SITE + "textual/dom.py", 41_286),
+    (_SITE + "textual/screen.py", 63_912),
+    (_SITE + "textual/message_pump.py", 24_508),
+    (_SITE + "textual/geometry.py", 32_664),
+    (_SITE + "textual/events.py", 21_037),
+    (_SITE + "textual/reactive.py", 23_915),
+    (_SITE + "textual/_compositor.py", 39_180),
+    (_SITE + "textual/containers.py", 6_704),
+    (_SITE + "textual/__pycache__/__init__.cpython-312.pyc", 5_318),
+    (_SITE + "textual/__pycache__/app.cpython-312.pyc", 121_446),
+    (_SITE + "textual/__pycache__/widget.cpython-312.pyc", 78_902),
+    (_SITE + "textual/__pycache__/dom.cpython-312.pyc", 33_155),
+    (_SITE + "textual/__pycache__/screen.cpython-312.pyc", 52_017),
+    (_SITE + "textual/__pycache__/message_pump.cpython-312.pyc", 19_884),
+    (_SITE + "textual/__pycache__/geometry.cpython-312.pyc", 26_573),
+    (_SITE + "textual/__pycache__/events.cpython-312.pyc", 17_260),
+    (_SITE + "textual/__pycache__/reactive.cpython-312.pyc", 19_006),
+    (_SITE + "textual/__pycache__/_compositor.cpython-312.pyc", 31_902),
+    (_SITE + "textual/__pycache__/containers.cpython-312.pyc", 5_744),
+    (_SITE + "textual/css/_style_properties.py", 44_562),
+    (_SITE + "textual/css/stylesheet.py", 34_129),
+    (_SITE + "textual/css/parse.py", 25_842),
+    (_SITE + "textual/css/tokenize.py", 18_760),
+    (_SITE + "textual/css/__pycache__/_style_properties.cpython-312.pyc", 36_118),
+    (_SITE + "textual/css/__pycache__/stylesheet.cpython-312.pyc", 27_744),
+    (_SITE + "textual/css/__pycache__/parse.cpython-312.pyc", 20_991),
+    (_SITE + "textual/css/__pycache__/tokenize.cpython-312.pyc", 15_302),
+    (_SITE + "textual/widgets/_data_table.py", 92_318),
+    (_SITE + "textual/widgets/_tree.py", 51_074),
+    (_SITE + "textual/widgets/_input.py", 46_211),
+    (_SITE + "textual/widgets/_button.py", 12_506),
+    (_SITE + "textual/widgets/_static.py", 3_072),
+    (_SITE + "textual/widgets/__pycache__/_data_table.cpython-312.pyc", 74_650),
+    (_SITE + "textual/widgets/__pycache__/_tree.cpython-312.pyc", 41_338),
+    (_SITE + "textual/widgets/__pycache__/_input.cpython-312.pyc", 37_486),
+    (_SITE + "textual/widgets/__pycache__/_button.cpython-312.pyc", 10_204),
+    (_SITE + "textual/widgets/__pycache__/_static.cpython-312.pyc", 2_601),
+
+    (_SITE + "rich/__init__.py", 6_269),
+    (_SITE + "rich/console.py", 99_884),
+    (_SITE + "rich/text.py", 47_312),
+    (_SITE + "rich/table.py", 39_506),
+    (_SITE + "rich/segment.py", 24_781),
+    (_SITE + "rich/style.py", 27_310),
+    (_SITE + "rich/markup.py", 8_452),
+    (_SITE + "rich/syntax.py", 35_744),
+    (_SITE + "rich/progress.py", 59_138),
+    (_SITE + "rich/traceback.py", 32_006),
+    (_SITE + "rich/__pycache__/__init__.cpython-312.pyc", 5_402),
+    (_SITE + "rich/__pycache__/console.cpython-312.pyc", 81_337),
+    (_SITE + "rich/__pycache__/text.cpython-312.pyc", 39_640),
+    (_SITE + "rich/__pycache__/table.cpython-312.pyc", 32_118),
+    (_SITE + "rich/__pycache__/segment.cpython-312.pyc", 20_669),
+    (_SITE + "rich/__pycache__/style.cpython-312.pyc", 22_884),
+    (_SITE + "rich/__pycache__/markup.cpython-312.pyc", 7_120),
+    (_SITE + "rich/__pycache__/syntax.cpython-312.pyc", 29_450),
+    (_SITE + "rich/__pycache__/progress.cpython-312.pyc", 48_602),
+    (_SITE + "rich/__pycache__/traceback.cpython-312.pyc", 26_155),
+
+    (_SITE + "aiohttp/__init__.py", 8_034),
+    (_SITE + "aiohttp/client.py", 62_190),
+    (_SITE + "aiohttp/web.py", 22_468),
+    (_SITE + "aiohttp/connector.py", 58_907),
+    (_SITE + "aiohttp/helpers.py", 34_112),
+    (_SITE + "aiohttp/_websocket.cpython-312-x86_64-linux-gnu.so", 214_392),
+    (_SITE + "aiohttp/_http_parser.cpython-312-x86_64-linux-gnu.so", 476_856),
+    (_SITE + "aiohttp/__pycache__/__init__.cpython-312.pyc", 6_915),
+    (_SITE + "aiohttp/__pycache__/client.cpython-312.pyc", 50_663),
+    (_SITE + "aiohttp/__pycache__/web.cpython-312.pyc", 18_442),
+    (_SITE + "aiohttp/__pycache__/connector.cpython-312.pyc", 47_708),
+    (_SITE + "aiohttp/__pycache__/helpers.cpython-312.pyc", 28_330),
+
+    (_SITE + "pytest/__init__.py", 5_112),
+    (_SITE + "pytest/__pycache__/__init__.cpython-312.pyc", 4_602),
+    (_SITE + "_pytest/fixtures.py", 68_244),
+    (_SITE + "_pytest/python.py", 61_130),
+    (_SITE + "_pytest/__pycache__/fixtures.cpython-312.pyc", 56_211),
+    (_SITE + "_pytest/__pycache__/python.cpython-312.pyc", 50_338),
+    (_SITE + "_pytest/config/__init__.py", 74_918),
+    (_SITE + "_pytest/config/__pycache__/__init__.cpython-312.pyc", 60_744),
+    (_SITE + "_pytest/assertion/rewrite.py", 52_366),
+    (_SITE + "_pytest/assertion/__pycache__/rewrite.cpython-312.pyc", 43_190),
+    (_SITE + "_pytest/mark/structures.py", 21_405),
+    (_SITE + "_pytest/mark/__pycache__/structures.cpython-312.pyc", 17_662),
+
+    (_SITE + "pygments/__init__.py", 2_959),
+    (_SITE + "pygments/lexer.py", 34_128),
+    (_SITE + "pygments/token.py", 6_226),
+    (_SITE + "pygments/__pycache__/__init__.cpython-312.pyc", 2_486),
+    (_SITE + "pygments/__pycache__/lexer.cpython-312.pyc", 27_690),
+    (_SITE + "pygments/__pycache__/token.cpython-312.pyc", 4_902),
+    (_SITE + "pygments/lexers/python.py", 54_236),
+    (_SITE + "pygments/lexers/data.py", 26_814),
+    (_SITE + "pygments/lexers/__pycache__/python.cpython-312.pyc", 44_881),
+    (_SITE + "pygments/lexers/__pycache__/data.cpython-312.pyc", 21_450),
+    (_SITE + "pygments/formatters/terminal256.py", 11_907),
+    (_SITE + "pygments/formatters/__pycache__/terminal256.cpython-312.pyc", 9_804),
+    (_SITE + "pygments/styles/__init__.py", 3_814),
+    (_SITE + "pygments/styles/monokai.py", 5_302),
+
+    (_SITE + "textual-1.0.0.dist-info/METADATA", 8_214),
+    (_SITE + "textual-1.0.0.dist-info/RECORD", 21_060),
+
+    # The package's own byte-cache, under two interpreters, the way an
+    # editable install tested across a version matrix leaves it.
+    ("src/disktide/__pycache__/__init__.cpython-312.pyc", 594),
+    ("src/disktide/__pycache__/__main__.cpython-312.pyc", 84_326),
+    ("src/disktide/__pycache__/app.cpython-312.pyc", 18_604),
+    ("src/disktide/__pycache__/config.cpython-312.pyc", 18_815),
+    ("src/disktide/__pycache__/glyphs.cpython-312.pyc", 1_110),
+    ("src/disktide/__pycache__/metrics.cpython-312.pyc", 2_488),
+    ("src/disktide/__pycache__/paths.cpython-312.pyc", 2_961),
+    ("src/disktide/__pycache__/rendering.cpython-312.pyc", 3_204),
+    ("src/disktide/__pycache__/visualization_formatting.cpython-312.pyc", 4_137),
+    ("src/disktide/__pycache__/__init__.cpython-313.pyc", 601),
+    ("src/disktide/__pycache__/__main__.cpython-313.pyc", 85_102),
+    ("src/disktide/__pycache__/app.cpython-313.pyc", 18_825),
+    ("src/disktide/__pycache__/config.cpython-313.pyc", 19_333),
+    ("src/disktide/__pycache__/glyphs.cpython-313.pyc", 1_112),
+    ("src/disktide/__pycache__/metrics.cpython-313.pyc", 2_510),
+    ("src/disktide/__pycache__/paths.cpython-313.pyc", 2_988),
+    ("src/disktide/__pycache__/rendering.cpython-313.pyc", 3_236),
+    ("src/disktide/__pycache__/visualization_formatting.cpython-313.pyc", 4_174),
+
+    (".pytest_cache/CACHEDIR.TAG", 191),
+    (".pytest_cache/.gitignore", 37),
+    (".pytest_cache/README.md", 302),
+    (".pytest_cache/v/cache/nodeids", 104_918),
+    (".pytest_cache/v/cache/lastfailed", 592),
+    (".pytest_cache/v/cache/stepwise", 3),
+)
+
+# Repeated to length: the scan reads sizes, never contents.
+FILLER = b"# regenerable payload -- only this file's name and size matter\n"
+
+
+def seed_ephemera(root: Path) -> int:
+    """Write EPHEMERA under `root` and report the bytes added."""
+    total = 0
+    for relative, size in EPHEMERA:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blob = FILLER * (size // len(FILLER) + 1)
+        path.write_bytes(blob[:size])
+        total += size
+    return total
 
 
 def commit_log() -> list[tuple[str, datetime]]:
@@ -504,7 +685,8 @@ def main() -> None:
         create_monitor(env)
         count = build_history()
         export_tree("HEAD")
-        print(f"  {count} snapshots saved")
+        seeded = seed_ephemera(STAGE)
+        print(f"  {count} snapshots saved, {seeded:,} bytes of ephemera staged")
 
         print(f"driving DiskTide at {COLS}x{ROWS}")
         start_pane(env)
@@ -514,9 +696,11 @@ def main() -> None:
         tmux("send-keys", "-t", "cap", "-l", str(STAGE))
         time.sleep(0.5)
         tmux("send-keys", "-t", "cap", "Enter")
-        # "code" is the file-type legend, which only lands once the scan has
-        # finished and the sunburst has drawn its last ring.
-        wait_for("Sunburst [F1]", "Nav [U]p", ".gitignore", "code ")
+        # The file-type legend only lands once the scan has finished and the
+        # sunburst has drawn its last ring; "ephemeral" additionally proves
+        # the seeded tree, not a bare export, is what was measured.
+        wait_for("Sunburst [F1]", "Nav [U]p", ".gitignore",
+                 "ephemeral ", "code ")
         capture(captures / "sunburst.ans")
 
         tmux("send-keys", "-t", "cap", "2")

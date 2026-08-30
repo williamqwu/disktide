@@ -343,6 +343,14 @@ def _arc_color(
             if dominant is not None and dominant[0] != "other":
                 color = category_dir_tint(dominant[0], dominant[1], depth)
         zebra = bool(arc.ordinal % 2)
+    elif category_index is not None and category_index.file_is_ephemeral(node.path):
+        # Inside a venv or a cache the extension describes what the tool
+        # wrote, not whether keeping it is a choice.  Colouring these by
+        # extension would break the container's wedge into green `.py`
+        # slivers against a warm ground and hide that all of it goes
+        # together.
+        color = category_file_color("ephemeral", depth)
+        zebra = False
     else:
         color = category_file_color(file_category(node.name), depth)
         zebra = False

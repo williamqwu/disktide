@@ -482,6 +482,14 @@ class SettingsScreen(Screen):
         self._detect_db_size()
 
     def on_screen_resume(self) -> None:
+        # This screen is installed once and re-pushed, so `on_mount` runs
+        # only on the first visit and the epoch it recorded is stale by
+        # the second. Every later dismissal would then read as "something
+        # global moved" and repaint the screen below for nothing. Resume
+        # fires on every entry, which is the boundary that actually
+        # matters here.
+        self._entry_epoch = render_epoch()
+
         self.query_one("#monitor-auto-start", Switch).value = (
             self._config.monitor.auto_start_in_tui
         )

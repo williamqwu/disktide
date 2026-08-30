@@ -631,6 +631,8 @@ The treemap and sunburst visualizations color files by category. Each file's ext
 
 Files without an extension (e.g., `Makefile`, `Dockerfile`) are classified as "other".
 
+One thing overrides the extension: everything inside a known regenerable container — `.venv`, `venv`, `node_modules`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`, `.eggs`, `.cache` — counts as ephemeral wholesale, files and directories alike, because a `.py` under `site-packages` is installed payload rather than your code and the whole tree comes back from one reinstall. Ambiguous names like `build` and `dist` are deliberately left to their extensions; they are as often yours as a tool's.
+
 Six is the ceiling at which the colors stay distinguishable from each other in a colorblind simulation as well as in normal vision, so pairs that call for the same cleanup decision share one color: documents with configuration, datasets with model checkpoints, images with audio and video, build output with logs.
 
 **Directories are colored too.** A directory is tinted towards whatever content type accounts for most of its bytes, and the more one-sided the subtree, the stronger the tint; a directory with no clear majority (under half its bytes in one category) stays neutral. That is what makes a fat wedge in the sunburst readable as "all checkpoints" or "all build output" without drilling into it. The tint is computed once per completed scan — a scan still in flight leaves directories neutral, because partial totals would name the wrong winner.
