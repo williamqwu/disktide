@@ -19,8 +19,10 @@ from disktide.config import (
 from disktide.rendering import bump_render_epoch, set_safe_rendering
 from disktide.repositories import default_snapshot_repository
 from disktide.repositories.snapshots import SnapshotRepository
+from disktide.themes import resolve_theme
 from disktide.viz import cellgeom
-from disktide.viz.colors import set_color_scheme
+from disktide.viz.chrome import CHROME_THEMES
+from disktide.viz.colors import SCHEMES, set_color_scheme
 from disktide.widgets.confirm_modal import ConfirmModal
 from disktide.widgets.monitor_editor import MonitorEditor, MonitorEditorResult
 
@@ -68,9 +70,16 @@ class DiskTideApp(App):
         snapshot_repository: SnapshotRepository | None = None,
         **kwargs,
     ):
-        if "NO_COLOR" in os.environ:
+        ansi_only = "NO_COLOR" in os.environ
+        if ansi_only:
             kwargs["ansi_color"] = True
         super().__init__(**kwargs)
+        self._ansi_only = ansi_only
+        # Registered here, before anything can be mounted: `App.theme` is a
+        # validated reactive and assigning a name Textual has not seen
+        # raises rather than falling back.
+        for theme in CHROME_THEMES:
+            self.register_theme(theme)
         # Textual's animations cost ~320ms of the ~420ms a viz tab switch
         # took, and each one is a burst of frames down an ssh pipe — this
         # tool's home is a login/compute node, not a local terminal.
@@ -166,8 +175,29 @@ class DiskTideApp(App):
             )
         return self.__cleanup_safe_action
 
+    def apply_color_theme(self, name: str) -> str:
+        """Apply a colour theme to both halves of the UI, and say which landed.
+
+        The charts read `viz.colors` and the chrome reads Textual's theme
+        registry, and nothing connects the two but this call — so the
+        settings picker and startup go through here rather than each
+        remembering to do both. Returns the resolved key so a caller with a
+        legacy or hand-typed name can write back what was actually used.
+
+        Under `NO_COLOR` the Textual theme is left alone: the app is already
+        in ansi mode, where every hex the theme carries is discarded, and
+        switching it would only churn the CSS.
+        """
+        resolved = resolve_theme(name)
+        set_color_scheme(resolved)
+        if not self._ansi_only:
+            self.theme = SCHEMES[resolved].textual_theme
+        return resolved
+
     def on_mount(self) -> None:
-        set_color_scheme(self._config.ui.color_theme)
+        self._config.ui.color_theme = self.apply_color_theme(
+            self._config.ui.color_theme
+        )
         set_safe_rendering(self._config.ui.safe_rendering)
         cellgeom.set_configured_aspect(self._config.ui.cell_aspect)
 

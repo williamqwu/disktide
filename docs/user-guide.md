@@ -585,7 +585,7 @@ quarantine_max_bytes = 10737418240        # 10 GiB capacity policy
 map_max_points = 80                       # bounded Age/Size Map (10–500)
 
 [ui]
-color_theme = "warm"                     # warm, default, cold, mono
+color_theme = "disktide"                 # disktide, cold, colorblind, cyberpunk, mono
 default_viz = "sunburst"                 # treemap, sunburst, details
 # show_cleanup = true                    # enable Cleanup mode (disabled by default)
 # safe_rendering = true                  # ASCII glyphs and block-free charts for web shells
@@ -683,4 +683,20 @@ Six is the ceiling at which the colors stay distinguishable from each other in a
 
 The sunburst legend (bottom-left corner) lists the categories present with each one's share of the scanned bytes, largest first (`■ data 46%`), capped at six entries.
 
-Switch color schemes with `color_theme` in config or the Settings screen (`?`), where a swatch row beside the picker previews the theme and the choice applies as soon as you leave the screen. Category colors are the same in `warm` (the default), `default` — shown as "Neutral" in Settings — and `cold`: a theme changes the *temperature of the neutrals* (the gray of an undominated directory), not what a category means, so you do not have to relearn the chart when you change themes. `mono` drops color entirely: files render a shade lighter than directories so shapes still separate. A `vivid` theme existed until 0.2.25 and was retired as a measured duplicate of `default`; configs naming it now load `default`.
+Switch color schemes with `color_theme` in config or the Settings screen (`?`), where a swatch row beside the picker previews the theme and the choice applies as soon as you leave the screen. A theme changes the whole window — header, borders, panels and footer as well as the charts.
+
+There are five:
+
+| Theme | Config key | What it looks like |
+| --- | --- | --- |
+| Disktide | `disktide` | The default. Warm charcoal, warm gray directories, the six category hues the charts have used since 0.2.24. |
+| Cold | `cold` | Deep navy-black. Teal, cyan, blue, periwinkle and orchid categories, with one warm amber kept for `ephemeral` so reclaimable junk still catches the eye in an otherwise cool chart. |
+| Colorblind-safe | `colorblind` | Okabe-Ito hues on the same charcoal as Disktide, arranged so the six categories are also a lightness ladder: they stay separable in grayscale, and the diff view's growth/shrink poles move from red/green to orange/blue. |
+| Cyberpunk | `cyberpunk` | Near-black indigo under acid green, ultraviolet, neon yellow, hot magenta, electric cyan and laser red. |
+| Mono | `mono` | Black and gray only — the charts, and the tree, breadcrumb and progress text with them. The six categories are a gray ladder rather than one flat gray, every step lighter than the directory ring around it, and the diff view becomes one diverging lightness ramp. |
+
+A theme colors the text as well as the charts: directory names, the size bar, warnings and errors all follow it, so `mono` is monochrome everywhere and not just inside the disc.
+
+Every theme's six category colors are measured, not chosen by eye: all fifteen pairs are checked against a protan and deutan colour-vision simulation, against normal vision, and for contrast on that theme's own background. `python tool/gen_palette.py --check` prints the numbers.
+
+Three theme names have been retired and a config naming any of them opens on `disktide`, which is the palette all three described: `warm` (renamed), and `default` — shown as "Neutral" — and `vivid`, both of which measured as duplicates of it.

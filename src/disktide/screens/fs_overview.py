@@ -32,6 +32,7 @@ from disktide.scanner.blockdev import idle_summary
 from disktide.scanner.benchmark import benchmark_mount, BenchmarkResult
 from disktide.scanner.policy import PSEUDO_FS_TYPES
 from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
+from disktide.viz.colors import ink
 from disktide.widgets.confirm_modal import ConfirmModal
 
 
@@ -97,9 +98,15 @@ class FSEntry:
 
     @property
     def speed_style(self) -> str:
-        return storage_class(
+        """The Rich style for this mount's speed tier, in the active theme.
+
+        `storage_class` answers with an ink *role*; the colour is this
+        layer's business, and resolving it here rather than at import means
+        a theme switch reaches the badges without a restart.
+        """
+        return ink(storage_class(
             self.fs_type, self.is_network_fs, self.is_rotational
-        )[1]
+        )[1])
 
     @property
     def badges(self) -> Text:
@@ -108,10 +115,10 @@ class FSEntry:
             self.fs_type, self.is_network_fs, self.is_rotational, self.transforms
         )
         t = Text()
-        for i, (label, style) in enumerate(pairs):
+        for i, (label, role) in enumerate(pairs):
             if i:
-                t.append(" · ", style="dim")
-            t.append(label, style=style)
+                t.append(" · ", style=ink("muted"))
+            t.append(label, style=ink(role))
         return t
 
 
@@ -317,7 +324,7 @@ def _usage_bar(pct: float, width: int = 12) -> Text:
     # otherwise produce a bar longer than `width` and a negative empty count.
     filled = max(0, min(width, int(pct / 100 * width)))
     bar = "█" * filled + "░" * (width - filled)
-    style = "red" if pct >= 90 else "yellow" if pct >= 70 else "green"
+    style = ink("error" if pct >= 90 else "warning" if pct >= 70 else "bar")
     t = Text()
     t.append(bar, style=style)
     t.append(f"  {pct:.1f}%")
@@ -331,7 +338,7 @@ def _quota_cell(entry: FSEntry) -> Text:
     used = humanize.naturalsize(entry.quota_used_bytes, binary=True)
     limit = humanize.naturalsize(entry.quota_hard_bytes, binary=True)
     pct = entry.quota_pct
-    style = "red" if pct >= 90 else "yellow" if pct >= 70 else "green"
+    style = ink("error" if pct >= 90 else "warning" if pct >= 70 else "bar")
     t = Text()
     t.append(f"{used}/{limit}", style=style)
     return t
@@ -349,11 +356,11 @@ def _format_benchmark(res: BenchmarkResult) -> str:
 def _probe_message(label: str, result: ProbeResult) -> Text:
     """Render an explicit available/degraded/unavailable probe summary."""
     if result.status is CapabilityStatus.AVAILABLE:
-        style = "green"
+        style = ink("bar")
     elif result.status is CapabilityStatus.DEGRADED:
-        style = "yellow"
+        style = ink("warning")
     else:
-        style = "red"
+        style = ink("error")
     text = Text(f"  {label}: {result.status.value}", style=style)
     text.append(f" — {result.reason}", style="dim")
     if result.suggestion:
@@ -407,21 +414,24 @@ def _build_summary(entries: list[FSEntry]) -> Text:
     return t
 
 
+# Label and *ink role* per status, not label and colour: this table is built
+# at import time and a colour baked in here would be whichever theme happened
+# to be active first. `ink()` is called at render time, below.
 _STATUS_DISPLAY: dict[DeviceStatus, tuple[str, str]] = {
-    DeviceStatus.MOUNTED: ("● mounted", "green"),
-    DeviceStatus.UNMOUNTED: ("○ not mounted", "cyan"),
-    DeviceStatus.UNFORMATTED: ("○ unformatted", "yellow"),
-    DeviceStatus.RAW: ("○ raw / no filesystem", "yellow"),
-    DeviceStatus.CONTAINER: ("partitioned", "dim"),
+    DeviceStatus.MOUNTED: ("● mounted", "bar"),
+    DeviceStatus.UNMOUNTED: ("○ not mounted", "link"),
+    DeviceStatus.UNFORMATTED: ("○ unformatted", "warning"),
+    DeviceStatus.RAW: ("○ raw / no filesystem", "warning"),
+    DeviceStatus.CONTAINER: ("partitioned", "muted"),
 }
 
 
 def _block_status_cell(dev: BlockDevice) -> Text:
     status = dev.status
-    label, style = _STATUS_DISPLAY[status]
+    label, role = _STATUS_DISPLAY[status]
     if status == DeviceStatus.MOUNTED and dev.mountpoint:
         label = f"● {dev.mountpoint}"
-    return Text(label, style=style)
+    return Text(label, style=ink(role))
 
 
 def _block_tree_rows(devices: list[BlockDevice]) -> list[tuple[BlockDevice, str]]:
@@ -451,7 +461,7 @@ def _build_block_summary(devices: list[BlockDevice]) -> Text:
         t.append(
             f"{idle_count} disk(s) with no mounted filesystem · "
             f"{humanize.naturalsize(idle_bytes, binary=True)} total capacity",
-            style="yellow",
+            style=ink("warning"),
         )
     return t
 
@@ -525,7 +535,7 @@ class FSDetailModal(ModalScreen):
             if self._benchmark is not None:
                 measured = Text(
                     f"  Measured:      {_format_benchmark(self._benchmark)}",
-                    style="cyan",
+                    style=ink("link"),
                 )
                 yield Static(measured, classes="detail-row")
 
@@ -641,13 +651,13 @@ class BlockDeviceModal(ModalScreen):
             if d.status == DeviceStatus.RAW:
                 yield Static(
                     Text("  No filesystem or child block devices were detected.",
-                         style="yellow"),
+                         style=ink("warning")),
                     classes="detail-row",
                 )
             elif d.status == DeviceStatus.UNFORMATTED:
                 yield Static(
                     Text("  No filesystem was detected on this partition.",
-                         style="yellow"),
+                         style=ink("warning")),
                     classes="detail-row",
                 )
 
@@ -805,7 +815,7 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
             if filesystem_probe.status is CapabilityStatus.DEGRADED:
                 summary_text.append(
                     f"\n  Coverage: degraded — {filesystem_probe.reason}",
-                    style="yellow",
+                    style=ink("warning"),
                 )
             summary.update(summary_text)
         else:

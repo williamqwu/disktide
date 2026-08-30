@@ -14,6 +14,7 @@ from textual.widgets import Button, DataTable, Input, Static
 from disktide.domain.cleanup import CleanupActionKind, CleanupPlan
 from disktide.models.patterns import RiskLevel
 from disktide.services.cleanup import CleanupService
+from disktide.viz.colors import ink
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +107,7 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
                     f"across {len(self._plan.active_actions)} action(s); "
                     f"confidence {self._plan.confidence:.0%}; "
                     f"{len(self._plan.actions) - len(self._plan.active_actions)} subsumed.",
-                    style="bold green",
+                    style=ink("bar_strong"),
                 )
             )
             with Vertical(id="cleanup-confirmation"):
@@ -114,7 +115,7 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
                     Text(
                         "Permanent delete bypasses recovery. To use the red "
                         f'button, type exactly: {self._confirmation}',
-                        style="bold red",
+                        style=ink("error_strong"),
                     )
                 )
                 yield Input(
@@ -141,9 +142,9 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
         table = self.query_one("#cleanup-table", DataTable)
         for action in self._plan.active_actions:
             risk_style = {
-                RiskLevel.SAFE: "green",
-                RiskLevel.MODERATE: "yellow",
-                RiskLevel.DANGEROUS: "bold red",
+                RiskLevel.SAFE: ink("bar"),
+                RiskLevel.MODERATE: ink("warning"),
+                RiskLevel.DANGEROUS: ink("error_strong"),
             }[action.risk]
             table.add_row(
                 f"{action.rule_pack}@{action.rule_pack_version}",

@@ -200,8 +200,11 @@ says which mechanism is in use.
 
 Settings leads with System Information, Scan Performance, and UI Settings; the
 longer Cleanup and Monitor sections are collapsed until you open them. The
-color theme picker offers Warm, Neutral, Cold, and Mono, with a live swatch row
-of the selected theme so the choice is visible before you leave the screen.
+color theme picker offers Disktide, Cold, Colorblind-safe, Cyberpunk, and Mono,
+with a live swatch row of the selected theme so the choice is visible before you
+leave the screen. Each theme retints the whole window, not just the charts, and
+each one's six category colors are validated for colour-vision separation and
+contrast against its own background.
 
 Inside Monitor Center, use `n` to create a monitor, `e` to edit it, `p` to
 pause/resume, `R` to run now, `g` to request a trusted full reconciliation, and

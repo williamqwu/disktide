@@ -11,6 +11,9 @@ from rich.style import Style
 from textual.binding import Binding
 from textual.message import Message
 from textual.strip import Strip
+
+from disktide.widgets import OpaqueStripMixin
+from disktide.viz.colors import ink
 from textual.widget import Widget
 
 from disktide.models.patterns import CleanupTarget, RiskLevel
@@ -98,7 +101,7 @@ def build_cleanup_map(
     )
 
 
-class CleanupMap(Widget, can_focus=True):
+class CleanupMap(OpaqueStripMixin, Widget, can_focus=True):
     """Keyboard-selectable cleanup map synchronized with the plan table."""
 
     BINDINGS = [
@@ -178,7 +181,7 @@ class CleanupMap(Widget, can_focus=True):
         if path is not None:
             self.post_message(self.PathSelected(path))
 
-    def render_line(self, y: int) -> Strip:
+    def render_content_line(self, y: int) -> Strip:
         width = self.size.width
         height = self.size.height
         if width <= 0 or height <= 0:
@@ -286,9 +289,9 @@ class CleanupMap(Widget, can_focus=True):
 
 
 def _point_style(point: CleanupMapPoint, selected: bool) -> Style:
-    color = {
-        RiskLevel.SAFE: "green",
-        RiskLevel.MODERATE: "yellow",
-        RiskLevel.DANGEROUS: "red",
+    role = {
+        RiskLevel.SAFE: "bar",
+        RiskLevel.MODERATE: "warning",
+        RiskLevel.DANGEROUS: "error",
     }[point.risk]
-    return Style(color=color, bold=selected, reverse=selected)
+    return Style.parse(ink(role)) + Style(bold=selected, reverse=selected)

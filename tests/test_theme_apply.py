@@ -11,11 +11,13 @@ that chain is cached somewhere, so these drive it the way a user does --
 keystrokes, a real scan, real rendered strips -- rather than calling the
 setter and trusting the rest.
 
-The perception: the neutral directory ladder is where a theme's
-temperature lives, the category hues being shared by design, and it used
-to carry so little chroma that the whole chain could work perfectly and
-still look like nothing had happened. `test_the_ladders_are_visibly_apart`
-pins the gate that keeps the tables honest about that.
+The perception: a theme change has to be *visible*. That used to rest on
+the neutral directory ladder alone, the category hues being shared by
+design, and the ladder carried so little chroma that the whole chain could
+work perfectly and still look like nothing had happened. Themes now move
+the categories and the application chrome too; how far apart the tables sit
+is measured in `tests/test_palette_gates.py`, and what these tests add is
+that the movement actually reaches the screen.
 
 Deadline polls throughout, never a fixed sleep: CI runners are two-core
 and the layout rebuild is deliberately deferred a frame past the paint
@@ -36,7 +38,7 @@ from disktide.config import load_config
 from disktide.rendering import render_epoch
 from disktide.screens.explorer import ExplorerScreen
 from disktide.screens.settings import SettingsScreen, theme_preview
-from disktide.viz.colors import NEUTRAL_DIR_RGB, get_color_scheme
+from disktide.viz.colors import NEUTRAL_DIR_RGB, SCHEMES, get_color_scheme
 from disktide.widgets.sunburst_view import SunburstView
 
 # How long a deadline poll waits before giving up: 40 pumps at 0.1s.
@@ -166,36 +168,6 @@ async def _pick_theme(pilot, screen, theme: str) -> None:
     await pilot.pause()
 
 
-def test_the_ladders_are_visibly_apart():
-    """The tables themselves have to carry a difference worth seeing.
-
-    Every other test here can pass on a palette nobody can tell apart:
-    the epoch moves, the strips differ by a count or two, and the user
-    still says the theme picker does nothing. This is the gate that
-    stops that regressing -- at each of the three shallowest depths,
-    which is nearly all of a sunburst's directory area, every pair of
-    temperatures separates by at least 25 on some sRGB channel.
-    """
-    for depth in (0, 1, 2):
-        ladders = {
-            theme: NEUTRAL_DIR_RGB[theme][depth]
-            for theme in ("default", "warm", "cold")
-        }
-        names = list(ladders)
-        for i, first in enumerate(names):
-            for second in names[i + 1:]:
-                apart = max(
-                    abs(a - b)
-                    for a, b in zip(ladders[first], ladders[second])
-                )
-                assert apart >= 25, (
-                    f"{first} and {second} neutrals at depth {depth} differ "
-                    f"by only {apart} ({ladders[first]} vs {ladders[second]}"
-                    f"); below a just-noticeable difference the theme picker "
-                    f"reads as broken"
-                )
-
-
 def test_the_preview_row_shows_the_picked_theme_not_the_active_one():
     """`theme_preview` reads the named theme's tables directly.
 
@@ -203,11 +175,37 @@ def test_the_preview_row_shows_the_picked_theme_not_the_active_one():
     binding it to the active scheme would make it a lagging echo of the
     previous pick rather than a preview.
     """
-    warm = _text_styles(theme_preview("warm"))
+    disktide = _text_styles(theme_preview("disktide"))
     cold = _text_styles(theme_preview("cold"))
-    assert warm != cold
-    assert any(_rgb(NEUTRAL_DIR_RGB["warm"][0]) in style for style in warm)
+    assert disktide != cold
+    assert any(_rgb(NEUTRAL_DIR_RGB["disktide"][0]) in style for style in disktide)
     assert any(_rgb(NEUTRAL_DIR_RGB["cold"][0]) in style for style in cold)
+
+
+def test_the_preview_row_steps_for_mono_too():
+    """`mono` used to draw six identical swatches.
+
+    Its six categories are a gray ladder now, and the swatch row is the
+    only place a user sees all six side by side before committing to the
+    theme -- if it renders one gray six times the picker is lying about
+    what it is offering.
+    """
+    styles = _text_styles(theme_preview("mono"))
+    assert len(set(styles)) >= 9, (
+        f"mono's preview drew only {len(set(styles))} distinct styles; "
+        f"three neutrals plus six stepped category grays were expected"
+    )
+
+
+def test_every_theme_previews_without_reaching_a_missing_table():
+    """The picker offers five themes, so five have to draw.
+
+    `mono` reaches a different swatch table from the other four and the
+    preview is built before any of them is active, so a key that exists in
+    `SCHEMES` but not in the generated tables would only surface here.
+    """
+    for name in SCHEMES:
+        assert _text_styles(theme_preview(name)), name
 
 
 def test_picking_a_theme_repaints_the_disc_underneath(tmp_path):
@@ -220,8 +218,12 @@ def test_picking_a_theme_repaints_the_disc_underneath(tmp_path):
         )
         async with app.run_test(size=(120, 40)) as pilot:
             _explorer, view = await _settled_explorer(pilot, app)
-            # The default config is warm, and `App.on_mount` applies it.
-            assert get_color_scheme().name == "warm"
+            # The default config is disktide, and `App.on_mount` applies it.
+            assert get_color_scheme().name == "disktide"
+            assert app.theme == "textual-dark", (
+                "disktide must stay on the built-in Textual theme; a copy "
+                "under another name would put the README shots at risk"
+            )
             before = _styles(view.render_line(view.size.height // 2))
             assert before, "the mid-disc row painted nothing to compare"
 
@@ -251,7 +253,12 @@ def test_picking_a_theme_repaints_the_disc_underneath(tmp_path):
             after = _styles(view.render_line(view.size.height // 2))
             assert after != before, (
                 "the sunburst repainted the same row after a theme change; "
-                "it is still drawing from the layout it baked warm RGB into"
+                "it is still drawing from the layout it baked the old "
+                "scheme's RGB into"
+            )
+            assert app.theme == "disktide-cold", (
+                "the chart repainted but the application chrome did not "
+                "follow; picking a theme has to move both halves"
             )
 
     asyncio.run(go())

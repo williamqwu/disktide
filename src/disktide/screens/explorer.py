@@ -141,8 +141,33 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         background: $surface;
     }
 
+    /* The chart panel names its background instead of inheriting one.
+       Textual paints a widget's background inside
+       `StylesCache.render_line`, and only for the parts of a line it
+       generates itself -- border, padding, and a blank line for a widget
+       with no content -- from `inner.rich_style`, the composited
+       `base_background + background`. The three widgets in this panel all
+       override `render_line`, so their `Strip` is composited verbatim and
+       any segment they built without a bgcolor (a `Strip.blank`, a hint
+       line, the space around the disc) reaches the terminal as SGR 49 --
+       the *emulator's* default background rather than the theme's. Under
+       the old charcoal default that was invisible; under the navy, violet
+       and black themes it was a two-tone window. `OpaqueStripMixin` is
+       what actually closes the leak; this rule is what tells it, and
+       `SunburstView._panel_bg`, which colour to close it with, so the
+       surround of the disc and the panel behind it cannot drift apart.
+       Do not delete either half: CSS alone does not paint those cells,
+       and the mixin alone would follow whatever the Screen happened to
+       be. `$background` and not `$surface`, because that is what the
+       panel composited to before it was written down, and both README
+       hero images are captures of it. */
     #viz-panel {
         width: 60%;
+        background: $background;
+    }
+
+    #sunburst-view, #treemap-view, #info-panel {
+        background: $background;
     }
 
     /* Progress-only scans keep the full panel. Live scans dock a compact

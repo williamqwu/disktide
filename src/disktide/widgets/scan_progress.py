@@ -9,6 +9,7 @@ from textual.widget import Widget
 from textual.widgets import Static, ProgressBar
 from rich.text import Text
 import humanize
+from disktide.viz.colors import ink
 
 class ScanProgressOverlay(Widget):
     """Overlay widget showing scan progress."""
@@ -121,8 +122,8 @@ class ScanProgressOverlay(Widget):
         self._path_display.update(Text(f"  {path}", style="dim"))
 
         stats_text = Text()
-        stats_text.append(f"  Dirs: {progress.dirs_scanned:,}", style="cyan")
-        stats_text.append(f"  Files: {progress.files_scanned:,}", style="green")
+        stats_text.append(f"  Dirs: {progress.dirs_scanned:,}", style=ink("link"))
+        stats_text.append(f"  Files: {progress.files_scanned:,}", style=ink("bar"))
         logical_bytes = getattr(
             progress,
             "logical_bytes",
@@ -130,7 +131,7 @@ class ScanProgressOverlay(Widget):
         )
         stats_text.append(
             f"  Logical: {humanize.naturalsize(logical_bytes, binary=True)}",
-            style="yellow",
+            style=ink("warning"),
         )
         queue_depth = getattr(progress, "queue_depth", 0)
         active_workers = getattr(progress, "active_workers", 0)
@@ -138,11 +139,11 @@ class ScanProgressOverlay(Widget):
         if queue_depth or active_workers or dirs_queued:
             stats_text.append(
                 f"  Queue: {queue_depth:,}/{dirs_queued:,}",
-                style="magenta",
+                style=ink("accent"),
             )
             stats_text.append(
                 f"  Active: {active_workers:,}",
-                style="cyan",
+                style=ink("link"),
             )
         speed = progress.items_per_second
         if speed > 0:
@@ -162,7 +163,7 @@ class ScanProgressOverlay(Widget):
         label = "Scan partial" if partial else "Scan complete"
         if selected:
             label += f" · {selected[:8]}"
-        style = "bold yellow" if partial else "bold green"
+        style = ink("warning_strong") if partial else ink("bar_strong")
         self._title.update(Text(label, style=style))
 
     def scan_cancelled(self, *, run_id: str | None = None) -> None:
@@ -172,7 +173,7 @@ class ScanProgressOverlay(Widget):
         label = "Scan cancelled"
         if selected:
             label += f" · {selected[:8]}"
-        self._title.update(Text(label, style="bold yellow"))
+        self._title.update(Text(label, style=ink("warning_strong")))
 
     def scan_failed(self, *, run_id: str | None = None) -> None:
         """Mark a scan as failed."""
@@ -181,4 +182,4 @@ class ScanProgressOverlay(Widget):
         label = "Scan failed"
         if selected:
             label += f" · {selected[:8]}"
-        self._title.update(Text(label, style="bold red"))
+        self._title.update(Text(label, style=ink("error_strong")))

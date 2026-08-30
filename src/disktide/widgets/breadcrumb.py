@@ -11,6 +11,7 @@ from textual.widgets import Static
 from rich.text import Text
 
 from disktide.rendering import denied_glyph, partial_glyph
+from disktide.viz.colors import ink
 
 
 class Breadcrumb(Widget):
@@ -54,17 +55,17 @@ class Breadcrumb(Widget):
                 text.append(" > ", style="dim")
 
             if i == len(parts) - 1:
-                text.append(part, style="bold cyan")
+                text.append(part, style=ink("dir"))
             else:
-                text.append(part, style="blue underline")
+                text.append(part, style=ink("crumb"))
 
         # Access state of the current (last) node — surfaced here so
         # visualizations (sunburst especially) don't have to fight for
         # space to show it.
         if self.access == "denied":
-            text.append(f"  {denied_glyph()}", style="bold red")
+            text.append(f"  {denied_glyph()}", style=ink("error_strong"))
         elif self.access == "partial":
-            text.append(f"  {partial_glyph()}", style="bold yellow")
+            text.append(f"  {partial_glyph()}", style=ink("warning_strong"))
 
         return text
 

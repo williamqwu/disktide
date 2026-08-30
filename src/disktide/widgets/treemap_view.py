@@ -7,6 +7,8 @@ from rich.style import Style
 from textual.events import Click, Leave, MouseMove, Resize
 from textual.message import Message
 from textual.strip import Strip
+
+from disktide.widgets import OpaqueStripMixin
 from textual.widget import Widget
 
 from disktide.domain.live_view import LiveViewNode
@@ -31,7 +33,7 @@ from disktide.viz.treemap import (
 )
 
 
-class TreemapView(Widget):
+class TreemapView(OpaqueStripMixin, Widget):
     """Widget that renders a treemap visualization.
 
     Mouse handling mirrors SunburstView: hover only hit-tests the layout's
@@ -254,7 +256,7 @@ class TreemapView(Widget):
             category_index=self._category_index,
         )
 
-    def render_line(self, y: int) -> Strip:
+    def render_content_line(self, y: int) -> Strip:
         if self._node is not None and not metric_available(self._node, self._metric):
             if y == self.size.height // 2:
                 label = METRIC_NAMES.get(self._metric, self._metric)

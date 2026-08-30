@@ -24,6 +24,7 @@ from disktide.models.patterns import (
 )
 from disktide.models.tree import FSNode
 from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
+from disktide.viz.colors import ink
 from disktide.services.cleanup import CleanupError, CleanupService
 from disktide.widgets.cleanup_map import CleanupMap
 from disktide.widgets.cleanup_history import CleanupHistoryModal
@@ -136,9 +137,9 @@ class CleanupScreen(RenderEpochRefreshMixin, Screen):
         for target in self._targets:
             selected = "✓" if target.path in self._selected else " "
             risk_style = {
-                RiskLevel.SAFE: "green",
-                RiskLevel.MODERATE: "yellow",
-                RiskLevel.DANGEROUS: "bold red",
+                RiskLevel.SAFE: ink("bar"),
+                RiskLevel.MODERATE: ink("warning"),
+                RiskLevel.DANGEROUS: ink("error_strong"),
             }[target.risk]
             action_label = (
                 "Detection only"

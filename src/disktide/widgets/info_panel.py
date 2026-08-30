@@ -23,6 +23,7 @@ from disktide.metrics import (
 from disktide.models.tree import FSNode
 from disktide.scanner.walker import classify_symlink
 from disktide.rendering import denied_glyph, partial_glyph
+from disktide.viz.colors import ink
 
 
 class InfoPanel(Widget):
@@ -80,7 +81,7 @@ class InfoPanel(Widget):
                     table.add_row("Target", node.link_target)
                 if node.link_broken:
                     table.add_row(
-                        "Target type", Text("Broken or unreachable", style="bold red")
+                        "Target type", Text("Broken or unreachable", style=ink("error_strong"))
                     )
                 elif node.link_is_dir:
                     table.add_row("Target type", "Directory  (press i to enter)")
@@ -91,7 +92,7 @@ class InfoPanel(Widget):
             if node.is_loop:
                 table.add_row(
                     "Note",
-                    Text("Filesystem loop (not scanned)", style="bold yellow"),
+                    Text("Filesystem loop (not scanned)", style=ink("warning_strong")),
                 )
 
         hidden = node.is_dir and (
@@ -104,7 +105,7 @@ class InfoPanel(Widget):
         ):
             value = metric_text(node, metric)
             if hidden and value != "Unavailable":
-                table.add_row(label, Text(f"≥ {value}  (partial)", style="yellow"))
+                table.add_row(label, Text(f"≥ {value}  (partial)", style=ink("warning")))
             else:
                 table.add_row(label, value)
 
@@ -139,11 +140,11 @@ class InfoPanel(Widget):
             if node.excluded:
                 table.add_row(
                     "Scan scope",
-                    Text(node.exclusion_reason or "Excluded", style="bold yellow"),
+                    Text(node.exclusion_reason or "Excluded", style=ink("warning_strong")),
                 )
             elif node.depth_limited:
                 table.add_row(
-                    "Scan scope", Text("Stopped at max depth", style="bold yellow")
+                    "Scan scope", Text("Stopped at max depth", style=ink("warning_strong"))
                 )
             elif node.excluded_subtree_count or node.depth_limited_subtree_count:
                 table.add_row(
@@ -151,7 +152,7 @@ class InfoPanel(Widget):
                     Text(
                         f"{node.excluded_subtree_count} excluded; "
                         f"{node.depth_limited_subtree_count} depth-limited",
-                        style="yellow",
+                        style=ink("warning"),
                     ),
                 )
             if node.scan_policy is not None:
@@ -161,14 +162,14 @@ class InfoPanel(Widget):
             if node.error is not None:
                 # "Unreadable" rather than "Denied": node.error captures any
                 # OSError from scandir, not only PermissionError.
-                table.add_row("Access", Text(f"{denied_glyph()} Unreadable", style="bold red"))
+                table.add_row("Access", Text(f"{denied_glyph()} Unreadable", style=ink("error_strong")))
             elif node.inaccessible_count > 0:
                 table.add_row(
                     "Access",
                     Text(
                         f"{partial_glyph()} Partial — {node.inaccessible_count} direct "
                         f"{'entry' if node.inaccessible_count == 1 else 'entries'} unreadable",
-                        style="bold yellow",
+                        style=ink("warning_strong"),
                     ),
                 )
             elif node.inaccessible_subtree_count > 0:
@@ -176,11 +177,11 @@ class InfoPanel(Widget):
                     "Access",
                     Text(
                         f"{partial_glyph()} {node.inaccessible_subtree_count} hidden below (no direct issue)",
-                        style="dim yellow",
+                        style=ink("warning_dim"),
                     ),
                 )
             else:
-                table.add_row("Access", Text("✓ Full", style="green"))
+                table.add_row("Access", Text("✓ Full", style=ink("bar")))
 
         if node.mtime > 0:
             dt = datetime.fromtimestamp(node.mtime)
@@ -188,7 +189,7 @@ class InfoPanel(Widget):
             table.add_row("", dt.strftime("%Y-%m-%d %H:%M:%S"))
 
         if node.error:
-            table.add_row("Error", Text(node.error, style="bold red"))
+            table.add_row("Error", Text(node.error, style=ink("error_strong")))
 
         # Top children by the active metric (size by default, or file count)
         if node.is_dir and node.children:

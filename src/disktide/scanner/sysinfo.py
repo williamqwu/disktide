@@ -183,21 +183,25 @@ _RAM_FS_TYPES = {"tmpfs", "ramfs"}
 def storage_class(
     fs_type: str, is_network_fs: bool, is_rotational: bool | None
 ) -> tuple[str, str]:
-    """Classify a mount's storage speed as (label, rich_style).
+    """Classify a mount's storage speed as (label, ink role).
 
     Single source of truth for the speed heuristic so every view agrees.
     Order matters: locality and RAM-backing dominate the rotational flag
     (a network mount has no meaningful rotational bit; a tmpfs reports none).
+
+    The second element is a role from `viz.colors.INK_ROLES`, not a colour:
+    this module has no business knowing what "slow" looks like, and when it
+    named a Rich colour the answer was the same under every theme.
     """
     if is_network_fs:
-        return ("Slow (Network)", "red")
+        return ("Slow (Network)", "error")
     if fs_type in _RAM_FS_TYPES:
-        return ("Fast (RAM)", "green")
+        return ("Fast (RAM)", "bar")
     if is_rotational is True:
-        return ("Medium (HDD)", "yellow")
+        return ("Medium (HDD)", "warning")
     if is_rotational is False:
-        return ("Fast (SSD)", "green")
-    return ("Unknown", "dim")
+        return ("Fast (SSD)", "bar")
+    return ("Unknown", "muted")
 
 
 # --- Orthogonal storage facets --------------------------------------------
@@ -207,15 +211,15 @@ def storage_class(
 
 _COW_FS_TYPES = {"btrfs", "zfs"}
 
-# medium key -> (badge label, rich style)
+# medium key -> (badge label, ink role)
 _MEDIUM_BADGE = {
-    "flash": ("Flash", "green"),
-    "hdd": ("HDD", "yellow"),
-    "ram": ("RAM", "green"),
-    "network": ("Network", "red"),
+    "flash": ("Flash", "bar"),
+    "hdd": ("HDD", "warning"),
+    "ram": ("RAM", "bar"),
+    "network": ("Network", "error"),
     "unknown": ("?", "dim"),
 }
-_TRANSFORM_STYLE = "cyan"
+_TRANSFORM_STYLE = "link"
 
 
 def classify_medium(

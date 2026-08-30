@@ -35,8 +35,10 @@ from disktide.rendering import (
     is_safe_rendering,
     render_epoch,
 )
+from disktide.screens import repaint_widgets
 from disktide.scanner.sysinfo import storage_class
 from disktide.repositories.snapshots import SnapshotRepository
+from disktide.themes import resolve_theme
 from disktide.viz.cellgeom import (
     clamp_cell_aspect,
     resolve_cell_aspect,
@@ -44,36 +46,31 @@ from disktide.viz.cellgeom import (
 )
 from disktide.viz.colors import (
     CATEGORIES,
-    CATEGORY_LEGEND_RGB,
     NEUTRAL_DIR_RGB,
-    OTHER_FILE_RGB,
     SCHEMES,
-    set_color_scheme,
+    scheme_legend_rgb,
 )
 
 
-# Display order and labels for the colour-theme picker. Warm leads because
-# it is the default. "Neutral" is the display name for the scheme whose
-# internal key is "default": the key is what lands in the config file and
-# renaming it would break every config already written.
+# Display order and labels for the colour-theme picker, straight off the
+# scheme table so the list cannot drift from what the app can actually
+# apply. Keys are what land in the config file; labels are what the user
+# reads, and only the label may be renamed.
 THEME_OPTIONS: list[tuple[str, str]] = [
-    ("Warm", "warm"),
-    ("Neutral", "default"),
-    ("Cold", "cold"),
-    ("Mono", "mono"),
+    (scheme.label, scheme.name) for scheme in SCHEMES.values()
 ]
-_THEME_FALLBACK = "warm"
 
 
 def sanitize_theme(name: str | None) -> str:
     """A theme key the picker can actually show.
 
     `Select(value=...)` raises on a value that is not one of its options,
-    and a config file is free to hold anything — a hand-typed name, or
-    `vivid` from before it was retired.
+    and a config file is free to hold anything — a hand-typed name, or one
+    of the retired keys (`warm`, `default`, `vivid`). What those mean is
+    decided once, in `resolve_theme`; this name marks the screen boundary
+    where a stored string has to become a selectable option.
     """
-    known = {key for _label, key in THEME_OPTIONS}
-    return name if name in known else _THEME_FALLBACK
+    return resolve_theme(name)
 
 
 def cell_aspect_hint() -> str:
@@ -103,17 +100,15 @@ def theme_preview(name: str) -> Text:
     """Swatches drawn from *name*'s own tables, not the active scheme.
 
     Reads as the chart does: the three shallowest directory neutrals (which
-    is where a theme's temperature actually lives) then the six category
-    swatches, over the theme's own panel colour.
+    is most of a chart's area) then the six category swatches, over the
+    theme's own panel colour. `mono` has to step visibly here too — its six
+    categories are a gray ladder rather than one flat gray — so the swatch
+    row is the same six lookups for every theme.
     """
-    scheme = SCHEMES.get(sanitize_theme(name), SCHEMES[_THEME_FALLBACK])
+    scheme = SCHEMES[sanitize_theme(name)]
     glyph = "##" if is_safe_rendering() else "██"
     background = scheme.border_bg
-    legend = (
-        CATEGORY_LEGEND_RGB.get(scheme.category_key)
-        if scheme.category_key is not None
-        else None
-    )
+    legend = scheme_legend_rgb(scheme)
 
     def swatch(rgb: tuple[int, int, int]) -> tuple[str, Style]:
         return glyph, Style(
@@ -130,9 +125,7 @@ def theme_preview(name: str) -> Text:
         preview.append(*swatch(neutrals[depth]))
     preview.append(" ", Style(bgcolor=background))
     for category in CATEGORIES[:-1]:  # "other" has no legend swatch
-        preview.append(*swatch(
-            OTHER_FILE_RGB[2] if legend is None else legend[category]
-        ))
+        preview.append(*swatch(legend[category]))
     return preview
 
 
@@ -653,17 +646,15 @@ class SettingsScreen(Screen):
         its size change, and colour scheme and safe rendering are neither:
         they are read inside `render_line`. Resuming a screen repaints it
         from those cached lines, which would restore the old picture
-        exactly. Nothing here knows what the screen holds — every widget
-        is simply asked to draw itself again, once, and only when the
-        epoch says something under it moved.
+        exactly. `repaint_widgets` is the same pass the mode screens run on
+        resume, so a screen revealed by leaving Settings and a screen
+        switched back to are refreshed identically.
         """
         try:
             screen = self.app.screen
         except Exception:
             return
-        screen.refresh(layout=True)
-        for widget in screen.query("*"):
-            widget.refresh()
+        repaint_widgets(screen)
 
     def _refresh_cell_aspect_hint(self) -> None:
         """Redraw the hint for whatever the terminal currently reports."""
@@ -799,10 +790,12 @@ class SettingsScreen(Screen):
         elif event.select.id == "color-theme":
             theme = sanitize_theme(str(event.value))
             self._config.ui.color_theme = theme
-            # set_color_scheme bumps the render epoch, so the charts drop
-            # the layouts they baked the old colours into and repaint in
-            # the new scheme as soon as this screen is dismissed.
-            set_color_scheme(theme)
+            # The app applies both halves: the chart tables (which bumps the
+            # render epoch, so the charts drop the layouts they baked the old
+            # colours into and repaint as soon as this screen is dismissed)
+            # and the Textual theme, which refreshes the chrome under this
+            # screen immediately.
+            self.app.apply_color_theme(theme)
             self._refresh_theme_preview()
         elif event.select.id == "live-scan-render":
             value = str(event.value)

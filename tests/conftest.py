@@ -51,4 +51,4 @@ def reset_global_rendering_state():
     from disktide.viz.colors import set_color_scheme
 
     set_safe_rendering(False)
-    set_color_scheme("default")
+    set_color_scheme("disktide")

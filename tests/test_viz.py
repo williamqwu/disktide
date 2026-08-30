@@ -7,7 +7,7 @@ import pytest
 from disktide.glyphs import visible_width
 from disktide.models.tree import FSNode
 from disktide.viz import cellgeom
-from disktide.viz.colors import size_color, depth_color, gradient_color, set_color_scheme
+from disktide.viz.colors import set_color_scheme
 from disktide.viz.treemap import compute_layout, render_line
 from disktide.viz.sunburst import (
     _arc_color,
@@ -133,44 +133,6 @@ def make_viz_tree():
         )
         root.children.append(child)
     return root
-
-
-class TestColors:
-    @pytest.fixture(autouse=True)
-    def _use_default_scheme(self):
-        set_color_scheme("default")
-        yield
-        set_color_scheme("default")
-
-    def test_size_color_small(self):
-        color = size_color(500)  # < 1MB
-        assert color == "dodger_blue2"
-
-    def test_size_color_medium(self):
-        color = size_color(50_000_000)  # < 100MB
-        assert color == "green3"
-
-    def test_size_color_large(self):
-        color = size_color(500_000_000)  # < 1GB
-        assert color == "dark_orange"
-
-    def test_size_color_huge(self):
-        color = size_color(5_000_000_000)  # < 10GB
-        assert color == "red1"
-
-    def test_size_color_massive(self):
-        color = size_color(50_000_000_000)  # >= 10GB
-        assert color == "medium_purple"
-
-    def test_depth_color(self):
-        c1 = depth_color(0)
-        c2 = depth_color(1)
-        assert c1 != c2  # Different depths should give different colors
-
-    def test_gradient_color(self):
-        c1 = gradient_color(0.0)
-        c2 = gradient_color(1.0)
-        assert c1 != c2  # Different ratios should give different colors
 
 
 class TestTreemap:
@@ -349,9 +311,9 @@ class TestSunburstFill:
 
     @pytest.fixture(autouse=True)
     def _use_default_scheme(self):
-        set_color_scheme("default")
+        set_color_scheme("disktide")
         yield
-        set_color_scheme("default")
+        set_color_scheme("disktide")
 
     @pytest.mark.parametrize("aspect", [2.0, 2.6])
     def test_disc_is_round_at_any_cell_aspect(self, aspect):

@@ -19,6 +19,9 @@ from disktide.models.tree import FSNode
 from disktide.screens.explorer import ExplorerScreen
 from disktide.viz.categories import build_category_index
 from disktide.viz.colors import (
+    CATEGORIES,
+    SCHEMES,
+    _relative_luminance,
     category_dir_tint,
     category_file_color,
     neutral_dir_color,
@@ -32,11 +35,16 @@ from disktide.widgets.treemap_view import TreemapView
 PANEL_BG = (30, 30, 30)
 
 
+def _luminance(color: str) -> float:
+    """WCAG relative luminance of an ``rgb(...)`` string."""
+    return _relative_luminance(_parse_rgb(color))
+
+
 @pytest.fixture(autouse=True)
 def _use_default_scheme():
-    set_color_scheme("default")
+    set_color_scheme("disktide")
     yield
-    set_color_scheme("default")
+    set_color_scheme("disktide")
 
 
 def _file(name: str, size: int, parent: str, depth: int) -> FSNode:
@@ -289,16 +297,88 @@ class TestDirectoryTint:
         assert category_dir_tint("code", 1.0, 2) != category_file_color("code", 2)
 
     def test_mono_never_tints(self):
+        """Achromatic means a directory stays on the neutral ladder.
+
+        `mono` does colour its six categories now, but only by lightness,
+        and lightness is what a ring depth already says -- a gray tint
+        would make a directory look like a deeper directory.
+        """
         set_color_scheme("mono")
         assert category_dir_tint("media", 1.0, 1) == neutral_dir_color(1)
 
-    def test_theme_changes_the_neutral_not_the_category(self):
-        set_color_scheme("warm")
-        warm_file = category_file_color("code", 2)
-        warm_neutral = neutral_dir_color(2)
+    def test_a_theme_moves_the_categories_as_well_as_the_neutral(self):
+        """The old rule -- themes re-temper neutrals, never hues -- is gone.
+
+        It could not produce a cold theme whose hues are cool or a
+        colorblind-safe theme separated by lightness, so every theme now
+        owns its category table. What replaces it is the invariant below,
+        checked in every theme rather than argued for once.
+        """
+        set_color_scheme("disktide")
+        base_file = category_file_color("code", 2)
+        base_neutral = neutral_dir_color(2)
         set_color_scheme("cold")
-        assert category_file_color("code", 2) == warm_file
-        assert neutral_dir_color(2) != warm_neutral
+        assert category_file_color("code", 2) != base_file
+        assert neutral_dir_color(2) != base_neutral
+
+    def test_an_uncategorised_file_reads_lighter_than_its_directory(self):
+        """The one lightness rule that outlived the shared palette.
+
+        A categorised file carries its category's own lightness, which may
+        be darker than the directory around it -- `code` is a deep green in
+        `disktide` -- and the hue is what tells them apart. An *un*
+        categorised file has no hue to spend, so at every depth, in every
+        theme, it has to sit lighter than the neutral at that depth.
+
+        Measured as luminance, not as a channel sum: `cyberpunk`'s violet
+        neutral adds up to more than a mid gray while being visibly darker
+        than it.
+        """
+        for theme in SCHEMES:
+            set_color_scheme(theme)
+            for depth in range(5):
+                neutral = _luminance(neutral_dir_color(depth))
+                fill = _luminance(category_file_color("other", depth))
+                assert fill > neutral, (
+                    f"{theme}: an uncategorised file at depth {depth} is "
+                    f"not lighter than the directory it sits in "
+                    f"({fill:.4f} vs {neutral:.4f})"
+                )
+
+    def test_mono_files_all_sit_above_the_directory_ladder(self):
+        """Without hue, lightness has to carry containment on its own.
+
+        Every one of mono's six categories is lighter than the *shallowest*
+        directory neutral at its own ladder level, so a file is lighter
+        than any directory it could be inside -- not merely lighter than
+        its own ring, which is all the other themes promise.
+        """
+        set_color_scheme("mono")
+        top_of_the_dir_ladder = _luminance(neutral_dir_color(0))
+        for category in CATEGORIES[:-1]:
+            fill = _luminance(category_file_color(category, 2))
+            assert fill > top_of_the_dir_ladder, (
+                f"mono {category} ({fill:.4f}) is not above the depth-0 "
+                f"neutral ({top_of_the_dir_ladder:.4f})"
+            )
+
+    def test_mono_steps_its_six_categories_apart(self):
+        """`mono` used to collapse all six onto one gray.
+
+        Every category rendered identically, so the legend named six things
+        the chart drew as one. The six now occupy a lightness ladder, and
+        this pins that they are distinct *and* ordered -- a shared value
+        anywhere would be the old bug back.
+        """
+        set_color_scheme("mono")
+        grays = [
+            _parse_rgb(category_file_color(cat, 2))[0]
+            for cat in CATEGORIES[:-1]
+        ]
+        assert grays == sorted(grays), grays
+        assert len(set(grays)) == len(grays), grays
+        steps = [grays[i + 1] - grays[i] for i in range(len(grays) - 1)]
+        assert min(steps) >= 8, f"mono steps too fine to see: {steps}"
 
 
 class TestSunburstUsesTheIndex:

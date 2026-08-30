@@ -9,6 +9,8 @@ from rich.style import Style
 from textual.events import Click, Leave, MouseMove, Resize
 from textual.message import Message
 from textual.strip import Strip
+
+from disktide.widgets import OpaqueStripMixin
 from textual.widget import Widget
 
 from disktide.domain.live_view import LiveViewNode
@@ -35,7 +37,7 @@ from disktide.viz.sunburst import (
 )
 
 
-class SunburstView(Widget):
+class SunburstView(OpaqueStripMixin, Widget):
     """Widget that renders a sunburst (ring chart) visualization.
 
     Mouse handling is deliberately asymmetric: hovering only hit-tests and
@@ -307,7 +309,7 @@ class SunburstView(Widget):
             category_index=self._category_index,
         )
 
-    def render_line(self, y: int) -> Strip:
+    def render_content_line(self, y: int) -> Strip:
         if self.size.width < 40 or self.size.height < 12:
             if y == max(0, self.size.height // 2 - 1):
                 message = "Sunburst needs >=40x12; use Tree/Treemap"

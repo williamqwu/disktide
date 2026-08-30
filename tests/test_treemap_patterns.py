@@ -655,7 +655,13 @@ class TestFileCategoryMapping:
         assert _file_category(name) == expected
 
     def test_every_category_has_a_color_in_every_scheme(self):
-        """No theme may leave a known category without a distinct fill."""
+        """No theme may leave a known category without a distinct fill.
+
+        `mono` used to be the exception -- all seven categories collapsed
+        onto one gray, so the legend named seven things the chart drew as
+        one. It has a gray ladder of its own now and is held to the same
+        rule as the rest.
+        """
         from disktide.viz.colors import (
             CATEGORIES,
             EXT_CATEGORIES,
@@ -670,12 +676,11 @@ class TestFileCategoryMapping:
                 set_color_scheme(name)
                 colors = {cat: category_file_color(cat, 2) for cat in CATEGORIES}
                 assert all(colors.values()), f"{name} scheme missing a fill"
-                if name != "mono":
-                    assert len(set(colors.values())) == len(CATEGORIES), (
-                        f"{name} scheme reuses a fill across categories: {colors}"
-                    )
+                assert len(set(colors.values())) == len(CATEGORIES), (
+                    f"{name} scheme reuses a fill across categories: {colors}"
+                )
         finally:
-            set_color_scheme("default")
+            set_color_scheme("disktide")
 
 
 class TestNonUniformSiblings:

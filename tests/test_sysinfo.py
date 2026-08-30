@@ -28,22 +28,22 @@ from disktide.scanner.sysinfo import (
 
 class TestStorageClass:
     def test_ssd(self):
-        assert storage_class("ext4", False, False) == ("Fast (SSD)", "green")
+        assert storage_class("ext4", False, False) == ("Fast (SSD)", "bar")
 
     def test_hdd(self):
-        assert storage_class("ext4", False, True) == ("Medium (HDD)", "yellow")
+        assert storage_class("ext4", False, True) == ("Medium (HDD)", "warning")
 
     def test_network_beats_rotational(self):
         # A network mount has no meaningful rotational bit; locality wins.
-        assert storage_class("nfs4", True, False) == ("Slow (Network)", "red")
+        assert storage_class("nfs4", True, False) == ("Slow (Network)", "error")
 
     def test_ram_backed(self):
         # Regression: tmpfs/ramfs used to fall through to "Unknown".
-        assert storage_class("tmpfs", False, None) == ("Fast (RAM)", "green")
-        assert storage_class("ramfs", False, None) == ("Fast (RAM)", "green")
+        assert storage_class("tmpfs", False, None) == ("Fast (RAM)", "bar")
+        assert storage_class("ramfs", False, None) == ("Fast (RAM)", "bar")
 
     def test_unknown_fallback(self):
-        assert storage_class("xfs", False, None) == ("Unknown", "dim")
+        assert storage_class("xfs", False, None) == ("Unknown", "muted")
 
 
 class TestFacets:
@@ -75,11 +75,11 @@ class TestFacets:
 
     def test_facet_labels_order_medium_then_transforms(self):
         labels = facet_labels("xfs", False, False, ["RAID"])
-        assert labels == [("Flash", "green"), ("RAID", "cyan")]
+        assert labels == [("Flash", "bar"), ("RAID", "link")]
 
     def test_facet_labels_network_no_local_badge(self):
         labels = facet_labels("nfs4", True, None, [])
-        assert labels == [("Network", "red")]
+        assert labels == [("Network", "error")]
 
 
 class TestUnescapeMountPath:

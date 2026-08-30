@@ -28,6 +28,7 @@ from disktide.viz.colors import (
     delta_background,
     file_category,
     get_color_scheme,
+    label_ink,
 )
 from disktide.viz.layout import aggregate_children, bounded_children
 
@@ -700,12 +701,13 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
             rect.node, rect.depth, rect.is_leaf, rect.visual,
             layout.category_index,
         )
-        # Every rect background on the category ladders is mid-to-dark, so
-        # labels are white throughout — the old dark-on-light rule for deep
-        # rects would now print near-black on near-black.
+        # The ink is measured against the fill rather than fixed: the
+        # colorblind and cyberpunk tables reach OKLab L 0.93, and a white
+        # label on a neon yellow rect is a blank rect.
+        ink = label_ink(bg)
         style = Style(
             bgcolor=bg,
-            color="white",
+            color=ink,
             bold=rect.selected,
             underline=rect.selected,
         )
@@ -723,7 +725,7 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
                         text,
                         Style(
                             bgcolor=bg,
-                            color="white",
+                            color=ink,
                             bold=True,
                             underline=rect.selected,
                         ),

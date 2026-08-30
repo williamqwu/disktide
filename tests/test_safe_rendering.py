@@ -31,10 +31,10 @@ BLOCK_ELEMENTS = range(0x2580, 0x25A0)
 def _reset_rendering():
     """Reset module state around each test (it's a global toggle)."""
     set_safe_rendering(False)
-    set_color_scheme("default")
+    set_color_scheme("disktide")
     yield
     set_safe_rendering(False)
-    set_color_scheme("default")
+    set_color_scheme("disktide")
 
 
 def _mixed_tree() -> FSNode:

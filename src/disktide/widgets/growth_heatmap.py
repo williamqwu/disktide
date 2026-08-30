@@ -7,6 +7,8 @@ from rich.style import Style
 from textual.binding import Binding
 from textual.message import Message
 from textual.strip import Strip
+
+from disktide.widgets import OpaqueStripMixin
 from textual.widget import Widget
 
 from disktide.domain.visualization import GrowthHeatmapModel, HeatmapCell, VisualState
@@ -14,7 +16,7 @@ from disktide.presentation.tui.viewmodels.visualization import legend_text, visu
 from disktide.viz.colors import delta_background
 
 
-class GrowthHeatmap(Widget, can_focus=True):
+class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
     """Render top-changing paths across bounded snapshot intervals."""
 
     BINDINGS = [
@@ -76,7 +78,7 @@ class GrowthHeatmap(Widget, can_focus=True):
         if path is not None:
             self.post_message(self.PathSelected(path))
 
-    def render_line(self, y: int) -> Strip:
+    def render_content_line(self, y: int) -> Strip:
         width = self.size.width
         height = self.size.height
         model = self._model

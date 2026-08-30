@@ -11,6 +11,7 @@ from pathlib import Path
 
 from disktide._compat import tomllib
 from disktide.paths import config_file, config_root
+from disktide.themes import resolve_theme
 
 _DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _SIZE_MULTIPLIERS = {
@@ -91,7 +92,7 @@ class CleanupConfig:
 
 @dataclass
 class UIConfig:
-    color_theme: str = "warm"
+    color_theme: str = "disktide"
     default_viz: str = "sunburst"
     show_cleanup: bool = False
     default_scan_path: str | None = None  # legacy flat field
@@ -371,10 +372,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     if "ui" in data:
         ui = data["ui"]
-        theme = ui.get("color_theme", "warm")
-        # `vivid` was retired in 0.2.25 as a perceptual duplicate of the
-        # neutral theme; configs written before then land on it.
-        config.ui.color_theme = "default" if theme == "vivid" else theme
+        # `warm`, `default` and `vivid` are all retired keys for what is
+        # now `disktide`; `resolve_theme` owns that mapping so the loader,
+        # the picker and the renderer cannot disagree. An unknown name
+        # (hand-typed, or from a newer build) lands on the default rather
+        # than raising when the picker tries to show it.
+        config.ui.color_theme = resolve_theme(ui.get("color_theme"))
         config.ui.default_viz = ui.get("default_viz", "sunburst")
         config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.safe_rendering = ui.get("safe_rendering", False)

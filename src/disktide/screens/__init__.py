@@ -1,10 +1,12 @@
 """Behaviour shared by the mode screens.
 
-Two things live here because all four content screens — explorer,
+Three things live here because all four content screens — explorer,
 monitor, fs-overview, cleanup — need them and none of them owns them:
 :class:`RenderEpochRefreshMixin`, which repaints a screen that was away
-while a global render decision changed, and :func:`scrollbar_css`, which
-gives every scrollable widget in the app one scrollbar palette.
+while a global render decision changed, :func:`repaint_widgets`, which is
+how that repaint is actually done (and which the Settings screen reuses on
+the screen its dismissal reveals), and :func:`scrollbar_css`, which gives
+every scrollable widget in the app one scrollbar palette.
 
 Nothing in here imports a screen module, so `import disktide.screens`
 stays as cheap as it was: the mode screens are still loaded one at a
@@ -59,12 +61,30 @@ class RenderEpochRefreshMixin:
         self._render_epoch_seen = epoch
         if not stale:
             return
-        # Nothing here knows which widgets read a global, so every one is
-        # asked to draw itself again, once. `layout=True` on the screen
-        # covers anything whose size depends on a glyph swap.
-        self.refresh(layout=True)
-        for widget in self.query("*"):
-            widget.refresh()
+        repaint_widgets(self)
+
+
+def repaint_widgets(screen) -> None:
+    """Draw every widget on `screen` again, once.
+
+    Nothing here knows which widgets read a global, so every one is asked.
+    `layout=True` on the screen covers anything whose size depends on a
+    glyph swap.
+
+    A `refresh()` is not always enough. Textual re-runs `render()` on a
+    refresh, but a widget that *builds* content and hands it over — Textual's
+    `Tree`, whose labels are `Text` objects stored on the nodes by
+    `set_label` — keeps whatever it was given, so a theme change would
+    repaint the old colours perfectly. Such a widget implements
+    `rebuild_render_cache`, called here before the refresh, and only the
+    widgets that have something to rebuild pay for it.
+    """
+    screen.refresh(layout=True)
+    for widget in screen.query("*"):
+        rebuild = getattr(widget, "rebuild_render_cache", None)
+        if rebuild is not None:
+            rebuild()
+        widget.refresh()
 
 
 # Textual's default `scrollbar-background` is `$background-darken-1`,

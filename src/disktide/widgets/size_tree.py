@@ -26,6 +26,7 @@ from disktide.presentation.tui.viewmodels.visualization import (
     visual_token,
 )
 from disktide.rendering import bar_chars, denied_glyph, link_arrow, partial_glyph
+from disktide.viz.colors import ink
 
 
 class SizeTree(Tree[FSNode]):
@@ -339,20 +340,20 @@ class SizeTree(Tree[FSNode]):
 
         # Name (directory, symlink, then plain file)
         if node.is_dir:
-            text.append(f"{node.name}/", style="bold cyan")
+            text.append(f"{node.name}/", style=ink("dir"))
             if node.is_loop:
-                text.append(" (loop)", style="bold yellow")
+                text.append(" (loop)", style=ink("warning_strong"))
         elif node.is_symlink:
-            text.append(node.name, style="cyan")
+            text.append(node.name, style=ink("link"))
             if node.link_target:
                 target = node.link_target
                 if node.link_is_dir:
                     target = target.rstrip("/") + "/"
                 text.append(f" {link_arrow()} {target}", style="dim")
             if node.link_broken:
-                text.append(" (broken)", style="bold red")
+                text.append(" (broken)", style=ink("error_strong"))
         else:
-            text.append(node.name, style="white")
+            text.append(node.name, style=ink("file"))
 
         value = metric_text(node, self._metric)
         text.append(f"  {value}", style="dim")
@@ -369,23 +370,23 @@ class SizeTree(Tree[FSNode]):
         if trend:
             spark = sparkline(trend)
             if spark:
-                text.append(f"  {spark}", style="dim cyan")
+                text.append(f"  {spark}", style=ink("link_dim"))
 
         if node.is_hardlink:
             if node.is_hardlink_duplicate and node.hardlink_owner_path:
                 owner = node.hardlink_owner_path.rsplit("/", 1)[-1]
-                text.append(f"  [hardlink → {owner}]", style="dim magenta")
+                text.append(f"  [hardlink → {owner}]", style=ink("accent_dim"))
             else:
                 text.append(
                     f"  [hardlink owner; {node.link_count} links]",
-                    style="dim magenta",
+                    style=ink("accent_dim"),
                 )
 
         if node.excluded:
             marker = "xdev" if node.filesystem_boundary else node.exclusion_reason
-            text.append(f"  [{marker or 'excluded'}]", style="bold yellow")
+            text.append(f"  [{marker or 'excluded'}]", style=ink("warning_strong"))
         elif node.depth_limited:
-            text.append("  [max-depth]", style="bold yellow")
+            text.append("  [max-depth]", style=ink("warning_strong"))
 
         # Accessibility indicators (full denial vs partial). Rendered last,
         # but resolved here so the bar can reserve room for them: they sit
@@ -393,15 +394,15 @@ class SizeTree(Tree[FSNode]):
         # off the right edge.
         indicator: tuple[str, str] | None = None
         if node.error:
-            indicator = (f" {denied_glyph()}", "bold red")
+            indicator = (f" {denied_glyph()}", ink("error_strong"))
         elif node.inaccessible_count > 0:
             indicator = (
                 f" {partial_glyph()} {node.inaccessible_count} hidden",
-                "bold yellow",
+                ink("warning_strong"),
             )
         elif node.is_dir and node.inaccessible_subtree_count > 0:
             # Some descendant somewhere below has hidden state — dim hint
-            indicator = (f" {partial_glyph()}", "dim yellow")
+            indicator = (f" {partial_glyph()}", ink("warning_dim"))
 
         # Proportional bar for directories (share of the scan root total)
         if node.is_dir:
@@ -443,9 +444,9 @@ class SizeTree(Tree[FSNode]):
             filled = int(ratio * bar_width)
             filled_ch, empty_ch = bar_chars()
             bar = filled_ch * filled + empty_ch * (bar_width - filled)
-            text.append(f"  {bar} {percent}", style="green")
+            text.append(f"  {bar} {percent}", style=ink("bar"))
         elif room is None or room >= 2 + len(percent):
-            text.append(f"  {percent}", style="green")
+            text.append(f"  {percent}", style=ink("bar"))
 
     def _tail_room(self, node: FSNode, text: Text, reserved: int) -> int | None:
         """Cells left on `node`'s row for the bar and percent.
@@ -516,6 +517,18 @@ class SizeTree(Tree[FSNode]):
             if tree_node.data is not None:
                 tree_node.set_label(self._make_label(tree_node.data))
             stack.extend(tree_node.children)
+
+    def rebuild_render_cache(self) -> None:
+        """Re-render the labels after a global render decision moved.
+
+        Textual's `Tree` holds each label as a `Text` built once by
+        `_make_label` and handed over with `set_label`, so a `refresh()`
+        redraws the same colours it was already drawing. The colour scheme
+        and ASCII-safe rendering are both read inside `_make_label`, which
+        makes this the one widget on the explorer that a theme change
+        cannot reach on its own.
+        """
+        self._refresh_labels()
 
     def cycle_sort(self) -> str:
         """Cycle through sort options and return the new sort key."""

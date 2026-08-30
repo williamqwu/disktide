@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from disktide.config import (
     load_config, save_config, AppConfig, HostPaths,
     get_effective_paths, parse_size, set_effective_paths,
@@ -39,7 +41,7 @@ exclude_pseudo_filesystems = false
 default_interval = 3600
 
 [ui]
-color_theme = "dark"
+color_theme = "cyberpunk"
 default_viz = "sunburst"
 safe_rendering = true
 """)
@@ -49,18 +51,40 @@ safe_rendering = true
         assert config.scan.one_file_system is True
         assert config.scan.exclude_pseudo_filesystems is False
         assert config.monitor.default_interval == 3600
-        assert config.ui.color_theme == "dark"
+        assert config.ui.color_theme == "cyberpunk"
         assert config.ui.default_viz == "sunburst"
         assert config.ui.safe_rendering is True
 
-    def test_retired_vivid_theme_loads_as_default(self, tmp_path):
-        """0.2.25 dropped `vivid`; a config naming it must still open."""
+    @pytest.mark.parametrize("retired", ["warm", "default", "vivid"])
+    def test_retired_theme_names_load_as_disktide(self, tmp_path, retired):
+        """Three keys named this palette before `disktide` did.
+
+        `vivid` (dropped in 0.2.25) and `default` (dropped when the five
+        themes landed) were both measured duplicates of `warm`, and `warm`
+        itself became the product's own theme under its own name. A config
+        naming any of them has to open on the colours it had, not on
+        whatever happens to sort first.
+        """
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(f"""
+[ui]
+color_theme = "{retired}"
+""")
+        assert load_config(str(config_file)).ui.color_theme == "disktide"
+
+    def test_an_unknown_theme_name_loads_as_the_default(self, tmp_path):
+        """A hand-typed or newer-build name must not stop the app opening.
+
+        `Select(value=...)` raises on a value outside its options, so a
+        name the picker cannot show has to be normalised before it reaches
+        the settings screen rather than after.
+        """
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [ui]
-color_theme = "vivid"
+color_theme = "aubergine"
 """)
-        assert load_config(str(config_file)).ui.color_theme == "default"
+        assert load_config(str(config_file)).ui.color_theme == "disktide"
 
     def test_partial_config(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -143,7 +167,7 @@ show_hidden = true
         config.scan.one_file_system = True
         config.scan.exclude_pseudo_filesystems = False
         config.monitor.default_interval = 7200
-        config.ui.color_theme = "dark"
+        config.ui.color_theme = "cyberpunk"
         config.ui.default_viz = "sunburst"
         config.ui.safe_rendering = True
 
@@ -156,7 +180,7 @@ show_hidden = true
         assert loaded.scan.one_file_system is True
         assert loaded.scan.exclude_pseudo_filesystems is False
         assert loaded.monitor.default_interval == 7200
-        assert loaded.ui.color_theme == "dark"
+        assert loaded.ui.color_theme == "cyberpunk"
         assert loaded.ui.default_viz == "sunburst"
         assert loaded.ui.safe_rendering is True
 
@@ -402,7 +426,7 @@ class TestMouseSupport:
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [ui]
-color_theme = "warm"
+color_theme = "disktide"
 """)
         assert load_config(config_file).ui.mouse is True
 
