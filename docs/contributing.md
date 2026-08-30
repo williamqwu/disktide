@@ -60,7 +60,10 @@ See [architecture.md](architecture.md) for the full layout. In brief:
 
 ### Code Style
 
-- Python >= 3.11 features are used freely: `X | Y` union syntax, `tomllib`, `slots=True` dataclasses.
+- Python >= 3.10 features are used freely: `X | Y` union syntax, `slots=True` and
+  `kw_only=True` dataclasses, `zip(strict=True)`. `match` statements are not used.
+- `tomllib` and `StrEnum` are 3.11 additions, so import both from
+  `disktide._compat` rather than from the standard library.
 - Type annotations on all public APIs. `from __future__ import annotations` at the top of every module.
 - Dataclasses with `slots=True` for models (`FSNode`, `Snapshot`, `SizeDelta`).
 

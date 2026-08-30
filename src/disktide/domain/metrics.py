@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Iterable, Protocol
+
+from disktide._compat import StrEnum
 
 
 class _StatLike(Protocol):

@@ -5,11 +5,11 @@ from __future__ import annotations
 import os
 import re
 import socket
-import tomllib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from disktide._compat import tomllib
 from disktide.paths import config_file, config_root
 
 _DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}

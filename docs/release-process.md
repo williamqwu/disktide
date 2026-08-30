@@ -10,7 +10,7 @@ Trusted Publishing. The release workflow is defined in
 1. The release version matches in `pyproject.toml`, `src/disktide/__init__.py`,
    and `uv.lock`.
 2. `uv sync --locked` succeeds without changing `uv.lock`.
-3. The Python 3.11, 3.12, and 3.13 CI matrix is green.
+3. The Python 3.10, 3.11, 3.12, 3.13, and 3.14 CI matrix is green.
 4. The minimal wheel environment stays within 20 runtime distributions and
    20 MiB, with no native extension.
 5. `disktide doctor`, `disktide doctor --json`, a small directory scan, and a

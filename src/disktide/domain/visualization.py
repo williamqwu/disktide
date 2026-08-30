@@ -5,11 +5,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
-from enum import StrEnum
 from pathlib import Path
 from statistics import median
 from typing import Mapping, Sequence
 
+from disktide._compat import StrEnum
 from disktide.domain.alerts import AlertEvent, AlertKind
 from disktide.domain.delta import CompareResult, SizeDelta
 from disktide.domain.metrics import MetricId

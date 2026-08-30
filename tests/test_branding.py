@@ -1,4 +1,3 @@
-import tomllib
 import importlib
 from pathlib import Path
 
@@ -16,6 +15,7 @@ from disktide import (
     __version__,
 )
 from disktide.__main__ import cli
+from disktide._compat import tomllib
 
 
 def test_canonical_and_legacy_commands_share_entrypoint():

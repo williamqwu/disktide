@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import tomllib
 import re
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 from typing import Iterable
 
+from disktide._compat import tomllib
 from disktide.models.patterns import (
     CleanupRule,
     CleanupRuleActionPolicy,

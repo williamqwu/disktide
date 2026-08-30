@@ -12,7 +12,7 @@
 <p>
   <a href="https://github.com/williamqwu/disktide/actions/workflows/ci.yml">
     <img alt="CI" src="https://github.com/williamqwu/disktide/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Python 3.11 to 3.14" src="https://img.shields.io/badge/python-3.11%20to%203.14-3776AB?logo=python&logoColor=white">
+  <img alt="Python 3.10 to 3.14" src="https://img.shields.io/badge/python-3.10%20to%203.14-3776AB?logo=python&logoColor=white">
   <a href="LICENSE">
     <img alt="License Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-green"></a>
   <img alt="Textual TUI" src="https://img.shields.io/badge/TUI-Textual-5A2CA0">
@@ -70,7 +70,7 @@ review before anything moves, and an applied plan can be undone.
 
 ## Installation
 
-Python 3.11 through 3.14 are supported, and the test suite passes on all four.
+Python 3.10 through 3.14 are supported, and the test suite passes on all five.
 
 Run once without installing:
 

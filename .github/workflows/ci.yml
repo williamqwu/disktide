@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -32,6 +32,25 @@ jobs:
       - name: Run test suite
         # The suite is about half wait -- app boot and scan handoffs -- so
         # one worker per core roughly halves it on the two-core runners.
+        run: .venv/bin/python -m pytest -q -n auto
+
+  test-prerelease:
+    # Informational only: 3.15 is still a beta, so a break here is a heads-up
+    # about upstream churn rather than a reason to block the merge. 3.15 is
+    # deliberately absent from the pyproject classifiers until it ships.
+    name: Python 3.15 pre-release (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.15"
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python 3.15
+      - name: Run test suite
         run: .venv/bin/python -m pytest -q -n auto
 
   watch-test:

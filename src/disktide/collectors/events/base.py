@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import StrEnum
 from typing import Callable, Protocol, runtime_checkable
 
+from disktide._compat import StrEnum
 from disktide.domain.monitor import WatchDiagnostics
 from disktide.domain.policy import ScanPolicy
 from disktide.extensions.capabilities import CapabilityStatus

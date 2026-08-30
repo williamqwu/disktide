@@ -841,9 +841,11 @@ a bounded temporary benchmark file on the selected mount.
 | humanize >= 4.0 | Human-readable sizes and dates |
 | inotify-simple >= 2, < 3 | Optional Linux `[watch]` event acceleration |
 
-Python >= 3.11 required (uses `tomllib`, `slots=True` dataclasses, `X | Y` union syntax).
+Python >= 3.10 required (uses `slots=True` dataclasses, `X | Y` union syntax).
+`tomllib` and `StrEnum` come from `disktide._compat`, which falls back to the
+`tomli` dependency and a `StrEnum` backport on 3.10.
 
-`uv.lock` is committed. CI tests Python 3.11, 3.12, and 3.13 with
+`uv.lock` is committed. CI tests Python 3.10 through 3.14 with
 `uv sync --locked`, then installs the wheel into a clean environment. The core
 budget is at most 20 runtime distributions and 20 MiB with no native extension.
 CI separately installs the `watch` extra and verifies event backend discovery;

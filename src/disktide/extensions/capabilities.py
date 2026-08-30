@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
+
+from disktide._compat import StrEnum
 
 
 class CapabilityStatus(StrEnum):

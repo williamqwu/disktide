@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from disktide._compat import StrEnum
 from disktide.domain.metrics import MetricId
 from disktide.domain.policy import ScanPolicy
 

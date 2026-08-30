@@ -8,10 +8,10 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Protocol
 
+from disktide._compat import StrEnum
 from disktide.collectors.events.base import (
     EventBackend,
     EventBackendInfo,

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.27
+
+**Python 3.10 through 3.14, with the two 3.11-only imports moved behind one shim**
+
+- **the floor drops to 3.10** The 3.11 requirement was load-bearing in exactly two places: `tomllib` (`config.py`, `extensions/cleanup_rules.py`) and `enum.StrEnum` (27 enum classes across 12 modules). Nothing else in the tree needs 3.11 -- no `match`, no `ExceptionGroup`, no `asyncio.TaskGroup`, no `typing.Self` -- and every runtime dependency already supports 3.10, so the floor was costing users a whole interpreter version for two importable names. `requires-python` is now `>=3.10`, the classifiers gain 3.10, and the CI matrix runs five interpreters. The full suite is green on CPython 3.10, 3.11, 3.12, 3.13, and 3.14; the 3.9 question was audited and declined -- 111 `slots=True` dataclasses (including `FSNode`, one instance per scanned file, where slots are the memory budget) and 12 `kw_only` contracts cannot be shimmed, six dependencies would have to be pinned back, and 3.9 stopped receiving security fixes in October 2025.
+- **`tomllib` and `StrEnum` go through `disktide._compat`** Rather than sprinkle version checks across a dozen modules, one module re-exports the genuine stdlib objects on 3.11+ and falls back on 3.10 to the `tomli` dependency (`tomllib`'s own upstream, same `TOMLDecodeError`) and a `StrEnum` backport. The backport is not just `str, Enum`: 3.11 builds `StrEnum` on `ReprEnum`, which leaves `__str__` and `__format__` to `str` so a member renders as its bare value -- without that, every f-string carrying a `ScanPhase` or `MonitorHealthState` would print `ScanPhase.DISCOVERING` on 3.10 and `discovering` everywhere else, silently, in CLI output and persisted rows alike. `__str__`, `__format__`, and `auto()`'s name-lowercasing are restored explicitly, and `tests/test_compat.py` pins that contract against whichever implementation the interpreter supplies, so a drift fails on the 3.10 job instead of surfacing as odd rendering later.
+- **the conditional dependency stays invisible on 3.11+** `tomli` is declared with `python_version < '3.11'`, so the 3.13 wheel install the dependency budget measures is unchanged; on 3.10 it costs one distribution (16 of 20, 11.6 MiB of 20 MiB, still no native extension). The lock gained only marker-gated entries -- `tomli` plus three dev-only backports pytest and textual-dev already wanted below 3.11 -- and no existing pin moved.
+- **3.15 runs informationally** The suite already passes on CPython 3.15.0b4 with no code changes, so a `continue-on-error` CI job tracks the beta and reports upstream churn early; 3.15 stays out of the classifiers until it ships.
+- **`.venv*/` is ignored** `.gitignore` matched only the exact name `.venv/`, so a second in-tree environment such as the `.venv-release-smoke` the release process asks for was swept into the sdist and failed the next `uv build`.
+
 ## v0.2.26
 
 **Charts that cannot mix two geometries in one frame, a tree percent that keeps its digits, and a suite that passes on two cores**

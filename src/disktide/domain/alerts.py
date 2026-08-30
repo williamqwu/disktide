@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import StrEnum
 
+from disktide._compat import StrEnum
 from disktide.domain.metrics import MetricId
 
 

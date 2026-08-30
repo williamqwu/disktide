@@ -5,10 +5,16 @@ from __future__ import annotations
 
 import argparse
 import tarfile
-import tomllib
 import zipfile
 from email.parser import BytesParser
 from pathlib import Path
+
+# Inlined rather than imported from disktide._compat so the script stays
+# runnable straight from a checkout, on 3.10, without disktide installed.
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 
 def main() -> int:

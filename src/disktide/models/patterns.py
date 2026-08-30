@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum, StrEnum
+from enum import Enum
 from fnmatch import fnmatch
 from pathlib import Path
+
+from disktide._compat import StrEnum
 
 
 class RiskLevel(Enum):

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 
+from disktide._compat import StrEnum
 from disktide.domain.snapshot import Snapshot
 
 
