@@ -94,6 +94,7 @@ src/disktide/
     treemap.py           Squarified treemap layout + rendering
     sunburst.py          Ring chart via braille canvas
     braille.py           ColorBrailleCanvas -- per-cell color voting
+    cellgeom.py          Layered cell-aspect resolver + XTWINOPS probe
     colors.py            5 color schemes, HSL utilities
 
   screens/
@@ -707,6 +708,49 @@ Ring chart where each concentric ring represents a depth level, and arc angles a
 - **Legend**: Bottom-left shows file-type categories with their colors, plus each one's byte share when the category index is available.
 - **Growth overlay**: Diff frames replace category hue with shared delta state while preserving path/ring identity. Selected branches remain in the arc model below the normal tiny-arc cutoff.
 - **Narrow fallback**: Canvases below 40x12 render a readable summary and legend instead of a clipped ring chart.
+
+### Terminal Cell Geometry
+
+Both spatial charts do their geometry in *units*, where one unit is the width of
+a character cell and a cell is `cell_aspect` units tall. A disc of radius R is
+then a true circle on screen -- `2R` columns by `2R / aspect` rows -- and a
+"square" treemap rect is actually square. `tests/test_chart_geometry.py` sweeps
+widths 40-200 against heights 12-64 at eight aspects and asserts the painted
+bounding box is round in unit space, inside the frame, and centred on the
+layout's own `center_x`/`center_y`. That leaves the *input* as the only thing
+that can make a disc oval, which is what `viz/cellgeom.py` owns.
+
+`resolve_cell_aspect()` returns a `CellAspect` carrying both the ratio and its
+provenance, resolved in order: the `DISKTIDE_CELL_ASPECT` environment variable;
+the `[ui] cell_aspect` override the Settings box and the `,`/`.` explorer keys
+write; an in-band (mode 2048) resize report; `TIOCGWINSZ`'s pixel fields; a
+cached XTWINOPS probe; then 2.0. Everything is clamped to [1.5, 3.5] and any
+exception resolves to 2.0 -- a chart that is slightly the wrong shape beats one
+that raises out of a render pass. `detect_cell_aspect()` remains the
+float-only entry point the two chart widgets call per rebuild.
+
+The measurement layers exist because `TIOCGWINSZ` reports no pixel size in a
+large share of real terminals: xterm.js web shells, VS Code's integrated
+terminal, ConPTY/Windows Terminal, mosh, GNU screen, a detached tmux, and the
+`textual serve` driver. `App.on_resize` feeds in-band reports to
+`report_pixel_size()`, which stores the derived *cell* size rather than the
+window size so it survives later SIGWINCH resizes at the same font; a changed
+aspect goes out as a `bump_render_epoch()` rather than touching either widget,
+because a layout may never be swapped mid-paint.
+
+`probe_terminal_cell_size()` is the last automatic resort and runs from exactly
+one place -- `__main__.cli()`, immediately before `DiskTideApp` is constructed,
+and only when both stdio halves are ttys and no earlier layer answered. It puts
+stdin in cbreak with ECHO off, writes `CSI 16 t`, `CSI 14 t`, the DECRQM query
+for mode 2048 and DA1 in one write, then reads until the DA1 reply or a 0.6s
+deadline. DA1 is last because nearly every terminal answers it, which is what
+distinguishes "no answer is coming" from "not yet" and keeps a silent terminal
+from costing the deadline more than once. The replies must be consumed before
+Textual starts: its parser reissues escape sequences it cannot interpret as
+typed keys, so a leftover `CSI 6;17;7t` would arrive as garbage keystrokes in
+the welcome screen's path input. `disktide doctor`'s `terminal` section reports
+each mechanism separately, since knowing that 14t answered where 16t did not
+identifies the terminal in a way one resolved number cannot.
 
 ### Trend and Growth Heatmap
 

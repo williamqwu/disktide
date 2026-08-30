@@ -202,6 +202,52 @@ show_hidden = true
         assert loaded.scan.workers is None
         assert loaded.scan.max_depth is None
 
+    def test_cell_aspect_roundtrip(self, tmp_path):
+        config = AppConfig()
+        config.ui.cell_aspect = 2.43
+        config_file = tmp_path / "aspect.toml"
+        save_config(config, config_file)
+
+        assert "cell_aspect = 2.43" in config_file.read_text()
+        assert load_config(config_file).ui.cell_aspect == 2.43
+
+    def test_cell_aspect_defaults_to_auto_and_is_not_written(self, tmp_path):
+        """Unset means "measure it", and leaves no key behind to argue with."""
+        config = AppConfig()
+        assert config.ui.cell_aspect is None
+        config_file = tmp_path / "auto.toml"
+        save_config(config, config_file)
+
+        assert "cell_aspect" not in config_file.read_text()
+        assert load_config(config_file).ui.cell_aspect is None
+
+    def test_cell_aspect_is_clamped_on_load(self, tmp_path):
+        """A value outside the range real cells occupy is a typo, not a font."""
+        config_file = tmp_path / "clamped.toml"
+        config_file.write_text("[ui]\ncell_aspect = 12.0\n")
+        assert load_config(config_file).ui.cell_aspect == 3.5
+
+        config_file.write_text("[ui]\ncell_aspect = 0.4\n")
+        assert load_config(config_file).ui.cell_aspect == 1.5
+
+    def test_unusable_cell_aspect_reads_as_auto(self, tmp_path):
+        """Including the "auto" a user would reasonably write by hand.
+
+        The field is an override for automatic detection, so anything
+        unusable has an obvious right answer -- go back to detecting -- and
+        refusing to start over it would be strictly worse.
+        """
+        config_file = tmp_path / "garbage.toml"
+        for literal in ('"auto"', '"2.43"', "0", "-1.0", "true"):
+            config_file.write_text(f"[ui]\ncell_aspect = {literal}\n")
+            assert load_config(config_file).ui.cell_aspect is None, literal
+
+    def test_integer_cell_aspect_is_accepted(self, tmp_path):
+        """TOML makes `cell_aspect = 2` an int; it is still a valid ratio."""
+        config_file = tmp_path / "int.toml"
+        config_file.write_text("[ui]\ncell_aspect = 2\n")
+        assert load_config(config_file).ui.cell_aspect == 2.0
+
     def test_default_scan_path_roundtrip(self, tmp_path):
         config = AppConfig()
         config.ui.default_scan_path = "/home/user/projects"

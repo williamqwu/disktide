@@ -15,7 +15,7 @@ from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 
-from disktide.config import AppConfig, resolve_live_scan_render
+from disktide.config import AppConfig, resolve_live_scan_render, save_config
 from disktide.domain.live_view import LiveViewNode, build_live_view
 from disktide.domain.metrics import MetricId
 from disktide.domain.policy import ScanPolicy
@@ -37,7 +37,7 @@ from disktide.domain.scan import (
 )
 from disktide.domain.visualization import ExplorerSpaceTime, VisualizationBlocked
 from disktide.metrics import METRIC_EXPLANATIONS, METRIC_NAMES, metric_text
-from disktide.rendering import denied_glyph, partial_glyph
+from disktide.rendering import bump_render_epoch, denied_glyph, partial_glyph
 from disktide.models.tree import FSNode
 from disktide.scanner.walker import classify_symlink
 from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
@@ -45,6 +45,11 @@ from disktide.services.scan import ScanService
 from disktide.services.monitor import MonitorEvent, MonitorEventKind, MonitorService
 from disktide.services.visualization import VisualizationService
 from disktide.viz.categories import CategoryIndex, build_category_index
+from disktide.viz.cellgeom import (
+    clamp_cell_aspect,
+    detect_cell_aspect,
+    set_configured_aspect,
+)
 from disktide.widgets.size_tree import SizeTree
 from disktide.widgets.breadcrumb import Breadcrumb
 from disktide.widgets.confirm_modal import ConfirmModal
@@ -52,6 +57,12 @@ from disktide.widgets.info_panel import InfoPanel
 from disktide.widgets.treemap_view import TreemapView
 from disktide.widgets.sunburst_view import SunburstView
 from disktide.widgets.scan_progress import ScanProgressOverlay
+
+
+# One nudge of the cell-aspect keys. Small enough that a user converging
+# on a round disc by eye does not overshoot it, large enough that a single
+# press is visible on a disc of any useful size.
+_CELL_ASPECT_STEP = 0.05
 
 
 class _ExplorerMonitorEventMessage(Message):
@@ -87,6 +98,13 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             "Older snapshot pair",
             show=False,
         ),
+        # Live cell-aspect calibration, for the terminals nothing can
+        # measure. `[` and `]` would be the conventional pair, but they
+        # already step through snapshot pairs above, so the nudge keys are
+        # `,` and `.` — the other long-standing "less / more" pair, and
+        # unbound everywhere in the app.
+        Binding("comma", "nudge_cell_aspect(-1)", "Rounder disc", show=False),
+        Binding("full_stop", "nudge_cell_aspect(1)", "Taller disc", show=False),
         Binding(
             "shift+m",
             "setup_monitor",
@@ -1208,6 +1226,37 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         if metric == "unique" and self._scan_in_progress:
             explanation = "available after global hardlink accounting completes"
         self.app.notify(f"{label}: {explanation}", timeout=3)
+
+    def action_nudge_cell_aspect(self, direction: int) -> None:
+        """Calibrate the cell aspect by eye, one step at a time.
+
+        The last resort for the terminals that report no pixel size at
+        all — xterm.js web shells, ConPTY, mosh, screen — where the disc
+        is drawn at the assumed 2.0 and there is nothing to measure. The
+        step starts from whatever is *effective* right now, so the first
+        press nudges away from the measured or assumed value rather than
+        from some remembered override, and it persists: a calibration the
+        user has to redo every launch is not one worth making.
+        """
+        current = detect_cell_aspect()
+        value = round(
+            clamp_cell_aspect(current + direction * _CELL_ASPECT_STEP), 2
+        )
+        set_configured_aspect(value)
+        if self._config is not None:
+            self._config.ui.cell_aspect = value
+            try:
+                save_config(self._config)
+            except OSError:
+                # A full disk costs the user the calibration next launch,
+                # which is not worth interrupting them over mid-nudge.
+                pass
+        bump_render_epoch()
+        self.app.notify(
+            f"Cell aspect {value:.2f} (manual) — blank it in Settings (?) "
+            "to return to auto",
+            timeout=4,
+        )
 
     def action_scroll_quarter(self, direction: str) -> None:
         """Move the tree cursor by a quarter of the visible tree height.

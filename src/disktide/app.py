@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from textual import events
 from textual.app import App
 from textual.binding import Binding
 
@@ -15,9 +16,10 @@ from disktide.config import (
     AppConfig, cleanup_rule_directory, load_config, save_config,
     get_effective_paths, set_effective_paths,
 )
-from disktide.rendering import set_safe_rendering
+from disktide.rendering import bump_render_epoch, set_safe_rendering
 from disktide.repositories import default_snapshot_repository
 from disktide.repositories.snapshots import SnapshotRepository
+from disktide.viz import cellgeom
 from disktide.viz.colors import set_color_scheme
 from disktide.widgets.confirm_modal import ConfirmModal
 from disktide.widgets.monitor_editor import MonitorEditor, MonitorEditorResult
@@ -167,6 +169,7 @@ class DiskTideApp(App):
     def on_mount(self) -> None:
         set_color_scheme(self._config.ui.color_theme)
         set_safe_rendering(self._config.ui.safe_rendering)
+        cellgeom.set_configured_aspect(self._config.ui.cell_aspect)
 
         # Connect the DB up front so a fallback to an in-memory database is
         # detected before the session starts. The warning is
@@ -203,6 +206,32 @@ class DiskTideApp(App):
                 pass
 
         self._warn_if_degraded()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Take the terminal's pixel size from an in-band resize report.
+
+        Terminals that support mode 2048 send their pixel size with every
+        resize, which is the only measurement available in a good few of
+        them: VS Code's integrated terminal and the xterm.js web shells
+        leave `TIOCGWINSZ`'s pixel fields at zero forever but will happily
+        report in band. SIGWINCH-driven resizes carry `pixel_size=None`,
+        so this fires only when there is something real to learn.
+
+        Textual dispatches `_on_resize` and `on_resize` both, so the
+        built-in one still runs; this only adds to it. The charts are not
+        touched directly — a widget mid-paint must never have its layout
+        swapped underneath it (see `SunburstView._ensure_layout`) — so a
+        changed aspect goes out as a render-epoch bump and each chart
+        rebuilds on its own deferred path.
+        """
+        pixel_size = event.pixel_size
+        if pixel_size is None or pixel_size.width <= 0 or pixel_size.height <= 0:
+            return
+        before = cellgeom.detect_cell_aspect()
+        if not cellgeom.report_pixel_size(event.size, pixel_size):
+            return
+        if abs(cellgeom.detect_cell_aspect() - before) > cellgeom.ASPECT_EPSILON:
+            bump_render_epoch()
 
     def _warn_if_degraded(self) -> None:
         """Warn once if the database fell back to memory.

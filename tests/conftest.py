@@ -22,6 +22,23 @@ def scheduler_invariants(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reset_cell_geometry():
+    """Forget any calibrated or measured cell aspect between tests.
+
+    The resolver's override, in-band report and probe cache are all
+    process-global, so one test that calibrates an aspect — or that drives
+    the app through a resize carrying a pixel size — would otherwise decide
+    the disc geometry of every test that ran after it, under a randomized
+    order that makes the failure look unrelated.
+    """
+    from disktide.viz.cellgeom import reset_cell_geometry as reset
+
+    reset()
+    yield
+    reset()
+
+
+@pytest.fixture(autouse=True)
 def reset_global_rendering_state():
     """Return safe rendering and the colour scheme to their defaults.
 

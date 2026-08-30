@@ -40,6 +40,7 @@ def test_doctor_json_has_versioned_schema_and_expected_sections(tmp_path, monkey
         "schema_version",
         "application",
         "platform",
+        "terminal",
         "paths",
         "config",
         "database",
@@ -109,7 +110,7 @@ def test_doctor_reports_watch_backend_version_and_configured_mode(
     payload = report.to_dict()
     watch = payload["optional_extras"]["watch"]
 
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["config"]["monitor_event_mode"] == "auto"
     assert watch["available"] is True
     assert watch["version"] == "2.0.1"

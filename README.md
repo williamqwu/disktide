@@ -192,6 +192,12 @@ Shift while dragging to reach your terminal's own text selection. Launch with
 `--no-mouse` for one session, or set `mouse = false` under `[ui]` (Settings ▸
 Mouse support) to opt out permanently.
 
+DiskTide measures how tall your terminal's character cell is so the sunburst
+comes out round; in the terminals that report no pixel size (xterm.js web
+shells, VS Code, ConPTY, mosh, screen) press `,` and `.` in the Explorer to
+calibrate it by eye, or set it under Settings ▸ Cell aspect. `disktide doctor`
+says which mechanism is in use.
+
 Settings leads with System Information, Scan Performance, and UI Settings; the
 longer Cleanup and Monitor sections are collapsed until you open them. The
 color theme picker offers Warm, Neutral, Cold, and Mono, with a live swatch row

@@ -30,9 +30,18 @@ from disktide.config import (
 )
 from disktide.cleanup.rules import get_rule_catalog
 from disktide.models.patterns import RiskLevel
-from disktide.rendering import is_safe_rendering, render_epoch
+from disktide.rendering import (
+    bump_render_epoch,
+    is_safe_rendering,
+    render_epoch,
+)
 from disktide.scanner.sysinfo import storage_class
 from disktide.repositories.snapshots import SnapshotRepository
+from disktide.viz.cellgeom import (
+    clamp_cell_aspect,
+    resolve_cell_aspect,
+    set_configured_aspect,
+)
 from disktide.viz.colors import (
     CATEGORIES,
     CATEGORY_LEGEND_RGB,
@@ -65,6 +74,29 @@ def sanitize_theme(name: str | None) -> str:
     """
     known = {key for _label, key in THEME_OPTIONS}
     return name if name in known else _THEME_FALLBACK
+
+
+def cell_aspect_hint() -> str:
+    """What to show beside the cell-aspect box: the terminal's own answer.
+
+    Deliberately reports the measurement with any override taken out of the
+    picture. A user who has typed 2.6 into the box still needs to see that
+    nothing was measured, because that — not the number they chose — is
+    what tells them whether they have to keep choosing one.
+    """
+    measured = resolve_cell_aspect(measured_only=True)
+    mechanisms = {
+        "ioctl": "TIOCGWINSZ",
+        "in-band": "in-band",
+        "xtwinops": "XTWINOPS",
+    }
+    mechanism = mechanisms.get(measured.source)
+    if mechanism is None:
+        return (
+            f"unmeasured — assuming {measured.value:.1f}; "
+            "set it if the disc looks oval"
+        )
+    return f"measured {measured.value:.2f} ({mechanism})"
 
 
 def theme_preview(name: str) -> Text:
@@ -149,6 +181,14 @@ class SettingsScreen(Screen):
         width: 20;
         height: 3;
         content-align: left middle;
+    }
+
+    /* The cell-aspect hint names the mechanism that measured the terminal,
+       or explains that nothing did; both are sentences rather than the
+       parenthetical asides the other hints carry, so this one gets the
+       rest of the row instead of the shared 30-cell column. */
+    .aspect-hint {
+        width: 1fr;
     }
 
     /* Cleanup and Monitor fold away: both are long, both are visited far
@@ -300,6 +340,19 @@ class SettingsScreen(Screen):
                 yield Label(
                     "(ASCII glyphs, plain charts)",
                     classes="input-hint",
+                )
+
+            with Horizontal(classes="setting-row"):
+                yield Label("Cell aspect (h/w)", classes="setting-label")
+                yield Input(
+                    placeholder="auto",
+                    id="cell-aspect-input",
+                    classes="setting-input",
+                )
+                yield Label(
+                    "",
+                    id="cell-aspect-hint",
+                    classes="input-hint aspect-hint",
                 )
 
             with Horizontal(classes="setting-row"):
@@ -476,6 +529,11 @@ class SettingsScreen(Screen):
             self.query_one("#max-depth-input", Input).value = str(self._config.scan.max_depth)
         if self._config.monitor.max_watch_time is not None:
             self.query_one("#max-watch-time-input", Input).value = format_duration(self._config.monitor.max_watch_time)
+        if self._config.ui.cell_aspect is not None:
+            self.query_one("#cell-aspect-input", Input).value = (
+                f"{self._config.ui.cell_aspect:g}"
+            )
+        self._refresh_cell_aspect_hint()
 
         # Detect system info
         self._detect_system()
@@ -493,6 +551,9 @@ class SettingsScreen(Screen):
         self.query_one("#monitor-auto-start", Switch).value = (
             self._config.monitor.auto_start_in_tui
         )
+        # A resize since the last visit may have brought an in-band pixel
+        # report with it, which changes what there is to say here.
+        self._refresh_cell_aspect_hint()
 
     def _detect_system(self) -> None:
         """Detect system info and update display."""
@@ -603,6 +664,30 @@ class SettingsScreen(Screen):
         screen.refresh(layout=True)
         for widget in screen.query("*"):
             widget.refresh()
+
+    def _refresh_cell_aspect_hint(self) -> None:
+        """Redraw the hint for whatever the terminal currently reports."""
+        try:
+            hint = self.query_one("#cell-aspect-hint", Label)
+        except Exception:
+            return
+        hint.update(cell_aspect_hint())
+
+    def _apply_cell_aspect(self, value: float | None) -> None:
+        """Adopt a manual cell aspect (or None for auto) immediately.
+
+        Bumping the epoch is what makes leaving Settings redraw the disc:
+        the charts cache a layout built at the old aspect and nothing else
+        they can see has changed. `action_dismiss_settings` compares the
+        epoch against the one it recorded on entry, so this is also what
+        marks the visit as worth repainting for.
+        """
+        if value == self._config.ui.cell_aspect:
+            return
+        self._config.ui.cell_aspect = value
+        set_configured_aspect(value)
+        bump_render_epoch()
+        self._refresh_cell_aspect_hint()
 
     def _refresh_theme_preview(self) -> None:
         """Redraw the swatch row for the theme the picker currently shows."""
@@ -736,6 +821,19 @@ class SettingsScreen(Screen):
                         self._config.scan.workers = parsed
                 except ValueError:
                     pass  # Silently ignore non-numeric input
+        elif event.input.id == "cell-aspect-input":
+            if value == "":
+                # Blank is how a user gets back to automatic detection,
+                # which is why this is not simply "ignore empty input".
+                self._apply_cell_aspect(None)
+            else:
+                try:
+                    parsed = float(value)
+                except ValueError:
+                    pass  # Mid-typing, or not a number at all
+                else:
+                    if parsed > 0:
+                        self._apply_cell_aspect(clamp_cell_aspect(parsed))
         elif event.input.id == "max-depth-input":
             if value == "":
                 self._config.scan.max_depth = None

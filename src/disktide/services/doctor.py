@@ -29,7 +29,7 @@ from disktide.storage.database import Database
 from disktide.storage.migrations import CURRENT_VERSION, get_version
 
 
-DOCTOR_SCHEMA_VERSION = 4
+DOCTOR_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +38,7 @@ class DoctorReport:
 
     application: dict[str, object]
     platform: dict[str, object]
+    terminal: dict[str, object]
     paths: dict[str, object]
     config: dict[str, object]
     database: dict[str, object]
@@ -54,6 +55,7 @@ class DoctorReport:
             "schema_version": self.schema_version,
             "application": self.application,
             "platform": self.platform,
+            "terminal": self.terminal,
             "paths": self.paths,
             "config": self.config,
             "database": self.database,
@@ -185,6 +187,7 @@ def build_doctor_report(
             "cpu_available": cpu_available,
             "memory": memory,
         },
+        terminal=_terminal_report(),
         paths=application_paths,
         config={
             "status": config_status,
@@ -235,6 +238,10 @@ def render_doctor_report(report: DoctorReport) -> str:
             f"{platform_info['cpu_total']} total"
         ),
         "",
+    ]
+    lines.extend(_render_terminal_block(payload["terminal"]))
+    lines.extend([
+        "",
         "Application paths",
         f"  Config: {paths['config']}",
         f"  Database: {paths['database']}",
@@ -251,7 +258,7 @@ def render_doctor_report(report: DoctorReport) -> str:
         f"  Writable persistence: {database['writable']}",
         "",
         "Storage metrics",
-    ]
+    ])
     lines.extend(_render_capability_group(payload["metrics"]))
     lines.extend(["", "Platform capabilities"])
     lines.extend(_render_capability_group(payload["capabilities"]))
@@ -311,6 +318,88 @@ def render_doctor_report(report: DoctorReport) -> str:
         f"  Hardlinks: {policy['hardlinks']}",
     ])
     return "\n".join(lines)
+
+
+def _terminal_report() -> dict[str, object]:
+    """Report which mechanism, if any, can measure this terminal's cell.
+
+    The sunburst is only round when something reports a pixel size, and the
+    number of terminals that report none is large enough — web shells, VS
+    Code, ConPTY, mosh, screen — that "why is my disc oval" needs an answer
+    a user can act on rather than a shrug. So each mechanism is listed
+    separately: knowing that 14t answered where 16t did not says which
+    terminal you are actually in, which a single resolved number cannot.
+
+    `is_tty` covers both halves of the terminal, because the probe needs to
+    write to one and read from the other; when it is false the XTWINOPS and
+    DECRQM answers are None — not-asked, which is not the same as asked-and-
+    refused. That is also the shape this takes in CI, where `doctor --json`
+    runs with stdout on a pipe.
+    """
+    from disktide.viz import cellgeom
+
+    try:
+        is_tty = bool(
+            sys.__stdin__ is not None
+            and sys.__stdin__.isatty()
+            and sys.__stdout__ is not None
+            and sys.__stdout__.isatty()
+        )
+    except Exception:
+        is_tty = False
+
+    winsize = cellgeom.terminal_winsize()
+    probe = cellgeom.probe_terminal_cell_size() if is_tty else None
+    aspect = cellgeom.resolve_cell_aspect()
+
+    if os.environ.get("TMUX"):
+        multiplexer = "tmux"
+    elif os.environ.get("STY"):
+        multiplexer = "screen"
+    else:
+        multiplexer = None
+
+    return {
+        "is_tty": is_tty,
+        "term": os.environ.get("TERM"),
+        "term_program": os.environ.get("TERM_PROGRAM"),
+        "multiplexer": multiplexer,
+        "ssh": bool(
+            os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION")
+        ),
+        "winsize": (
+            None
+            if winsize is None
+            else {
+                "rows": winsize[0],
+                "cols": winsize[1],
+                "xpixel": winsize[2],
+                "ypixel": winsize[3],
+            }
+        ),
+        "cell_aspect": {
+            "value": round(aspect.value, 4),
+            "source": aspect.source,
+            "cell_px": (
+                None
+                if aspect.cell_px is None
+                else [
+                    round(aspect.cell_px[0], 3),
+                    round(aspect.cell_px[1], 3),
+                ]
+            ),
+        },
+        "pixel_reports": {
+            "tiocgwinsz": bool(
+                winsize is not None and winsize[2] > 0 and winsize[3] > 0
+            ),
+            "xtwinops_16t": None if probe is None else probe.answered_16t,
+            "xtwinops_14t": None if probe is None else probe.answered_14t,
+            "in_band_resize_2048": (
+                None if probe is None else probe.supports_in_band_resize
+            ),
+        },
+    }
 
 
 def _cleanup_safety_report(
@@ -375,6 +464,92 @@ def _cleanup_safety_report(
             "rebuild_command": "disktide cleanup quarantine rebuild ROOT",
         },
     }
+
+
+def _render_terminal_block(terminal: object) -> list[str]:
+    """Render the Terminal block: which mechanism gives a round disc.
+
+    Written to be readable in one glance, because the question it answers
+    is asked in exactly one mood — "why is my sunburst an ellipse". The
+    suggestion is printed only when nothing measured the cell, since that
+    is the only case where the user has to do anything.
+    """
+    if not isinstance(terminal, dict):
+        return []
+    aspect = terminal.get("cell_aspect") or {}
+    reports = terminal.get("pixel_reports") or {}
+    winsize = terminal.get("winsize")
+
+    identity = [f"TERM: {terminal.get('term') or 'unset'}"]
+    if terminal.get("term_program"):
+        identity.append(f"program: {terminal['term_program']}")
+    if terminal.get("multiplexer"):
+        identity.append(f"multiplexer: {terminal['multiplexer']}")
+    identity.append(f"ssh: {'yes' if terminal.get('ssh') else 'no'}")
+    identity.append(f"tty: {'yes' if terminal.get('is_tty') else 'no'}")
+
+    lines = ["Terminal", "  " + " · ".join(identity)]
+
+    if isinstance(winsize, dict):
+        size = f"  Size: {winsize['cols']}x{winsize['rows']} cells"
+        if winsize["xpixel"] > 0 and winsize["ypixel"] > 0:
+            size += f", {winsize['xpixel']}x{winsize['ypixel']} px"
+        lines.append(size)
+
+    source = str(aspect.get("source", "default"))
+    measured_labels = {
+        "ioctl": "TIOCGWINSZ",
+        "in-band": "in-band resize",
+        "xtwinops": "XTWINOPS",
+    }
+    value = float(aspect.get("value", 2.0))
+    if source in measured_labels:
+        detail = f"measured: {measured_labels[source]}"
+        cell = aspect.get("cell_px")
+        if isinstance(cell, list) and len(cell) == 2:
+            detail += f", {_px(cell[0])}x{_px(cell[1])} px cell"
+    elif source == "env":
+        detail = "set: DISKTIDE_CELL_ASPECT"
+    elif source == "config":
+        detail = "set: [ui] cell_aspect"
+    else:
+        detail = "assumed; nothing measured it"
+    lines.append(f"  Cell aspect: {value:.2f} ({detail})")
+
+    def _flag(value: object) -> str:
+        if value is None:
+            return "not asked"
+        return "yes" if value else "no"
+
+    lines.append(
+        "  Pixel size reports: "
+        f"TIOCGWINSZ {_flag(reports.get('tiocgwinsz'))} · "
+        f"XTWINOPS 16t {_flag(reports.get('xtwinops_16t'))} · "
+        f"14t {_flag(reports.get('xtwinops_14t'))} · "
+        f"in-band resize (2048) {_flag(reports.get('in_band_resize_2048'))}"
+    )
+    if source not in measured_labels and source not in ("env", "config"):
+        lines.append(
+            "  Suggestion: set Settings > Cell aspect, or press , / . in "
+            "the explorer, or export DISKTIDE_CELL_ASPECT"
+        )
+    return lines
+
+
+def _px(value: object) -> str:
+    """A pixel measurement, without a decimal point it has not earned.
+
+    16t answers in whole pixels; a cell derived from 14t over the grid
+    rarely does, and rounding that to an int would claim a precision the
+    terminal never gave.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "?"
+    if abs(number - round(number)) < 0.05:
+        return str(int(round(number)))
+    return f"{number:.1f}"
 
 
 def _render_capability_group(items: object) -> list[str]:

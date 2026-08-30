@@ -273,6 +273,7 @@ Textual offers no supported way to change it under a running app.
 | `y` | Explorer | Copy highlighted path to clipboard |
 | `t` | Explorer | Cycle Logical / Allocated / Unique / Files across all views |
 | Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
+| `,` / `.` | Explorer | Nudge the terminal cell aspect by 0.05 (rounder / taller disc) |
 | Up / Down | Settings | Move focus between fields (also Tab/Shift+Tab) |
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
 | `b` | FS Overview | Confirm and benchmark the highlighted mount |
@@ -301,9 +302,9 @@ policy, and terminal status.
 ### doctor
 
 Report the installed version, Python/Textual versions, active platform adapter,
-application paths, database status/schema, storage metrics, platform
-capabilities, optional extras (including watch backend/version/status), and
-default scan policy:
+terminal identity and cell geometry, application paths, database status/schema,
+storage metrics, platform capabilities, optional extras (including watch
+backend/version/status), and default scan policy:
 
 ```bash
 disktide doctor
@@ -588,6 +589,7 @@ color_theme = "warm"                     # warm, default, cold, mono
 default_viz = "sunburst"                 # treemap, sunburst, details
 # show_cleanup = true                    # enable Cleanup mode (disabled by default)
 # safe_rendering = true                  # ASCII glyphs and block-free charts for web shells
+# cell_aspect = 2.43                     # omit to measure; pixel height/width of one cell
 # mouse = false                          # default true; --no-mouse overrides per session
 # live_scan_render = "auto"              # auto | on | off — draw viz live during scan
 # default_scan_path = "/home/user/data" # pre-fill welcome screen
@@ -605,6 +607,48 @@ The `[cleanup]` section controls safe executor preference, quarantine expiry and
 capacity, disabled declarative packs, and the Age/Size Map point budget. It
 never enables permanent deletion as a default action. Settings presents the
 same pack switches with source, rule count, and maximum risk.
+
+### Terminal cell aspect
+
+The sunburst is a circle and the treemap's "square" rectangles are square only
+if DiskTide knows how tall one character cell is per unit of width. That ratio
+depends on the font and its line spacing: a 7x17 pixel cell -- a 14px monospace
+face at 1.2 line height -- is 2.43, and drawing a circle as if it were the
+traditional 2.0 stretches it vertically by about 21%, which reads as a plainly
+oval disc.
+
+DiskTide resolves the ratio in order, and stops at the first answer:
+
+1. `DISKTIDE_CELL_ASPECT`, e.g. `export DISKTIDE_CELL_ASPECT=2.43`.
+2. `cell_aspect` under `[ui]`, which is what the Settings box and the
+   calibration keys write.
+3. An **in-band resize report** (terminal mode 2048), which carries the window's
+   pixel size with every resize.
+4. **`TIOCGWINSZ`** pixel fields, which most native terminals fill in and which
+   tmux forwards into every pane it owns.
+5. An **XTWINOPS probe** (`CSI 16 t` / `CSI 14 t`) sent once at startup, only
+   when nothing above answered. Set `DISKTIDE_NO_TERMINAL_PROBE=1` to skip it.
+6. **2.0**, the historical assumption, when nothing measured anything.
+
+Most native terminals -- kitty, foot, Alacritty, GNOME Terminal and other VTE
+terminals, xterm, WezTerm, Ghostty, Konsole, iTerm2 -- are measured
+automatically by step 3 or 4 and need nothing from you. The families that report
+no pixel size at all, and so land on the 2.0 fallback, are the xterm.js-based
+web shells (JupyterLab's terminal, Open OnDemand, ttyd), VS Code's integrated
+terminal, ConPTY and Windows Terminal (including WSL and ssh launched from it),
+mosh, GNU screen, a detached tmux or one whose client reports no pixel size, the
+`textual serve` web driver, and any wrapper pty. In those, set the value by
+hand.
+
+To calibrate, press `.` in the Explorer to make the disc taller and `,` to make
+it rounder. Each press moves the ratio by 0.05, applies immediately, and is
+saved, so the disc converges on a circle in a few presses and stays that way
+next launch. **Settings ▸ Cell aspect** takes a number directly and shows what
+was measured beside it; blank the box to go back to automatic detection.
+
+`disktide doctor` prints a **Terminal** block naming which mechanism is feeding
+the value, whether each pixel-size report answered, and -- when nothing did --
+what to do about it.
 
 The **Live scan rendering** setting (`live_scan_render`) controls whether the active visualization tab redraws as the scan progresses. `auto` (the default) enables it on terminals at least 80 columns by 24 rows with at least 4 CPUs, and stays off on smaller / lower-resource setups where the per-frame redraw cost would compete with the scan. Set to `on` to force it regardless of terminal size, or `off` to wait for the scan to finish and render once.
 

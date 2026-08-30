@@ -95,6 +95,8 @@ def cli(
         if exclude_pseudo is not None:
             config.scan.exclude_pseudo_filesystems = exclude_pseudo
 
+        _probe_terminal_if_unmeasured(config)
+
         app = DiskTideApp(show_welcome=True, config=config)
         # --no-mouse is a session override, not a preference: it never
         # writes back to the config the settings screen owns.
@@ -116,6 +118,33 @@ def cli(
         # both streams were flushed right before this block.
         import os as _os
         _os._exit(0)
+
+
+def _probe_terminal_if_unmeasured(config) -> None:
+    """Ask the terminal for its cell size, but only when nothing else can.
+
+    This is the one place the probe may run: it writes escape sequences to
+    the terminal and reads the replies straight off stdin, which is only
+    safe while nothing else owns either. In particular it has to finish
+    before Textual starts — Textual's parser reissues any escape sequence
+    it cannot interpret as typed keys, so a reply still in the buffer would
+    arrive as garbage keystrokes in the welcome screen's path input.
+
+    Every terminal that already answers `TIOCGWINSZ` skips it for free, as
+    do both overrides: there is nothing to learn and no reason to spend
+    even a millisecond, let alone the deadline a silent terminal costs.
+    """
+    import os
+
+    from disktide.viz import cellgeom
+
+    if (os.environ.get(cellgeom.ASPECT_ENV_VAR) or "").strip():
+        return
+    if config.ui.cell_aspect is not None:
+        return
+    if cellgeom.resolve_cell_aspect(measured_only=True).source != "default":
+        return
+    cellgeom.probe_terminal_cell_size()
 
 
 def _force_teardown(app) -> None:

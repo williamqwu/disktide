@@ -108,6 +108,12 @@ class UIConfig:
     # terminal emulator, which is what a user wants when their terminal's
     # own selection/paste is more valuable than in-app hit testing.
     mouse: bool = True
+    # Pixel height/width ratio of one character cell, or None for "measure
+    # it". A manual value is the only thing that makes the sunburst round
+    # in the terminals that report no pixel size at all — xterm.js web
+    # shells, ConPTY, mosh, screen — where every automatic layer comes up
+    # empty and the disc falls back to the historical 2.0.
+    cell_aspect: float | None = None
     # "auto" | "on" | "off". Controls whether the active viz tab (sunburst
     # or treemap) redraws live with partial scan data, vs. waiting for the
     # scan to finish and rendering once. `auto` enables it on a roomy
@@ -244,6 +250,13 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append("safe_rendering = true")
     if not config.ui.mouse:
         lines.append("mouse = false")
+    if config.ui.cell_aspect is not None:
+        # `:g` drops the trailing zeros the calibration keys never produce
+        # anyway; the suffix keeps it a TOML float rather than an int.
+        rendered = f"{config.ui.cell_aspect:g}"
+        if "." not in rendered:
+            rendered += ".0"
+        lines.append(f"cell_aspect = {rendered}")
     if config.ui.live_scan_render != "auto":
         lines.append(f'live_scan_render = "{config.ui.live_scan_render}"')
     if config.ui.default_scan_path is not None:
@@ -262,6 +275,29 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append("")
 
     config_file.write_text("\n".join(lines))
+
+
+def _parse_cell_aspect(value: object) -> float | None:
+    """Read a manual cell aspect out of a config file, or None.
+
+    Anything that isn't a positive number — the literal string "auto" a
+    user might reasonably write to mean "go back to measuring", a typo, a
+    zero — is treated as unset rather than as an error, because the
+    fallback is the automatic detection the field exists to override and
+    refusing to start over a bad number would be far worse than ignoring
+    it. `bool` is excluded explicitly: it is an `int` subclass, and
+    `cell_aspect = true` should not resolve to 1.0.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if numeric != numeric or numeric <= 0.0:  # NaN, zero, negative
+        return None
+    from disktide.viz.cellgeom import clamp_cell_aspect
+
+    return clamp_cell_aspect(numeric)
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
@@ -343,6 +379,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.safe_rendering = ui.get("safe_rendering", False)
         config.ui.mouse = bool(ui.get("mouse", True))
+        config.ui.cell_aspect = _parse_cell_aspect(ui.get("cell_aspect"))
         raw_live = ui.get("live_scan_render", "auto")
         config.ui.live_scan_render = (
             raw_live if raw_live in ("auto", "on", "off") else "auto"

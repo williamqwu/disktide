@@ -152,6 +152,140 @@ class TestSunburstRoundness:
         assert max_hy < 2 * height
 
 
+class TestGeometrySweep:
+    """One wide pass over the shapes a real terminal actually takes.
+
+    The parametrized tests above pin three viewports against four aspects,
+    which is enough to catch an outright wrong formula and not enough to
+    catch one that only misbehaves at an odd size -- a radius that rounds
+    the wrong way on an even height, a centre that drifts half a cell on a
+    narrow pane. Those are exactly the defects that reach a user as "the
+    disc sits slightly left" rather than as a failing assertion, so the
+    sweep covers the whole plausible range in one test.
+
+    Kept to one test on purpose: as hundreds of parametrizations this
+    would dominate the suite's output for no extra signal, and the whole
+    sweep costs a few seconds. The endpoints are named explicitly so the
+    extremes of the documented range are always included and never fall
+    between two steps.
+    """
+
+    # 40x12 is the smallest viewport the sunburst will draw into at all
+    # (below it the widget prints "use Tree/Treemap"); 200x64 is a wide
+    # full-screen terminal.
+    WIDTHS = tuple(sorted({*range(40, 201, 17), 200}))
+    HEIGHTS = tuple(sorted({*range(12, 65, 13), 64}))
+    # 1.5 and 3.5 are the clamp bounds, 2.0 the historical assumption, and
+    # 2.43 the 14px-at-1.2-line-height cell that first exposed the ellipse.
+    SWEEP_ASPECTS = (1.5, 1.8, 2.0, 2.2, 2.43, 2.7, 3.0, 3.5)
+
+    @staticmethod
+    def _bbox(frame) -> tuple[int, int, int, int]:
+        """(min_x, max_x, min_hy, max_hy), scanning each row from both ends.
+
+        `_frame_bbox` visits every half-cell, which over a few hundred
+        layouts is most of this test's runtime; the disc is convex, so the
+        first and last painted cell in a row are all it can contribute.
+        """
+        min_x, max_x, min_hy, max_hy = 1 << 30, -1, -1, -1
+        for hy, row in enumerate(frame):
+            first = None
+            for x, cell in enumerate(row):
+                if cell is not None:
+                    first = x
+                    break
+            if first is None:
+                continue
+            last = len(row) - 1
+            while row[last] is None:
+                last -= 1
+            min_x = min(min_x, first)
+            max_x = max(max_x, last)
+            if min_hy < 0:
+                min_hy = hy
+            max_hy = hy
+        return min_x, max_x, min_hy, max_hy
+
+    def test_the_disc_is_round_and_centred_at_every_size(self):
+        # The tree is immutable as far as the layout code is concerned, so
+        # one is built for the whole sweep rather than ~600 identical ones.
+        tree = _sample_tree()
+        checked = 0
+        for width in self.WIDTHS:
+            for height in self.HEIGHTS:
+                for aspect in self.SWEEP_ASPECTS:
+                    layout = compute_sunburst(
+                        tree, width, height, cell_aspect=aspect,
+                    )
+                    if layout.radius <= 0:
+                        # Too small to draw a disc into; the widget says so
+                        # instead, which the viewport tests already cover.
+                        continue
+                    checked += 1
+                    where = f"{width}x{height} at aspect {aspect}"
+
+                    min_x, max_x, min_hy, max_hy = self._bbox(layout.frame)
+                    assert min_x >= 0 and max_x < width, (
+                        f"{where}: disc spans columns {min_x}..{max_x} in a "
+                        f"{width}-column widget"
+                    )
+                    assert min_hy >= 0 and max_hy < 2 * height, (
+                        f"{where}: disc spans half-rows {min_hy}..{max_hy} "
+                        f"in a {2 * height}-half-row frame"
+                    )
+
+                    unit_w = max_x - min_x + 1
+                    unit_h = (max_hy - min_hy + 1) * (aspect / 2.0)
+                    assert abs(unit_w - unit_h) <= aspect + 1, (
+                        f"{where}: disc is {unit_w:.2f}x{unit_h:.2f} units"
+                    )
+
+                    # A disc can be perfectly round and still sit off to
+                    # one side; only comparing its painted centre with the
+                    # layout's own catches that.
+                    center_x = (min_x + max_x + 1) / 2.0
+                    center_y = ((min_hy + max_hy + 1) / 2.0) * (aspect / 2.0)
+                    assert abs(center_x - layout.center_x) <= 1.0, (
+                        f"{where}: painted centre column {center_x:.2f} vs "
+                        f"layout {layout.center_x:.2f}"
+                    )
+                    assert abs(center_y - layout.center_y) <= aspect, (
+                        f"{where}: painted centre row {center_y:.2f} vs "
+                        f"layout {layout.center_y:.2f} units"
+                    )
+        assert checked > 300, (
+            f"the sweep only exercised {checked} layouts; the ranges above "
+            f"have drifted away from the sizes they were meant to cover"
+        )
+
+    def test_no_treemap_rect_leaves_the_widget(self):
+        """The same sweep for the other chart.
+
+        Squarify works in floats and the aspect scales one axis before the
+        rects are cut, so an off-by-a-rounding rect is a real risk here in
+        a way it is not for a disc bounded by its own radius.
+        """
+        tree = _sample_tree()
+        for width in self.WIDTHS:
+            for height in self.HEIGHTS:
+                for aspect in self.SWEEP_ASPECTS:
+                    layout = compute_layout(
+                        tree, width, height, cell_aspect=aspect,
+                    )
+                    assert layout.width == width and layout.height == height
+                    for rect in layout.rects:
+                        assert (
+                            rect.x >= -1e-6
+                            and rect.y >= -1e-6
+                            and rect.x + rect.w <= width + 1e-6
+                            and rect.y + rect.h <= height + 1e-6
+                        ), (
+                            f"{width}x{height} at aspect {aspect}: rect "
+                            f"({rect.x:.3f}, {rect.y:.3f}, {rect.w:.3f}, "
+                            f"{rect.h:.3f}) leaves the widget"
+                        )
+
+
 class TestSunburstNoOverflow:
     """A layout can never paint outside the widget it was built for."""
 
