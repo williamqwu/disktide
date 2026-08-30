@@ -48,7 +48,7 @@ fsmonitor = "disktide.__main__:cli"
 fsmonitor-cli = "disktide.__main__:cli"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/disktide", "src/sizetrail", "src/fs_monitor"]
+packages = ["src/disktide", "src/fs_monitor"]
 
 [dependency-groups]
 dev = [

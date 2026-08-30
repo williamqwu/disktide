@@ -53,12 +53,17 @@ def test_storage_namespace_stays_compatible():
     )
 
 
-def test_compatibility_python_namespaces_expose_version():
-    previous = importlib.import_module("sizetrail")
+def test_compatibility_python_namespace_exposes_version():
+    """Only `fs_monitor` needs an import shim.
+
+    Every released version (v0.1.2-v0.1.7) shipped `fs_monitor` as the real
+    package, so `import fs_monitor` has to keep working. `sizetrail` was an
+    intermediate name that never left the development branch -- no release
+    ever exposed it -- so it carries no import surface to preserve. The
+    `sizetrail` console script stays a CLI alias regardless.
+    """
     legacy = importlib.import_module("fs_monitor")
 
-    assert previous.__version__ == __version__
-    assert previous.CLI_NAME == CLI_NAME
     assert legacy.__version__ == __version__
     assert legacy.CLI_NAME == CLI_NAME
 
