@@ -30,7 +30,9 @@ jobs:
       - name: Sync locked development environment
         run: uv sync --locked --python "${{ matrix.python-version }}"
       - name: Run test suite
-        run: .venv/bin/python -m pytest -q
+        # The suite is about half wait -- app boot and scan handoffs -- so
+        # one worker per core roughly halves it on the two-core runners.
+        run: .venv/bin/python -m pytest -q -n auto
 
   watch-test:
     name: Python 3.13 with watch extra
@@ -45,7 +47,7 @@ jobs:
       - name: Sync locked watch environment
         run: uv sync --locked --python 3.13 --extra watch
       - name: Run full suite with watch extra
-        run: .venv/bin/python -m pytest -q
+        run: .venv/bin/python -m pytest -q -n auto
 
   minimal-distribution:
     name: Minimal wheel and sdist

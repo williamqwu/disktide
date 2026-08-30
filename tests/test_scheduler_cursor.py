@@ -19,7 +19,7 @@ scheduler's bounds cannot leave them silently exercising nothing.
 
 from __future__ import annotations
 
-from dataclasses import replace
+import os
 
 import pytest
 
@@ -34,35 +34,63 @@ from tests.scheduler_invariants import (
 
 
 def _directories_first(monkeypatch):
-    """Publish entry chunks with directories ahead of files.
+    """Hand every readdir to the scanner with directories ahead of files.
 
     Real filesystems hand out entries in hash order, which is what produced
     the original report (`pg_wal` yielded `archive_status` and `summaries`
     before its WAL segment files). Forcing the order keeps these tests from
     depending on how the CI filesystem happens to lay a directory out.
+
+    The reorder has to happen at the readdir rather than on each published
+    chunk. A chunk spans at most `entry_chunk_size` entries, so sorting inside
+    one only reaches across the whole directory while the chunk is at least as
+    large as it -- below that the delivered order falls back to the
+    filesystem's, which is what the chunk-size parametrization below varies.
+    Sorting the source keeps `entry_chunk_size` deciding only where the chunk
+    boundaries land.
     """
-    original = scheduler_module.scan_directory_once
 
-    def scan_directory_once(job, **kwargs):
-        callback = kwargs.get("checkpoint_callback")
-        if callback is not None:
+    real_scandir = os.scandir
 
-            def reordered(chunk):
-                return callback(
-                    replace(
-                        chunk,
-                        children=tuple(
-                            sorted(chunk.children, key=lambda c: not c.is_dir)
-                        ),
-                    )
-                )
+    class _OrderedEntries:
+        """`os.scandir`'s iterator contract over a materialised entry list."""
 
-            kwargs["checkpoint_callback"] = reordered
-        return original(job, **kwargs)
+        def __init__(self, entries):
+            self._entries = iter(entries)
 
-    monkeypatch.setattr(
-        scheduler_module, "scan_directory_once", scan_directory_once
-    )
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._entries)
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    class _OrderedScandir:
+        """`os`, with only `scandir` replaced.
+
+        Shadowing the scheduler's `os` binding rather than assigning to
+        `os.scandir` keeps the override off every other thread in the process.
+        """
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def scandir(path):
+            with real_scandir(path) as entries:
+                listed = list(entries)
+            listed.sort(key=lambda entry: not entry.is_dir(follow_symlinks=False))
+            return _OrderedEntries(listed)
+
+    monkeypatch.setattr(scheduler_module, "os", _OrderedScandir())
 
 
 def _adversarial_directory(root, name="parent", *, subdirectories=2, files=2):

@@ -54,5 +54,6 @@ packages = ["src/disktide", "src/sizetrail", "src/fs_monitor"]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "pytest-xdist>=3.5",
     "textual-dev>=1.0.0",
 ]
