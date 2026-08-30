@@ -348,6 +348,7 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
     (tmp_path / "sub" / "b.txt").write_text("ok")
 
     async def go():
+        import threading
         import time
         from disktide.config import AppConfig
         from disktide.scanner import scheduler as scheduler_mod
@@ -356,11 +357,27 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
 
         orig_scan = scheduler_mod.scan_directory_once
 
-        def slow_scan(*args, **kwargs):
-            time.sleep(0.05)
+        # The mid-scan assertions need the scan to still be running. Sleeping
+        # a fixed slice per directory left a window only as long as this tiny
+        # tree takes to walk (~0.1s), and a loaded runner can park the polling
+        # coroutine across the whole of it -- the scan then finished before the
+        # first look and the overlay was already hidden again. Holding the
+        # first directory until the test says go makes the window unbounded.
+        # `_run_scan` is `@work(thread=True)`, so this parks a worker thread,
+        # not the event loop. Later directories keep the original pacing, which
+        # is what gives the run its live visual updates.
+        holding = threading.Event()
+        release = threading.Event()
+
+        def held_scan(*args, **kwargs):
+            if holding.is_set():
+                time.sleep(0.05)
+            else:
+                holding.set()
+                release.wait(timeout=30)
             return orig_scan(*args, **kwargs)
 
-        scheduler_mod.scan_directory_once = slow_scan
+        scheduler_mod.scan_directory_once = held_scan
 
         try:
             cfg = AppConfig()
@@ -381,6 +398,14 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
                 overlay = screen.query_one("#scan-progress", ScanProgressOverlay)
                 tree = screen.query_one("#size-tree", SizeTree)
 
+                # `display` here is CSS-driven (`#tree-panel.scanning`), so it
+                # turns on a style pass later than the `_scan_in_progress` flag
+                # the loop above breaks on. Settle before asserting on it.
+                for _ in range(40):
+                    if overlay.display and tree.display:
+                        break
+                    await pilot.pause(delay=0.05)
+
                 # Mid-scan: compact progress and incremental tree coexist.
                 assert overlay.display is True, "overlay hidden mid-scan"
                 assert tree.display is True, "live tree hidden mid-scan"
@@ -397,7 +422,8 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
                     f"tree; got {w_at.__class__.__name__} id={w_at.id}"
                 )
 
-                # Wait for completion.
+                # Let the held directory through, then wait for completion.
+                release.set()
                 for _ in range(100):
                     await pilot.pause(delay=0.05)
                     if not screen._scan_in_progress:
@@ -416,6 +442,8 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
                     f"tree; got {w_at.__class__.__name__} id={w_at.id}"
                 )
         finally:
+            # A failed assertion must not leave the scan thread parked.
+            release.set()
             scheduler_mod.scan_directory_once = orig_scan
 
     asyncio.run(go())
