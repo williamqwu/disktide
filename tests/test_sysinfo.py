@@ -23,6 +23,14 @@ from disktide.scanner.sysinfo import (
     unescape_mount_path,
     _compute_recommended_workers,
     _find_block_device,
+    _MEDIUM_BADGE,
+)
+from disktide.viz.colors import (
+    INK_ROLES,
+    SCHEMES,
+    get_color_scheme,
+    ink,
+    set_color_scheme,
 )
 
 
@@ -80,6 +88,66 @@ class TestFacets:
     def test_facet_labels_network_no_local_badge(self):
         labels = facet_labels("nfs4", True, None, [])
         assert labels == [("Network", "error")]
+
+    def test_facet_labels_unknown_medium(self):
+        """The case that shipped broken: `("?", "dim")` where a role belonged.
+
+        `dim` is a Rich style, not an ink role, so rendering this badge
+        raised `KeyError` inside a Textual worker. It reached CI because it
+        needs a mount whose rotational bit is unreadable -- the runner's
+        `/dev/root` -- and the box this was written on has none.
+        """
+        assert facet_labels("ext4", False, None, []) == [("?", "muted")]
+
+
+class TestInkRolesAreReal:
+    """Every role these tables hand to `ink()` has to be one it knows.
+
+    `ink()` raises on an unknown role by design -- an unthemed string is a
+    typo at the call site, not something to paint silently -- which makes
+    the role column of a lookup table a live wire: it is only exercised on
+    a host whose mounts reach that row, so a bad value can sit in the
+    table through a release. `test_palette_gates` asserts every theme
+    *answers* for every role; this is the other direction, that nothing
+    *asks* for a role no theme has.
+    """
+
+    _MEDIA = [
+        ("ext4", False, False),   # flash
+        ("ext4", False, True),    # hdd
+        ("tmpfs", False, None),   # ram
+        ("nfs4", True, None),     # network
+        ("ext4", False, None),    # unknown
+    ]
+
+    def test_storage_class_roles(self):
+        for args in self._MEDIA:
+            role = storage_class(*args)[1]
+            assert role in INK_ROLES, f"{args} -> {role!r}"
+
+    def test_facet_label_roles(self):
+        transforms = ["RAID", "CoW", "Compressed", "Encrypted"]
+        for args in self._MEDIA:
+            for label, role in facet_labels(*args, transforms):
+                assert role in INK_ROLES, f"{args} {label!r} -> {role!r}"
+
+    def test_every_medium_badge_role(self):
+        """Covers rows no `classify_medium` input above happens to reach."""
+        for key, (label, role) in _MEDIUM_BADGE.items():
+            assert role in INK_ROLES, f"{key} {label!r} -> {role!r}"
+
+    def test_roles_resolve_under_every_theme(self):
+        """A role in the tuple still has to resolve in each theme's table."""
+        original = get_color_scheme().name
+        try:
+            for theme in SCHEMES:
+                set_color_scheme(theme)
+                for args in self._MEDIA:
+                    ink(storage_class(*args)[1])
+                    for _, role in facet_labels(*args, ["RAID"]):
+                        assert ink(role), f"{theme}/{role}"
+        finally:
+            set_color_scheme(original)
 
 
 class TestUnescapeMountPath:

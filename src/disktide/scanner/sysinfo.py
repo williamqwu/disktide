@@ -217,7 +217,13 @@ _MEDIUM_BADGE = {
     "hdd": ("HDD", "warning"),
     "ram": ("RAM", "bar"),
     "network": ("Network", "error"),
-    "unknown": ("?", "dim"),
+    # `muted`, not a bare `"dim"`: this column holds ink *roles*, and `ink()`
+    # raises on anything that is not one. Every theme resolves `muted` to
+    # `dim`, so the badge looks exactly as it did -- but it now survives the
+    # lookup. Nothing caught this because no test ever rendered the unknown
+    # medium: the local box classifies every mount it shows as network or
+    # flash, while CI's `/dev/root` has no readable rotational bit.
+    "unknown": ("?", "muted"),
 }
 _TRANSFORM_STYLE = "link"
 
