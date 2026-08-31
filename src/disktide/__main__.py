@@ -98,18 +98,29 @@ def cli(
         _probe_terminal_if_unmeasured(config)
 
         app = DiskTideApp(show_welcome=True, config=config)
-        # --no-mouse is a session override, not a preference: it never
-        # writes back to the config the settings screen owns.
-        app.run(mouse=config.ui.mouse and not no_mouse)
-
-        # Quitting is silent: the TUI restores the terminal and the
-        # shell prompt is the only acknowledgement a user needs. Run
-        # the cleanup that matters (cancel scan + close SQLite), then
-        # hard-exit -- see `_force_teardown` for why we skip Python's
-        # natural shutdown sequence on the way out.
-        _force_teardown(app)
-        sys.stdout.flush()
-        sys.stderr.flush()
+        try:
+            # --no-mouse is a session override, not a preference: it never
+            # writes back to the config the settings screen owns.
+            app.run(mouse=config.ui.mouse and not no_mouse)
+        finally:
+            # Quitting is silent: the TUI restores the terminal and the
+            # shell prompt is the only acknowledgement a user needs. Run
+            # the cleanup that matters (cancel scan + close SQLite), then
+            # hard-exit -- see `_force_teardown` for why we skip Python's
+            # natural shutdown sequence on the way out.
+            #
+            # In a `finally` because `app.run()` also *raises*: Textual
+            # re-raises whatever took the TUI down, and on that path
+            # nothing below here runs. The scan then survives the app that
+            # started it, and because Textual's thread workers live in the
+            # default executor -- which the interpreter joins on the way
+            # out -- the process sits at a dead terminal for as long as the
+            # walk had left to run (~50 s on a home directory) before the
+            # traceback is even printed. Cancelling turns that into the
+            # walker's usual ~10 ms bail.
+            _force_teardown(app)
+            sys.stdout.flush()
+            sys.stderr.flush()
         # Bypass Python's interpreter teardown: gc of the in-memory
         # FSNode tree + atexit + module cleanup adds tens of seconds on
         # a multi-million-file scan, all spent freeing memory the kernel

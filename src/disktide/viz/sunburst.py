@@ -52,7 +52,7 @@ from disktide.viz.colors import (
     file_category,
     neutral_dir_color,
 )
-from disktide.viz.layout import bounded_children
+from disktide.viz.layout import LayoutNode, bounded_children
 
 
 RGB = tuple[int, int, int]
@@ -112,7 +112,7 @@ class ArcSegment:
     Radii are in units (cell widths) and are floats: the ring width is a
     fraction of the disc, not a whole number of pixels.
     """
-    node: FSNode
+    node: LayoutNode
     depth: int
     angle_start: float
     angle_end: float
@@ -251,7 +251,7 @@ class SunburstLayout:
 
 
 def compute_sunburst(
-    node: FSNode,
+    node: LayoutNode,
     char_width: int,
     char_height: int,
     max_depth: int = 4,

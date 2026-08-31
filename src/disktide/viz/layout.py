@@ -5,8 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from heapq import nlargest
 
+from disktide.domain.live_view import LiveViewNode
 from disktide.domain.metrics import MetricId
 from disktide.models.tree import FSNode
+
+
+#: What a visualization is actually handed. A finished scan lays out its
+#: own `FSNode` tree; an in-flight one lays out the bounded frozen view
+#: model the scheduler ships instead, which carries the measurements a
+#: chart draws with and nothing else. Everything below reads both shapes.
+LayoutNode = FSNode | LiveViewNode
 
 
 # Path infixes that mark a synthetic rollup rather than a real directory.
@@ -26,17 +34,17 @@ def is_aggregate_path(path: str) -> bool:
 
 
 def bounded_children(
-    node: FSNode,
+    node: LayoutNode,
     *,
     metric: MetricId | str,
-    value: Callable[[FSNode], int],
+    value: Callable[[LayoutNode], int],
     limit: int,
     selected_path: str | None = None,
-) -> list[FSNode]:
+) -> list[LayoutNode]:
     """Return deterministic top-N children plus one aggregate remainder."""
     cap = max(2, limit)
     candidate_count = 0
-    selected_child = None
+    selected_child: LayoutNode | None = None
     total_layout_value = 0
 
     def weighted_children():
@@ -84,13 +92,13 @@ def bounded_children(
 
 
 def aggregate_children(
-    parent: FSNode,
-    children: Iterable[FSNode],
+    parent: LayoutNode,
+    children: Iterable[LayoutNode],
     *,
     metric: MetricId | str,
     layout_value: int,
     key: str | None = None,
-) -> FSNode:
+) -> LayoutNode:
     """Build the same "… N more" placeholder node `bounded_children` uses.
 
     Exposed so a visualization can fold siblings together *after* layout —
@@ -99,24 +107,35 @@ def aggregate_children(
     remainder.  `key` disambiguates the synthetic path when one parent
     emits more than one aggregate.
     """
-    node = _aggregate_node(
+    return _aggregate_node(
         parent,
         children,
         metric=metric if isinstance(metric, MetricId) else MetricId.parse(metric),
         layout_value=layout_value,
+        key=key,
     )
-    if key:
-        node.path = f"{node.path}-{key}"
-    return node
 
 
 def _aggregate_node(
-    parent: FSNode,
-    omitted: Iterable[FSNode],
+    parent: LayoutNode,
+    omitted: Iterable[LayoutNode],
     *,
     metric: MetricId,
     layout_value: int,
-) -> FSNode:
+    key: str | None = None,
+) -> LayoutNode:
+    """Roll `omitted` up into one "… N more" stand-in for its siblings.
+
+    The result is the same shape as the siblings it replaces.  That is not
+    tidiness: a live scan lays out `LiveViewNode`s, which carry the
+    measurements a chart draws with and *not* the four subtree diagnostic
+    counters an `FSNode` has, so building an unconditional `FSNode` here
+    read attributes that were simply not on the object.  Every fold path
+    hit it — the count cap below, and both of the treemap's geometry folds
+    — which took the treemap down with an `AttributeError` inside
+    `render_content_line` on nearly every frame of a live scan.
+    """
+    live = isinstance(parent, LiveViewNode)
     count = 0
     logical = 0
     allocated = 0
@@ -132,6 +151,7 @@ def _aggregate_node(
     partial_subtree = 0
     excluded_subtree = 0
     depth_limited_subtree = 0
+    stable = True
     for child in omitted:
         count += 1
         logical += child.size
@@ -148,10 +168,14 @@ def _aggregate_node(
         mtime = max(mtime, child.mtime)
         inaccessible += child.inaccessible_count
         inaccessible_subtree += child.inaccessible_subtree_count
-        denied_subtree += child.denied_dir_subtree_count
-        partial_subtree += child.partial_dir_subtree_count
-        excluded_subtree += child.excluded_subtree_count
-        depth_limited_subtree += child.depth_limited_subtree_count
+        if live:
+            # A fold is only as settled as the least settled thing in it.
+            stable = stable and child.stable
+        else:
+            denied_subtree += child.denied_dir_subtree_count
+            partial_subtree += child.partial_dir_subtree_count
+            excluded_subtree += child.excluded_subtree_count
+            depth_limited_subtree += child.depth_limited_subtree_count
     if metric is MetricId.LOGICAL:
         logical = layout_value
     elif metric is MetricId.ALLOCATED:
@@ -162,9 +186,31 @@ def _aggregate_node(
         unique_available = True
     else:
         files = layout_value
-    path = f"{parent.path.rstrip('/')}/.disktide-other-{parent.depth + 1}"
+    depth = parent.depth + 1
+    path = f"{parent.path.rstrip('/')}/.disktide-other-{depth}"
+    if key:
+        path = f"{path}-{key}"
+    name = f"… {count:,} more"
+    if live:
+        return LiveViewNode(
+            name=name,
+            path=path,
+            size=logical,
+            allocated_size=allocated if allocated_available else None,
+            unique_allocated_size=unique if unique_available else None,
+            file_count=files,
+            dir_count=directories,
+            is_dir=True,
+            mtime=mtime,
+            error=None,
+            inaccessible_count=inaccessible,
+            inaccessible_subtree_count=inaccessible_subtree,
+            depth=depth,
+            stable=stable,
+            synthetic=True,
+        )
     return FSNode(
-        name=f"… {count:,} more",
+        name=name,
         path=path,
         size=logical,
         own_size=logical,
@@ -176,7 +222,7 @@ def _aggregate_node(
         dir_count=directories,
         is_dir=True,
         mtime=mtime,
-        depth=parent.depth + 1,
+        depth=depth,
         inaccessible_count=inaccessible,
         inaccessible_subtree_count=inaccessible_subtree,
         denied_dir_subtree_count=denied_subtree,

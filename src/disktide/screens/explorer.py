@@ -689,6 +689,16 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
     ) -> None:
         if not self.is_mounted:
             return
+        if self._scan_in_progress:
+            # Nothing asks for a context during a scan, so one landing here
+            # was requested by the *previous* scan's completion and the user
+            # has since pressed `i`, `u` or `r`. `_start_scan` already
+            # dropped it; letting it through would run `_apply_visual_mode`,
+            # which reloads the size tree and repaints the chart from the
+            # finished root -- on top of the live stream, which then patches
+            # the old tree with the new scan's partial nodes. The scan's own
+            # completion asks again, for the tree it actually produced.
+            return
         self._space_time = context
         self._space_time_error = error
         if context is not None:

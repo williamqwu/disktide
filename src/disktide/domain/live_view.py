@@ -30,6 +30,11 @@ class LiveViewNode:
     error: str | None
     inaccessible_count: int
     inaccessible_subtree_count: int
+    # Mirrors `FSNode.depth`. Nothing on a live chart draws with it, but
+    # the shared layout code mints synthetic "… N more" siblings whose
+    # path is spelled from the parent's depth, and it has to spell them the
+    # same way whichever of the two node shapes it was handed.
+    depth: int = 0
     children: tuple[LiveViewNode, ...] = ()
     stable: bool = False
     synthetic: bool = False
@@ -95,6 +100,7 @@ def build_live_view(
                             if id(child) not in omitted_ids
                         ),
                         stable_paths,
+                        depth=depth + 1,
                     )
                 )
             children = tuple(converted)
@@ -112,6 +118,7 @@ def build_live_view(
             error=node.error,
             inaccessible_count=node.inaccessible_count,
             inaccessible_subtree_count=node.inaccessible_subtree_count,
+            depth=depth,
             children=children,
             stable=node.path in stable_paths,
         )
@@ -135,6 +142,8 @@ def _aggregate_omitted(
     parent: FSNode,
     omitted: Iterable[FSNode],
     stable_paths: frozenset[str],
+    *,
+    depth: int,
 ) -> LiveViewNode:
     count = 0
     logical = 0
@@ -178,6 +187,7 @@ def _aggregate_omitted(
         error=None,
         inaccessible_count=inaccessible,
         inaccessible_subtree_count=inaccessible_subtree,
+        depth=depth,
         stable=stable,
         synthetic=True,
     )

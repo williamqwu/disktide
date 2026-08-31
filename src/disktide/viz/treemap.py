@@ -30,7 +30,7 @@ from disktide.viz.colors import (
     get_color_scheme,
     label_ink,
 )
-from disktide.viz.layout import aggregate_children, bounded_children
+from disktide.viz.layout import LayoutNode, aggregate_children, bounded_children
 
 
 def _rect_bg(
@@ -76,7 +76,7 @@ class TreemapRect:
     y: float
     w: float
     h: float
-    node: FSNode
+    node: LayoutNode
     depth: int = 0
     label: str = ""
     size_label: str = ""
@@ -129,7 +129,7 @@ class TreemapLayout:
 
 
 def compute_layout(
-    node: FSNode,
+    node: LayoutNode,
     width: int,
     height: int,
     max_depth: int = 3,
