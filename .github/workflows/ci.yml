@@ -13,13 +13,73 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The single primary signal.
+  #
+  # Every other job that runs this same suite waits on this one. The suite
+  # is identical across the version matrix, so a test that is sensitive to
+  # the *environment* rather than to the Python version used to fail in
+  # all five matrix jobs at once, plus the watch and pre-release jobs --
+  # seven red boxes describing one broken test, and no hint in any of them
+  # about which kind of problem it was. Gating costs a couple of minutes
+  # on a green run and saves six job-runs on every red one.
   test:
-    name: Python ${{ matrix.python-version }}
+    name: Python 3.13
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python 3.13
+      - name: Run test suite
+        # The suite is about half wait -- app boot and scan handoffs -- so
+        # one worker per core roughly halves it on the two-core runners.
+        run: .venv/bin/python -m pytest -q -n auto
+
+  # Runs the suite against a host deliberately shaped unlike a developer's.
+  #
+  # Three of the four divergences that have turned this board red were a
+  # test reading the host rather than reading disktide: the order the
+  # filesystem returns directory entries in, a mount whose rotational bit
+  # sysfs cannot answer for, and the core count -- which is an input to
+  # the `live_scan_render` auto-gate, so it changes what the explorer
+  # *does*, not just how fast it does it. `tests/hostshape.py` models each
+  # one deterministically, which is what lets a developer reproduce this
+  # job in seconds instead of by pushing. Keeping it in CI is what keeps
+  # the models honest.
+  host-shapes:
+    name: Host shapes (readdir, medium, cores)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python 3.13
+      - name: Run test suite against a differently shaped host
+        env:
+          DISKTIDE_HOST_SHAPE: readdir,medium,cores
+        run: .venv/bin/python -m pytest -q -n auto
+
+  test-matrix:
+    name: Python ${{ matrix.python-version }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        # 3.13 is the canary above and is not repeated here.
+        python-version: ["3.10", "3.11", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -30,8 +90,6 @@ jobs:
       - name: Sync locked development environment
         run: uv sync --locked --python "${{ matrix.python-version }}"
       - name: Run test suite
-        # The suite is about half wait -- app boot and scan handoffs -- so
-        # one worker per core roughly halves it on the two-core runners.
         run: .venv/bin/python -m pytest -q -n auto
 
   test-prerelease:
@@ -39,7 +97,9 @@ jobs:
     # about upstream churn rather than a reason to block the merge. 3.15 is
     # deliberately absent from the pyproject classifiers until it ships.
     name: Python 3.15 pre-release (informational)
+    needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,7 +115,9 @@ jobs:
 
   watch-test:
     name: Python 3.13 with watch extra
+    needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -68,9 +130,13 @@ jobs:
       - name: Run full suite with watch extra
         run: .venv/bin/python -m pytest -q -n auto
 
+  # Deliberately not gated on `test`: it runs no pytest at all, so it is
+  # the one job whose colour carries information independent of the suite.
+  # It stayed green through the run that turned every other job red.
   minimal-distribution:
     name: Minimal wheel and sdist
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1

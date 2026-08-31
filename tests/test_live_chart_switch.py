@@ -438,11 +438,19 @@ def test_a_stale_space_time_context_does_not_clobber_the_live_tree(tmp_path):
 
     async def go():
         config = load_config()
+        # Pin the live-render gate instead of letting `auto` decide it.
+        # `auto` resolves through `os.cpu_count()`, and under four cores it
+        # resolves to off -- which is what makes `_start_scan` skip
+        # `begin_live()` and leave the finished root in the tree. The
+        # premise below would then hold on a workstation and fail on a
+        # two-core CI runner, which is exactly what it did. What this test
+        # is about is the stale context, not the gate.
+        config.ui.live_scan_render = "on"
         app = DiskTideApp(
             scan_path=str(tmp_path), show_welcome=False, config=config
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            for _ in range(60):
+            for _ in range(120):
                 await pilot.pause(delay=0.05)
                 if (
                     isinstance(app.screen, ExplorerScreen)
@@ -450,6 +458,8 @@ def test_a_stale_space_time_context_does_not_clobber_the_live_tree(tmp_path):
                     and not app.screen._scan_in_progress
                 ):
                     break
+            else:  # pragma: no cover - only on a pathologically slow host
+                pytest.fail("the setup scan never finished")
             screen = app.screen
             finished = screen._root
             assert finished.children
@@ -457,6 +467,8 @@ def test_a_stale_space_time_context_does_not_clobber_the_live_tree(tmp_path):
             screen._start_scan(force=True)
             tree = screen.query_one("#size-tree", SizeTree)
             assert screen._scan_in_progress
+            # `begin_live` put a fresh placeholder root in the tree, so the
+            # finished one is no longer what the widget is showing.
             assert tree._fs_root is not finished
 
             screen._apply_space_time_context(None, "no comparable snapshots")

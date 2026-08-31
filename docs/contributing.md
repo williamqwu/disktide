@@ -42,6 +42,45 @@ disktide.app` is allowed to pull in before the welcome screen -- is asserted in
 
 `PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app tests instead wrap an async helper with `asyncio.run(...)` and use `app.run_test()`; follow the style of the nearby tests.
 
+### Reproducing a CI-only failure
+
+The GitHub runners are two-core containers on ext4; a developer machine is
+usually neither. Four times now the suite has been green locally and red on
+a push, and every time the cause was a test reading something about the
+*host* rather than about disktide. `tests/hostshape.py` models those
+differences so you can reproduce them in seconds instead of by pushing:
+
+```bash
+# what the `host-shapes` CI job runs
+DISKTIDE_HOST_SHAPE=readdir,medium,cores uv run pytest -q -n auto
+
+# one axis at a time, when you are bisecting
+DISKTIDE_HOST_SHAPE=readdir uv run pytest -q tests/test_scheduler_cursor.py
+```
+
+| Shape | Models | Has caused |
+| --- | --- | --- |
+| `readdir` | `os.scandir` returning entries in the filesystem's order, not creation order | v0.2.26: a chunked sort window that fell back to the filesystem's order at `entry_chunk_size=1` |
+| `medium` | a mount whose rotational bit sysfs cannot read, so every medium is `unknown` | v0.2.29: an unknown-medium badge holding a raw Rich style where an ink role belonged |
+| `cores` | two cores, reported through `os.cpu_count()` **and** `os.sched_getaffinity()` | the `live_scan_render` auto-gate resolving to off, so `_start_scan` skipped `begin_live()` |
+| `sleepless` | every `time.sleep` collapsing to nothing, as a parked coroutine does under load | v0.2.24: a pilot test asserting a button label straight after an async stop |
+
+Two things are worth knowing:
+
+- **The core count is pinned for every test run**, shape or no shape, to a
+  fixed `DEFAULT_CPUS`. `os.cpu_count()` is an input to product behaviour --
+  the `live_scan_render` auto-gate reads it -- so leaving it to the machine
+  means a test can silently assert "this developer's core count". The
+  `cores` shape is how you deliberately ask for the other answer.
+- **`taskset` and a container's `--cpus` do not reproduce the `cores`
+  shape.** Both change scheduling, and neither changes what `os.cpu_count()`
+  returns, which is the value the gate actually reads.
+
+`sleepless` is a diagnostic, not a gate, and is deliberately absent from CI:
+it also trips the few tests that use a sleep as an *instrument* (measuring
+elapsed time, standing in for a slow scan) rather than as pacing.
+
+
 ## Project Structure
 
 See [architecture.md](architecture.md) for the full layout. In brief:
@@ -242,6 +281,7 @@ default_action = "safe"
 - **Scan service tests**: Cover complete, partial, cancelled, and failed terminals; assert no events follow a terminal event and replay reconstructs the same view model.
 - **Database tests**: Use in-memory SQLite (`:memory:`) or `tmp_path` for the db file. The `db` fixture in `tests/test_storage.py` provides a connected, migrated database.
 - **Async tests**: Use `@pytest.mark.asyncio` for focused coroutine tests. For Textual app flows, use the established `asyncio.run(go())` + `app.run_test()` pattern.
+- **Do not read the host**: a test that branches on the real core count, the real `/proc/mounts`, the real `os.scandir` order, or on how long something took is asserting something about the machine it runs on. Inject the value (`resolve_live_scan_render(..., cpu_count=2)`), pin the config (`config.ui.live_scan_render = "on"`), or build the window out of a `threading.Event` rather than a sleep. See *Reproducing a CI-only failure* above.
 - **Visualization tests**: Test layout computation separately from rendering. Verify shared state classification, rectangle coordinates, arc angles, gap handling, selected-path identity, 80x24/safe/no-color fallback, and the 100k-node performance bound.
 
 ## Dev Utilities
