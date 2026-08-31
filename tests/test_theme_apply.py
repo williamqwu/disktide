@@ -359,3 +359,60 @@ def test_dismissing_without_a_change_leaves_the_epoch_alone(tmp_path):
             )
 
     asyncio.run(go())
+
+
+def test_the_picker_seats_every_theme_name_on_one_line(tmp_path):
+    """A wrapped theme name costs more than the line it takes.
+
+    `Select` is `height: auto`, so a name too wide for the control grows
+    it to four rows inside a three-row `.setting-row`: the swatch row
+    beside it loses its baseline and the next row's control lands on top
+    of this one. `Colorblind-safe` is the longest name the picker has to
+    seat, and a setting row's three columns share only the 70 cells an
+    80-column terminal leaves them -- so this drives the picker at the
+    width where the fit is tightest rather than at whatever width a
+    developer's terminal happens to be, and it checks the dropdown as
+    well as the closed control, which are sized by different chrome.
+    """
+    root = _scan_dir(tmp_path)
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(root), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(80, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("question_mark")
+            settings = await _await_screen(pilot, app, SettingsScreen)
+            picker = settings.query_one("#color-theme", Select)
+            current = settings.query_one("#color-theme SelectCurrent #label", Static)
+
+            for name, scheme in SCHEMES.items():
+                await _pick_theme(pilot, settings, name)
+                assert current.region.height == 1, (
+                    f"{scheme.label!r} wrapped onto {current.region.height} "
+                    f"lines: the closed picker leaves it "
+                    f"{current.region.width} cells and it needs "
+                    f"{len(scheme.label)}"
+                )
+                assert picker.region.height == 3, (
+                    f"the picker grew to {picker.region.height} rows on "
+                    f"{scheme.label!r}; it has three to live in"
+                )
+
+            assert settings.query_one("#theme-preview", Static).region.width == 20, (
+                "the swatch row no longer has the 20 cells `theme_preview` "
+                "draws into; widening the picker took them"
+            )
+
+            picker.expanded = True
+            await pilot.pause()
+            await pilot.pause()
+            overlay = settings.query_one("#color-theme SelectOverlay")
+            assert overlay.region.height == len(SCHEMES) + 2, (
+                f"the open dropdown is {overlay.region.height} rows tall "
+                f"for {len(SCHEMES)} themes plus its border; a name is "
+                f"wrapping onto a second line in the list"
+            )
+
+    asyncio.run(go())

@@ -153,8 +153,12 @@ class SettingsScreen(Screen):
         padding: 0 2;
     }
 
+    /* Sized to the longest label, "Safe rendering (web shells)". The three
+       columns of a row share the 70 cells an 80-column terminal leaves
+       inside `.setting-row`, so every cell the label column does not need
+       is one the picker beside it does. */
     .setting-label {
-        width: 30;
+        width: 27;
     }
 
     .input-hint {
@@ -166,8 +170,13 @@ class SettingsScreen(Screen):
         width: 16;
     }
 
+    /* Wide enough for the longest option, "Colorblind-safe" (15), in both
+       places an option is drawn: a closed Select spends 8 cells on border,
+       padding and the arrow, its open overlay 6. Narrower than this and the
+       option wraps onto a second line, which grows the control out of the
+       3-cell row and shunts the swatches beside it. */
     .viz-select {
-        width: 20;
+        width: 23;
     }
 
     .theme-preview {
@@ -465,7 +474,15 @@ class SettingsScreen(Screen):
                         classes="viz-select",
                         allow_blank=False,
                     )
-                    yield Label("([watch] extra on Linux)", classes="input-hint")
+                    # The pip extra really is called `[watch]`, and a
+                    # Label reads its text as content markup: without
+                    # this the brackets parse as a style tag and the
+                    # hint renders as "( extra on Linux)".
+                    yield Label(
+                        "([watch] extra on Linux)",
+                        classes="input-hint",
+                        markup=False,
+                    )
 
                 with Horizontal(classes="setting-row"):
                     yield Label("Database soft budget", classes="setting-label")
