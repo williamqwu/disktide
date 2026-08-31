@@ -541,6 +541,13 @@ def test_diff_mode_shares_the_one_settle_timer(tmp_path):
             await _wait_for_explorer(pilot, app)
             screen = app.screen
             screen._diff_mode = True
+            # The real delay is 120ms, which `pilot.pause()` below can
+            # outrun on a loaded runner: the timer fires, nulls itself, and
+            # the assert reads `None` for a timer that was armed correctly.
+            # Stretching the deadline past the test makes "was it armed"
+            # observable instead of a race. Shadows the class attribute,
+            # which `_schedule_cursor_settle` reads at arm time.
+            screen._CURSOR_SETTLE_DELAY = 3600
             screen._cancel_cursor_settle()
 
             await pilot.press("down")
