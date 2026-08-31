@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic
 
 from textual import on, work
 from textual.app import ComposeResult
@@ -237,6 +238,12 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # kept current while its tab is visible, so this is what tab
         # activation replays into it.
         self._last_highlighted: FSNode | None = None
+        # Duty-cycle state for the live category rollup. Cost seeds at zero
+        # so the first snapshot of a scan is tinted as soon as it lands.
+        self._category_index_running = False
+        self._category_index_cost = 0.0
+        self._category_index_at = 0.0
+        self._active_metric = MetricId.LOGICAL
 
     @property
     def selected_path(self) -> str:
@@ -349,6 +356,12 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = True
         self._live_snapshot = None
         self._live_view_snapshot = None
+        # What the scheduler's bounded view_root is weighted by, so a live
+        # frame can tell whether the shipped one still answers.
+        self._active_metric = MetricId.parse(request.metric)
+        self._category_index_running = False
+        self._category_index_cost = 0.0
+        self._category_index_at = 0.0
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.start(
@@ -468,18 +481,24 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         if isinstance(event, FSNode):
             node = event
             changed_nodes = (event,)
+            view_root = None
         else:
             node = event.root
             changed_nodes = event.changed_nodes or (node,)
-        metric = self.query_one("#size-tree", SizeTree).metric
-        view_root = build_live_view(node, metric=metric)
+            view_root = event.view_root
+        tree = self.query_one("#size-tree", SizeTree)
+        metric = tree.metric
+        # The scheduler already built a bounded view off the scan thread and
+        # shipped it on the event. Rebuilding it here only earns something
+        # when the user has since switched the tree to a different metric
+        # than the run was started with, which is what the view weighs by.
+        if view_root is None or MetricId.parse(metric) is not self._active_metric:
+            view_root = build_live_view(node, metric=metric)
         self._live_snapshot = node
         self._live_view_snapshot = view_root
-        self.query_one("#size-tree", SizeTree).apply_live_update(
-            node,
-            changed_nodes,
-        )
+        tree.apply_live_update(node, changed_nodes)
         self._update_active_viz(node, visual_node=self._live_view_snapshot)
+        self._maybe_build_category_index(node)
 
     def _on_scan_complete(
         self,
@@ -532,26 +551,91 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
         breadcrumb.update_path(root.path, access=self._access_state(root))
 
+        self._request_space_time_context()
+        # Before the chart, so a live index built moments ago is already on
+        # the widget when the full-depth layout is first built: without it
+        # the finished scan paints one wholly neutral frame and recolours
+        # a few hundred ms later, which reads as a second jump.
+        self._build_category_index(root)
         # Update only the active viz tab
         self._update_active_viz(root)
         self._update_status()
-        self._request_space_time_context()
+
+    # A category rollup is one pass over every node, so it cannot run per
+    # live frame. It is thrown at a worker whenever it has been idle for
+    # several times its own last duration: on a small tree that is almost
+    # every frame, and on a large one it settles to a few seconds apart,
+    # which caps the cost at a fixed fraction of one core however big the
+    # scan gets.
+    _CATEGORY_INDEX_DUTY = 8.0
+    _CATEGORY_INDEX_MIN_GAP = 0.5
+
+    def _maybe_build_category_index(self, root: FSNode) -> None:
+        """Refresh the live tints if the last rollup has paid for itself."""
+        if self._category_index_running:
+            return
+        gap = max(
+            self._CATEGORY_INDEX_MIN_GAP,
+            self._category_index_cost * self._CATEGORY_INDEX_DUTY,
+        )
+        if monotonic() - self._category_index_at < gap:
+            return
         self._build_category_index(root)
 
-    @work(thread=True, exclusive=True, group="explorer-category-index")
     def _build_category_index(self, root: FSNode) -> None:
-        """Roll the finished tree up into per-directory content shares.
+        """Start one rollup pass and close the gate until it settles.
 
-        Only completed trees get one: a live scan's partial aggregates
-        would name a dominant category from whatever happened to land first.
+        A thread worker cannot actually be interrupted, so `exclusive` only
+        marks a running pass cancelled -- this flag is what keeps two
+        rollups off the CPU at once, and it has to be set on the UI thread
+        here rather than inside a worker that may not have started yet.
         """
-        index = build_category_index(root)
+        self._category_index_running = True
+        self._category_index_worker(root)
+
+    @work(
+        thread=True,
+        exclusive=True,
+        group="explorer-category-index",
+        exit_on_error=False,
+        # Textual builds a worker's debug description by repr()-ing every
+        # positional argument unless it is given one. FSNode is a plain
+        # dataclass whose children are in its repr, so leaving this out
+        # renders the entire scan tree into a string -- 5.3 s and half a
+        # gigabyte on a 679k-node home directory, on the UI thread, before
+        # the worker even starts.
+        description="build category index",
+    )
+    def _category_index_worker(self, root: FSNode) -> None:
+        """Roll a tree up into per-directory content shares.
+
+        Runs against live snapshots too. Their aggregates are partial, so a
+        directory can be named for whatever landed first and change its
+        tint later -- the same caveat every other number on a live chart
+        carries, and far better than the alternative, which is a disc drawn
+        entirely in the neutral directory colour until the scan ends.
+        """
+        started = monotonic()
+        try:
+            index = build_category_index(root)
+        finally:
+            self.app.call_from_thread(
+                self._settle_category_index, monotonic() - started
+            )
         self.app.call_from_thread(self._apply_category_index, root, index)
+
+    def _settle_category_index(self, cost: float) -> None:
+        self._category_index_running = False
+        self._category_index_cost = cost
+        self._category_index_at = monotonic()
 
     def _apply_category_index(self, root: FSNode, index: CategoryIndex) -> None:
         # A newer scan can land while the pass is running; its own worker
-        # will supply the matching index.
-        if not self.is_mounted or self._root is not root:
+        # will supply the matching index. During one, the tree the rollup
+        # read is the live snapshot rather than `_root`.
+        if not self.is_mounted:
+            return
+        if root is not self._root and root is not self._live_snapshot:
             return
         for view_id, view_cls in (
             ("#sunburst-view", SunburstView),

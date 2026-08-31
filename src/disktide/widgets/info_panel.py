@@ -215,7 +215,17 @@ class InfoPanel(Widget):
         if node.is_symlink and not node.link_classified and self.is_mounted:
             self._classify_node(node)
 
-    @work(thread=True, exclusive=True, group="info-panel-symlink", exit_on_error=False)
+    @work(
+        thread=True,
+        exclusive=True,
+        group="info-panel-symlink",
+        exit_on_error=False,
+        # Without one, Textual describes the worker by repr-ing its
+        # arguments, and an FSNode's repr renders its whole subtree. Only
+        # symlinks reach here and those have no children, so today it is
+        # free -- but it is one changed caller away from not being.
+        description="classify symlink target",
+    )
     def _classify_node(self, node: FSNode) -> None:
         """Resolve a symlink's target off the UI thread, then re-render."""
         classify_symlink(node)

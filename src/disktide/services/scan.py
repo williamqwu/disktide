@@ -100,6 +100,14 @@ class _PendingEmission:
     payload: dict[str, object]
 
 
+#: Phases a progress report is allowed to promote out of. The collector
+#: sends one last report after the walk -- from inside finalisation, once
+#: the queue has drained -- and treating "not scanning" as "scanning" there
+#: bounced the phase FINALIZING -> SCANNING -> FINALIZING and flickered
+#: every progress display at the worst possible moment.
+_PRE_SCAN_PHASES = frozenset({ScanPhase.VALIDATING, ScanPhase.DISCOVERING})
+
+
 class _RunEmitter:
     def __init__(
         self,
@@ -416,7 +424,7 @@ class ScanService:
             nonlocal previous_progress
             snapshot = self._snapshot_progress(progress)
             run.progress = snapshot
-            if run.phase is not ScanPhase.SCANNING:
+            if run.phase in _PRE_SCAN_PHASES:
                 previous_phase = run.phase
                 run.phase = ScanPhase.SCANNING
                 emitter.emit(ScanPhaseChanged, previous=previous_phase)
@@ -468,6 +476,23 @@ class ScanService:
                 view_root=build_live_view(update, metric=run.request.metric),
             )
 
+        def enter_finalizing() -> None:
+            """Announce FINALIZING the moment the walk stops.
+
+            The collector keeps working after the last directory is read --
+            snapshot clone, hardlink accounting -- and on a large tree that
+            is seconds. Waiting for `scan()` to return before saying so left
+            every progress display frozen on the walking phase with an empty
+            queue and no active workers, which reads as a hang. Idempotent,
+            because a collector that does not call it still gets the phase
+            set on return.
+            """
+            if run.phase is ScanPhase.FINALIZING:
+                return
+            previous = run.phase
+            run.phase = ScanPhase.FINALIZING
+            emitter.emit(ScanPhaseChanged, previous=previous)
+
         collector: ScannerCollector | None = None
         try:
             reason = self._cancel_reason(run.run_id)
@@ -483,6 +508,7 @@ class ScanService:
                     ),
                     worker_selection=run.worker_selection,
                     directory_observer=directory_observer,
+                    walk_complete_callback=enter_finalizing,
                 )
             else:
                 effective_request = replace(
@@ -513,9 +539,7 @@ class ScanService:
                 )
                 return run
 
-            previous_phase = run.phase
-            run.phase = ScanPhase.FINALIZING
-            emitter.emit(ScanPhaseChanged, previous=previous_phase)
+            enter_finalizing()
             emitter.emit(NodeAggregateUpdated, root=root, final=True)
             self._emit_access_errors(root, emitter)
             if root.error is not None:
@@ -771,7 +795,30 @@ class ScanService:
 
     @staticmethod
     def _emit_access_errors(root: FSNode, emitter: _RunEmitter) -> None:
-        for node in sorted(root.walk(), key=lambda item: item.path):
+        """Report every unreadable node, in path order.
+
+        Only the nodes that have something to say are sorted. Sorting the
+        whole walk instead put every file through a string comparison to
+        order a list that is usually empty -- 0.66 s and 679k comparisons
+        on a home directory that raised no access error at all.
+        """
+        reportable: list[tuple[FSNode, int]] = []
+        for node in root.walk():
+            # Cheap rejection first: a node with no error of its own and no
+            # unreadable direct entry has nothing to report, and that is
+            # every file and nearly every directory. Only survivors pay for
+            # the scan over their children.
+            if node.error is None and not node.inaccessible_count:
+                continue
+            represented_children = sum(
+                1 for child in node.children
+                if child.is_dir and child.error is not None
+            )
+            unrepresented = max(0, node.inaccessible_count - represented_children)
+            if node.error is not None or unrepresented > 0:
+                reportable.append((node, unrepresented))
+        reportable.sort(key=lambda item: item[0].path)
+        for node, unrepresented in reportable:
             if node.error is not None:
                 emitter.emit(
                     AccessError,
@@ -779,11 +826,6 @@ class ScanService:
                     message=node.error,
                     count=1,
                 )
-            represented_children = sum(
-                1 for child in node.children
-                if child.is_dir and child.error is not None
-            )
-            unrepresented = max(0, node.inaccessible_count - represented_children)
             if unrepresented > 0:
                 emitter.emit(
                     AccessError,

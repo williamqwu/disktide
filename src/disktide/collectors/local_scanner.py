@@ -25,6 +25,7 @@ class LocalScanner:
         tree_callback: Callable[[FSNode | ScanTreeUpdate], None] | None = None,
         worker_selection: ScanWorkerSelection | None = None,
         directory_observer: Callable[[str], None] | None = None,
+        walk_complete_callback: Callable[[], None] | None = None,
     ):
         policy = request.policy
         self._engine = ScanEngine(
@@ -40,6 +41,7 @@ class LocalScanner:
             metric=request.metric,
             worker_selection=worker_selection,
             directory_observer=directory_observer,
+            walk_complete_callback=walk_complete_callback,
         )
         self._path = request.path
 

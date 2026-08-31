@@ -45,6 +45,7 @@ class ScanEngine:
         metric: MetricId | str = MetricId.LOGICAL,
         worker_selection: ScanWorkerSelection | None = None,
         directory_observer: Callable[[str], None] | None = None,
+        walk_complete_callback: Callable[[], None] | None = None,
     ):
         from disktide.scanner.sysinfo import select_scan_workers
 
@@ -76,6 +77,7 @@ class ScanEngine:
         self._entry_chunk_size = entry_chunk_size
         self._entry_chunk_queue_capacity = entry_chunk_queue_capacity
         self._directory_observer = directory_observer
+        self._walk_complete_callback = walk_complete_callback
         self._scheduler_stats: SchedulerStats | None = None
 
     def cancel(self) -> None:
@@ -141,8 +143,14 @@ class ScanEngine:
 
         scheduled: ScheduledTree = scheduler.scan(path)
         self._scheduler_stats = scheduled.stats
+        # Everything below this line is finalisation, and on a large tree it
+        # runs for seconds with an empty queue and no workers. Say so before
+        # starting it rather than leaving the caller's progress display
+        # frozen on the walking phase.
+        if self._walk_complete_callback is not None:
+            self._walk_complete_callback()
         root = (
-            clone_tree(scheduled.root)
+            clone_tree(scheduled.root, share_leaves=True)
             if scheduled.published_snapshots > 0
             else scheduled.root
         )

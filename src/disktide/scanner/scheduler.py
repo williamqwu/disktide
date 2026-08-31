@@ -483,14 +483,28 @@ def scan_directory_once(
     )
 
 
-def clone_tree(root: FSNode) -> FSNode:
-    """Clone a tree iteratively so final accounting cannot mutate snapshots."""
+def clone_tree(root: FSNode, *, share_leaves: bool = False) -> FSNode:
+    """Clone a tree iteratively so final accounting cannot mutate snapshots.
+
+    `share_leaves` keeps the original file nodes in place and copies only
+    the directories. Files are the overwhelming majority of a scan -- 592k
+    of 679k on a real home directory -- and copying them dominated the
+    post-walk stall at 10.7 s. What the clone exists to protect is a
+    published snapshot's *aggregates*, and those live on directories; the
+    only thing `finalize_unique_allocated` writes to a leaf is that leaf's
+    own final unique-allocated value, which is the correct answer for the
+    snapshot too. Callers that hand the clone out for independent editing
+    (the provisional store) must keep the full copy.
+    """
 
     clones: dict[int, FSNode] = {}
     stack: list[tuple[FSNode, bool]] = [(root, False)]
     while stack:
         node, visited = stack.pop()
         if not visited:
+            if share_leaves and not node.is_dir:
+                clones[id(node)] = node
+                continue
             stack.append((node, True))
             stack.extend((child, False) for child in reversed(node.children))
             continue
