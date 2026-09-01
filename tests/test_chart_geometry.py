@@ -117,13 +117,21 @@ def _covered_cells(layout) -> dict[int, set[int]]:
 
 
 class TestSunburstRoundness:
-    """The disc is a circle in unit space at every aspect and viewport."""
+    """The disc is a circle in unit space at every aspect and viewport.
+
+    Named explicitly, because the configured default is `tiles`, which is
+    a rectangle on purpose: "is it round" is a question only one of the
+    three shapes is meant to answer yes to.  The suites below that pin no
+    shape are the ones whose invariant holds for all three, and they read
+    the default so it does not go uncovered.
+    """
 
     @pytest.mark.parametrize("aspect", ASPECTS)
     @pytest.mark.parametrize("width,height", VIEWPORTS)
     def test_painted_disc_is_round_in_unit_space(self, aspect, width, height):
         layout = compute_sunburst(
             _sample_tree(), width, height, cell_aspect=aspect,
+            shape="disc",
         )
         assert layout.radius > 0
 
@@ -141,6 +149,7 @@ class TestSunburstRoundness:
     def test_frame_covers_exactly_the_widget(self, aspect, width, height):
         layout = compute_sunburst(
             _sample_tree(), width, height, cell_aspect=aspect,
+            shape="disc",
         )
         assert layout.char_width == width
         assert layout.char_height == height
@@ -216,6 +225,7 @@ class TestGeometrySweep:
                 for aspect in self.SWEEP_ASPECTS:
                     layout = compute_sunburst(
                         tree, width, height, cell_aspect=aspect,
+                        shape="disc",
                     )
                     if layout.radius <= 0:
                         # Too small to draw a disc into; the widget says so

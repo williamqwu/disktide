@@ -274,6 +274,7 @@ Textual offers no supported way to change it under a running app.
 | `t` | Explorer | Cycle Logical / Allocated / Unique / Files across all views |
 | Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
 | `,` / `.` | Explorer | Nudge the terminal cell aspect by 0.05 (rounder / taller disc) |
+| `g` | Explorer | Cycle the ring chart's shape: tiles / disc / fill |
 | Up / Down | Settings | Move focus between fields (also Tab/Shift+Tab) |
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
 | `b` | FS Overview | Confirm and benchmark the highlighted mount |
@@ -590,6 +591,7 @@ default_viz = "sunburst"                 # treemap, sunburst, details
 # show_cleanup = true                    # enable Cleanup mode (disabled by default)
 # safe_rendering = true                  # ASCII glyphs and block-free charts for web shells
 # cell_aspect = 2.43                     # omit to measure; pixel height/width of one cell
+# ring_shape = "disc"                    # default tiles; disc | fill | tiles (see Ring shape)
 # mouse = false                          # default true; --no-mouse overrides per session
 # live_scan_render = "auto"              # auto | on | off — draw viz live during scan
 # default_scan_path = "/home/user/data" # pre-fill welcome screen
@@ -610,8 +612,10 @@ same pack switches with source, rule count, and maximum risk.
 
 ### Terminal cell aspect
 
-The sunburst is a circle and the treemap's "square" rectangles are square only
-if DiskTide knows how tall one character cell is per unit of width. That ratio
+The treemap's "square" rectangles, and a ring chart drawn as a `disc`, are the
+right shape only if DiskTide knows how tall one character cell is per unit of
+width. (The default `tiles` ring shape needs none of this -- see **Ring shape**
+below -- but the treemap always does.) That ratio
 depends on the font and its line spacing: a 7x17 pixel cell -- a 14px monospace
 face at 1.2 line height -- is 2.43, and drawing a circle as if it were the
 traditional 2.0 stretches it vertically by about 21%, which reads as a plainly
@@ -649,6 +653,33 @@ was measured beside it; blank the box to go back to automatic detection.
 `disktide doctor` prints a **Terminal** block naming which mechanism is feeding
 the value, whether each pixel-size report answered, and -- when nothing did --
 what to do about it.
+
+### Ring shape
+
+The ring chart draws in one of three shapes, chosen by `[ui] ring_shape` or
+cycled in the Explorer with `g`. A press applies at once and is saved, so a
+shape you prefer survives the next launch.
+
+| Shape | Rings are | Siblings are cut by |
+| --- | --- | --- |
+| `tiles` (default) | rectangles sized in whole cells | straight lines |
+| `disc` | circles | rays from the centre |
+| `fill` | rectangles stretched to the pane's edges | rays from the centre |
+
+A terminal cell is a rectangle, so a circle built out of cells is an
+approximation at every point of its rim: the disc's silhouette, its centre hole
+and all four of its ring boundaries are anti-aliased, which is how a chart made
+of cells admits an edge falls between two of them. `tiles` sizes each ring as a
+whole number of columns and half-rows and cuts siblings with straight lines, so
+every edge in the picture lands on a cell edge and no cell is a blend of two
+things. It is the same at every cell aspect, which is why it needs no
+calibration; `disc` and `fill` do.
+
+What `tiles` gives up is the radial reading. A child's cut and its parent's sit
+at the same fraction of two different loops, so they line up along a face and
+step where a loop turns a corner: the chart reads as nested frames rather than
+as rays fanning out from the root. Pick `disc` if that alignment is what you
+use the chart for. Area is exactly proportional to value in all three.
 
 The **Live scan rendering** setting (`live_scan_render`) controls whether the active visualization tab redraws as the scan progresses. `auto` (the default) enables it on terminals at least 80 columns by 24 rows with at least 4 CPUs, and stays off on smaller / lower-resource setups where the per-frame redraw cost would compete with the scan. Set to `on` to force it regardless of terminal size, or `off` to wait for the scan to finish and render once.
 

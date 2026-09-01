@@ -58,9 +58,17 @@ from dataclasses import dataclass, field
 
 
 #: Every shape `ui.ring_shape` may name, in the order the explorer's
-#: cycle key steps through them.
+#: cycle key steps through them.  The order is the order they were built
+#: in, which is also roughly the order of how much of the grid they land
+#: on; the default is picked below, not by position.
 RING_SHAPES: tuple[str, ...] = ("disc", "fill", "tiles")
-DEFAULT_RING_SHAPE = "disc"
+#: `tiles` is the default: it is the only one of the three that draws no
+#: partially covered cell at any cell aspect, so it needs no aspect
+#: calibration to look right and it is sharp on a terminal that reports
+#: nothing about its own font.  The trade is real and is the reason the
+#: other two stay reachable -- nesting frames of tiles gives up the disc's
+#: radial parent/child alignment, so it reads less like a sunburst.
+DEFAULT_RING_SHAPE = "tiles"
 
 #: Unpainted centre of a round or stretched-rectangle chart, in units.
 #: `tiles` sizes its own hole -- see `geometry_for`.

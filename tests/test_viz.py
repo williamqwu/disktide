@@ -307,6 +307,11 @@ class TestSunburstFill:
     the dotted rims — especially the walls of the empty wedges that cut
     through the disc wherever a leaf has no children — read as noise beside
     the solid interiors.
+
+    Every layout here asks for `shape="disc"` by name.  The configured
+    default is `tiles`, whose whole claim is that it paints no partially
+    covered cell at all — so a rim-anti-aliasing test read against it is
+    not a weaker test, it is a test of something else.
     """
 
     @pytest.fixture(autouse=True)
@@ -326,7 +331,7 @@ class TestSunburstFill:
         """
         layout = compute_sunburst(
             _chain_tree(), 100, 46, max_depth=4,
-            cell_aspect=aspect, panel_bg=PANEL_BG,
+            cell_aspect=aspect, panel_bg=PANEL_BG, shape="disc",
         )
         width, height = _painted_bbox(layout)
         ratio = width / height
@@ -343,7 +348,7 @@ class TestSunburstFill:
         """
         layout = compute_sunburst(
             _chain_tree(), 100, 46, max_depth=4,
-            cell_aspect=2.0, panel_bg=PANEL_BG,
+            cell_aspect=2.0, panel_bg=PANEL_BG, shape="disc",
         )
         root_arc = next(arc for arc in layout.arcs if arc.depth == 0)
         expected = _parse_rgb(_arc_color(root_arc))
@@ -377,7 +382,7 @@ class TestSunburstFill:
         """The rim resolves as a blend, and nothing is painted past it."""
         layout = compute_sunburst(
             _chain_tree(), 100, 46, max_depth=4,
-            cell_aspect=2.0, panel_bg=PANEL_BG,
+            cell_aspect=2.0, panel_bg=PANEL_BG, shape="disc",
         )
         reach = max(arc.r_outer for arc in layout.arcs)
         outermost = max(layout.arcs, key=lambda arc: arc.depth)
@@ -414,7 +419,7 @@ class TestSunburstFill:
         """
         layout = compute_sunburst(
             _chain_tree(), 100, 46, max_depth=4,
-            cell_aspect=2.0, panel_bg=PANEL_BG,
+            cell_aspect=2.0, panel_bg=PANEL_BG, shape="disc",
         )
         reach = max(arc.r_outer for arc in layout.arcs)
         halves = [
@@ -435,7 +440,7 @@ class TestSunburstFill:
         """
         layout = compute_sunburst(
             _split_tree(), 100, 46, max_depth=4,
-            cell_aspect=2.0, panel_bg=PANEL_BG,
+            cell_aspect=2.0, panel_bg=PANEL_BG, shape="disc",
         )
         ring1 = [arc for arc in layout.arcs if arc.depth == 1]
         assert len(ring1) == 2
@@ -480,7 +485,7 @@ class TestSunburstFill:
         """Even where a seam cannot fit, siblings still differ."""
         layout = compute_sunburst(
             _split_tree(), 100, 46, max_depth=4,
-            cell_aspect=2.0, panel_bg=PANEL_BG,
+            cell_aspect=2.0, panel_bg=PANEL_BG, shape="disc",
         )
         ring1 = [arc for arc in layout.arcs if arc.depth == 1]
         first, second = (_parse_rgb(_arc_color(arc)) for arc in ring1)
@@ -494,7 +499,7 @@ class TestSunburstFill:
         aspect = 2.6
         layout = compute_sunburst(
             make_viz_tree(), 100, 46, max_depth=4,
-            cell_aspect=aspect, panel_bg=PANEL_BG,
+            cell_aspect=aspect, panel_bg=PANEL_BG, shape="disc",
         )
         wide = [
             arc
@@ -553,7 +558,7 @@ class TestSunburstFill:
             is_dir=True, depth=0, children=[big] + crumbs,
         )
         layout = compute_sunburst(
-            root, 100, 46, max_depth=4, cell_aspect=2.0, panel_bg=PANEL_BG,
+            root, 100, 46, max_depth=4, cell_aspect=2.0, panel_bg=PANEL_BG, shape="disc",
         )
 
         spans = [arc.angle_span for arc in layout.arcs if arc.depth == 1]

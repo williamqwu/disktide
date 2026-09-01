@@ -117,11 +117,11 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # unbound everywhere in the app.
         Binding("comma", "nudge_cell_aspect(-1)", "Rounder disc", show=False),
         Binding("full_stop", "nudge_cell_aspect(1)", "Taller disc", show=False),
-        # EXPERIMENTAL, and a key rather than a settings row on purpose:
-        # the question it answers is which shape looks better on *this*
-        # terminal, and the only way to answer that is to flip between
-        # them on one frame of one real scan. `g` for geometry, and free
-        # in both this screen's bindings and the app's.
+        # A key rather than a settings row on purpose: the question it
+        # answers is which shape reads better on *this* terminal, and the
+        # only way to answer that is to flip between them on one frame of
+        # one real scan. `g` for geometry, and free in both this screen's
+        # bindings and the app's.
         Binding("g", "cycle_ring_shape", "Ring shape", show=False),
         Binding(
             "shift+m",
@@ -1402,21 +1402,21 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         )
 
     def action_cycle_ring_shape(self) -> None:
-        """Step the ring chart through round, pane-filling and tiled.
+        """Step the ring chart through tiled, round and pane-filling.
 
-        EXPERIMENTAL. A terminal cell is a rectangle, so a disc is an
-        approximation at every point of its rim, its hole and all four of
-        its ring boundaries -- the half-block pass anti-aliases them, which
-        is how a chart made of rectangles admits an edge falls between two
-        cells. Rectangular rings put those same edges *on* cell edges, and
-        `tiles` cuts siblings with straight lines rather than rays so that
-        nothing in the picture is diagonal. This is the key that lets the
-        three be compared on one scan; see `viz.ringshape` for what changes
-        underneath.
+        A terminal cell is a rectangle, so a disc is an approximation at
+        every point of its rim, its hole and all four of its ring
+        boundaries -- the half-block pass anti-aliases them, which is how
+        a chart made of rectangles admits an edge falls between two cells.
+        Rectangular rings put those same edges *on* cell edges, and the
+        default `tiles` cuts siblings with straight lines rather than rays
+        so that nothing in the picture is diagonal. What it trades away is
+        the radial parent/child alignment a disc reads by, which is a
+        matter of taste and so is a key rather than a measurement; see
+        `viz.ringshape` for what changes underneath.
 
         The write-back mirrors the cell-aspect nudge: a shape you have to
-        re-pick on every launch is not one you can live with long enough
-        to judge.
+        re-pick on every launch is not one you can live with.
         """
         shapes = RING_SHAPES
         landed = set_ring_shape(
@@ -1435,8 +1435,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # nothing here dirtied a row, so it repaints itself.
         repaint_widgets(self)
         self.app.notify(
-            f"Ring shape: {landed} (experimental) — `g` cycles "
-            f"{' / '.join(shapes)}",
+            f"Ring shape: {landed} — `g` cycles {' / '.join(shapes)}",
             timeout=3,
         )
 

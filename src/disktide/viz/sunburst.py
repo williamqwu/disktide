@@ -67,7 +67,6 @@ from disktide.viz.colors import (
 )
 from disktide.viz.ringshape import (
     DEFAULT_HOLE_RADIUS,
-    DEFAULT_RING_SHAPE,
     DiscGeometry,
     RingGeometry,
     geometry_for,
@@ -81,8 +80,8 @@ RGB = tuple[int, int, int]
 #: Background assumed when the widget cannot resolve its own.
 DEFAULT_PANEL_BG: RGB = (30, 30, 30)
 
-# Unpainted disc centre, in units, where the root label sits.  Every
-# shape but `tiles` uses it; that one sizes its hole from the cell grid
+# Unpainted chart centre, in units, where the root label sits.  `disc`
+# and `fill` use it; the default shape sizes its hole from the cell grid
 # it snaps to and reports what it chose (`ringshape.RingFit`).
 _HOLE_RADIUS = DEFAULT_HOLE_RADIUS
 
@@ -199,11 +198,14 @@ class SunburstLayout:
     char_height: int
     cell_aspect: float = DEFAULT_CELL_ASPECT
     panel_bg: RGB = DEFAULT_PANEL_BG
-    # Round rings or rectangular ones, and the arithmetic that decides.  The
-    # two travel together: `shape` is what a caller asked for and what
-    # the widget compares against, `geometry` is what every radius and
-    # angle below actually goes through.
-    shape: str = DEFAULT_RING_SHAPE
+    # Round rings or rectangular ones, and the arithmetic that decides.
+    # The two travel together: `shape` is the name that was asked for --
+    # read only by `center_x`, which aligns a straight edge to a column --
+    # and `geometry` is what every radius and angle below actually goes
+    # through.  The defaults are a coherent placeholder for a layout that
+    # holds no arcs, not the configured default: `compute_sunburst` sets
+    # both together the moment it has a pane to fit them to.
+    shape: str = "disc"
     geometry: RingGeometry = field(default_factory=DiscGeometry)
     radius: float = 0.0
     hole_radius: float = _HOLE_RADIUS

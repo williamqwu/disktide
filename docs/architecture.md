@@ -714,7 +714,20 @@ Ring chart where each concentric ring represents a depth level, and arc angles a
 Both spatial charts do their geometry in *units*, where one unit is the width of
 a character cell and a cell is `cell_aspect` units tall. A disc of radius R is
 then a true circle on screen -- `2R` columns by `2R / aspect` rows -- and a
-"square" treemap rect is actually square. `tests/test_chart_geometry.py` sweeps
+"square" treemap rect is actually square.
+
+*How far out* a point is and *how far around* it is are the only two functions
+the sunburst is written against, and `viz/ringshape.py` owns both. Swapping the
+pair draws the same chart with rectangular rings: `disc` answers with `hypot`
+and `atan2`, `fill` with Chebyshev distance and position along the perimeter,
+and the default `tiles` measures the loop as cumulative *area* along the face a
+point is on, which is what turns a sibling boundary from a ray into a straight
+line. `tiles` picks whole columns and half-rows first and reports the radius
+they add up to, so its ring boundaries land on the cell grid at any aspect and
+it needs no calibration; `geometry_for()` returns the shape together with the
+radial layout it wants. `tests/test_ring_shapes.py` measures the claim directly,
+by rasterizing against two panel colours and counting the cells whose colour
+moves -- which is exactly the partially covered ones. `tests/test_chart_geometry.py` sweeps
 widths 40-200 against heights 12-64 at eight aspects and asserts the painted
 bounding box is round in unit space, inside the frame, and centred on the
 layout's own `center_x`/`center_y`. That leaves the *input* as the only thing

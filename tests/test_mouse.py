@@ -63,7 +63,9 @@ def _arc_for(layout: SunburstLayout, path: str) -> ArcSegment:
 
 
 def test_centre_cell_hits_the_chart_root():
-    layout = compute_sunburst(_hit_tree(), 80, 40, cell_aspect=2.0)
+    layout = compute_sunburst(
+        _hit_tree(), 80, 40, cell_aspect=2.0, shape="disc"
+    )
     hit = layout.hit_test(
         int(layout.center_x), int(layout.center_y / layout.cell_aspect)
     )
@@ -73,7 +75,9 @@ def test_centre_cell_hits_the_chart_root():
 
 
 def test_child_mid_angle_cell_hits_that_child():
-    layout = compute_sunburst(_hit_tree(), 80, 40, cell_aspect=2.0)
+    layout = compute_sunburst(
+        _hit_tree(), 80, 40, cell_aspect=2.0, shape="disc"
+    )
     for path in ("/root/deep", "/root/flat", "/root/deep/blob.bin"):
         arc = _arc_for(layout, path)
         hit = layout.hit_test(*_cell_of(layout, arc))
@@ -82,7 +86,9 @@ def test_child_mid_angle_cell_hits_that_child():
 
 def test_cell_in_an_empty_wedge_returns_none():
     """`flat` has no children, so its slice of the depth-2 ring is empty."""
-    layout = compute_sunburst(_hit_tree(), 80, 40, cell_aspect=2.0)
+    layout = compute_sunburst(
+        _hit_tree(), 80, 40, cell_aspect=2.0, shape="disc"
+    )
     flat = _arc_for(layout, "/root/flat")
     outer = _arc_for(layout, "/root/deep/blob.bin")  # the depth-2 ring
     mid_r = (outer.r_inner + outer.r_outer) / 2.0
@@ -92,7 +98,9 @@ def test_cell_in_an_empty_wedge_returns_none():
 
 
 def test_cell_outside_the_disc_returns_none():
-    layout = compute_sunburst(_hit_tree(), 80, 40, cell_aspect=2.0)
+    layout = compute_sunburst(
+        _hit_tree(), 80, 40, cell_aspect=2.0, shape="disc"
+    )
     assert layout.hit_test(0, 0) is None
     assert layout.hit_test(layout.char_width - 1, layout.char_height - 1) is None
 
@@ -100,8 +108,12 @@ def test_cell_outside_the_disc_returns_none():
 def test_hit_test_respects_cell_aspect():
     """A 2.43 cell is 21% taller than the assumed 2.0, so the disc covers
     fewer rows; a hit test frozen at 2.0 reports arcs above its rim."""
-    wide = compute_sunburst(_hit_tree(), 80, 40, cell_aspect=2.0)
-    tall = compute_sunburst(_hit_tree(), 80, 40, cell_aspect=2.43)
+    wide = compute_sunburst(
+        _hit_tree(), 80, 40, cell_aspect=2.0, shape="disc"
+    )
+    tall = compute_sunburst(
+        _hit_tree(), 80, 40, cell_aspect=2.43, shape="disc"
+    )
     column = int(wide.center_x)
 
     def first_hit_row(layout: SunburstLayout) -> int | None:
