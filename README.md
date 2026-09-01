@@ -246,8 +246,6 @@ one, with the stream and exit-code contract, the JSON output, and every flag.
   syscall the tool makes, and platform-specific behavior.
 - **[Release Process](docs/release-process.md)**: locked builds, clean-wheel
   smoke tests, checksums, SBOM, provenance, and PyPI publishing.
-- **[Delivery Waves](docs/waves/README.md)**: interactive feature,
-  architecture, and validation briefs for Waves 01 to 07.
 - **[Contributing](docs/contributing.md)**: dev setup, testing, and how to add
   rules, screens, or visualizations.
 
