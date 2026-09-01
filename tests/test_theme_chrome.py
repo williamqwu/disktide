@@ -32,11 +32,11 @@ from textual.widgets import TabbedContent
 
 from disktide.app import DiskTideApp
 from disktide.config import AppConfig
-from disktide.screens.explorer import ExplorerScreen
 from disktide.viz.colors import SCHEMES
 from disktide.widgets.breadcrumb import Breadcrumb
 from disktide.widgets.size_tree import SizeTree
 from disktide.widgets.sunburst_view import SunburstView
+from tests.waiting import wait_for_explorer, wait_until
 
 _POLL_TRIES = 60
 _POLL_DELAY = 0.1
@@ -95,17 +95,25 @@ def _cells_without_a_background(app) -> int:
 
 
 async def _settled_explorer(pilot, app):
-    """Wait until the explorer holds a scan *and* a built sunburst layout."""
-    await pilot.pause(delay=0.2)
-    for _ in range(_POLL_TRIES):
-        await pilot.pause(delay=_POLL_DELAY)
-        screen = app.screen
-        if not isinstance(screen, ExplorerScreen) or screen._root is None:
-            continue
-        view = screen.query_one("#sunburst-view", SunburstView)
-        if view._category_index is not None and view._layout is not None:
-            return screen, view
-    raise AssertionError("the explorer never painted a sunburst layout")
+    """Wait until the explorer holds a scan *and* a built sunburst layout.
+
+    The boot half is `tests.waiting`, which waits for the tree panel to
+    come out of its scanning layout rather than only for a root -- this
+    test reads the whole composited screen, so a frame caught mid-relayout
+    is a frame with cells nothing has painted yet. The tints are the extra
+    condition on top: the category rollup is thrown at a worker, so a
+    chart can be laid out before it is coloured.
+    """
+    screen = await wait_for_explorer(pilot, app)
+    view = screen.query_one("#sunburst-view", SunburstView)
+    await wait_until(
+        pilot,
+        lambda: view._category_index is not None and view._layout is not None,
+        what="the explorer never painted a sunburst layout with its tints",
+        tries=_POLL_TRIES,
+        delay=_POLL_DELAY,
+    )
+    return screen, view
 
 
 async def _await_screen(pilot, app, name: str):
