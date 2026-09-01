@@ -16,13 +16,13 @@ from disktide.app import DiskTideApp
 from disktide.config import load_config
 from disktide.domain.live_view import build_live_view
 from disktide.models.tree import FSNode
-from disktide.screens.explorer import ExplorerScreen
 from disktide.viz.layout import bounded_children, is_aggregate_path
 from disktide.viz.sunburst import ArcSegment, SunburstLayout, compute_sunburst
 from disktide.viz.treemap import compute_layout
 from disktide.widgets.size_tree import SizeTree
 from disktide.widgets.sunburst_view import SunburstView
 from disktide.widgets.treemap_view import TreemapView
+from tests.waiting import wait_for_explorer, wait_for_layout
 
 
 # --- unit: sunburst hit_test ----------------------------------------------
@@ -185,21 +185,6 @@ def test_treemap_rect_at_outside_the_grid_is_none():
 # --- integration helpers --------------------------------------------------
 
 
-async def _wait_for_explorer(pilot, app) -> None:
-    await pilot.pause(delay=0.2)
-    for _ in range(20):
-        await pilot.pause(delay=0.1)
-        if isinstance(app.screen, ExplorerScreen) and app.screen._root is not None:
-            return
-
-
-async def _wait_for_layout(pilot, view) -> None:
-    for _ in range(20):
-        await pilot.pause(delay=0.05)
-        if view._layout is not None and not view._stale:
-            return
-
-
 def _make_tree_dir(tmp_path) -> None:
     """Two directories with arcs wide enough to click without ambiguity."""
     for name, size in (("alpha", 60_000), ("beta", 40_000)):
@@ -234,9 +219,9 @@ def test_clicking_an_arc_drills_into_that_directory(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#sunburst-view", SunburstView)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
 
             target = str(tmp_path / "alpha")
             arc = _arc_for(view._layout, target)
@@ -255,17 +240,22 @@ def test_clicking_the_centre_goes_up_one_level(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#sunburst-view", SunburstView)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
 
             arc = _arc_for(view._layout, str(tmp_path / "alpha"))
             await pilot.click(view, offset=_cell_of(view._layout, arc))
             await pilot.pause()
             assert app.screen._current.path == str(tmp_path / "alpha")
 
+            # `_stale` is only ever set alongside a refresh() -- see
+            # `SunburstView._ensure_layout`. A bare poke dirties no rows, so
+            # no render pass runs and the rebuild never happens; the wait
+            # below used to spin out and fall through in silence.
             view._stale = True
-            await _wait_for_layout(pilot, view)
+            view.refresh()
+            await wait_for_layout(pilot, view)
             layout = view._layout
             centre = (
                 int(layout.center_x),
@@ -287,9 +277,9 @@ def test_clicking_the_centre_at_the_scan_root_never_rescans(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#sunburst-view", SunburstView)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
             layout = view._layout
 
             await pilot.click(
@@ -314,7 +304,7 @@ def test_arc_clicks_are_ignored_while_a_scan_is_running(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             before = screen._current
 
@@ -335,7 +325,7 @@ def test_a_click_on_an_unknown_path_is_a_silent_no_op(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             before = screen._current
 
@@ -358,9 +348,9 @@ def test_hovering_an_arc_sets_a_tooltip(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#sunburst-view", SunburstView)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
 
             arc = _arc_for(view._layout, str(tmp_path / "alpha"))
             await pilot.hover(view, offset=_cell_of(view._layout, arc))
@@ -380,9 +370,9 @@ def test_hovering_never_recomputes_the_layout(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#sunburst-view", SunburstView)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
             layout = view._layout
 
             for arc in view._layout.arcs:
@@ -401,9 +391,9 @@ def test_leaving_the_chart_clears_the_tooltip(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#sunburst-view", SunburstView)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
 
             arc = _arc_for(view._layout, str(tmp_path / "alpha"))
             await pilot.hover(view, offset=_cell_of(view._layout, arc))
@@ -426,9 +416,9 @@ def test_clicking_a_treemap_rect_moves_the_tree_cursor(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="treemap")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#treemap-view", TreemapView)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
 
             target = str(tmp_path / "alpha" / "blob.bin")
             cell = _treemap_cell(view._layout, target)
@@ -448,9 +438,9 @@ def test_hovering_a_treemap_rect_sets_a_tooltip(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="treemap")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#treemap-view", TreemapView)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
 
             cell = _treemap_cell(view._layout, str(tmp_path / "alpha" / "blob.bin"))
             assert cell is not None
@@ -473,10 +463,10 @@ def test_tree_cursor_syncs_the_sunburst_selection_once_it_settles(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#sunburst-view", SunburstView)
             tree = app.screen.query_one("#size-tree", SizeTree)
-            await _wait_for_layout(pilot, view)
+            await wait_for_layout(pilot, view)
 
             await pilot.press("down")
             await pilot.pause(delay=0.4)
@@ -497,7 +487,7 @@ def test_the_chart_root_is_not_mirrored_as_a_selection(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             view = app.screen.query_one("#sunburst-view", SunburstView)
             tree = app.screen.query_one("#size-tree", SizeTree)
             await pilot.pause(delay=0.4)
@@ -515,7 +505,7 @@ def test_selection_sync_is_debounced(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
 
             screen._schedule_cursor_settle()
@@ -538,7 +528,7 @@ def test_diff_mode_shares_the_one_settle_timer(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             screen._diff_mode = True
             # The real delay is 120ms, which `pilot.pause()` below can
@@ -576,7 +566,7 @@ def test_settings_switch_updates_the_mouse_preference(tmp_path):
         app = _explorer_app(tmp_path)
         config = app._config
         async with app.run_test(size=(140, 50)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await pilot.press("question_mark")
             await pilot.pause()
             screen = app.screen

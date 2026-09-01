@@ -24,17 +24,9 @@ from disktide.domain.metrics import MetricId
 from disktide.domain.snapshot import Snapshot
 from disktide.domain.visualization import DiffFrame, ExplorerSpaceTime
 from disktide.models.tree import FSNode
-from disktide.screens.explorer import ExplorerScreen
 from disktide.widgets.info_panel import InfoPanel
 from disktide.widgets.size_tree import SizeTree
-
-
-async def _wait_for_explorer(pilot, app) -> None:
-    await pilot.pause(delay=0.2)
-    for _ in range(20):
-        await pilot.pause(delay=0.1)
-        if isinstance(app.screen, ExplorerScreen) and app.screen._root is not None:
-            return
+from tests.waiting import wait_for_explorer
 
 
 def _make_tree_dir(tmp_path) -> None:
@@ -82,7 +74,7 @@ def test_cursor_moves_do_not_rebuild_a_hidden_details_panel(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="sunburst")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             panel = screen.query_one("#info-panel", InfoPanel)
             calls: list[FSNode | None] = []
@@ -104,7 +96,7 @@ def test_cursor_moves_rebuild_the_details_panel_while_it_is_visible(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="details")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             panel = screen.query_one("#info-panel", InfoPanel)
             calls: list[FSNode | None] = []
@@ -127,7 +119,7 @@ def test_activating_details_shows_the_node_the_cursor_is_on(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="sunburst")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
             panel = screen.query_one("#info-panel", InfoPanel)
@@ -152,7 +144,7 @@ def test_activating_details_before_any_highlight_falls_back(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="sunburst")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             screen._last_highlighted = None
             panel = screen.query_one("#info-panel", InfoPanel)
@@ -177,7 +169,7 @@ def test_diff_mode_cursor_move_defers_the_chart_recompute(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="treemap")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             screen._diff_mode = True
             screen._cancel_cursor_settle()
@@ -208,7 +200,7 @@ def test_the_settled_diff_recompute_skips_the_details_tab(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="details")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             screen._diff_mode = True
 
@@ -256,7 +248,7 @@ def test_diff_mode_keeps_the_selected_path_bookkeeping_per_move(tmp_path):
     async def go():
         app = _explorer_app(tmp_path, viz="treemap")
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
             root = screen._root
@@ -297,7 +289,7 @@ def test_quarter_jump_posts_one_highlight_per_press(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
             quarter = max(1, tree.size.height // 4)
@@ -321,7 +313,7 @@ def test_quarter_jump_up_lands_a_quarter_back(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
             quarter = max(1, tree.size.height // 4)
@@ -351,7 +343,7 @@ def test_quarter_jump_clamps_at_both_ends(tmp_path):
     async def go():
         app = _explorer_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
             assert tree.last_line < max(1, tree.size.height // 4)

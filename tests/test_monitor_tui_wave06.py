@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import time
 
 from textual.widgets import Button
 
@@ -16,38 +15,30 @@ from disktide.screens.explorer import ExplorerScreen
 from disktide.screens.monitor import MonitorScreen
 from disktide.widgets.alert_editor import AlertEditor
 from disktide.widgets.monitor_editor import MonitorEditor
-
-
-async def _wait_for_explorer(pilot, app) -> None:
-    for _ in range(80):
-        await pilot.pause(0.025)
-        if getattr(app.screen, "_scan_in_progress", True) is False:
-            return
+from tests.waiting import wait_for_explorer, wait_until
 
 
 async def _wait_for_monitor_load(pilot, screen: MonitorScreen) -> None:
-    for _ in range(80):
-        await pilot.pause(0.025)
-        if not screen._loading:
-            return
+    await wait_until(
+        pilot,
+        lambda: not screen._loading,
+        what="the Monitor Center never finished loading",
+        tries=200,
+        delay=0.025,
+    )
 
 
-async def _settle(pilot, predicate, timeout: float = 8.0) -> None:
-    """Pump the message loop until ``predicate`` holds or ``timeout`` lapses.
+async def _settle(pilot, predicate, tries: int = 160) -> None:
+    """Pump the message loop until ``predicate`` holds, or say which one did not.
 
     Service flags flip on worker threads before the callbacks that rewrite the
     UI reach the Textual message loop, so a single fixed pause is not a
-    synchronisation point on a busy (2-CPU CI) host. Callers re-assert the same
-    condition right after, which keeps a genuine regression reporting the real
-    value instead of hiding it behind a timeout error.
+    synchronisation point on a busy (2-CPU CI) host. Most callers re-assert the
+    same condition right after, which reports the real value rather than a bare
+    timeout; the ones that go straight on to `query_one` do not, and a silent
+    return left those raising `NoMatches` from inside the widget instead.
     """
-    deadline = time.monotonic() + timeout
-    while True:
-        await pilot.pause(0.05)
-        if predicate():
-            return
-        if time.monotonic() >= deadline:
-            return
+    await wait_until(pilot, predicate, tries=tries, delay=0.05)
 
 
 async def _drain_monitor_loads(pilot, app) -> None:
@@ -87,7 +78,7 @@ def test_tui_setup_is_visible_to_shared_service_and_alert_editor(tmp_path):
             snapshot_repository=repository,
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await pilot.press("2")
             await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             screen = app.screen
@@ -187,7 +178,7 @@ def test_monitor_sampling_controls_start_stop_and_persist_auto_start(
             snapshot_repository=repository,
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await pilot.press("2")
             await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             screen = app.screen
@@ -265,7 +256,7 @@ def test_monitor_auto_start_launch_is_reflected_in_controls(tmp_path):
             snapshot_repository=repository,
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await _settle(pilot, lambda: app._monitor_service.session_running)
             assert app._monitor_service.session_running
             await pilot.press("2")
@@ -320,7 +311,7 @@ def test_narrow_monitor_uses_list_detail_and_session_continues_off_screen(
             snapshot_repository=repository,
         )
         async with app.run_test(size=(80, 24)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await pilot.press("2")
             await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
             screen = app.screen
@@ -397,7 +388,7 @@ def test_explorer_sets_up_monitor_for_highlighted_directory(tmp_path):
             snapshot_repository=repository,
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree")
             await pilot.press("down")
             await _settle(

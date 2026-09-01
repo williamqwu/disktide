@@ -14,9 +14,9 @@ from disktide.config import load_config
 from disktide.models.tree import FSNode
 from disktide.scanner.engine import ScanEngine
 from disktide.scanner.walker import classify_symlink
-from disktide.screens.explorer import ExplorerScreen
 from disktide.widgets.info_panel import InfoPanel
 from disktide.widgets.size_tree import SizeTree
+from tests.waiting import wait_for_explorer
 
 
 def _find(node: FSNode, name: str) -> FSNode | None:
@@ -160,14 +160,6 @@ def test_info_panel_shows_symlink_target():
 # --- explorer: `i` navigates a symlinked directory ------------------------
 
 
-async def _wait_for_explorer(pilot, app) -> None:
-    await pilot.pause(delay=0.2)
-    for _ in range(30):
-        await pilot.pause(delay=0.1)
-        if isinstance(app.screen, ExplorerScreen) and app.screen._root is not None:
-            return
-
-
 async def _cursor_to(pilot, tree, name: str) -> bool:
     """Move the tree cursor onto the first node whose FSNode name matches."""
     for _ in range(tree.last_line + 1):
@@ -192,7 +184,7 @@ def test_press_i_enters_symlinked_directory(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
 
@@ -220,7 +212,7 @@ def test_press_i_does_nothing_on_file_symlink(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
 

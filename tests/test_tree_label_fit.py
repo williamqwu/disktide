@@ -14,21 +14,13 @@ import re
 from disktide.app import DiskTideApp
 from disktide.config import load_config
 from disktide.rendering import bar_chars
-from disktide.screens.explorer import ExplorerScreen
 from disktide.widgets.size_tree import SizeTree
+from tests.waiting import wait_for_explorer
 
 # A percent that survived the crop intact: digits, a decimal, one digit, "%".
 COMPLETE_PCT = re.compile(r"\d+\.\d%")
 # The classic clipped tails: "…16." and "…0.2" with nothing after them.
 FRAGMENT = re.compile(r"\d+\.$|\d+\.\d$")
-
-
-async def _wait_for_explorer(pilot, app) -> None:
-    await pilot.pause(delay=0.2)
-    for _ in range(40):
-        await pilot.pause(delay=0.1)
-        if isinstance(app.screen, ExplorerScreen) and app.screen._root is not None:
-            return
 
 
 def _make_clipping_tree(tmp_path) -> None:
@@ -110,7 +102,7 @@ def _assert_no_clipped_tail(rows: list[str], width: int) -> None:
 async def _rows_at(tmp_path, size) -> tuple[list[str], int]:
     app = DiskTideApp(scan_path=str(tmp_path), show_welcome=False, config=load_config())
     async with app.run_test(size=size) as pilot:
-        await _wait_for_explorer(pilot, app)
+        await wait_for_explorer(pilot, app)
         tree = app.screen.query_one("#size-tree", SizeTree)
         await pilot.pause(delay=0.2)
         await _expand_everything(tree, pilot)
@@ -167,7 +159,7 @@ def test_labels_refit_when_the_panel_is_resized(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(160, 38)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree", SizeTree)
             await pilot.pause(delay=0.2)
             await _expand_everything(tree, pilot)

@@ -36,6 +36,7 @@ from disktide.services.scan_consumers import (
     TreeViewModel,
     replay_scan_events,
 )
+from tests.waiting import wait_until
 
 
 def _tree(path: Path, *, partial: bool = False) -> FSNode:
@@ -469,10 +470,13 @@ def test_live_snapshot_does_not_replace_completed_navigation_state(tmp_path):
             config=config,
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            for _ in range(80):
-                await pilot.pause(delay=0.025)
-                if not app.screen._scan_in_progress:
-                    break
+            await wait_until(
+                pilot,
+                lambda: not app.screen._scan_in_progress,
+                what="the setup scan never finished",
+                tries=80,
+                delay=0.025,
+            )
             stable = app.screen._current
             live = _tree(tmp_path / "live")
             app.screen._scan_in_progress = True

@@ -11,11 +11,11 @@ from disktide.app import DiskTideApp
 from disktide.config import load_config
 from disktide.metrics import METRIC_NAMES, METRICS, metric_text, metric_value
 from disktide.models.tree import FSNode
-from disktide.screens.explorer import ExplorerScreen
 from disktide.viz.sunburst import compute_sunburst
 from disktide.viz.treemap import compute_layout
 from disktide.widgets.info_panel import InfoPanel
 from disktide.widgets.size_tree import SizeTree
+from tests.waiting import wait_for_explorer
 
 
 # --- unit tests: SizeTree metric ------------------------------------------
@@ -148,14 +148,6 @@ def test_sorted_name_and_mtime_ignore_metric():
 # --- integration tests: explorer key bindings -----------------------------
 
 
-async def _wait_for_explorer(pilot, app) -> None:
-    await pilot.pause(delay=0.2)
-    for _ in range(20):
-        await pilot.pause(delay=0.1)
-        if isinstance(app.screen, ExplorerScreen) and app.screen._root is not None:
-            return
-
-
 def _make_tree_dir(tmp_path) -> None:
     """One dir dominated by bytes, one dominated by file count."""
     big = tmp_path / "big"
@@ -175,7 +167,7 @@ def test_press_y_copies_highlighted_path(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree", SizeTree)
             await pilot.press("down")  # move the cursor off the root
             await pilot.pause()
@@ -195,7 +187,7 @@ def test_press_t_cycles_bar_metric(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree", SizeTree)
             assert tree.metric == "logical"
 
@@ -225,7 +217,7 @@ def test_toggle_metric_preserves_cursor_under_name_sort(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree", SizeTree)
             await pilot.press("s")  # size -> name sort (order no longer follows metric)
             await pilot.pause()
@@ -252,7 +244,7 @@ def test_toggle_metric_resorts_under_quantitative_sort(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree", SizeTree)
             # Size order: 'big' (100 KB blob) leads.
             assert tree.root.children[0].data.name == "big"
@@ -275,7 +267,7 @@ def test_cursor_usable_after_rescan(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             tree = app.screen.query_one("#size-tree", SizeTree)
 
             await pilot.press("r")  # open the rescan confirm modal
@@ -446,7 +438,7 @@ def test_press_t_propagates_metric_to_visualizations(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             scr = app.screen
             views = [
                 scr.query_one("#treemap-view"),
@@ -474,7 +466,7 @@ def test_treemap_recomputes_in_count_mode_after_toggle(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await pilot.press("f2")   # switch to the treemap tab
             await pilot.pause()
             await pilot.press("t", "t", "t")   # cycle to file count

@@ -26,15 +26,7 @@ from disktide.rendering import bump_render_epoch, render_epoch
 from disktide.screens.explorer import ExplorerScreen
 from disktide.screens.monitor import MonitorScreen
 from disktide.widgets.size_tree import SizeTree
-
-
-async def _wait_for_explorer(pilot, app) -> None:
-    """Boot far enough that the explorer holds a scanned tree."""
-    await pilot.pause(delay=0.2)
-    for _ in range(20):
-        await pilot.pause(delay=0.1)
-        if isinstance(app.screen, ExplorerScreen) and app.screen._root is not None:
-            return
+from tests.waiting import wait_for_explorer
 
 
 async def _wait_for_screen(pilot, app, screen_class) -> None:
@@ -88,7 +80,7 @@ def test_resume_repaints_when_epoch_moved_while_suspended(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(130, 38)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             explorer = app.screen
             tree = explorer.query_one("#size-tree", SizeTree)
             indicator = explorer.query_one("#sort-indicator", Static)
@@ -147,7 +139,7 @@ def test_resume_without_epoch_change_does_not_repaint(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(130, 38)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             explorer = app.screen
             indicator = explorer.query_one("#sort-indicator", Static)
 
@@ -189,7 +181,7 @@ def test_screen_with_its_own_resume_handler_still_tracks_the_epoch(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(130, 38)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
 
             await pilot.press("2")
             await _wait_for_screen(pilot, app, MonitorScreen)

@@ -8,14 +8,7 @@ import os
 from disktide.app import DiskTideApp
 from disktide.config import load_config
 from disktide.screens.explorer import ExplorerScreen
-
-
-async def _wait_for_explorer(pilot, app) -> None:
-    await pilot.pause(delay=0.2)
-    for _ in range(20):
-        await pilot.pause(delay=0.1)
-        if isinstance(app.screen, ExplorerScreen) and app.screen._root is not None:
-            return
+from tests.waiting import wait_for_explorer, wait_until
 
 
 def _make_flat_tree(tmp_path, count: int) -> None:
@@ -32,7 +25,7 @@ def test_quarter_screen_jump_moves_cursor_down(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree")
             start = tree.cursor_line
@@ -58,7 +51,7 @@ def test_no_color_environment_does_not_crash(tmp_path, monkeypatch):
         )
         assert app.no_color is True
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             assert isinstance(app.screen, ExplorerScreen)
             assert app.screen._root is not None
 
@@ -73,7 +66,7 @@ def test_quarter_screen_jump_up_after_down(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree")
 
@@ -93,7 +86,7 @@ def test_settings_down_moves_focus(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await pilot.press("question_mark")
             await pilot.pause()
             screen = app.screen
@@ -114,7 +107,7 @@ def test_settings_up_moves_focus_back(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await pilot.press("question_mark")
             await pilot.pause()
             screen = app.screen
@@ -150,7 +143,7 @@ def test_live_render_disabled_on_tiny_canvas(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=config
         )
         async with app.run_test(size=(70, 30)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             assert app.screen._live_render is False
 
     asyncio.run(go())
@@ -181,7 +174,7 @@ def test_live_render_gate_uses_app_size_not_shutil(tmp_path, monkeypatch):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(150, 60)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             assert captured.get("terminal_width") == 150, (
                 f"expected explorer to pass terminal_width=150, "
                 f"got kwargs={captured}"
@@ -242,10 +235,14 @@ def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
                 scan_path=str(tmp_path), show_welcome=False, config=cfg
             )
             async with app.run_test(size=(160, 50)) as pilot:
-                for _ in range(50):
-                    await pilot.pause(delay=0.05)
-                    if isinstance(app.screen, ExplorerScreen):
-                        break
+                await wait_until(
+                    pilot,
+                    lambda: isinstance(app.screen, ExplorerScreen)
+                    and bool(app.screen.query("#sunburst-view")),
+                    what="the explorer never mounted its sunburst",
+                    tries=50,
+                    delay=0.05,
+                )
                 screen = app.screen
                 sv = screen.query_one("#sunburst-view", SunburstView)
                 # Wait until the live snapshot has actual children and
@@ -310,7 +307,7 @@ def test_viz_clears_at_scan_start_regardless_of_live_render(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=cfg
         )
         async with app.run_test(size=(140, 50)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             sv = screen.query_one("#sunburst-view", SunburstView)
             # First scan completed; sunburst (default-active tab) holds
@@ -387,13 +384,15 @@ def test_scan_overlay_lives_in_tree_panel_during_scan(tmp_path):
                 scan_path=str(tmp_path), show_welcome=False, config=cfg
             )
             async with app.run_test(size=(140, 40)) as pilot:
-                for _ in range(60):
-                    await pilot.pause(delay=0.05)
-                    if (
-                        isinstance(app.screen, ExplorerScreen)
-                        and app.screen._scan_in_progress
-                    ):
-                        break
+                await wait_until(
+                    pilot,
+                    lambda: isinstance(app.screen, ExplorerScreen)
+                    and app.screen._scan_in_progress
+                    and bool(app.screen.query("#scan-progress")),
+                    what="the scan never started with the overlay mounted",
+                    tries=60,
+                    delay=0.05,
+                )
                 screen = app.screen
                 overlay = screen.query_one("#scan-progress", ScanProgressOverlay)
                 tree = screen.query_one("#size-tree", SizeTree)
@@ -517,7 +516,7 @@ def test_settings_arrow_does_not_steal_focus_when_select_expanded(tmp_path):
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(140, 50)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             await pilot.press("question_mark")
             await pilot.pause()
             screen = app.screen

@@ -29,6 +29,7 @@ from disktide.models.tree import FSNode
 from disktide.scanner.scheduler import clone_tree
 from disktide.services.scan import ScanService
 from disktide.services.scan_consumers import ScanEventRecorder
+from tests.waiting import wait_for_explorer
 
 
 # --- clone_tree ------------------------------------------------------------
@@ -477,7 +478,6 @@ def test_a_live_frame_reuses_the_view_the_scheduler_shipped(tmp_path):
     from disktide.app import DiskTideApp
     from disktide.config import load_config
     from disktide.domain.live_view import build_live_view
-    from disktide.screens.explorer import ExplorerScreen
     from disktide.widgets.size_tree import SizeTree
     import disktide.screens.explorer as explorer_mod
 
@@ -488,14 +488,7 @@ def test_a_live_frame_reuses_the_view_the_scheduler_shipped(tmp_path):
         config.ui.default_viz = "sunburst"
         app = DiskTideApp(scan_path=str(tmp_path), show_welcome=False, config=config)
         async with app.run_test(size=(120, 40)) as pilot:
-            for _ in range(30):
-                await pilot.pause(delay=0.1)
-                if (
-                    isinstance(app.screen, ExplorerScreen)
-                    and app.screen._root is not None
-                ):
-                    break
-            screen = app.screen
+            screen = await wait_for_explorer(pilot, app)
             root = screen._root
             shipped = build_live_view(root, metric=MetricId.LOGICAL)
             rebuilt: list[object] = []
@@ -531,7 +524,6 @@ def test_a_live_frame_asks_for_a_category_rollup(tmp_path):
     from disktide.app import DiskTideApp
     from disktide.config import load_config
     from disktide.domain.live_view import build_live_view
-    from disktide.screens.explorer import ExplorerScreen
 
     _live_tree(tmp_path)
 
@@ -540,14 +532,7 @@ def test_a_live_frame_asks_for_a_category_rollup(tmp_path):
         config.ui.default_viz = "sunburst"
         app = DiskTideApp(scan_path=str(tmp_path), show_welcome=False, config=config)
         async with app.run_test(size=(120, 40)) as pilot:
-            for _ in range(30):
-                await pilot.pause(delay=0.1)
-                if (
-                    isinstance(app.screen, ExplorerScreen)
-                    and app.screen._root is not None
-                ):
-                    break
-            screen = app.screen
+            screen = await wait_for_explorer(pilot, app)
             root = screen._root
             asked: list[FSNode] = []
             screen._maybe_build_category_index = asked.append
@@ -570,7 +555,6 @@ def test_a_finished_scan_has_its_tints_before_the_chart_is_built(tmp_path):
 
     from disktide.app import DiskTideApp
     from disktide.config import load_config
-    from disktide.screens.explorer import ExplorerScreen
 
     _live_tree(tmp_path)
 
@@ -579,14 +563,7 @@ def test_a_finished_scan_has_its_tints_before_the_chart_is_built(tmp_path):
         config.ui.default_viz = "sunburst"
         app = DiskTideApp(scan_path=str(tmp_path), show_welcome=False, config=config)
         async with app.run_test(size=(120, 40)) as pilot:
-            for _ in range(30):
-                await pilot.pause(delay=0.1)
-                if (
-                    isinstance(app.screen, ExplorerScreen)
-                    and app.screen._root is not None
-                ):
-                    break
-            screen = app.screen
+            screen = await wait_for_explorer(pilot, app)
             order: list[str] = []
             screen._build_category_index = lambda root: order.append("rollup")
             original = screen._update_active_viz
