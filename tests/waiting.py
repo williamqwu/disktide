@@ -184,6 +184,13 @@ async def wait_for_layout(pilot, view, *, tries: int = 60, delay: float = 0.05) 
     That is what `test_hovering_never_recomputes_the_layout` saw on a
     two-core runner: the hover budget was kept, and the layout still
     changed identity underneath it.
+
+    The category rollup is the third source and the likeliest one, since
+    it is asynchronous by design.  `_on_scan_complete` throws it at a
+    thread worker, and `_apply_category_index` calls `set_category_index`
+    on both chart views when it lands -- which sets `_stale` and rebuilds
+    a layout that was, until that moment, settled and the right size.  A
+    caller that has waited for the tints cannot be overtaken by them.
     """
     await wait_until(
         pilot,
@@ -192,6 +199,7 @@ async def wait_for_layout(pilot, view, *, tries: int = 60, delay: float = 0.05) 
             and not view._stale
             and not view._invalidate_scheduled
             and view._fits_current_size()
+            and view._category_index is not None
         ),
         what=f"{type(view).__name__} never built a settled layout",
         tries=tries,
