@@ -27,13 +27,13 @@ A Linux filesystem is a tree by definition. Every directory is a node, every fil
 
 That third property is what a flat sorted list of `du -sh` outputs cannot give you. You see the *structure* of where the bytes live, not just the leaderboard.
 
-![A small filesystem tree on the left and the same data rendered as a sunburst on the right, with three labelled leader lines connecting subtree nodes to their corresponding arcs.](../images/sunburst-mapping.jpg)
+![A small filesystem tree on the left and the same data rendered as a sunburst on the right, with three labelled leader lines connecting subtree nodes to their corresponding arcs.](images/sunburst-mapping.jpg)
 
 *The same filesystem, two encodings. The root maps to the center disc; depth maps to ring number; each parent's bytes are distributed among its children clockwise around its arc; a descendant always stays inside its ancestor's wedge.*
 
 ## Reading our chart
 
-![An annotated reference sunburst chart with seven labelled callouts pointing to the center disc, the rings, an arc-angle indicator, the unreadable and partial accessibility glyphs, the color-by-file-type encoding, and the legend.](../images/sunburst-anatomy.jpg)
+![An annotated reference sunburst chart with seven labelled callouts pointing to the center disc, the rings, an arc-angle indicator, the unreadable and partial accessibility glyphs, the color-by-file-type encoding, and the legend.](images/sunburst-anatomy.jpg)
 
 *Anatomy of the chart. The same seven labels are unpacked below.*
 
