@@ -18,9 +18,9 @@
   <img alt="Textual TUI" src="https://img.shields.io/badge/TUI-Textual-5A2CA0">
 </p>
 
-<img alt="Explorer: the file tree of a disktide working checkout on the left, led by .venv/ at 50.3% of 7.7 MiB, its anti-aliased sunburst on the right with the virtualenv a rust wedge through every ring, legend reading ephemeral 55%, code 28%, media 10%, docs 7%"
+<img alt="Explorer: the file tree of a disktide working checkout on the left, led by .venv/ at 47.7% of 8.1 MiB, its sunburst on the right in the default tiles shape, concentric rectangular rings cut by straight lines with the virtualenv a rust frame enclosing every inner ring, legend reading ephemeral 52%, code 30%, media 10%, docs 8%"
      src="docs/images/sunburst.png" width="49%">
-<img alt="Monitor Center: the Space-Time Trend of the disktide codebase growing from March to August 2026, 162 snapshots, one per commit"
+<img alt="Monitor Center: the Space-Time Trend of the disktide codebase growing from March to August 2026, 184 snapshots, one per commit"
      src="docs/images/monitor.png" width="49%">
 
 <p>
@@ -172,6 +172,7 @@ disktide
 | `1` / `2` / `3` | Switch mode (Explorer / Monitor / FS Overview) |
 | `c` | Switch to Cleanup mode (enable it in Settings first) |
 | `F1` / `F2` / `F3` | Switch visualization (Sunburst / Treemap / Details) |
+| `g` | Cycle sunburst shape (Tiles / Disc / Fill) |
 | `d` / `[` / `]` | Toggle Current/Diff / browse adjacent snapshot pairs |
 | `u` / `i` | Navigate up / drill into directory |
 | `s` | Cycle sort (Size / Name / Modified) |
@@ -189,11 +190,16 @@ Shift while dragging to reach your terminal's own text selection. Launch with
 `--no-mouse` for one session, or set `mouse = false` under `[ui]` (Settings ▸
 Mouse support) to opt out permanently.
 
-DiskTide measures how tall your terminal's character cell is so the sunburst
-comes out round; in the terminals that report no pixel size (xterm.js web
-shells, VS Code, ConPTY, mosh, screen) press `,` and `.` in the Explorer to
-calibrate it by eye, or set it under Settings ▸ Cell aspect. `disktide doctor`
-says which mechanism is in use.
+The sunburst draws in **tiles** by default, the shape in the shot above:
+concentric rectangular rings cut by straight lines, so every boundary lands on
+a whole cell at any terminal geometry. `g` cycles to the round `disc` or the
+panel-filling `fill`, and `ring_shape` under `[ui]` makes the choice stick.
+
+`disc` and `fill` have to know how tall your terminal's character cell is to
+come out round. DiskTide measures it; in the terminals that report no pixel
+size (xterm.js web shells, VS Code, ConPTY, mosh, screen) press `,` and `.` in
+the Explorer to calibrate by eye, or set it under Settings ▸ Cell aspect, and
+`disktide doctor` says which mechanism is in use. `tiles` needs none of this.
 
 Settings leads with System Information, Scan Performance, and UI Settings; the
 longer Cleanup and Monitor sections are collapsed until you open them. The
