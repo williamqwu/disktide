@@ -16,7 +16,11 @@ from disktide.config import (
     AppConfig, cleanup_rule_directory, load_config, save_config,
     get_effective_paths, set_effective_paths,
 )
-from disktide.rendering import bump_render_epoch, set_safe_rendering
+from disktide.rendering import (
+    bump_render_epoch,
+    set_ring_shape,
+    set_safe_rendering,
+)
 from disktide.repositories import default_snapshot_repository
 from disktide.repositories.snapshots import SnapshotRepository
 from disktide.themes import resolve_theme
@@ -199,6 +203,12 @@ class DiskTideApp(App):
             self._config.ui.color_theme
         )
         set_safe_rendering(self._config.ui.safe_rendering)
+        # The environment wins over the config so a shape can be asked for
+        # per-launch — which is the whole of how the two are compared,
+        # including by the README capture pipeline.
+        self._config.ui.ring_shape = set_ring_shape(
+            os.environ.get("DISKTIDE_RING_SHAPE") or self._config.ui.ring_shape
+        )
         cellgeom.set_configured_aspect(self._config.ui.cell_aspect)
 
         # Connect the DB up front so a fallback to an in-memory database is

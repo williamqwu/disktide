@@ -38,14 +38,25 @@ from disktide.domain.scan import (
 )
 from disktide.domain.visualization import ExplorerSpaceTime, VisualizationBlocked
 from disktide.metrics import METRIC_EXPLANATIONS, METRIC_NAMES, metric_text
-from disktide.rendering import bump_render_epoch, denied_glyph, partial_glyph
+from disktide.rendering import (
+    bump_render_epoch,
+    denied_glyph,
+    partial_glyph,
+    ring_shape,
+    set_ring_shape,
+)
 from disktide.models.tree import FSNode
 from disktide.scanner.walker import classify_symlink
-from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
+from disktide.screens import (
+    RenderEpochRefreshMixin,
+    repaint_widgets,
+    scrollbar_css,
+)
 from disktide.services.scan import ScanService
 from disktide.services.monitor import MonitorEvent, MonitorEventKind, MonitorService
 from disktide.services.visualization import VisualizationService
 from disktide.viz.categories import CategoryIndex, build_category_index
+from disktide.viz.ringshape import RING_SHAPES
 from disktide.viz.cellgeom import (
     clamp_cell_aspect,
     detect_cell_aspect,
@@ -106,6 +117,12 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # unbound everywhere in the app.
         Binding("comma", "nudge_cell_aspect(-1)", "Rounder disc", show=False),
         Binding("full_stop", "nudge_cell_aspect(1)", "Taller disc", show=False),
+        # EXPERIMENTAL, and a key rather than a settings row on purpose:
+        # the question it answers is which shape looks better on *this*
+        # terminal, and the only way to answer that is to flip between
+        # them on one frame of one real scan. `g` for geometry, and free
+        # in both this screen's bindings and the app's.
+        Binding("g", "cycle_ring_shape", "Ring shape", show=False),
         Binding(
             "shift+m",
             "setup_monitor",
@@ -1382,6 +1399,45 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             f"Cell aspect {value:.2f} (manual) — blank it in Settings (?) "
             "to return to auto",
             timeout=4,
+        )
+
+    def action_cycle_ring_shape(self) -> None:
+        """Step the ring chart through round, pane-filling and tiled.
+
+        EXPERIMENTAL. A terminal cell is a rectangle, so a disc is an
+        approximation at every point of its rim, its hole and all four of
+        its ring boundaries -- the half-block pass anti-aliases them, which
+        is how a chart made of rectangles admits an edge falls between two
+        cells. Rectangular rings put those same edges *on* cell edges, and
+        `tiles` cuts siblings with straight lines rather than rays so that
+        nothing in the picture is diagonal. This is the key that lets the
+        three be compared on one scan; see `viz.ringshape` for what changes
+        underneath.
+
+        The write-back mirrors the cell-aspect nudge: a shape you have to
+        re-pick on every launch is not one you can live with long enough
+        to judge.
+        """
+        shapes = RING_SHAPES
+        landed = set_ring_shape(
+            shapes[(shapes.index(ring_shape()) + 1) % len(shapes)]
+        )
+        if self._config is not None:
+            self._config.ui.ring_shape = landed
+            try:
+                save_config(self._config)
+            except OSError:
+                # Same call as the aspect nudge makes: a full disk costs
+                # the setting next launch, not this session.
+                pass
+        # `set_ring_shape` bumped the epoch, which is what a *suspended*
+        # screen checks on the way back in. This one is on screen, and
+        # nothing here dirtied a row, so it repaints itself.
+        repaint_widgets(self)
+        self.app.notify(
+            f"Ring shape: {landed} (experimental) — `g` cycles "
+            f"{' / '.join(shapes)}",
+            timeout=3,
         )
 
     def action_scroll_quarter(self, direction: str) -> None:

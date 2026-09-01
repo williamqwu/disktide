@@ -8,6 +8,14 @@ braille dot is only square when a cell is exactly 2:1) drew a vertical
 ellipse on any font whose cells are taller than that — a 7x17 cell, common
 for a 14px face at 1.2 line height, stretched the disc by 21%.
 
+The *shape* of a ring lives in `viz.ringshape`: how far out a point is
+and how far around it is are two functions there, and swapping the pair
+draws the same chart with rectangular rings -- cut by rays, or cut by
+straight lines.  Everything below is written in radius and angle and does
+not care which is in force.  The one thing it has to hand over is which
+*band* a sample landed in, because a shape whose separators are straight
+lines measures "how far around" against that band's own midline.
+
 Painting is a supersampled half-block pass rather than braille stippling.
 The framebuffer is W x 2H half-cells; each half-cell averages four
 subsamples taken at its quarter points, and each pair of vertically
@@ -39,7 +47,12 @@ from disktide.visualization_formatting import (
     format_visual_delta,
     visual_token,
 )
-from disktide.rendering import denied_glyph, is_safe_rendering, partial_glyph
+from disktide.rendering import (
+    denied_glyph,
+    is_safe_rendering,
+    partial_glyph,
+    ring_shape,
+)
 from disktide.viz.categories import CategoryIndex
 from disktide.viz.cellgeom import DEFAULT_CELL_ASPECT
 from disktide.viz.colors import (
@@ -52,6 +65,14 @@ from disktide.viz.colors import (
     file_category,
     neutral_dir_color,
 )
+from disktide.viz.ringshape import (
+    DEFAULT_HOLE_RADIUS,
+    DEFAULT_RING_SHAPE,
+    DiscGeometry,
+    RingGeometry,
+    geometry_for,
+    resolve_ring_shape,
+)
 from disktide.viz.layout import LayoutNode, bounded_children
 
 
@@ -60,8 +81,10 @@ RGB = tuple[int, int, int]
 #: Background assumed when the widget cannot resolve its own.
 DEFAULT_PANEL_BG: RGB = (30, 30, 30)
 
-# Unpainted disc centre, in units, where the root label sits.
-_HOLE_RADIUS = 2.0
+# Unpainted disc centre, in units, where the root label sits.  Every
+# shape but `tiles` uses it; that one sizes its hole from the cell grid
+# it snaps to and reports what it chose (`ringshape.RingFit`).
+_HOLE_RADIUS = DEFAULT_HOLE_RADIUS
 
 # Radial separator: the outermost slice of a ring that is darkened to
 # divide it from the ring outside it.  Capped as a fraction of the ring so
@@ -155,6 +178,11 @@ class _Ring(NamedTuple):
     boundary_start: list[float]
     boundary_end: list[float]
     r_outer: float
+    # Radius of the band's midline.  A shape that cuts siblings with
+    # straight lines measures "how far around" against the rectangle
+    # through the middle of the band, so every sample in the band is
+    # asked the same question whatever its own radius.
+    r_mid: float
     full: bool  # one arc covering the whole circle: no angle lookup needed
     ring_seam: bool  # another ring is painted outside this one
 
@@ -171,6 +199,12 @@ class SunburstLayout:
     char_height: int
     cell_aspect: float = DEFAULT_CELL_ASPECT
     panel_bg: RGB = DEFAULT_PANEL_BG
+    # Round rings or rectangular ones, and the arithmetic that decides.  The
+    # two travel together: `shape` is what a caller asked for and what
+    # the widget compares against, `geometry` is what every radius and
+    # angle below actually goes through.
+    shape: str = DEFAULT_RING_SHAPE
+    geometry: RingGeometry = field(default_factory=DiscGeometry)
     radius: float = 0.0
     hole_radius: float = _HOLE_RADIUS
     ring_width: float = 0.0
@@ -189,8 +223,21 @@ class SunburstLayout:
 
     @property
     def center_x(self) -> float:
-        """Disc centre along x, in units."""
-        return self.char_width / 2.0
+        """Chart centre along x, in units.
+
+        Rectangular rings snap it to a column boundary.  Their vertical
+        edges are the one part of the geometry the framebuffer cannot
+        resolve below a whole cell -- it supersamples in y, where half
+        blocks give it somewhere to put the answer, and only averages in
+        x -- so an edge landing mid-column is a soft band a full cell
+        wide.  Half a cell of offset at an odd width is the difference
+        between that and an exact edge, and `tiles` measures its ring
+        widths out from here.  A disc has no straight edges to align and
+        keeps the exact centre it always had.
+        """
+        if self.shape == "disc":
+            return self.char_width / 2.0
+        return float(round(self.char_width / 2.0))
 
     @property
     def center_y(self) -> float:
@@ -223,7 +270,7 @@ class SunburstLayout:
         x, y = self.cell_center(char_x, char_y)
         dx = x - self.center_x
         dy = y - self.center_y
-        radius = math.hypot(dx, dy)
+        radius = self.geometry.radius(dx, dy)
 
         if radius < self.hole_radius:
             # The unpainted centre reads as the chart root, which is the
@@ -240,9 +287,7 @@ class SunburstLayout:
         if ring.full:
             return ring.arcs[0]
 
-        theta = math.atan2(dy, dx)
-        if theta < 0.0:
-            theta += 2.0 * math.pi
+        theta = self.geometry.angle(dx, dy, ring.r_mid)
         index = bisect_right(ring.starts, theta) - 1
         if index < 0 or theta >= ring.ends[index]:
             # An empty wedge: this ring's parent has no child here.
@@ -262,6 +307,7 @@ def compute_sunburst(
     cell_aspect: float | None = None,
     panel_bg: RGB | None = None,
     category_index: CategoryIndex | None = None,
+    shape: str | None = None,
 ) -> SunburstLayout:
     """Compute and render a sunburst chart.
 
@@ -270,14 +316,18 @@ def compute_sunburst(
     so callers that do not measure their terminal stay deterministic.
     `panel_bg` is the widget's own background, which subsamples that miss
     every arc blend towards.  `category_index` tints directory arcs by what
-    dominates them; without it they stay neutral.
+    dominates them; without it they stay neutral.  `shape` picks round or
+    rectangular rings (`viz.ringshape`); None takes the global the
+    settings own.
     """
     aspect = DEFAULT_CELL_ASPECT if cell_aspect is None else float(cell_aspect)
+    shape = resolve_ring_shape(ring_shape() if shape is None else shape)
     layout = SunburstLayout(
         char_width=char_width,
         char_height=char_height,
         cell_aspect=aspect,
         panel_bg=DEFAULT_PANEL_BG if panel_bg is None else tuple(panel_bg),
+        shape=shape,
         diff_mode=visuals is not None,
     )
 
@@ -291,23 +341,27 @@ def compute_sunburst(
     ):
         return layout
 
-    # Radius that fits both ways once a row is counted as `aspect` units
-    # tall — the whole point of the unit space is that this one number
-    # describes a circle rather than an ellipse.
-    radius = min(char_width / 2.0, char_height * aspect / 2.0) - 1.0
-    if radius < 5.0:
+    # How far the chart reaches, and how that is divided radially, is the
+    # shape's own business.  A disc takes half the shorter side once a row
+    # is counted as `aspect` units tall -- the whole point of the unit
+    # space being that one number describes a circle rather than an
+    # ellipse.  `tiles` works the other way round, picking whole numbers
+    # of cells first so its boundaries land on the grid, and reporting the
+    # radius they add up to.
+    fit = geometry_for(shape, char_width, char_height, aspect, max_depth)
+    if fit.radius < 5.0 or fit.ring_width <= 0.0:
         return layout
 
-    ring_width = (radius - _HOLE_RADIUS) / (max_depth + 1)
-    if ring_width <= 0.0:
-        return layout
-
-    layout.radius = radius
+    ring_width = fit.ring_width
+    layout.geometry = fit.geometry
+    layout.radius = fit.radius
+    layout.hole_radius = fit.hole_radius
     layout.ring_width = ring_width
 
     _build_arcs(
         node, 0, 2 * math.pi,
         depth=0, max_depth=max_depth,
+        hole_radius=fit.hole_radius,
         ring_width=ring_width,
         arcs=layout.arcs,
         metric=metric,
@@ -406,9 +460,17 @@ _SEAM = 1e-9
 
 def _build_rings(
     arcs: list[ArcSegment],
+    geometry: RingGeometry,
     category_index: CategoryIndex | None = None,
 ) -> list[_Ring | None]:
-    """Group arcs by depth into point-lookup tables."""
+    """Group arcs by depth into point-lookup tables.
+
+    The boundaries stored here are the ones the rasterizer and the hit
+    test both read, so a shape that rounds its cuts onto the cell grid
+    rounds them once, here: painting and clicking then agree by
+    construction, and the arcs keep their exact angles for the tooltip
+    that reports a share.
+    """
     two_pi = 2.0 * math.pi
     collected: dict[int, list[ArcSegment]] = {}
     for arc in arcs:
@@ -425,8 +487,10 @@ def _build_rings(
         ):
             group = sorted(group, key=lambda arc: arc.angle_start)
 
-        starts = [arc.angle_start for arc in group]
-        ends = [arc.angle_end for arc in group]
+        r_mid = (group[0].r_inner + group[0].r_outer) / 2.0
+        snap = geometry.snap_angle
+        starts = [snap(arc.angle_start, r_mid) for arc in group]
+        ends = [snap(arc.angle_end, r_mid) for arc in group]
         for i in range(len(ends) - 1):
             gap = starts[i + 1] - ends[i]
             if 0.0 < gap < _SEAM:
@@ -465,6 +529,7 @@ def _build_rings(
             boundary_start=boundary_start,
             boundary_end=boundary_end,
             r_outer=group[0].r_outer,
+            r_mid=r_mid,
             full=count == 1 and spans[0] >= two_pi - _SEAM,
             ring_seam=depth < deepest,
         )
@@ -488,7 +553,7 @@ def _rasterize_arcs(
     if not arcs or ring_width <= 0.0:
         return
 
-    rings = _build_rings(arcs, category_index)
+    rings = _build_rings(arcs, layout.geometry, category_index)
     layout._rings = rings
     ring_count = len(rings)
     reach = max(arc.r_outer for arc in arcs)
@@ -505,12 +570,23 @@ def _rasterize_arcs(
     ]
     layout.frame = frame
 
-    sqrt = math.sqrt
-    atan2 = math.atan2
-    two_pi = 2.0 * math.pi
+    # Bound once: the shape's arithmetic runs four times per half-cell.
+    radius_of = layout.geometry.radius
+    angle_of = layout.geometry.angle
+    row_half_width = layout.geometry.row_half_width
+    edge_per_radian = layout.geometry.edge_per_radian
+    # A shape whose every edge already lands on a cell edge draws its
+    # seams as whole cells instead: the anti-aliased hairline below is
+    # the right answer for an edge that falls *between* two cells, and
+    # the wrong one for the only soft thing left in the picture.
+    crisp = layout.geometry.crisp_seams
+    if crisp:
+        cell_depth = layout.geometry.cell_depth
+        cell_edge = layout.geometry.cell_edge
     inv_ring = 1.0 / ring_width
     bg_r, bg_g, bg_b = layout.panel_bg
     ring_seam_depth = min(_RING_SEAM, ring_width * _RING_SEAM_MAX_FRACTION)
+    max_seam_depth = ring_width * _RING_SEAM_MAX_FRACTION
     seam_half = _ARC_SEAM / 2.0
     # Beyond this arc-length distance no part of a subsample's footprint can
     # touch the seam.
@@ -524,9 +600,11 @@ def _rasterize_arcs(
         dy1 = (hy + 0.75) * half_row - cy
         # Closest this half-row's sample lines get to the centre.
         nearest = 0.0 if dy0 * dy1 <= 0.0 else min(abs(dy0), abs(dy1))
-        if nearest >= reach:
+        # Half the row's covered width, or negative when the row misses
+        # the chart: a chord under the disc, a flat edge under the rest.
+        chord = row_half_width(nearest, reach)
+        if chord < 0.0:
             continue
-        chord = sqrt(reach * reach - nearest * nearest)
         x_lo = max(0, int(cx - chord) - 1)
         x_hi = min(width - 1, int(cx + chord) + 1)
         row = frame[hy]
@@ -536,7 +614,7 @@ def _rasterize_arcs(
             total_r = total_g = total_b = 0
             covered = 0
             for dx, dy in ((dx0, dy0), (dx1, dy0), (dx0, dy1), (dx1, dy1)):
-                radius = sqrt(dx * dx + dy * dy)
+                radius = radius_of(dx, dy)
                 if radius < hole or radius >= reach:
                     total_r += bg_r
                     total_g += bg_g
@@ -553,9 +631,7 @@ def _rasterize_arcs(
                     index = 0
                     theta = 0.0
                 else:
-                    theta = atan2(dy, dx)
-                    if theta < 0.0:
-                        theta += two_pi
+                    theta = angle_of(dx, dy, ring.r_mid)
                     index = bisect_right(ring.starts, theta) - 1
                     if index < 0 or theta >= ring.ends[index]:
                         # An empty slot: this ring has no child here, so the
@@ -570,30 +646,61 @@ def _rasterize_arcs(
                     # Radial separator: a band just inside the ring's outer
                     # edge, dividing it from the ring beyond.
                     r_out = ring.r_outer
-                    lo = max(r_out - ring_seam_depth, radius - foot)
-                    hi = min(r_out, radius + foot)
-                    if hi > lo:
-                        seam_alpha = (hi - lo) * inv_foot
+                    if crisp:
+                        # Exactly the outermost cell of the band, which is
+                        # a whole cell deep because the band's own edges
+                        # are on the grid.  Skipped where a cell is too
+                        # much of the ring to spend on a divider.
+                        depth_one = cell_depth(dx, dy, ring.r_mid)
+                        if (
+                            depth_one <= max_seam_depth
+                            and radius >= r_out - depth_one
+                        ):
+                            seam_alpha = 1.0
+                    else:
+                        lo = max(r_out - ring_seam_depth, radius - foot)
+                        hi = min(r_out, radius + foot)
+                        if hi > lo:
+                            seam_alpha = (hi - lo) * inv_foot
                 if not ring.full:
                     # Angular separator: a hairline centred on the boundary
                     # with each neighbour, skipped where either neighbour is
-                    # too narrow to survive it.
+                    # too narrow to survive it.  Seam widths are lengths of
+                    # ring edge, and one radian is worth a different length
+                    # of edge in every shape — and, where the angle counts
+                    # area rather than perimeter, on every face of the same
+                    # ring — so each one is asked before the comparison.
+                    edge = edge_per_radian(theta, radius, ring.r_mid)
                     span_start = ring.boundary_start[index]
                     span_end = ring.boundary_end[index]
-                    arc_d = -1.0
-                    if span_start > 0.0 and span_start * radius >= seam_min_span:
-                        arc_d = (theta - ring.starts[index]) * radius
-                    if span_end > 0.0 and span_end * radius >= seam_min_span:
-                        other = (ring.ends[index] - theta) * radius
-                        if arc_d < 0.0 or other < arc_d:
-                            arc_d = other
-                    if 0.0 <= arc_d < seam_reach:
-                        lo = max(-seam_half, arc_d - foot)
-                        hi = min(seam_half, arc_d + foot)
-                        if hi > lo:
-                            alpha = (hi - lo) * inv_foot
-                            if alpha > seam_alpha:
-                                seam_alpha = alpha
+                    if crisp:
+                        # One whole cell, and only on the far side of each
+                        # arc: a cell on both sides of every boundary would
+                        # be two cells of divider in a band a few cells
+                        # thick.  Every internal boundary still gets its
+                        # one, from the arc that ends there.
+                        one = cell_edge(theta, ring.r_mid)
+                        if (
+                            span_end > 0.0
+                            and span_end * edge >= one * _SEAM_MIN_SPAN_FACTOR
+                            and (ring.ends[index] - theta) * edge < one
+                        ):
+                            seam_alpha = 1.0
+                    else:
+                        arc_d = -1.0
+                        if span_start > 0.0 and span_start * edge >= seam_min_span:
+                            arc_d = (theta - ring.starts[index]) * edge
+                        if span_end > 0.0 and span_end * edge >= seam_min_span:
+                            other = (ring.ends[index] - theta) * edge
+                            if arc_d < 0.0 or other < arc_d:
+                                arc_d = other
+                        if 0.0 <= arc_d < seam_reach:
+                            lo = max(-seam_half, arc_d - foot)
+                            hi = min(seam_half, arc_d + foot)
+                            if hi > lo:
+                                alpha = (hi - lo) * inv_foot
+                                if alpha > seam_alpha:
+                                    seam_alpha = alpha
                 pixel = ring.colors[index]
                 if seam_alpha > 0.0:
                     seam = ring.seam_colors[index]
@@ -716,6 +823,7 @@ def _build_arcs(
     node: FSNode,
     angle_start: float, angle_end: float,
     depth: int, max_depth: int,
+    hole_radius: float,
     ring_width: float,
     arcs: list[ArcSegment],
     metric: str,
@@ -737,7 +845,7 @@ def _build_arcs(
             or selected_path.startswith(node.path.rstrip("/") + "/")
         )
     )
-    r_inner = _HOLE_RADIUS + depth * ring_width
+    r_inner = hole_radius + depth * ring_width
     r_outer = r_inner + ring_width
 
     arcs.append(ArcSegment(
@@ -814,6 +922,7 @@ def _build_arcs(
             child, current_angle, child_end,
             depth + 1,
             max_depth,
+            hole_radius,
             ring_width,
             arcs,
             metric,
@@ -866,11 +975,16 @@ def _compute_labels(
             continue
 
         mid_angle = arc.angle_mid
+        # The midline of the arc's own band, which is the rectangle
+        # `tiles` measured that arc's angles against.
         mid_r = (arc.r_inner + arc.r_outer) / 2
-        char_x = int(layout.char_width / 2 + mid_r * math.cos(mid_angle))
-        char_y = int(
-            layout.char_height / 2 + mid_r * math.sin(mid_angle) / aspect
-        )
+        # Same transform the rasterizer painted the arc with, run
+        # backwards: on a rectangular ring this walks that band's own
+        # midline rather than a circle, so a label stays on its band
+        # whatever shape is in force.
+        dx, dy = layout.geometry.offset(mid_angle, mid_r)
+        char_x = int(layout.char_width / 2 + dx)
+        char_y = int(layout.char_height / 2 + dy / aspect)
 
         name = arc.node.name
         if arc.visual is not None:
@@ -1049,6 +1163,7 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
                     legend_chars[offset] = (ch, color)
                     offset += 1
 
+    legend_bg = Color.from_rgb(*layout.panel_bg) if legend_chars else None
     segments: list[Segment] = []
     pending: list[str] = []
     pending_style: Style | None = None
@@ -1057,7 +1172,14 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
     for x, (ch, style) in enumerate(cells[y]):
         if x in legend_chars:
             lch, lcolor = legend_chars[x]
-            ch, style = lch, Style(color=lcolor)
+            # A round chart leaves the bottom-left corner unpainted and the
+            # legend simply sits on the panel.  A rectangular one reaches into
+            # that corner, so the strip lays the panel colour back down
+            # rather than letting arcs show between its glyphs.
+            ch, style = lch, Style(
+                color=lcolor,
+                bgcolor=None if style is None else legend_bg,
+            )
         elif x in label_chars:
             lch, lfg, lbg = label_chars[x]
             ch, style = lch, Style(color=lfg, bgcolor=lbg)

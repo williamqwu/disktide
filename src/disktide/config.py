@@ -12,6 +12,10 @@ from pathlib import Path
 from disktide._compat import tomllib
 from disktide.paths import config_file, config_root
 from disktide.themes import resolve_theme
+# Pure stdlib, unlike the rest of `viz` — the reason `resolve_theme` had to
+# be split out of `viz.colors` does not apply to it, so the vocabulary can
+# live in one place instead of being restated here.
+from disktide.viz.ringshape import resolve_ring_shape
 
 _DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _SIZE_MULTIPLIERS = {
@@ -115,6 +119,14 @@ class UIConfig:
     # shells, ConPTY, mosh, screen — where every automatic layer comes up
     # empty and the disc falls back to the historical 2.0.
     cell_aspect: float | None = None
+    # EXPERIMENTAL. "disc" | "fill" | "tiles": whether the ring chart's
+    # rings are circles, rectangles stretched to the pane's own edges, or
+    # those same rectangles cut into blocks by straight lines instead of
+    # by rays. A terminal cell is a rectangle, so a rectangular ring lands
+    # its silhouette, its hole and every ring boundary exactly on cell
+    # edges where a circle can only be anti-aliased towards them; `tiles`
+    # goes further and has no diagonal edge anywhere in the picture.
+    ring_shape: str = "disc"
     # "auto" | "on" | "off". Controls whether the active viz tab (sunburst
     # or treemap) redraws live with partial scan data, vs. waiting for the
     # scan to finish and rendering once. `auto` enables it on a roomy
@@ -258,6 +270,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         if "." not in rendered:
             rendered += ".0"
         lines.append(f"cell_aspect = {rendered}")
+    if config.ui.ring_shape != "disc":
+        lines.append(f'ring_shape = "{config.ui.ring_shape}"')
     if config.ui.live_scan_render != "auto":
         lines.append(f'live_scan_render = "{config.ui.live_scan_render}"')
     if config.ui.default_scan_path is not None:
@@ -383,6 +397,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.safe_rendering = ui.get("safe_rendering", False)
         config.ui.mouse = bool(ui.get("mouse", True))
         config.ui.cell_aspect = _parse_cell_aspect(ui.get("cell_aspect"))
+        config.ui.ring_shape = resolve_ring_shape(ui.get("ring_shape"))
         raw_live = ui.get("live_scan_render", "auto")
         config.ui.live_scan_render = (
             raw_live if raw_live in ("auto", "on", "off") else "auto"
