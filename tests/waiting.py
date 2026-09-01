@@ -82,24 +82,54 @@ async def wait_for_explorer(
     tries: int = EXPLORER_TRIES,
     delay: float = EXPLORER_DELAY,
 ) -> ExplorerScreen:
-    """Return the explorer once it holds a finished scan and a live tree.
+    """Return the explorer once its scan is done *and* the tree is laid out.
 
     The size-tree is part of the condition, not an afterthought: it is the
     widget every caller reaches for next, and a screen that is current but
     not yet composed is the state that produced ``NoMatches: '#size-tree'``
     from deep inside production code.
+
+    So is the tree panel's `scanning` class, and for a subtler reason.
+    `_root` is assigned in `_on_scan_complete` a few statements *before*
+    that class comes off, and the class is what docks a nine-row progress
+    surface above the tree (`#tree-panel.scanning.live-tree
+    #scan-progress`).  A caller that stops at "`_root` is set" can
+    therefore measure a tree that is nine rows short of the one it is
+    about to drive: `test_quarter_jump_posts_one_highlight_per_press` read
+    `size.height // 4` as 7, pressed, and the screen moved by the 9 the
+    relaid-out tree was worth.  Waiting on the class -- and on a height
+    that proves the layout pass ran -- is what the old helper's extra
+    `pause(0.1)` was accidentally buying.
     """
 
+    settled_height: int | None = None
+
     def ready() -> ExplorerScreen | None:
+        nonlocal settled_height
         screen = app.screen
-        if (
+        if not (
             isinstance(screen, ExplorerScreen)
             and screen._root is not None
             and screen.is_mounted
-            and screen.query("#size-tree")
         ):
-            return screen
-        return None
+            settled_height = None
+            return None
+        trees = screen.query("#size-tree")
+        panels = screen.query("#tree-panel")
+        if not trees or not panels or "scanning" in panels.first().classes:
+            settled_height = None
+            return None
+        height = trees.first().size.height
+        if height <= 0:
+            settled_height = None
+            return None
+        # The class comes off before the relayout it triggers has run, so
+        # one clean observation is not enough to prove the tree is the one
+        # the caller will drive.  A height that survives a pump is.
+        if settled_height != height:
+            settled_height = height
+            return None
+        return screen
 
     await pilot.pause(delay * 2)
     for _ in range(tries):
@@ -115,11 +145,19 @@ async def wait_for_explorer(
 
     current = app.screen
     if isinstance(current, ExplorerScreen):
-        composed = current.is_mounted and current.query("#size-tree")
-        tree = "present" if composed else "absent"
+        trees = current.query("#size-tree") if current.is_mounted else None
+        panels = current.query("#tree-panel") if current.is_mounted else None
+        tree = (
+            f"h={trees.first().size.height}" if trees else "absent"
+        )
+        panel = (
+            "scanning" if panels and "scanning" in panels.first().classes
+            else ("settled" if panels else "absent")
+        )
         state = (
             f"root={'set' if current._root is not None else 'None'}, "
-            f"mounted={current.is_mounted}, size-tree={tree}"
+            f"mounted={current.is_mounted}, size-tree={tree}, "
+            f"tree-panel={panel}"
         )
     else:
         state = f"still on {type(current).__name__}"
@@ -138,13 +176,22 @@ async def wait_for_layout(pilot, view, *, tries: int = 60, delay: float = 0.05) 
     frame (see `SunburstView._invalidate_after_paint`).  A caller that
     stops at `not _stale` captures the layout that pending rebuild is
     about to discard, and only finds out several pumps later.
+
+    The size check is the other half of the same thing.  A layout built
+    before the pane reached its final size is not marked stale by anyone;
+    the *next* paint is what notices and defers a rebuild, so a caller can
+    hold a settled-looking layout that the first repaint will replace.
+    That is what `test_hovering_never_recomputes_the_layout` saw on a
+    two-core runner: the hover budget was kept, and the layout still
+    changed identity underneath it.
     """
     await wait_until(
         pilot,
         lambda: (
             view._layout is not None
             and not view._stale
-            and not getattr(view, "_invalidate_scheduled", False)
+            and not view._invalidate_scheduled
+            and view._fits_current_size()
         ),
         what=f"{type(view).__name__} never built a settled layout",
         tries=tries,
