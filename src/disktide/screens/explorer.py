@@ -708,7 +708,14 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._apply_visual_mode()
 
     def _apply_visual_mode(self) -> None:
+        # `is_mounted` outlives the children it implies: app shutdown
+        # removes the tree before the screen reports itself unmounted, and
+        # a space-time context landing from its worker inside that window
+        # took the whole app down with `NoMatches: '#size-tree'`. Nothing
+        # here is worth painting into a screen that is on its way out.
         if not self.is_mounted or self._root is None:
+            return
+        if not self.query("#size-tree"):
             return
         tree = self.query_one("#size-tree", SizeTree)
         selected_path = tree.selected_path
