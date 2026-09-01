@@ -2,6 +2,10 @@
 
 Technical overview of disktide's internals for anyone reading or extending the codebase.
 
+Architecture decisions are recorded as ADRs in the companion
+`artifacts-disktide` repository under `adr/`; this document refers to them by
+number.
+
 ## Project Layout
 
 ```
@@ -171,9 +175,9 @@ resource wait, and requested/effective worker selection. The Explorer
 consumer only schedules `app.call_from_thread()`, so scanner and dispatcher
 threads never mutate Textual widgets or view models.
 
-See `docs/adr/0002-scan-service-event-protocol.md`,
-`docs/adr/0003-all-tree-scheduler-and-event-backpressure.md`, and
-`docs/adr/0012-adaptive-live-scan-engine.md` for the accepted contracts.
+See ADR 0002 for the scan service and event protocol, ADR 0003 for the
+all-tree scheduler and event backpressure, and ADR 0012 for the adaptive live
+scan engine.
 
 ## Scanner
 
@@ -242,7 +246,7 @@ reconciliation. The final tree additionally carries Allocated and Unique.
 - Descendant pseudo mounts are excluded by default; an explicit root is allowed.
 - Max-depth and policy exclusions are separate from access errors.
 
-See `docs/adr/0001-storage-metric-semantics.md` for the complete contract.
+See ADR 0001 for the complete storage metric contract.
 
 ### Error Resilience
 
@@ -446,8 +450,8 @@ snapshot ids, observed and threshold values, severity, confidence, cooldown
 suppression, and suppression reason. Partial snapshots create suppressed audit
 events instead of presenting low-confidence triggers as definitive.
 
-See `docs/adr/0005-monitor-service-retention-and-alerts.md` for the base host,
-scheduling, retention, and alert boundaries, and ADR 0009 for event acceleration.
+See ADR 0005 for the base host, scheduling, retention, and alert boundaries,
+and ADR 0009 for event acceleration.
 
 ## Database
 
