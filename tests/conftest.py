@@ -42,16 +42,24 @@ def reset_cell_geometry():
 def reset_global_rendering_state():
     """Return safe rendering and the colour scheme to their defaults.
 
-    Both are process-wide and both are set by any test that launches the
-    app with a config that names them, so a test that reads them was
-    previously at the mercy of the (randomized) test order.
+    All three are process-wide and all three are set by any test that
+    launches the app with a config that names them, so a test that reads
+    them was previously at the mercy of the (randomized) test order.
+
+    The ring shape is the one that bites hardest, because the config it
+    comes from is the *developer's own*: `load_config()` with no path
+    reads `~/.config/.../config.toml`, so one machine with `ring_shape`
+    set turned every later `compute_sunburst` in that xdist worker into a
+    chart the disc-geometry unit tests do not describe. `set_ring_shape`
+    takes None as "whatever the default is", which is what a reset wants.
     """
     yield
-    from disktide.rendering import set_safe_rendering
+    from disktide.rendering import set_ring_shape, set_safe_rendering
     from disktide.viz.colors import set_color_scheme
 
     set_safe_rendering(False)
     set_color_scheme("disktide")
+    set_ring_shape(None)
 
 
 @pytest.fixture(autouse=True)
