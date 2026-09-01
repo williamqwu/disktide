@@ -70,54 +70,51 @@ review before anything moves, and an applied plan can be undone.
 
 ## Installation
 
-Python 3.10 through 3.14 are supported, and the test suite passes on all five.
-
-Run once without installing:
-
-```bash
-uvx disktide
-```
-
-Install as an isolated command with any supported tool:
+DiskTide is not on PyPI yet, so it installs from a checkout. Python 3.10
+through 3.14 are supported and the suite passes on all five; the package is
+pure Python, so nothing compiles.
 
 ```bash
-uv tool install disktide
-pipx install disktide
-
-# Standard virtual environment
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install disktide
+git clone https://github.com/williamqwu/disktide && cd disktide
 ```
 
-Linux filesystem-event acceleration is optional. Install the `watch` extra to
-reduce change visibility latency while retaining periodic full reconciliation:
+**With uv** — builds a `.venv` from the committed `uv.lock`, so you get the
+exact dependency set CI tests against:
 
 ```bash
-uv tool install 'disktide[watch]'
-pipx install 'disktide[watch]'
-python -m pip install 'disktide[watch]'
+uv sync --locked                 # editable venv, plus the dev tools
+uv run disktide                  # or: . .venv/bin/activate && disktide
+
+uv tool install .                # instead: disktide on PATH, own environment
 ```
 
-Without the extra, monitor hosting remains fully functional in periodic mode.
-`disktide doctor` reports the active backend, version, status, and installation
-remedy.
-
-Upgrade or uninstall:
+**With pip:**
 
 ```bash
-uv tool upgrade disktide
-uv tool uninstall disktide
-pipx upgrade disktide
-pipx uninstall disktide
+python -m venv .venv && . .venv/bin/activate
+pip install .                    # -e instead of . for an editable install
+disktide
 ```
+
+Both give the same program. Editable is optional either way (`pip install -e .`,
+`uv tool install --editable .`); take it if you intend to change the source.
+To upgrade a source install, `git pull` and repeat the install command.
+
+### Optional extras
+
+| Extra | Install | Effect |
+|---|---|---|
+| `watch` | `pip install '.[watch]'`<br>`uv sync --locked --extra watch` | Linux only. Adds `inotify-simple`, so monitors see changes as they happen instead of at the next sweep. Without it, hosting is fully functional in periodic mode. |
+| dev tools | included in `uv sync --locked`<br>`pip install -e . pytest pytest-asyncio pytest-xdist textual-dev` | pytest and Textual's devtools, for running the suite and the debug console. |
+
+`disktide doctor` reports the active watch backend, its version and status, and
+the command to install it if it is missing. The `export`, `remote`, and `web`
+rows it also prints are reserved for later releases and are not installable.
 
 The Python distribution, import package, and canonical command are all named
 `disktide`. The previous `sizetrail`, `fsmonitor`, and `fsmonitor-cli` commands
-remain available as compatibility aliases.
-
-The core wheel is pure Python and has no compiler requirement. Development
-checkouts use `uv sync --locked`; see [Contributing](docs/contributing.md).
+remain available as compatibility aliases. See
+[Contributing](docs/contributing.md) for the development workflow.
 
 ## Stored data
 
