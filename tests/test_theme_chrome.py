@@ -180,7 +180,7 @@ def test_every_cell_carries_a_background(tmp_path, theme):
                 leaked = _cells_without_a_background(app)
                 assert leaked == 0, f"{theme} explorer/{tab}: {leaked} cells"
 
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             await _await_screen(pilot, app, "SettingsScreen")
             await _settled_paint(pilot)
             assert _cells_without_a_background(app) == 0, f"{theme} settings"
@@ -190,7 +190,7 @@ def test_every_cell_carries_a_background(tmp_path, theme):
             for key, name in (
                 ("2", "MonitorScreen"),
                 ("3", "FSOverviewScreen"),
-                ("c", "CleanupScreen"),
+                ("4", "CleanupScreen"),
             ):
                 await pilot.press(key)
                 await _await_screen(pilot, app, name)
@@ -227,7 +227,7 @@ def test_switching_theme_recolours_the_tree_without_a_restart(tmp_path):
             )
             crumb_before = _crumb_styles(explorer)
 
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             settings = await _await_screen(pilot, app, "SettingsScreen")
             settings.query_one("#color-theme").value = "mono"
             await pilot.pause()

@@ -20,9 +20,9 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
     """Render top-changing paths across bounded snapshot intervals."""
 
     BINDINGS = [
-        Binding("up", "cursor_up", "Previous path", show=False),
-        Binding("down", "cursor_down", "Next path", show=False),
-        Binding("enter", "select_path", "Open path", show=False),
+        Binding("up", "cursor_up", "Previous path", show=False, id="heatmap.up"),
+        Binding("down", "cursor_down", "Next path", show=False, id="heatmap.down"),
+        Binding("enter", "select_path", "Open path", show=False, id="heatmap.select"),
     ]
 
     DEFAULT_CSS = """

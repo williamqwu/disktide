@@ -51,9 +51,9 @@ class ConfirmModal(ModalScreen[bool]):
     # (e.g. the originating key "r" or "q") so the user can press the
     # same key twice to confirm — convenient muscle memory.
     BINDINGS = [
-        Binding("y", "confirm", "Yes", show=True),
-        Binding("n", "cancel", "No", show=True),
-        Binding("escape", "cancel", "No", show=False),
+        Binding("y", "confirm", "Yes", show=True, id="confirm.yes"),
+        Binding("n", "cancel", "No", show=True, id="confirm.no"),
+        Binding("escape", "cancel", "No", show=False, id="confirm.cancel"),
     ]
 
     def __init__(

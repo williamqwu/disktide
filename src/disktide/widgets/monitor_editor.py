@@ -50,10 +50,10 @@ class MonitorEditor(ModalScreen[MonitorEditorResult | None]):
     """Short basic form with policy controls in an advanced section."""
 
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel", show=False),
-        Binding("ctrl+s", "save", "Save", show=True),
-        Binding("down", "focus_next", "Next", show=False, priority=True),
-        Binding("up", "focus_previous", "Previous", show=False, priority=True),
+        Binding("escape", "cancel", "Cancel", show=False, id="editor.cancel"),
+        Binding("ctrl+s", "save", "Save", show=True, id="editor.save"),
+        Binding("down", "focus_next", "Next", show=False, priority=True, id="editor.field_next"),
+        Binding("up", "focus_previous", "Previous", show=False, priority=True, id="editor.field_previous"),
     ]
 
     DEFAULT_CSS = """

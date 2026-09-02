@@ -87,7 +87,7 @@ def test_settings_down_moves_focus(tmp_path):
         )
         async with app.run_test(size=(120, 40)) as pilot:
             await wait_for_explorer(pilot, app)
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             await pilot.pause()
             screen = app.screen
             assert screen.__class__.__name__ == "SettingsScreen"
@@ -108,7 +108,7 @@ def test_settings_up_moves_focus_back(tmp_path):
         )
         async with app.run_test(size=(120, 40)) as pilot:
             await wait_for_explorer(pilot, app)
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             await pilot.pause()
             screen = app.screen
 
@@ -517,7 +517,7 @@ def test_settings_arrow_does_not_steal_focus_when_select_expanded(tmp_path):
         )
         async with app.run_test(size=(140, 50)) as pilot:
             await wait_for_explorer(pilot, app)
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             await pilot.pause()
             screen = app.screen
             assert screen.__class__.__name__ == "SettingsScreen"

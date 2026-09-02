@@ -420,24 +420,24 @@ def test_tui_preview_safe_apply_and_undo_share_cleanup_service(
                 pilot,
                 lambda: getattr(app.screen, "_scan_in_progress", True) is False,
             )
-            await pilot.press("c")
+            await pilot.press("4")
             await wait_until(
                 pilot,
                 lambda: isinstance(app.screen, CleanupScreen)
                 and bool(app.screen._targets),
             )
-            await pilot.press("a", "d")
+            await pilot.press("a", "p")
             await wait_until(pilot, lambda: isinstance(app.screen, CleanupModal))
             await pilot.click("#btn-preview")
             await pilot.pause()
             assert cache.exists()
 
-            await pilot.press("d")
+            await pilot.press("p")
             await wait_until(pilot, lambda: isinstance(app.screen, CleanupModal))
             await pilot.click("#btn-apply")
             await wait_until(pilot, lambda: not cache.exists())
 
-            await pilot.press("u")
+            await pilot.press("z")
             await wait_until(pilot, cache.exists)
         app._monitor_service.shutdown(wait=True)
 

@@ -24,6 +24,7 @@ from textual.widgets import (
 )
 
 from disktide.config import AppConfig, format_duration, save_config
+from disktide.keys import ALERT, DIFF, TREND
 from disktide.domain.alerts import AlertRule
 from disktide.domain.monitor import (
     HistoryPointState,
@@ -63,32 +64,50 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
     """Unified TUI management surface over :class:`MonitorService`."""
 
     BINDINGS = [
-        Binding("n", "new_monitor", "New", show=True),
-        Binding("e", "edit_monitor", "Edit", show=True),
-        Binding("p", "pause_resume", "Pause/Resume", show=True),
-        Binding("shift+r", "run_now", "Run now", show=True, key_display="R"),
-        Binding("g", "reconcile", "Reconcile", show=True),
-        Binding("s", "toggle_session", "Start/Stop sampling", show=True),
-        Binding("d", "archive_monitor", "Archive", show=False),
-        Binding("i", "pin_snapshot", "Pin/Unpin", show=False),
-        Binding("a", "add_alert", "Add alert", show=False),
-        Binding("shift+a", "edit_alert", "Edit alert", show=False),
-        Binding("x", "toggle_alert", "Toggle alert", show=False),
-        Binding("backspace", "remove_alert", "Remove alert", show=False),
-        Binding("t", "run_retention", "Retention", show=False),
-        Binding("r", "refresh", "Refresh", show=True),
-        Binding("enter", "open_detail", "Details", show=False),
-        Binding("escape", "back_to_list", "Back", show=False),
-        Binding("f1", "switch_history_viz('trend')", "Trend", show=False),
-        Binding("f2", "switch_history_viz('treemap')", "Diff map", show=False),
-        Binding("f3", "switch_history_viz('sunburst')", "Growth rings", show=False),
-        Binding("f4", "switch_history_viz('heatmap')", "Heatmap", show=False),
-        Binding("z", "cycle_trend_zoom", "Trend zoom", show=False),
-        Binding("shift+left", "pan_trend(1)", "Trend older", show=False),
-        Binding("shift+right", "pan_trend(-1)", "Trend newer", show=False),
-        Binding("b", "set_diff_baseline", "Set baseline", show=False),
-        Binding("v", "set_diff_target", "Set target", show=False),
-        Binding("l", "use_latest_pair", "Latest/previous", show=False),
+        Binding("n", "new_monitor", "New", show=True, id="monitor.new"),
+        Binding("e", "edit_monitor", "Edit", show=True, id="monitor.edit"),
+        Binding("p", "pause_resume", "Pause", show=True, id="monitor.pause"),
+        Binding("shift+r", "run_now", "Run", show=True, key_display="R", id="monitor.run_now"),
+        # Baseline and target are one control — which pair of snapshots the
+        # diff map is built from — so they share a footer group.
+        Binding("b", "set_diff_baseline", "Set baseline", show=True, group=DIFF, id="monitor.baseline"),
+        Binding("v", "set_diff_target", "Set target", show=True, group=DIFF, id="monitor.target"),
+        Binding("l", "use_latest_pair", "Latest/previous", show=False, id="monitor.latest_pair"),
+        # `s` started a background sampling host while Explorer's `s` only
+        # cycled a sort. Shift, per the rule: a key that is consequential in
+        # any mode is consequential in every mode.
+        Binding(
+            "shift+s", "toggle_session", "Start/Stop sampling",
+            show=False, key_display="S", id="monitor.sampling",
+        ),
+        Binding("g", "reconcile", "Reconcile", show=False, id="monitor.reconcile"),
+        Binding("r", "refresh", "Refresh", show=False, id="monitor.refresh"),
+        # Archiving a monitor is rare and destructive. It used to be `d`, the
+        # same finger as Explorer's view toggle and Cleanup's delete plan; it
+        # is now reachable by name from the command palette only, which is
+        # why it carries no key here.
+        Binding("i", "pin_snapshot", "Pin/Unpin", show=False, id="monitor.pin"),
+        Binding("a", "add_alert", "Add alert", show=False, group=ALERT, id="monitor.alert_add"),
+        Binding("shift+a", "edit_alert", "Edit alert", show=False, group=ALERT, id="monitor.alert_edit"),
+        Binding("x", "toggle_alert", "Toggle alert", show=False, group=ALERT, id="monitor.alert_toggle"),
+        Binding(
+            "backspace", "remove_alert", "Remove alert",
+            show=False, group=ALERT, id="monitor.alert_remove",
+        ),
+        Binding("t", "run_retention", "Retention", show=False, id="monitor.retention"),
+        Binding("enter", "open_detail", "Details", show=False, id="monitor.detail"),
+        Binding("escape", "back_to_list", "Back", show=False, id="monitor.back"),
+        # F1-F4 are eaten by tmux, macOS and several terminal emulators, so
+        # `tab` walks the same four tabs. The tab labels already carry their
+        # own names, which is what makes cycling legible without a footer slot.
+        Binding("f1", "switch_history_viz('trend')", "Trend", show=False, id="monitor.viz_trend"),
+        Binding("f2", "switch_history_viz('treemap')", "Diff map", show=False, id="monitor.viz_treemap"),
+        Binding("f3", "switch_history_viz('sunburst')", "Growth rings", show=False, id="monitor.viz_sunburst"),
+        Binding("f4", "switch_history_viz('heatmap')", "Heatmap", show=False, id="monitor.viz_heatmap"),
+        Binding("tab", "next_history_viz", "Next chart", show=False, id="monitor.viz_next"),
+        Binding("z", "cycle_trend_zoom", "Trend zoom", show=False, group=TREND, id="monitor.trend_zoom"),
+        Binding("shift+left", "pan_trend(1)", "Trend older", show=False, group=TREND, id="monitor.trend_older"),
+        Binding("shift+right", "pan_trend(-1)", "Trend newer", show=False, group=TREND, id="monitor.trend_newer"),
     ]
 
     DEFAULT_CSS = """
@@ -954,6 +973,26 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
         target = tab_map.get(viz)
         if target is not None:
             tabs.active = target
+
+    # The four charts also answer to F1-F4, but tmux, macOS and several
+    # terminal emulators eat those before the app sees them. The tab labels
+    # already name each chart, so walking them with `tab` needs no extra
+    # discovery surface — and it is the only route that works everywhere.
+    _HISTORY_VIZ_TABS = (
+        "monitor-trend-tab",
+        "monitor-diff-tab",
+        "monitor-rings-tab",
+        "monitor-heatmap-tab",
+    )
+
+    def action_next_history_viz(self) -> None:
+        tabs = self.query_one("#monitor-history-viz-tabs", TabbedContent)
+        order = self._HISTORY_VIZ_TABS
+        try:
+            index = order.index(tabs.active)
+        except ValueError:
+            index = -1
+        tabs.active = order[(index + 1) % len(order)]
 
     def action_cycle_trend_zoom(self) -> None:
         self.query_one("#monitor-history-chart", TrendChart).cycle_zoom()

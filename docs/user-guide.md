@@ -113,14 +113,15 @@ daemon or keep sampling after the TUI exits.
 | `p` | Pause or resume the selected definition |
 | `R` | Run the selected monitor now |
 | `g` | Run or queue a trusted full reconciliation |
-| `s` | Start continuous sampling, or stop it and cancel the active monitor scan |
-| `d` | Archive the monitor after confirmation; history remains |
+| `S` | Start continuous sampling, or stop it and cancel the active monitor scan |
+| _(palette)_ | Archive the monitor after confirmation; history remains — Ctrl+P, "Archive monitor" |
 | `i` | Pin or unpin the selected History snapshot |
 | `a` / `A` | Add or edit an alert rule in the Alerts tab |
 | `x` / Backspace | Enable/disable or remove the selected alert rule |
 | `t` | Run retention maintenance from the Retention tab |
 | `r` | Refresh all monitor data |
 | `1` | Return to Explorer; lowercase `e` remains Edit |
+| Tab | Cycle the four history charts (F1-F4 still work where the terminal passes them through) |
 
 The History tab has four visual surfaces:
 
@@ -190,7 +191,7 @@ Press `Enter` on a filesystem or block-device row to open its details. Press `b`
 
 Pseudo-filesystems (`proc`, `sysfs`, `tmpfs`, etc.) are automatically filtered out. Press `r` to refresh.
 
-### Cleanup (c)
+### Cleanup (4)
 
 Detects pattern-matched candidates through versioned declarative rule packs for
 Python, Node, Rust, general logs/temp, IDE metadata, and container/build caches.
@@ -198,7 +199,7 @@ Every row exposes pack/version, category, reason, age, score, confidence, risk,
 default action policy, and rebuild guidance. These rules and scores are
 heuristics, not a guarantee that a path is safe to remove.
 
-Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in the Settings screen (`?`) — a collapsed section near the bottom; move to its title and press Enter to open it. Once enabled, press `c` to switch to it.
+Cleanup mode is **disabled by default**. Enable it under "Cleanup Settings" in the Settings screen (`,`) — a collapsed section near the bottom; move to its title and press Enter to open it. Once enabled, press `4` to switch to it.
 
 The Age/Size Map places age on the vertical axis and size on the horizontal
 axis, with glyph/color conveying risk and the selected point synchronized with
@@ -206,11 +207,11 @@ the table. Press `m` to focus the map and use its arrow keys plus Enter to move
 the table cursor. On small or safe-rendering terminals it becomes a bounded
 score/age/confidence list instead of dropping information.
 
-Review every selected path before acting. Press `d` to create and inspect a
+Review every selected path before acting. Press `p` to create and inspect a
 persistent CleanupPlan v2; this is read-only until an explicit action is chosen.
 **Apply Safely** moves each revalidated target to system Trash when an atomic
 same-filesystem move is available, otherwise to an owned mode-0700 quarantine
-directory next to the target. Press `u` to restore the latest recoverable plan
+directory next to the target. Press `z` to restore the latest recoverable plan
 and `h` to inspect savings history grouped by category. Permanent deletion is a
 separate red action and requires typing the exact plan-scoped
 `DELETE <plan-id>` token. Detection-only rules remain visible but cannot enter
@@ -258,33 +259,88 @@ Textual offers no supported way to change it under a running app.
 
 ### Key Binding Reference
 
+Press `?` in the app for this table, live, for the screen you are on — it is
+generated from the bindings themselves, so it cannot fall out of date the way
+this one can. It lists the keys that work everywhere first, then the current
+screen's own, in sections: **Move around**, **Choose the view**, **Compare
+snapshots**, **Alerts**, **Other actions**. The keys that are too niche for
+the footer — `g` for the ring shape, `[`/`]` for snapshot pairs, `z` and
+Shift+arrows for the trend chart — live there, filed with the everyday keys
+they belong with. `Ctrl+P` searches every action by name, including the few
+that carry no key at all.
+
 | Key | Scope | Action |
 |-----|-------|--------|
-| `1` | Global | Switch to Explorer |
-| `2` | Global | Switch to Monitor |
-| `3` | Global | Switch to FS Overview |
-| `c` | Global | Switch to Cleanup (must be enabled in Settings) |
-| `?` | Global | Open settings |
+| `1` `2` `3` `4` | Global | Switch to Explorer / Monitor / FS Overview / Cleanup |
+| `?` | Global | Open the key map for the current screen |
+| `,` | Global | Open Settings |
+| Ctrl+P | Global | Command palette — search every action by name |
 | `q` | Global | Quit (prompts y/n first) |
+| `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
+| Esc | Modals, Monitor detail | Back / close |
 | `F1` / `F2` / `F3` | Explorer | Sunburst / Treemap / Details |
 | `u` / `i` | Explorer | Navigate up / drill into directory |
 | `s` | Explorer | Cycle sort order |
-| `M` | Explorer | Set up monitoring for the highlighted directory |
-| `y` | Explorer | Copy highlighted path to clipboard |
+| `d` | Explorer | Toggle Current/Diff view |
 | `t` | Explorer | Cycle Logical / Allocated / Unique / Files across all views |
-| Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
-| `,` / `.` | Explorer | Nudge the terminal cell aspect by 0.05 (rounder / taller disc) |
+| `y` | Explorer | Copy highlighted path to clipboard |
+| `M` | Explorer | Set up monitoring for the highlighted directory |
+| `[` / `]` | Explorer | Browse newer / older adjacent snapshot pairs |
 | `g` | Explorer | Cycle the ring chart's shape: tiles / disc / fill |
-| Up / Down | Settings | Move focus between fields (also Tab/Shift+Tab) |
-| `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
-| `b` | FS Overview | Confirm and benchmark the highlighted mount |
+| Ctrl+U / Ctrl+D | Explorer | Jump tree cursor up / down by a quarter screen |
+| `n` / `e` / `p` | Monitor | New / edit / pause-resume the selected monitor |
+| `R` | Monitor | Run the selected monitor now |
+| `S` | Monitor | Start or stop continuous sampling |
+| `g` | Monitor | Run or queue a trusted full reconciliation |
+| `b` / `v` | Monitor | Set the diff baseline / target snapshot |
+| Tab | Monitor | Cycle the four history charts |
+| `B` | FS Overview | Confirm and benchmark the highlighted mount |
 | Enter | FS Overview | Open filesystem or block-device details |
-| `d` | Cleanup | Create and review a CleanupPlan for selected rows |
-| `a` | Cleanup | Select all |
-| Space | Cleanup | Toggle row selection |
-| `u` | Cleanup | Undo the latest recoverable plan |
+| Space / `a` | Cleanup | Toggle row selection / select all |
+| `p` | Cleanup | Create and review a CleanupPlan for selected rows |
+| `z` | Cleanup | Undo the latest recoverable plan |
 | `h` | Cleanup | Show persisted savings history by category |
 | `m` | Cleanup | Focus the synchronized Age/Size Map |
+| Up / Down | Settings | Move focus between fields (also Tab/Shift+Tab) |
+
+Six keys moved in this release. If your fingers disagree, you do not have to
+relearn them -- see below.
+
+### Remapping keys
+
+Every binding carries an id, and `[keys]` in `config.toml` maps an id to a key.
+Three presets ship:
+
+| Preset | What it is |
+|--------|------------|
+| `spine` | The layout above. The default. |
+| `safe` | The v0.2.30 layout with only the three consequence mismatches fixed (`d`, `u`, `s`). |
+| `classic` | The v0.2.30 layout exactly. |
+
+```toml
+[keys]
+preset = "classic"          # start from the old layout ...
+"cleanup.review_plan" = "p" # ... but keep the new plan key
+```
+
+Overrides apply on top of the preset, so "classic except one key" is two lines.
+The key map (`?`) shows which preset is live and always reflects your own
+bindings. An id that no longer exists costs you that one binding and a warning
+toast, never the session.
+
+Why the six moved:
+
+| Was | Now | Reason |
+|-----|-----|--------|
+| `c` Cleanup | `4` | Modes are digits, with no exception to remember. |
+| `?` Settings | `?` key map, `,` Settings | `?` means help everywhere else; there was no key map in the app at all. |
+| `d` Cleanup review plan | `p` | `d` toggled a harmless view in Explorer and reviewed a delete plan here. |
+| `u` Cleanup undo | `z` | `u` steps up a directory in Explorer and undid a plan here. |
+| `s` Monitor sampling | `S` | Starting a background sampling host is consequential; Explorer's `s` only sorts. |
+| `b` FS benchmark | `B` | Benchmarking writes to the disk under test, and frees `b` for "baseline". |
+
+Archiving a monitor lost its key entirely (it was `d`). It is rare, it is
+destructive, and it is now in the command palette by name.
 
 ## CLI Commands
 
@@ -624,8 +680,7 @@ oval disc.
 DiskTide resolves the ratio in order, and stops at the first answer:
 
 1. `DISKTIDE_CELL_ASPECT`, e.g. `export DISKTIDE_CELL_ASPECT=2.43`.
-2. `cell_aspect` under `[ui]`, which is what the Settings box and the
-   calibration keys write.
+2. `cell_aspect` under `[ui]`, which is what the Settings box writes.
 3. An **in-band resize report** (terminal mode 2048), which carries the window's
    pixel size with every resize.
 4. **`TIOCGWINSZ`** pixel fields, which most native terminals fill in and which
@@ -644,11 +699,17 @@ mosh, GNU screen, a detached tmux or one whose client reports no pixel size, the
 `textual serve` web driver, and any wrapper pty. In those, set the value by
 hand.
 
-To calibrate, press `.` in the Explorer to make the disc taller and `,` to make
-it rounder. Each press moves the ratio by 0.05, applies immediately, and is
-saved, so the disc converges on a circle in a few presses and stays that way
-next launch. **Settings ▸ Cell aspect** takes a number directly and shows what
-was measured beside it; blank the box to go back to automatic detection.
+To calibrate, open **Settings ▸ Cell aspect** (`,`). It takes a number
+directly and shows what was measured beside it; blank the box to go back to
+automatic detection. For converging on a circle by eye, the command palette
+(Ctrl+P) offers **Cell aspect: rounder** and **Cell aspect: taller**, which
+move the ratio by 0.05, apply immediately and are saved.
+
+These two were `,` and `.` in the Explorer until v0.2.31. They were retired
+because `tiles` is now the default ring shape and renders identically from
+aspect 1.5 through 3.0, which makes this a `disc`-and-treemap setup step
+rather than something worth two top-level keys -- and `,` is worth more as
+the Settings key.
 
 `disktide doctor` prints a **Terminal** block naming which mechanism is feeding
 the value, whether each pixel-size report answered, and -- when nothing did --
@@ -714,7 +775,7 @@ Six is the ceiling at which the colors stay distinguishable from each other in a
 
 The sunburst legend (bottom-left corner) lists the categories present with each one's share of the scanned bytes, largest first (`■ data 46%`), capped at six entries.
 
-Switch color schemes with `color_theme` in config or the Settings screen (`?`), where a swatch row beside the picker previews the theme and the choice applies as soon as you leave the screen. A theme changes the whole window — header, borders, panels and footer as well as the charts.
+Switch color schemes with `color_theme` in config or the Settings screen (`,`), where a swatch row beside the picker previews the theme and the choice applies as soon as you leave the screen. A theme changes the whole window — header, borders, panels and footer as well as the charts.
 
 There are five:
 

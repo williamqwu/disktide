@@ -17,6 +17,7 @@ from textual.timer import Timer
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 
 from disktide.config import AppConfig, resolve_live_scan_render, save_config
+from disktide.keys import NAV, SNAPSHOT
 from disktide.domain.live_view import LiveViewNode, build_live_view
 from disktide.domain.metrics import MetricId
 from disktide.domain.policy import ScanPolicy
@@ -90,52 +91,61 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # Viz-switch keys are surfaced on the tab labels themselves
         # ("Sunburst [F1]" / "Treemap [F2]" / "Details [F3]") so they don't
         # need to eat space in the footer too.
-        Binding("f1", "switch_viz('sunburst')", "Sunburst", show=False),
-        Binding("f2", "switch_viz('treemap')", "Treemap", show=False),
-        Binding("f3", "switch_viz('details')", "Details", show=False),
-        Binding("u", "go_up", "[U]p [I]nto", show=True, key_display="Nav"),
-        Binding("i", "go_into", "Into", show=False),
-        Binding("s", "cycle_sort", "[S]ort [R]escan", show=True, key_display="Action"),
-        Binding("r", "rescan", "Rescan", show=False),
-        Binding("d", "toggle_diff", "Current/Diff", show=True, key_display="D"),
+        Binding("f1", "switch_viz('sunburst')", "Sunburst", show=False, id="explorer.viz_sunburst"),
+        Binding("f2", "switch_viz('treemap')", "Treemap", show=False, id="explorer.viz_treemap"),
+        Binding("f3", "switch_viz('details')", "Details", show=False, id="explorer.viz_details"),
+        # Footer tier. `u` and `i` are declared adjacently on purpose: the
+        # Footer groups with itertools.groupby, so a run of same-group
+        # bindings has to be consecutive or it renders as two groups. This
+        # pair is what the old "[U]p [I]nto" description drew by hand.
+        Binding("u", "go_up", "Up a level", show=True, group=NAV, id="explorer.up"),
+        Binding("i", "go_into", "Into directory", show=True, group=NAV, id="explorer.into"),
+        Binding("s", "cycle_sort", "Sort", show=True, id="explorer.sort"),
+        Binding("d", "toggle_diff", "Diff", show=True, id="explorer.diff"),
+        Binding("t", "toggle_metric", "Bar", show=True, id="explorer.metric"),
+        Binding("y", "copy_path", "Yank", show=True, id="explorer.yank"),
+        # `r` is spine: it means rescan/refresh on every screen, so it is in
+        # the key map and the palette rather than costing a footer slot.
+        Binding("r", "rescan", "Rescan", show=False, id="explorer.rescan"),
         Binding(
             "left_square_bracket",
             "browse_snapshot_pair(-1)",
             "Newer snapshot pair",
             show=False,
+            group=SNAPSHOT,
+            id="explorer.snapshot_newer",
         ),
         Binding(
             "right_square_bracket",
             "browse_snapshot_pair(1)",
             "Older snapshot pair",
             show=False,
+            group=SNAPSHOT,
+            id="explorer.snapshot_older",
         ),
-        # Live cell-aspect calibration, for the terminals nothing can
-        # measure. `[` and `]` would be the conventional pair, but they
-        # already step through snapshot pairs above, so the nudge keys are
-        # `,` and `.` — the other long-standing "less / more" pair, and
-        # unbound everywhere in the app.
-        Binding("comma", "nudge_cell_aspect(-1)", "Rounder disc", show=False),
-        Binding("full_stop", "nudge_cell_aspect(1)", "Taller disc", show=False),
-        # A key rather than a settings row on purpose: the question it
-        # answers is which shape reads better on *this* terminal, and the
-        # only way to answer that is to flip between them on one frame of
-        # one real scan. `g` for geometry, and free in both this screen's
-        # bindings and the app's.
-        Binding("g", "cycle_ring_shape", "Ring shape", show=False),
+        # `,` and `.` used to nudge the cell aspect live. They are gone: the
+        # Settings screen has had a "Cell aspect (h/w)" field the whole time,
+        # `tiles` is the default ring shape and renders byte-identically from
+        # aspect 1.5 through 3.0, and `,` is worth more as the settings key.
+        # The action itself is still there for the palette and for tests.
+        Binding("g", "cycle_ring_shape", "Ring shape", show=False, id="explorer.ring_shape"),
         Binding(
             "shift+m",
             "setup_monitor",
             "Setup monitor",
-            show=True,
+            show=False,
             key_display="M",
+            id="explorer.setup_monitor",
         ),
-        # QoL: yank the highlighted path, and toggle what the tree bar measures.
-        Binding("y", "copy_path", "[Y]ank path", show=True, key_display="Copy"),
-        Binding("t", "toggle_metric", "[T]oggle metric", show=True, key_display="Bar"),
         # Quarter-screen jumps in the tree — fast scanning of huge lists.
-        Binding("ctrl+d", "scroll_quarter('down')", "↓¼", show=True, key_display="^D/^U"),
-        Binding("ctrl+u", "scroll_quarter('up')", "↑¼", show=False),
+        Binding(
+            "ctrl+d", "scroll_quarter('down')", "Half page down",
+            show=False, id="explorer.scroll_down",
+        ),
+        Binding(
+            "ctrl+u", "scroll_quarter('up')", "Half page up",
+            show=False, id="explorer.scroll_up",
+        ),
     ]
 
     DEFAULT_CSS = """

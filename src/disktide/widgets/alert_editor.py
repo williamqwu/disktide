@@ -27,10 +27,10 @@ class AlertEditor(ModalScreen[AlertRule | None]):
     """Rule editor shared by the Monitor Center Alerts tab."""
 
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel", show=False),
-        Binding("ctrl+s", "save", "Save", show=True),
-        Binding("down", "focus_next", "Next", show=False, priority=True),
-        Binding("up", "focus_previous", "Previous", show=False, priority=True),
+        Binding("escape", "cancel", "Cancel", show=False, id="alert.cancel"),
+        Binding("ctrl+s", "save", "Save", show=True, id="alert.save"),
+        Binding("down", "focus_next", "Next", show=False, priority=True, id="alert.field_next"),
+        Binding("up", "focus_previous", "Previous", show=False, priority=True, id="alert.field_previous"),
     ]
 
     DEFAULT_CSS = """

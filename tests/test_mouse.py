@@ -579,7 +579,7 @@ def test_settings_switch_updates_the_mouse_preference(tmp_path):
         config = app._config
         async with app.run_test(size=(140, 50)) as pilot:
             await wait_for_explorer(pilot, app)
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             await pilot.pause()
             screen = app.screen
             assert screen.__class__.__name__ == "SettingsScreen"

@@ -105,11 +105,11 @@ class CleanupMap(OpaqueStripMixin, Widget, can_focus=True):
     """Keyboard-selectable cleanup map synchronized with the plan table."""
 
     BINDINGS = [
-        Binding("left", "previous", "Previous candidate", show=False),
-        Binding("up", "previous", "Previous candidate", show=False),
-        Binding("right", "next", "Next candidate", show=False),
-        Binding("down", "next", "Next candidate", show=False),
-        Binding("enter", "select", "Select candidate", show=False),
+        Binding("left", "previous", "Previous candidate", show=False, id="map.previous"),
+        Binding("up", "previous", "Previous candidate", show=False, id="map.previous_up"),
+        Binding("right", "next", "Next candidate", show=False, id="map.next"),
+        Binding("down", "next", "Next candidate", show=False, id="map.next_down"),
+        Binding("enter", "select", "Select candidate", show=False, id="map.select"),
     ]
 
     DEFAULT_CSS = """

@@ -133,14 +133,14 @@ class SettingsScreen(Screen):
     """Configuration settings screen."""
 
     BINDINGS = [
-        Binding("escape", "dismiss_settings", "Back", show=True),
+        Binding("escape", "dismiss_settings", "Back", show=True, id="settings.back"),
         # Arrow keys move focus between fields, like Tab/Shift+Tab.
         # `priority=True` so Select/Input widgets don't swallow them
         # when they have no useful arrow-key behaviour of their own
         # (Inputs use Home/End and ←/→ for caret movement; Selects
         # only need ↑/↓ when the dropdown is open).
-        Binding("down", "focus_next_field", "Down", show=True, priority=True),
-        Binding("up", "focus_previous_field", "Up", show=True, priority=True),
+        Binding("down", "focus_next_field", "Down", show=True, priority=True, id="settings.field_next"),
+        Binding("up", "focus_previous_field", "Up", show=True, priority=True, id="settings.field_previous"),
     ]
 
     DEFAULT_CSS = """

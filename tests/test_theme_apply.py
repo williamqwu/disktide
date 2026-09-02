@@ -227,7 +227,7 @@ def test_picking_a_theme_repaints_the_disc_underneath(tmp_path):
             before = _styles(view.render_line(view.size.height // 2))
             assert before, "the mid-disc row painted nothing to compare"
 
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             settings = await _await_screen(pilot, app, SettingsScreen)
             preview_before = _preview_styles(settings)
 
@@ -281,7 +281,7 @@ def test_a_second_visit_applies_a_theme_just_as_well(tmp_path):
         async with app.run_test(size=(120, 40)) as pilot:
             _explorer, view = await _settled_explorer(pilot, app)
 
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             settings = await _await_screen(pilot, app, SettingsScreen)
             await _pick_theme(pilot, settings, "cold")
             await pilot.press("escape")
@@ -290,7 +290,7 @@ def test_a_second_visit_applies_a_theme_just_as_well(tmp_path):
             cold_row = _styles(view.render_line(view.size.height // 2))
 
             # Second visit: same installed screen, resumed rather than mounted.
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             settings_again = await _await_screen(pilot, app, SettingsScreen)
             assert settings_again is settings, (
                 "the settings screen was rebuilt; this test is meant to "
@@ -334,7 +334,7 @@ def test_dismissing_without_a_change_leaves_the_epoch_alone(tmp_path):
             _explorer, view = await _settled_explorer(pilot, app)
 
             # First visit changes the theme, which moves the epoch.
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             settings = await _await_screen(pilot, app, SettingsScreen)
             await _pick_theme(pilot, settings, "cold")
             await pilot.press("escape")
@@ -342,7 +342,7 @@ def test_dismissing_without_a_change_leaves_the_epoch_alone(tmp_path):
             await _await_fresh_layout(pilot, view)
 
             # Second visit touches nothing.
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             await _await_screen(pilot, app, SettingsScreen)
             settled = render_epoch()
             assert settings._entry_epoch == settled
@@ -382,7 +382,7 @@ def test_the_picker_seats_every_theme_name_on_one_line(tmp_path):
         )
         async with app.run_test(size=(80, 40)) as pilot:
             await pilot.pause()
-            await pilot.press("question_mark")
+            await pilot.press("comma")
             settings = await _await_screen(pilot, app, SettingsScreen)
             picker = settings.query_one("#color-theme", Select)
             current = settings.query_one("#color-theme SelectCurrent #label", Static)

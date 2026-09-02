@@ -7,6 +7,8 @@ from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
+
+from disktide.keys import PLAN, SELECT
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Static
 
@@ -35,13 +37,20 @@ class CleanupScreen(RenderEpochRefreshMixin, Screen):
     """Review detected candidates without exposing a direct-delete path."""
 
     BINDINGS = [
-        Binding("d", "delete_selected", "Review Plan", show=True),
-        Binding("a", "select_all", "Select All", show=True),
-        Binding("space", "toggle_select", "Toggle", show=True),
-        Binding("r", "refresh_targets", "Refresh", show=True),
-        Binding("u", "undo_last", "Undo Last", show=True),
-        Binding("h", "show_history", "History", show=True),
-        Binding("m", "focus_map", "Age/Size Map", show=True),
+        # `d` used to review the delete plan here while it toggled a harmless
+        # view in Explorer, and `u` undid a plan here while it stepped up a
+        # directory there. Both moved: the plan is `p`, the undo is `z`.
+        #
+        # Selection and plan are two controls, not four verbs, so each pair
+        # shares a footer group. Ungrouped this screen needs 92 columns; the
+        # two groups bring it to 77.
+        Binding("space", "toggle_select", "Toggle candidate", show=True, group=SELECT, id="cleanup.toggle"),
+        Binding("a", "select_all", "Select all", show=True, group=SELECT, id="cleanup.select_all"),
+        Binding("p", "delete_selected", "Review delete plan", show=True, group=PLAN, id="cleanup.review_plan"),
+        Binding("z", "undo_last", "Undo last plan", show=True, group=PLAN, id="cleanup.undo"),
+        Binding("h", "show_history", "History", show=True, id="cleanup.history"),
+        Binding("m", "focus_map", "Map", show=True, id="cleanup.map"),
+        Binding("r", "refresh_targets", "Refresh", show=False, id="cleanup.refresh"),
     ]
 
     DEFAULT_CSS = """

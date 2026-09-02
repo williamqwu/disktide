@@ -21,6 +21,8 @@ from disktide.rendering import (
     set_ring_shape,
     set_safe_rendering,
 )
+from disktide.commands import BindingCommands
+from disktide.keys import MODE, resolve_keymap
 from disktide.repositories import default_snapshot_repository
 from disktide.repositories.snapshots import SnapshotRepository
 from disktide.themes import resolve_theme
@@ -49,21 +51,52 @@ class DiskTideApp(App):
 
     TITLE = APP_NAME
     SUB_TITLE = "Disk Usage Explorer"
-    ENABLE_COMMAND_PALETTE = False
+    # The palette is what makes the third tier of the keymap free: every
+    # action is reachable by name, so a binding no longer has to earn a key
+    # to be discoverable. Turning it on is the prerequisite for the footer
+    # being allowed to show only six verbs.
+    ENABLE_COMMAND_PALETTE = True
+    # Textual's own providers (themes, quit, screenshot) plus one that walks
+    # this app's bindings, so every action is findable by name.
+    COMMANDS = App.COMMANDS | {BindingCommands}
 
     BINDINGS = [
+        # The four mode digits are one control, so they are one footer group.
+        # Textual renders grouped keys bare and puts a single "Mode" label
+        # after the run — which is exactly what the old
+        # "[1]Explorer [2]Monitor [3]FS-Overview" description was drawing by
+        # hand. Keep the four adjacent: Footer groups with itertools.groupby,
+        # which only ever sees consecutive runs.
         Binding(
-            "1",
-            "switch_mode('explorer')",
-            "[1]Explorer [2]Monitor [3]FS-Overview",
-            show=True,
-            key_display="Mode",
+            "1", "switch_mode('explorer')", "Explorer",
+            show=True, group=MODE, id="app.mode_explorer",
         ),
-        Binding("2", "switch_mode('monitor')", "Monitor", show=False),
-        Binding("3", "switch_mode('fs_overview')", "FS Overview", show=False),
-        Binding("c", "switch_mode('cleanup')", "Cleanup", show=False),
-        Binding("question_mark", "push_screen('settings')", "Settings", show=True, key_display="?"),
-        Binding("q", "quit", "Quit", show=True),
+        Binding(
+            "2", "switch_mode('monitor')", "Monitor",
+            show=True, group=MODE, id="app.mode_monitor",
+        ),
+        Binding(
+            "3", "switch_mode('fs_overview')", "FS Overview",
+            show=True, group=MODE, id="app.mode_fs_overview",
+        ),
+        Binding(
+            "4", "switch_mode('cleanup')", "Cleanup",
+            show=True, group=MODE, id="app.mode_cleanup",
+        ),
+        # `?` means help everywhere else in the world; it used to open
+        # Settings, which is why the app had no key map at all. Settings
+        # takes `,`, the near-universal preferences key, freed by retiring
+        # the cell-aspect nudges to the Settings screen that already has a
+        # field for them.
+        Binding(
+            "question_mark", "show_keymap", "Keys",
+            show=True, key_display="?", id="app.keymap",
+        ),
+        Binding(
+            "comma", "push_screen('settings')", "Settings",
+            show=False, key_display=",", id="app.settings",
+        ),
+        Binding("q", "quit", "Quit", show=True, id="app.quit"),
     ]
 
     def __init__(
@@ -199,6 +232,11 @@ class DiskTideApp(App):
         return resolved
 
     def on_mount(self) -> None:
+        # Before any screen is pushed: a screen caches its active bindings on
+        # mount, so a keymap applied later would leave the first screen on the
+        # declared keys.
+        self._apply_keymap()
+
         self._config.ui.color_theme = self.apply_color_theme(
             self._config.ui.color_theme
         )
@@ -472,6 +510,36 @@ class DiskTideApp(App):
                 self.__scan_service.cancel_all()
         self.exit()
 
+    def _apply_keymap(self) -> None:
+        """Resolve `[keys]` from the config and hand it to Textual.
+
+        A bad preset name or a stale binding id costs the user that one
+        binding and a toast, not the session — the app has to start even if
+        the config is out of date with the release.
+        """
+        keymap, problems = resolve_keymap(
+            self._config.keys.preset, self._config.keys.overrides
+        )
+        if keymap:
+            self.set_keymap(keymap)
+        for problem in problems:
+            self.notify(problem, severity="warning", timeout=8)
+
+    def action_show_keymap(self) -> None:
+        """Open the key map — every binding on the current screen, grouped."""
+        from disktide.screens.keymap import KeymapScreen
+
+        # Pressing `?` again from inside the key map should close it rather
+        # than stack a second copy.
+        if isinstance(self.screen, KeymapScreen):
+            self.pop_screen()
+            return
+        # The screen is handed over rather than looked up from inside the
+        # map: `push_screen` composes before it appends, so the map cannot
+        # read its own position in the stack. This is the only moment at
+        # which "the screen the user pressed `?` on" is unambiguous.
+        self.push_screen(KeymapScreen(self.screen))
+
     def action_switch_mode(self, mode: str) -> None:
         """Switch between explorer/cleanup/monitor/fs_overview modes."""
         if mode == "explorer":
@@ -479,7 +547,7 @@ class DiskTideApp(App):
         elif mode == "cleanup":
             if not self._config.ui.show_cleanup:
                 self.notify(
-                    "Cleanup mode is disabled. Enable it in Settings (?).",
+                    "Cleanup mode is disabled. Enable it in Settings (,).",
                     severity="warning",
                 )
                 return

@@ -327,19 +327,38 @@ def test_narrow_monitor_uses_list_detail_and_session_continues_off_screen(
             assert "no active host" in str(
                 screen.query_one("#monitor-history-summary").render()
             )
+            # The mode digits used to be one binding whose description drew
+            # the other three by hand ("[1]Explorer [2]Monitor [3]FS-Overview",
+            # key_display="Mode"), because the footer could not group. It can:
+            # the four are a Binding.Group, rendered as bare keys plus one
+            # shared label, and each keeps its own real description for the
+            # key map.
             mode_binding = app.active_bindings["1"].binding
-            assert mode_binding.key_display == "Mode"
-            assert (
-                mode_binding.description
-                == "[1]Explorer [2]Monitor [3]FS-Overview"
-            )
+            assert mode_binding.group is not None
+            assert mode_binding.group.description == "Mode"
+            assert mode_binding.description == "Explorer"
+            for key, description in (
+                ("2", "Monitor"),
+                ("3", "FS Overview"),
+                ("4", "Cleanup"),
+            ):
+                sibling = app.active_bindings[key].binding
+                assert sibling.group is mode_binding.group
+                assert sibling.description == description
+
             footer = screen.query_one("Footer")
-            assert any(
-                getattr(item, "key_display", None) == "Mode"
-                and getattr(item, "description", None)
-                == "[1]Explorer [2]Monitor [3]FS-Overview"
+            groups = {
+                tuple(getattr(key, "key", None) for key in item.children)
                 for item in footer.children
-            )
+                if type(item).__name__ == "KeyGroup"
+            }
+            assert ("1", "2", "3", "4") in groups, groups
+            labels = [
+                str(getattr(item, "content", ""))
+                for item in footer.children
+                if type(item).__name__ == "FooterLabel"
+            ]
+            assert "Mode" in labels, labels
             screen.query_one("#monitor-list").focus()
             await pilot.press("enter")
             await _settle(pilot, lambda: screen.has_class("detail"))
@@ -348,7 +367,7 @@ def test_narrow_monitor_uses_list_detail_and_session_continues_off_screen(
             await _settle(pilot, lambda: not screen.has_class("detail"))
             assert not screen.has_class("detail")
 
-            await pilot.press("s")
+            await pilot.press("shift+s")
             await _settle(pilot, lambda: app._monitor_service.session_running)
             assert app._monitor_service.session_running
             await pilot.press("1")

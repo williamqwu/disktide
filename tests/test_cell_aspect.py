@@ -685,7 +685,15 @@ class TestInBandResizeReachesTheDisc:
 
 
 class TestManualCalibrationKeys:
-    """`,` and `.` in the explorer, for the terminals nothing can measure."""
+    """Nudging the aspect, for the terminals nothing can measure.
+
+    `,` and `.` used to do this from the explorer. They were retired in the
+    keymap work: `tiles` is the default ring shape and renders identically
+    from aspect 1.5 through 3.0, so this is a `disc`-only setup step, and `,`
+    is worth more as the settings key. The action stayed — Settings has a
+    "Cell aspect (h/w)" field and the command palette offers the nudges by
+    name — so the behaviour below is still reachable and still tested.
+    """
 
     def test_two_nudges_persist_and_reach_the_disc(
         self, tmp_path, monkeypatch, _isolated_home
@@ -703,9 +711,9 @@ class TestManualCalibrationKeys:
                 _explorer, view = await _settled_explorer(pilot, app)
                 assert view._layout.cell_aspect == 2.0
 
-                await pilot.press("full_stop")
+                await app.run_action("nudge_cell_aspect(1)", default_namespace=app.screen)
                 await pilot.pause()
-                await pilot.press("full_stop")
+                await app.run_action("nudge_cell_aspect(1)", default_namespace=app.screen)
                 await pilot.pause()
 
                 # Two 0.05 steps up from the assumed 2.0.
@@ -736,7 +744,7 @@ class TestManualCalibrationKeys:
             async with app.run_test(size=(120, 50)) as pilot:
                 await _settled_explorer(pilot, app)
 
-                await pilot.press("comma")
+                await app.run_action("nudge_cell_aspect(-1)", default_namespace=app.screen)
                 await pilot.pause()
                 assert cellgeom.configured_aspect() == pytest.approx(1.95)
 
@@ -758,7 +766,7 @@ class TestManualCalibrationKeys:
                 await _settled_explorer(pilot, app)
 
                 for _ in range(40):
-                    await pilot.press("full_stop")
+                    await app.run_action("nudge_cell_aspect(1)", default_namespace=app.screen)
                 await pilot.pause()
                 assert cellgeom.configured_aspect() == pytest.approx(
                     cellgeom.MAX_CELL_ASPECT
@@ -785,7 +793,7 @@ class TestSettingsCalibration:
                 _explorer, view = await _settled_explorer(pilot, app)
                 assert view._layout.cell_aspect == 2.0
 
-                await pilot.press("question_mark")
+                await pilot.press("comma")
                 settings = await _await_screen(pilot, app, SettingsScreen)
 
                 from textual.widgets import Input
@@ -826,7 +834,7 @@ class TestSettingsCalibration:
                 _explorer, view = await _settled_explorer(pilot, app)
                 assert view._layout.cell_aspect == pytest.approx(3.0)
 
-                await pilot.press("question_mark")
+                await pilot.press("comma")
                 settings = await _await_screen(pilot, app, SettingsScreen)
 
                 from textual.widgets import Input

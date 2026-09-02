@@ -195,7 +195,7 @@ class WelcomeScreen(Screen[tuple[str, bool]]):
     """
 
     BINDINGS = [
-        Binding("escape", "quit_app", "Quit", show=False),
+        Binding("escape", "quit_app", "Quit", show=False, id="welcome.quit"),
     ]
 
     def __init__(

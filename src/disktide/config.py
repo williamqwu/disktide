@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from disktide._compat import tomllib
+from disktide.keys import DEFAULT_PRESET as DEFAULT_KEY_PRESET
 from disktide.paths import config_file, config_root
 from disktide.themes import resolve_theme
 # Pure stdlib, unlike the rest of `viz` — the reason `resolve_theme` had to
@@ -145,11 +146,27 @@ class HostPaths:
 
 
 @dataclass
+class KeysConfig:
+    """The `[keys]` table: a named preset plus per-binding overrides.
+
+    `preset` picks one of `disktide.keys.PRESETS` — `spine` (the shipped
+    layout), `safe` (the v0.2.30 keys with only the three consequence
+    mismatches fixed) or `classic` (the v0.2.30 keys exactly). `overrides`
+    maps a binding id to a key and is applied on top of the preset, so
+    "classic, except one key" is a two-line config.
+    """
+
+    preset: str = DEFAULT_KEY_PRESET
+    overrides: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class AppConfig:
     scan: ScanConfig = field(default_factory=ScanConfig)
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    keys: KeysConfig = field(default_factory=KeysConfig)
     host_paths: dict[str, HostPaths] = field(default_factory=dict)
 
 
@@ -254,6 +271,15 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append(f"disabled_rule_packs = [{values}]")
     lines.append(f"map_max_points = {config.cleanup.map_max_points}")
     lines.append("")
+
+    if config.keys.preset != DEFAULT_KEY_PRESET or config.keys.overrides:
+        lines.append("[keys]")
+        if config.keys.preset != DEFAULT_KEY_PRESET:
+            lines.append(f'preset = "{config.keys.preset}"')
+        for binding_id in sorted(config.keys.overrides):
+            key = config.keys.overrides[binding_id]
+            lines.append(f"{json.dumps(binding_id)} = {json.dumps(key)}")
+        lines.append("")
 
     lines.append("[ui]")
     lines.append(f'color_theme = "{config.ui.color_theme}"')
@@ -405,6 +431,20 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         )
         config.ui.default_scan_path = ui.get("default_scan_path")
         config.ui.hostname_aware_paths = ui.get("hostname_aware_paths", True)
+
+    if "keys" in data:
+        keys = data["keys"]
+        if isinstance(keys, dict):
+            config.keys.preset = str(keys.get("preset", DEFAULT_KEY_PRESET))
+            # Everything that is not `preset` is a binding id. Validation
+            # belongs to `disktide.keys.resolve_keymap`, which reports an
+            # unknown id as a toast instead of failing the load — a config
+            # written against a newer release must still open the app.
+            config.keys.overrides = {
+                str(name): str(key)
+                for name, key in keys.items()
+                if name != "preset" and isinstance(key, str)
+            }
 
     if "paths" in data:
         for hostname, hp_data in data["paths"].items():

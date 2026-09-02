@@ -470,9 +470,9 @@ class FSDetailModal(ModalScreen):
     """Detail popup for a single filesystem — press Esc or Enter to close."""
 
     BINDINGS = [
-        Binding("escape", "dismiss", "Close", show=True),
-        Binding("enter", "dismiss", "Close", show=False),
-        Binding("q", "dismiss", "Close", show=False),
+        Binding("escape", "dismiss", "Close", show=True, id="fs.detail_close"),
+        Binding("enter", "dismiss", "Close", show=False, id="fs.detail_close_enter"),
+        Binding("q", "dismiss", "Close", show=False, id="fs.detail_close_q"),
     ]
 
     DEFAULT_CSS = """
@@ -614,9 +614,9 @@ class BlockDeviceModal(ModalScreen):
     """Detail popup for a single block device — press Esc or Enter to close."""
 
     BINDINGS = [
-        Binding("escape", "dismiss", "Close", show=True),
-        Binding("enter", "dismiss", "Close", show=False),
-        Binding("q", "dismiss", "Close", show=False),
+        Binding("escape", "dismiss", "Close", show=True, id="fs.device_close"),
+        Binding("enter", "dismiss", "Close", show=False, id="fs.device_close_enter"),
+        Binding("q", "dismiss", "Close", show=False, id="fs.device_close_q"),
     ]
 
     DEFAULT_CSS = FSDetailModal.DEFAULT_CSS.replace(
@@ -678,8 +678,13 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
     """Overview of all mounted real filesystems."""
 
     BINDINGS = [
-        Binding("r", "refresh", "Refresh", show=True),
-        Binding("b", "benchmark", "Benchmark mount", show=True),
+        # Benchmarking writes to the disk under test, so it takes the shift
+        # form and frees `b` for "baseline" elsewhere in the app.
+        Binding(
+            "shift+b", "benchmark", "Benchmark mount",
+            show=True, key_display="B", id="fs.benchmark",
+        ),
+        Binding("r", "refresh", "Refresh", show=False, id="fs.refresh"),
     ]
 
     DEFAULT_CSS = """
@@ -907,7 +912,7 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
                     "This writes a temporary file to measure throughput."
                 ),
                 title="Benchmark mount",
-                confirm_keys=("b",),
+                confirm_keys=("shift+b",),
             ),
             callback=_on_confirm,
         )
