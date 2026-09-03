@@ -470,7 +470,16 @@ live_scan_render = "always-and-forever"
 
 
 class TestResolveLiveScanRender:
-    """The auto-gate: terminal-size + cpu_count thresholds."""
+    """The auto-gate: a terminal-size threshold, and only that.
+
+    It used to also require four cores, on the premise that spare ones
+    absorb the redraw. They do not -- the paint is Python and holds the
+    GIL against every scan thread for the whole of a frame -- and the
+    clause was actively backwards, since the hosts with sixteen cores are
+    the ones with the 300-column terminals whose frames cost the most.
+    What bounds the cost is `ExplorerScreen`'s duty cycle. The keyword is
+    still accepted so callers and older tests keep working.
+    """
 
     def test_on_overrides_gate(self):
         from disktide.config import resolve_live_scan_render
@@ -502,10 +511,19 @@ class TestResolveLiveScanRender:
             "auto", terminal_width=120, terminal_height=15, cpu_count=8
         ) is False
 
-    def test_auto_disabled_when_too_few_cpus(self):
+    def test_auto_ignores_the_core_count(self):
+        """Two cores on a roomy terminal is a live chart, paced by cost."""
         from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=120, terminal_height=40, cpu_count=2
+        ) is True
+        assert resolve_live_scan_render(
+            "auto", terminal_width=120, terminal_height=40, cpu_count=1
+        ) is True
+        # And a cramped terminal is still off, at any core count: the
+        # size gate is about whether the chart can be read.
+        assert resolve_live_scan_render(
+            "auto", terminal_width=60, terminal_height=40, cpu_count=64
         ) is False
 
     def test_unknown_value_treated_as_auto(self):

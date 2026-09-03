@@ -15,12 +15,15 @@ a different mount table, and less CPU than a workstation:
                 ``unknown`` -- a row a developer whose disks are all
                 network or flash never renders once.
   ``cores``     ``os.cpu_count()`` is an *input to product behaviour*,
-                not just a performance knob: the ``live_scan_render``
-                auto-gate turns live rendering off below four cores, so on
-                a two-core runner the explorer takes a different code path
-                than it does on any developer machine.  Note that neither
-                ``taskset`` nor a container's ``--cpus`` reproduces this --
-                both leave ``os.cpu_count()`` reporting the host's count.
+                not just a performance knob: it picks the scan's worker
+                count, and it used to decide the ``live_scan_render``
+                auto-gate as well, so a two-core runner sent the explorer
+                down a different code path than any developer machine.
+                (That clause is gone -- the paint holds the GIL, so cores
+                never hid it -- but the worker count remains.)  Note that
+                neither ``taskset`` nor a container's ``--cpus``
+                reproduces this: both leave ``os.cpu_count()`` reporting
+                the host's count.
   ``sleepless`` A ``time.sleep`` that paces a test is a guess about how
                 long the rest of the machine takes.  On a loaded two-core
                 runner the coroutine it was pacing is parked far longer,

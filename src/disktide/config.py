@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import socket
 import json
@@ -131,10 +130,10 @@ class UIConfig:
     ring_shape: str = DEFAULT_RING_SHAPE
     # "auto" | "on" | "off". Controls whether the active viz tab (sunburst
     # or treemap) redraws live with partial scan data, vs. waiting for the
-    # scan to finish and rendering once. `auto` enables it on a roomy
-    # terminal with enough cores; see `resolve_live_scan_render` for the
-    # exact gate. The opt-out matters on cramped terminals and small VMs
-    # where the per-frame redraw cost is noticeable against the scan.
+    # scan to finish and rendering once. `auto` enables it on a terminal
+    # roomy enough to read the chart on; see `resolve_live_scan_render`.
+    # The opt-out is still worth having: the paint shares the GIL with the
+    # scan, and the duty cycle bounds that cost rather than removing it.
     live_scan_render: str = "auto"
 
 
@@ -459,13 +458,21 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 # Auto-gate thresholds for the live-scan-render setting. The progress
 # overlay docks into the left tree panel during a scan and the viz fills
 # the right; below ~80 columns or ~24 rows the explorer's 40/60 split
-# leaves neither side roomy enough for the live render to be worth its
-# per-frame cost. Four cores is the rough line at which a 50-200 ms
-# braille fill per second stops competing with the scan worker threads
-# for CPU.
+# leaves neither side roomy enough for the chart to be legible, which is
+# the whole of what this gate is for.
+#
+# It used to also require four cores, on the premise that spare cores
+# hide the redraw. They do not: the render is Python and holds the GIL for
+# every millisecond of a frame, so a live paint and a scan thread cannot
+# run at once however many cores the host has -- more cores only meant
+# more threads queueing behind the painter. The gate was in fact
+# backwards, since a machine with sixteen cores is usually the one with
+# the 300-column terminal, and frame cost grows with cells: 33 ms at
+# 70x30 against 163 ms at 182x62. What bounds the cost is
+# `ExplorerScreen`'s duty cycle, which forwards one frame per several
+# times its own measured cost; the size below is a legibility floor.
 _LIVE_RENDER_MIN_COLS = 80
 _LIVE_RENDER_MIN_ROWS = 24
-_LIVE_RENDER_MIN_CPUS = 4
 
 
 def resolve_live_scan_render(
@@ -478,11 +485,14 @@ def resolve_live_scan_render(
     """Resolve a `live_scan_render` config value to a concrete on/off.
 
     Explicit "on" / "off" honor the user; "auto" (the default) enables
-    live rendering only when both the terminal is roomy enough for the
-    sunburst to be visible around the progress overlay AND there are
-    enough cores that the per-frame redraw cost is not visible against
-    the scan. The keyword arguments are taken from the runtime by
-    default; tests inject them to assert the gate.
+    live rendering when the terminal is roomy enough for the chart to be
+    worth looking at around the progress overlay. It is a legibility
+    check and nothing more: what keeps the paint from starving the scan
+    is `ExplorerScreen`'s duty cycle, not the host. `cpu_count` is still
+    accepted, and ignored, because callers (and tests) pass it.
+
+    The keyword arguments are taken from the runtime by default; tests
+    inject them to assert the gate.
     """
     normalized = (value or "auto").strip().lower()
     if normalized == "on":
@@ -507,10 +517,7 @@ def resolve_live_scan_render(
         terminal_width = _LIVE_RENDER_MIN_COLS
     if terminal_height is None:
         terminal_height = _LIVE_RENDER_MIN_ROWS
-    if cpu_count is None:
-        cpu_count = os.cpu_count() or 1
     return (
         terminal_width >= _LIVE_RENDER_MIN_COLS
         and terminal_height >= _LIVE_RENDER_MIN_ROWS
-        and cpu_count >= _LIVE_RENDER_MIN_CPUS
     )

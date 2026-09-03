@@ -439,12 +439,12 @@ def test_a_stale_space_time_context_does_not_clobber_the_live_tree(tmp_path):
     async def go():
         config = load_config()
         # Pin the live-render gate instead of letting `auto` decide it.
-        # `auto` resolves through `os.cpu_count()`, and under four cores it
-        # resolves to off -- which is what makes `_start_scan` skip
-        # `begin_live()` and leave the finished root in the tree. The
-        # premise below would then hold on a workstation and fail on a
-        # two-core CI runner, which is exactly what it did. What this test
-        # is about is the stale context, not the gate.
+        # `auto` off means `_start_scan` skips `begin_live()` and leaves
+        # the finished root in the tree, so the premise below would hold
+        # or not depending on the host the suite ran on -- which is
+        # exactly what it did when the gate still read `os.cpu_count()`.
+        # It reads the terminal size now, and this test is about the stale
+        # context rather than about either.
         config.ui.live_scan_render = "on"
         app = DiskTideApp(
             scan_path=str(tmp_path), show_welcome=False, config=config
