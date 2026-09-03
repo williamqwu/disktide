@@ -14,6 +14,7 @@ from concurrent.futures import (
     ThreadPoolExecutor,
 )
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import Callable, Mapping
 
 from disktide.domain.live_view import build_live_view
@@ -31,6 +32,11 @@ from disktide.scanner.walker import (
 
 _TOP_LEVEL_CLASSIFY_CAP = 100
 _DEFAULT_ENTRY_CHUNK_SIZE = 256
+
+# Every directory's children are sorted by (name, path) twice over a scan --
+# once where the walk finishes it and once where it settles. A lambda pays a
+# Python frame per comparison key; attrgetter builds the same tuple in C.
+_NAME_PATH_KEY = attrgetter("name", "path")
 
 # Generations only ever count up from zero, so this never matches a live one:
 # a state carrying it is always treated as stale and copied before mutation.
@@ -413,12 +419,18 @@ def scan_directory_once(
                         chunk_children.append(child)
                         own_size += child.own_size
                         chunk_own_size += child.own_size
-                        own_allocated = sum_available(
-                            (own_allocated, child.own_allocated_size)
-                        )
-                        chunk_own_allocated = sum_available(
-                            (chunk_own_allocated, child.own_allocated_size)
-                        )
+                        # sum_available inlined: two calls per entry, each
+                        # building a tuple and running a generic loop, were
+                        # 12% of the scanner profile at 200k entries.
+                        child_allocated = child.own_allocated_size
+                        if child_allocated is None:
+                            own_allocated = None
+                            chunk_own_allocated = None
+                        else:
+                            if own_allocated is not None:
+                                own_allocated += child_allocated
+                            if chunk_own_allocated is not None:
+                                chunk_own_allocated += child_allocated
                         if (
                             job.depth == 0
                             and top_level_classified < _TOP_LEVEL_CLASSIFY_CAP
@@ -443,12 +455,15 @@ def scan_directory_once(
                         chunk_children.append(child)
                         own_size += entry_stat.st_size
                         chunk_own_size += entry_stat.st_size
-                        own_allocated = sum_available(
-                            (own_allocated, child.own_allocated_size)
-                        )
-                        chunk_own_allocated = sum_available(
-                            (chunk_own_allocated, child.own_allocated_size)
-                        )
+                        child_allocated = child.own_allocated_size
+                        if child_allocated is None:
+                            own_allocated = None
+                            chunk_own_allocated = None
+                        else:
+                            if own_allocated is not None:
+                                own_allocated += child_allocated
+                            if chunk_own_allocated is not None:
+                                chunk_own_allocated += child_allocated
                     except OSError:
                         direct_inaccessible += 1
                         chunk_inaccessible += 1
@@ -471,7 +486,7 @@ def scan_directory_once(
     node.own_size = own_size
     node.own_allocated_size = own_allocated
     if checkpoint_callback is None:
-        node.children.sort(key=lambda child: (child.name, child.path))
+        node.children.sort(key=_NAME_PATH_KEY)
     _recalculate_directory(node, direct_inaccessible)
     return DirectoryScanResult(
         job=job,
@@ -498,13 +513,36 @@ def clone_tree(root: FSNode, *, share_leaves: bool = False) -> FSNode:
     """
 
     clones: dict[int, FSNode] = {}
-    stack: list[tuple[FSNode, bool]] = [(root, False)]
+    if share_leaves:
+        # Leaves are shared, so they never need to reach the stack or the
+        # `clones` map at all: pushing every one of a home directory's 592k
+        # files only to pop it, store it under its own id and look it up
+        # again was most of what the "shared" path still paid for. Only
+        # directories are traversed; a cloned directory rebuilds its child
+        # list by taking the clone for a directory child and the original
+        # object for everything else.
+        stack: list[tuple[FSNode, bool]] = [(root, False)]
+        while stack:
+            node, visited = stack.pop()
+            if not visited:
+                stack.append((node, True))
+                stack.extend(
+                    (child, False) for child in node.children if child.is_dir
+                )
+                continue
+            cloned = copy.copy(node)
+            cloned.children = [
+                clones[id(child)] if child.is_dir else child
+                for child in node.children
+            ]
+            cloned._sorted_cache = None
+            clones[id(node)] = cloned
+        return clones[id(root)]
+
+    stack = [(root, False)]
     while stack:
         node, visited = stack.pop()
         if not visited:
-            if share_leaves and not node.is_dir:
-                clones[id(node)] = node
-                continue
             stack.append((node, True))
             stack.extend((child, False) for child in reversed(node.children))
             continue
@@ -871,9 +909,13 @@ class TreeScanScheduler:
                 chunk.own_allocated_size_delta,
             )
         )
-        state.node.file_count += sum(
-            child.file_count for child in chunk.children if not child.is_dir
-        )
+        # Counted once and reused below: the same generator sum ran twice
+        # per chunk, once for the directory and once for the scan total.
+        chunk_file_count = 0
+        for child in chunk.children:
+            if not child.is_dir:
+                chunk_file_count += child.file_count
+        state.node.file_count += chunk_file_count
         state.node.dir_count += chunk.child_count
         state.node.inaccessible_count += chunk.direct_inaccessible_delta
         state.node.inaccessible_subtree_count += chunk.direct_inaccessible_delta
@@ -896,9 +938,7 @@ class TreeScanScheduler:
             self._max_queue_depth,
             self._outstanding_tasks,
         )
-        self._files_scanned += sum(
-            child.file_count for child in chunk.children if not child.is_dir
-        )
+        self._files_scanned += chunk_file_count
         self._logical_bytes += chunk.own_size_delta
         self._errors += chunk.direct_inaccessible_delta
         self._propagate(state, previous)
@@ -1027,7 +1067,7 @@ class TreeScanScheduler:
             # directory that has already been scanned and hand out a duplicate
             # job whose parent state is gone by the time it lands.
             current.next_child_index = len(current.node.children)
-            current.node.children.sort(key=lambda child: (child.name, child.path))
+            current.node.children.sort(key=_NAME_PATH_KEY)
             current.node.invalidate_sort()
             current.settled = True
             self._stable_paths.add(current.job.path)

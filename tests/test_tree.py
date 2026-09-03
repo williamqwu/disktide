@@ -1,5 +1,7 @@
 """Tests for FSNode data model."""
 
+import dataclasses
+
 import pytest
 from disktide.models.tree import FSNode
 
@@ -95,3 +97,49 @@ class TestFSNode:
     def test_size_percent_zero(self):
         node = FSNode(name="test", path="/test", size=0)
         assert node.size_percent(0) == 0.0
+
+
+# `scanner.walker.make_file_node` and `make_symlink_node` construct an FSNode
+# positionally for these 28 fields -- 0.83 us against 1.12 us for the keyword
+# form, once per file, on the hottest path in the scanner. Positional
+# construction makes declaration order part of the contract: a field inserted
+# or reordered anywhere above `link_count` would silently write a size into
+# the wrong slot, so it fails here instead.
+FSNODE_POSITIONAL_PREFIX = [
+    "name",
+    "path",
+    "size",
+    "own_size",
+    "allocated_size",
+    "own_allocated_size",
+    "unique_allocated_size",
+    "own_unique_allocated_size",
+    "file_count",
+    "dir_count",
+    "is_dir",
+    "mtime",
+    "depth",
+    "children",
+    "error",
+    "inaccessible_count",
+    "inaccessible_subtree_count",
+    "denied_dir_subtree_count",
+    "partial_dir_subtree_count",
+    "is_symlink",
+    "link_target",
+    "link_is_dir",
+    "link_broken",
+    "link_classified",
+    "is_loop",
+    "device_id",
+    "inode",
+    "link_count",
+]
+
+
+def test_fsnode_positional_prefix():
+    names = [field.name for field in dataclasses.fields(FSNode)][:28]
+    assert names == FSNODE_POSITIONAL_PREFIX, (
+        "make_file_node / make_symlink_node build an FSNode positionally for "
+        "these fields; append new fields at the end of the dataclass instead."
+    )
