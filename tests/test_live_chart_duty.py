@@ -1,17 +1,21 @@
-"""Pacing the live chart, and why the scan was ten times slower without it.
+"""Pacing the live UI, and why the scan was ten times slower without it.
 
 The scan service coalesces `NodeAggregateUpdated`, so the explorer is
-handed a new frame exactly as fast as it can paint one.  Painting all of
-them held the UI thread at 100 %, and because a `compute_sunburst` holds
-the GIL for its whole 163 ms at a 182x62 widget, every scan thread behind
-it stalled on each re-acquisition: 21.0 s live-off against 152.3 s
-live-on for the same local tree, 36.8 s against ~420 s for a real home
-over NFS.
+handed a new snapshot exactly as fast as it can draw one. Drawing all of
+them held the UI thread at 100 %, and because the whole of a
+`compute_sunburst` is spent holding the GIL, every scan thread behind it
+stalled on each re-acquisition: 21.0 s live-off against 152.3 s live-on
+for the same local tree, 36.8 s against ~420 s for a real home over NFS.
 
-The gate here is the fix.  It is written against the *measured* cost of
-the last frame rather than a constant, because that cost runs from 33 ms
-at a 70x30 chart to 163 ms at 182x62 and a constant would over-throttle
-one end and starve the scan at the other.
+Pacing only the chart got a third of the way there (78.1 s on that home).
+Pacing a *predicted* per-snapshot cost got no further, because the
+prediction was wrong in both directions -- the frame grows with the tree
+(500 arcs to 9,000 over one scan) and the paint lands whenever the
+compositor gets to it, not when the callback that was supposed to time it
+runs. So the gate is a closed loop on what the thread actually used:
+`thread_time` and `monotonic` are stamped at each applied snapshot, and
+the next one waits until the CPU spent since then is back under one part
+in `_LIVE_UI_DUTY` of the wall clock that passed.
 """
 
 from __future__ import annotations
@@ -52,29 +56,39 @@ def _live_tree(tmp_path: Path) -> None:
         (directory / "notes.txt").write_bytes(b"y" * 512)
 
 
-def _live_event(root: FSNode, view_root) -> NodeAggregateUpdated:
+def _live_event(root: FSNode, view_root, changed=None) -> NodeAggregateUpdated:
     return NodeAggregateUpdated(
         run_id="run",
         sequence=1,
         phase=ScanPhase.SCANNING,
         root=root,
         final=False,
-        changed_nodes=(root,),
+        changed_nodes=changed if changed is not None else (root,),
         view_root=view_root,
     )
 
 
 class _FakeClock:
-    """A monotonic clock the test moves by hand."""
+    """The two clocks the gate reads, both moved by hand.
+
+    `now` is the wall clock and `cpu` is the UI thread's own CPU time;
+    the gate is the ratio between what they have done since the last
+    applied snapshot, so a test has to be able to move them apart.
+    """
 
     def __init__(self, now: float = 1000.0) -> None:
         self.now = now
+        self.cpu = 100.0
 
     def __call__(self) -> float:
         return self.now
 
-    def advance(self, seconds: float) -> None:
+    def thread_time(self) -> float:
+        return self.cpu
+
+    def advance(self, seconds: float, *, cpu: float = 0.0) -> None:
         self.now += seconds
+        self.cpu += cpu
 
 
 class _Armed:
@@ -115,6 +129,7 @@ def _arm_fakes(screen, monkeypatch, clock):
     import disktide.screens.explorer as explorer_mod
 
     monkeypatch.setattr(explorer_mod, "monotonic", clock)
+    monkeypatch.setattr(explorer_mod, "thread_time", clock.thread_time)
     armed = _Armed()
 
     def set_timer(delay, callback):
@@ -127,7 +142,7 @@ def _arm_fakes(screen, monkeypatch, clock):
     monkeypatch.setattr(screen, "_maybe_build_category_index", lambda root: None)
     screen._scan_in_progress = True
     screen._active_metric = MetricId.LOGICAL
-    screen._reset_live_chart_pacing()
+    screen._reset_live_ui_pacing()
     return armed
 
 
@@ -141,7 +156,7 @@ def _push(screen) -> None:
 # --- the gate --------------------------------------------------------------
 
 
-def test_the_first_frame_of_a_scan_is_never_gated(tmp_path, monkeypatch):
+def test_the_first_snapshot_of_a_scan_is_never_gated(tmp_path, monkeypatch):
     """A scan that publishes once and then works for a minute still draws."""
 
     async def body(pilot, app, screen):
@@ -159,10 +174,10 @@ def test_the_first_frame_of_a_scan_is_never_gated(tmp_path, monkeypatch):
     _drive(tmp_path, body)
 
 
-def test_a_frame_inside_the_gap_is_skipped_and_left_a_trailing_timer(
+def test_nothing_is_drawn_twice_inside_the_publish_interval(
     tmp_path, monkeypatch
 ):
-    """The frame is dropped, but never silently: one timer catches it up."""
+    """The floor: below the scheduler's own cadence there is nothing new."""
 
     async def body(pilot, app, screen):
         clock = _FakeClock()
@@ -176,8 +191,62 @@ def test_a_frame_inside_the_gap_is_skipped_and_left_a_trailing_timer(
         _push(screen)
 
         assert view.live_update_count == painted, "the second frame painted"
-        assert armed.delays == [pytest.approx(screen._live_chart_gap() - 0.05)]
-        assert screen._live_chart_timer is armed
+        assert armed.delays == [pytest.approx(0.20)]
+        assert screen._live_ui_timer is armed
+
+    _drive(tmp_path, body)
+
+
+def test_a_thread_that_has_spent_its_budget_waits_for_the_clock(
+    tmp_path, monkeypatch
+):
+    """0.1 s of CPU has to be paid for with `_LIVE_UI_DUTY` x 0.1 s of wall."""
+
+    async def body(pilot, app, screen):
+        clock = _FakeClock()
+        armed = _arm_fakes(screen, monkeypatch, clock)
+        view = screen.query_one("#sunburst-view", SunburstView)
+        view.set_live_mode(True)
+
+        _push(screen)
+        painted = view.live_update_count
+        # Well past the floor, but the frame it drew cost 0.1 s of CPU.
+        clock.advance(0.30, cpu=0.10)
+        _push(screen)
+
+        assert view.live_update_count == painted
+        owed = 0.10 * screen._LIVE_UI_DUTY - 0.30
+        assert armed.delays == [pytest.approx(owed)]
+
+    _drive(tmp_path, body)
+
+
+def test_the_debt_is_paid_off_by_a_clock_the_thread_is_not_running_in(
+    tmp_path, monkeypatch
+):
+    """It converges: wall time passes whether or not the UI thread works."""
+
+    async def body(pilot, app, screen):
+        clock = _FakeClock()
+        armed = _arm_fakes(screen, monkeypatch, clock)
+        view = screen.query_one("#sunburst-view", SunburstView)
+        view.set_live_mode(True)
+
+        _push(screen)
+        painted = view.live_update_count
+        clock.advance(0.30, cpu=0.10)
+        _push(screen)
+        first_owed = armed.delays[-1]
+        clock.advance(0.20)
+        _push(screen)
+        assert armed.delays[-1] == pytest.approx(first_owed - 0.20)
+        assert view.live_update_count == painted
+
+        clock.advance(armed.delays[-1] + 1e-6)
+        _push(screen)
+
+        assert view.live_update_count == painted + 1
+        assert screen._live_ui_timer is None
 
     _drive(tmp_path, body)
 
@@ -199,17 +268,17 @@ def test_only_one_trailing_timer_is_ever_pending(tmp_path, monkeypatch):
         assert len(armed.delays) == 4
         # Three replacements plus nothing else: the fourth is still armed.
         assert armed.stopped == 3
-        assert screen._live_chart_timer is armed
+        assert screen._live_ui_timer is armed
 
     _drive(tmp_path, body)
 
 
-def test_the_trailing_timer_paints_the_newest_snapshot(tmp_path, monkeypatch):
+def test_the_trailing_timer_applies_the_newest_snapshot(tmp_path, monkeypatch):
     """It lands the frame the skip deferred, not the one it was armed for."""
 
     async def body(pilot, app, screen):
         clock = _FakeClock()
-        armed = _arm_fakes(screen, monkeypatch, clock)
+        _arm_fakes(screen, monkeypatch, clock)
         view = screen.query_one("#sunburst-view", SunburstView)
         view.set_live_mode(True)
 
@@ -219,18 +288,20 @@ def test_the_trailing_timer_paints_the_newest_snapshot(tmp_path, monkeypatch):
         _push(screen)
         newest = screen._live_view_snapshot
 
-        screen._flush_live_chart()
+        clock.advance(0.20)
+        screen._flush_live_ui()
 
         assert view.live_update_count == painted + 1
         assert view._node is newest
-        assert screen._live_chart_timer is None
+        assert screen._live_ui_timer is None
 
     _drive(tmp_path, body)
 
 
-def test_a_frame_past_the_gap_is_forwarded_and_disarms_the_timer(
-    tmp_path, monkeypatch
-):
+def test_the_trailing_timer_goes_back_through_the_gate(tmp_path, monkeypatch):
+    """The paint the skipped frame was waiting on may still be running up
+    the bill, so firing is a re-check and not a licence to draw."""
+
     async def body(pilot, app, screen):
         clock = _FakeClock()
         armed = _arm_fakes(screen, monkeypatch, clock)
@@ -240,13 +311,13 @@ def test_a_frame_past_the_gap_is_forwarded_and_disarms_the_timer(
         _push(screen)
         painted = view.live_update_count
         clock.advance(0.05)
-        _push(screen)  # skipped, arms the timer
-        clock.advance(screen._live_chart_gap())
         _push(screen)
+        # The deferred paint lands while the one-shot is pending.
+        clock.advance(0.20, cpu=0.25)
+        screen._flush_live_ui()
 
-        assert view.live_update_count == painted + 1
-        assert screen._live_chart_timer is None
-        assert armed.stopped == 1
+        assert view.live_update_count == painted, "drew while over budget"
+        assert screen._live_ui_timer is armed
 
     _drive(tmp_path, body)
 
@@ -263,43 +334,42 @@ def test_a_completed_scan_never_leaves_a_timer_armed(tmp_path, monkeypatch):
         _push(screen)
         clock.advance(0.05)
         _push(screen)
-        assert screen._live_chart_timer is armed
+        assert screen._live_ui_timer is armed
 
         screen._on_scan_complete(screen._root)
 
-        assert screen._live_chart_timer is None
+        assert screen._live_ui_timer is None
         assert armed.stopped == 1
         # And a timer that fires anyway after the fact is a no-op.
-        screen._flush_live_chart()
+        screen._flush_live_ui()
 
     _drive(tmp_path, body)
 
 
-def test_the_gap_is_the_duty_multiple_of_what_the_chart_measured(
-    tmp_path, monkeypatch
-):
-    """The whole point: pacing follows the terminal it is running in."""
+def test_the_budget_is_a_share_of_the_wall_clock(tmp_path, monkeypatch):
+    """What the constant means, stated once where it can be checked."""
 
     async def body(pilot, app, screen):
-        view = screen.query_one("#sunburst-view", SunburstView)
+        clock = _FakeClock()
+        _arm_fakes(screen, monkeypatch, clock)
+        screen._live_ui_at = clock.now
+        screen._live_ui_cpu = clock.cpu
 
-        view._last_paint_cost = 0.0
-        assert screen._live_chart_gap() == screen._LIVE_CHART_MIN_GAP
-        # A cheap chart is floored at the scheduler's own publish interval.
-        view._last_paint_cost = 0.01
-        assert screen._live_chart_gap() == screen._LIVE_CHART_MIN_GAP
-        # An expensive one pays for itself several times over first.
-        view._last_paint_cost = 0.163
-        assert screen._live_chart_gap() == pytest.approx(
-            0.163 * screen._LIVE_CHART_DUTY
-        )
+        clock.advance(1.0, cpu=1.0 / screen._LIVE_UI_DUTY)
+        assert screen._live_ui_owed() == pytest.approx(0.0, abs=1e-9)
+        clock.advance(1.0, cpu=1.0)
+        assert screen._live_ui_owed() > 0.0
 
     _drive(tmp_path, body)
 
 
-def test_the_tree_panel_still_sees_every_frame(tmp_path, monkeypatch):
-    """Only the chart is paced: the tree and the overlay are ~2 % of the
-    thread between them and are what the user actually reads mid-scan."""
+def test_the_tree_panel_is_paced_with_the_chart(tmp_path, monkeypatch):
+    """Round 1 left the tree panel per-frame, and it was a third of the bill.
+
+    Relabelling is not free: `apply_live_update` builds a `Text` for every
+    changed row it can show and then dirties the tree, and the panel is on
+    screen throughout a live scan.
+    """
     from disktide.widgets.size_tree import SizeTree
 
     async def body(pilot, app, screen):
@@ -309,74 +379,97 @@ def test_the_tree_panel_still_sees_every_frame(tmp_path, monkeypatch):
         tree.begin_live(screen._root.path)
         view = screen.query_one("#sunburst-view", SunburstView)
         view.set_live_mode(True)
+        before = tree.live_update_count
 
         for _ in range(5):
             clock.advance(0.01)
             _push(screen)
 
-        assert tree.live_update_count == 5
+        assert tree.live_update_count == before + 1
         assert view.live_update_count == 1
 
     _drive(tmp_path, body)
 
 
-# --- what the widgets report ----------------------------------------------
+def test_the_newest_frames_changed_list_is_what_lands(tmp_path, monkeypatch):
+    """Skipped frames are not accumulated, and it matters that they are not.
 
-
-def test_a_live_sunburst_reports_what_its_frame_cost(tmp_path):
-    async def body(pilot, app, screen):
-        view = screen.query_one("#sunburst-view", SunburstView)
-
-        # The full-depth frame is dearer and is not the one being paced,
-        # so it must not overwrite the estimate.
-        view.set_live_mode(False)
-        view._last_paint_cost = 0.0
-        view.set_node(screen._root)
-        for y in range(view.size.height):
-            view.render_content_line(y)
-        assert view.last_paint_cost == 0.0, "a static frame is not paced"
-
-        view.set_live_mode(True)
-        view.set_node(screen._root)
-        for y in range(view.size.height):
-            view.render_content_line(y)
-
-        assert view.last_paint_cost > 0.0
-        assert view._layout is not None
-        # The fold into (glyph, style) cells is inside the measurement, so
-        # the first render_line of the frame finds it already done.
-        assert view._layout._cells_cache is not None
-
-    _drive(tmp_path, body)
-
-
-def test_a_live_treemap_reports_what_its_frame_cost(tmp_path):
-    async def body(pilot, app, screen):
-        await pilot.press("f2")
-        await pilot.pause()
-        view = screen.query_one("#treemap-view", TreemapView)
-        view.set_live_mode(True)
-        view.set_node(screen._root)
-        for y in range(view.size.height):
-            view.render_content_line(y)
-
-        assert view.last_paint_cost > 0.0
-
-    _drive(tmp_path, body)
-
-
-def test_the_treemap_is_paced_when_it_is_the_visible_tab(tmp_path, monkeypatch):
-    """The gate reads whichever chart the active tab actually paints."""
+    `TreeScanScheduler._record_changed` walks a settled directory's whole
+    ancestor chain, so every row the tree has materialised is in every
+    publish that touches anything below it -- the union adds nothing the
+    next frame does not already carry. Taking it anyway put 45,000 nodes
+    into one `apply_live_update`, which sorts them all before discarding
+    everything it cannot show: the gate then measured a second, closed for
+    eleven, and the panel it exists to pace froze.
+    """
+    from disktide.widgets.size_tree import SizeTree
 
     async def body(pilot, app, screen):
-        await pilot.press("f2")
-        await pilot.pause()
-        treemap = screen.query_one("#treemap-view", TreemapView)
-        treemap._last_paint_cost = 0.4
-
-        assert screen._active_chart_view() is treemap
-        assert screen._live_chart_gap() == pytest.approx(
-            0.4 * screen._LIVE_CHART_DUTY
+        clock = _FakeClock()
+        _arm_fakes(screen, monkeypatch, clock)
+        tree = screen.query_one("#size-tree", SizeTree)
+        tree.begin_live(screen._root.path)
+        seen: list[tuple[str, ...]] = []
+        original = tree.apply_live_update
+        monkeypatch.setattr(
+            tree,
+            "apply_live_update",
+            lambda root, changed: (
+                seen.append(tuple(sorted(n.path for n in changed))),
+                original(root, changed),
+            )[1],
         )
+        root = screen._root
+        first, second = root.children[0], root.children[1]
+
+        screen._apply_tree_snapshot(_live_event(root, None, changed=(first,)))
+        clock.advance(0.01)
+        screen._apply_tree_snapshot(_live_event(root, None, changed=(second,)))
+        clock.advance(0.30)
+        screen._apply_tree_snapshot(_live_event(root, None, changed=(first, second)))
+
+        assert seen == [(first.path,), tuple(sorted((first.path, second.path)))]
+
+    _drive(tmp_path, body)
+
+
+def test_the_progress_overlay_still_sees_every_event(tmp_path, monkeypatch):
+    """Progress is throttled in the scheduler already, and it is the one
+    number a user watches; pacing it would only make it lag."""
+    from disktide.domain.scan import ScanPhase, ScanProgressUpdated
+
+    async def body(pilot, app, screen):
+        applied: list[object] = []
+        monkeypatch.setattr(screen, "_apply_progress", applied.append)
+        screen._scan_in_progress = True
+        run = screen._active_run
+        for index in range(5):
+            screen._apply_scan_event(
+                ScanProgressUpdated(
+                    run_id=run.run_id,
+                    sequence=index,
+                    phase=ScanPhase.SCANNING,
+                    progress=object(),
+                )
+            )
+        assert len(applied) == 5
+
+    _drive(tmp_path, body)
+
+
+def test_the_category_rollup_is_paced_far_below_the_ui(tmp_path):
+    """A full pass over every node, for a tint that is provisional anyway.
+
+    py-spy put it at 12 % of everything the process ran during a live
+    scan, against 44 % for the walk it was taking that time from.
+    """
+    from disktide.screens.explorer import ExplorerScreen
+
+    async def body(pilot, app, screen):
+        assert ExplorerScreen._CATEGORY_INDEX_DUTY == 40.0
+        assert (
+            ExplorerScreen._CATEGORY_INDEX_DUTY
+            > ExplorerScreen._LIVE_UI_DUTY
+        ), "a rollup costs more than a frame and is wanted less often"
 
     _drive(tmp_path, body)

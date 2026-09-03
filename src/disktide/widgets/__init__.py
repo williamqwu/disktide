@@ -6,8 +6,6 @@ out of Textual's own painting, and the four chart widgets all do.
 
 from __future__ import annotations
 
-from time import perf_counter
-
 from textual.strip import Strip
 
 
@@ -49,55 +47,3 @@ class OpaqueStripMixin:
     def render_content_line(self, y: int) -> Strip:
         """The widget's own line, free to leave cells unstyled."""
         raise NotImplementedError
-
-
-class LivePaintCostMixin:
-    """Report what this widget's last live-scan frame cost to lay out.
-
-    A chart repainted from partial scan data is the single most expensive
-    thing on the UI thread: one sunburst frame is 33 ms at a 70x30 widget
-    and 163 ms at 182x62 (measured uncontended; the geometry cache took
-    the latter to ~45 ms), and the frames arrive as fast as the thread can
-    draw them because the scan service coalesces the scheduler's
-    publishes.  Every one of those milliseconds is spent holding the GIL,
-    so the scan threads behind it stall: a local home-shaped tree that
-    scans in 21 s with the live chart off took 152 s with it on.
-
-    The screen therefore paces the frames it forwards, and pacing needs a
-    number.  A constant would be wrong at both ends of that range, so the
-    widget measures its own frame instead -- the same shape as
-    `ExplorerScreen._maybe_build_category_index`, where the rollup reports
-    its own duration and the gate is a multiple of it.
-
-    Measured only in live mode: the static frame is deeper and dearer, and
-    it is not the one being paced.  Mix in on a widget that has
-    `_live_mode` and `_layout`.
-    """
-
-    #: Seconds the last live frame spent in layout plus the per-cell work
-    #: its first `render_line` would otherwise have paid for.  Zero until
-    #: one has been drawn, which the screen reads as "no estimate yet".
-    _last_paint_cost: float = 0.0
-
-    @property
-    def last_paint_cost(self) -> float:
-        """Cost of the most recent live frame, in seconds."""
-        return self._last_paint_cost
-
-    def _timed_live_layout(self, build) -> None:
-        """Run `build`, and in live mode record what the frame cost."""
-        if not self._live_mode:
-            build()
-            return
-        started = perf_counter()
-        build()
-        self._materialize_layout()
-        self._last_paint_cost = perf_counter() - started
-
-    def _materialize_layout(self) -> object | None:
-        """Force the derived per-cell work the first `render_line` does.
-
-        Returned rather than discarded so the call cannot be read as dead
-        code and removed; the value itself is of no interest.
-        """
-        return None

@@ -10,7 +10,7 @@ from textual.events import Click, Leave, MouseMove, Resize
 from textual.message import Message
 from textual.strip import Strip
 
-from disktide.widgets import LivePaintCostMixin, OpaqueStripMixin
+from disktide.widgets import OpaqueStripMixin
 from textual.widget import Widget
 
 from disktide.domain.live_view import LiveViewNode
@@ -37,7 +37,7 @@ from disktide.viz.sunburst import (
 )
 
 
-class SunburstView(LivePaintCostMixin, OpaqueStripMixin, Widget):
+class SunburstView(OpaqueStripMixin, Widget):
     """Widget that renders a sunburst (ring chart) visualization.
 
     Mouse handling is deliberately asymmetric: hovering only hit-tests and
@@ -284,22 +284,7 @@ class SunburstView(LivePaintCostMixin, OpaqueStripMixin, Widget):
         self.refresh()
 
     def _build_layout(self, epoch: int) -> None:
-        """Rebuild the cached layout, timing it when it is a live frame."""
-        self._timed_live_layout(lambda: self._compose_layout(epoch))
-
-    def _materialize_layout(self) -> object | None:
-        """Fold the framebuffer into cells while the clock is still running.
-
-        `rendered_cells` is memoised on the layout and the first
-        `render_sunburst_line` of the frame would pay for it anyway, so
-        doing it here bills it to the frame it belongs to rather than
-        leaving the screen's estimate short by the whole fold.
-        """
-        layout = self._layout
-        return None if layout is None else layout.rendered_cells
-
-    def _compose_layout(self, epoch: int) -> None:
-        """Recompute the layout at the widget's current size."""
+        """Rebuild the cached layout at the widget's current size."""
         self._stale = False
         self._layout_epoch = epoch
         if self._node is None:

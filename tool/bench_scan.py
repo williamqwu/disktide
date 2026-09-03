@@ -89,21 +89,26 @@ def _parse_size(text: str) -> tuple[int, int]:
 
 
 def _explorer_pacing() -> tuple[float, float]:
-    """The duty cycle the explorer paces its live chart with.
+    """The duty cycle the explorer paces its live UI work with.
 
     Read off the screen class rather than copied here, so the bench keeps
     measuring what the app actually does. An install that predates the
     duty cycle gets the shipped numbers instead of no pacing at all.
+
+    One difference the numbers below carry: the app measures a whole
+    snapshot -- the tree panel, the chart and the compositor pass they
+    queue -- while this measures the chart alone, so it paces a little
+    faster than the explorer does on the same terminal.
     """
     try:
         from disktide.screens.explorer import ExplorerScreen
 
         return (
-            float(ExplorerScreen._LIVE_CHART_DUTY),
-            float(ExplorerScreen._LIVE_CHART_MIN_GAP),
+            float(ExplorerScreen._LIVE_UI_DUTY),
+            float(ExplorerScreen._LIVE_UI_MIN_GAP),
         )
     except Exception:
-        return (5.0, 0.25)
+        return (12.0, 0.25)
 
 
 class _LivePainter:

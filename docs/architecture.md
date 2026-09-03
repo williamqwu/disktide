@@ -741,39 +741,52 @@ Tree, Sunburst, and Treemap update throughout a scan:
 - `live_scan_render = "auto"` (default) requires ≥ 80×24; otherwise
   progress-only mode. It is a legibility check, not a capacity one.
 
-**The chart is duty-cycled; nothing else is.** The service coalesces
-`NodeAggregateUpdated`, so the explorer is handed a frame exactly as fast
-as it can draw one — and a chart frame is the most expensive thing on the
-UI thread by two orders of magnitude (163 ms at a 182×62 sunburst before
-the geometry cache, ~48 ms after; the size tree and the progress overlay
-are ~2% of the thread between them). Every millisecond of it is spent
-holding the GIL, so the scan threads behind it stall on each
-re-acquisition: a 982k-entry local tree scanned in 21.0 s with the chart
-off and 152.3 s with it on, and a 700k-entry home over NFS in 36.8 s
-against ~420 s.
+**The UI thread is on a budget, and live snapshots are what it spends
+it on.** The service coalesces `NodeAggregateUpdated`, so the explorer is
+handed a frame exactly as fast as it can draw one, and every millisecond
+it spends drawing is a millisecond the walk does not get: the GIL makes a
+UI-thread budget a scan budget. A 982k-entry local tree scanned in 21.0 s
+with the chart off and 152.3 s with it on; a 700k-entry home over NFS in
+36.8 s against ~420 s.
 
-`SunburstView` / `TreemapView` time their own live frame
-(`widgets.LivePaintCostMixin.last_paint_cost` — the layout plus the fold
-into cells the first `render_line` would pay for), and
-`ExplorerScreen._maybe_update_live_chart` forwards a frame only once
-`_LIVE_CHART_DUTY` (5) times that has passed, floored at the scheduler's
-own 0.25 s publish interval. That holds the chart to ~1/5 of the thread
-at any widget size, where a constant would be wrong at both ends of a
-33 ms (70×30) to 163 ms (182×62) range. A skipped frame arms one
-`set_timer` for the rest of the gap and is replaced by the next, so a
-scan that goes quiet still lands its last frame; completion always
-paints. `tool/bench_scan.py --mode live --paint COLSxROWS` runs the same
-loop on the service's dispatch thread without a terminal, and
-`--paint-every-frame` reproduces what it looked like before (39.8 s / 37.8 s
-/ 62.4 s on the same 88k-directory tree).
+`ExplorerScreen._maybe_apply_live_ui` is a closed loop, not an estimate.
+At each applied snapshot the screen stamps `thread_time()` and
+`monotonic()`; the next one waits until the CPU spent since then is back
+under one part in `_LIVE_UI_DUTY` (8) of the wall clock that passed,
+floored at the scheduler's own 0.25 s publish interval. Nothing has to be
+predicted and nothing can be missed — a chart that grows from 500 arcs to
+9,000 over one scan, a geometry table built for a new widget size, a
+compositor pass that lands three callbacks later are all inside the
+window, because the window is "since last time". The two measurements
+that were tried first are in the comment above the constant, with the
+numbers that ruled them out.
 
-What is left is the rest of the live pipeline, not the chart: the same
-307x69 A/B is 21.9 s off against 48.5 s on, and pinning the duty cycle so
-the chart paints once still costs 40.4 s. The gap is the bounded view the
-scheduler builds on every publish (~6 s on its own thread), the category
-rollup worker (4-6 s), and the tree panel, the progress overlay and
-Textual's compositor (~4 s on the UI thread) — each of them contending for
-the same GIL the walk needs.
+One gate covers the tree panel, the chart and the compositor pass they
+queue. It does not cover the progress overlay, which is cheap per event,
+already throttled in the scheduler, and the one number a user watches;
+that costs ~10% of the thread on its own, which is why the budget for
+*everything* the thread does cannot be as small as a budget for a
+snapshot alone. A skipped frame arms one `set_timer` for what is still
+owed and is replaced by the next, so a scan that goes quiet still lands
+its last picture; the timer goes back through the gate rather than past
+it. Completion always paints. `tool/bench_scan.py --mode live --paint
+COLSxROWS` runs the same loop on the service's dispatch thread without a
+terminal (39.4 s no paint / 39.6 s paced / 62.4 s per frame / 256.9 s per
+frame with the geometry cache off, on the same 88k-directory tree).
+
+Only the newest frame's `changed_nodes` is applied, not the union of the
+skipped ones: `TreeScanScheduler._record_changed` walks a settled
+directory's whole ancestor chain, so every row the tree has materialised
+is in every publish that touches anything below it. Accumulating instead
+put 45,000 nodes into one `apply_live_update`, which sorts them all
+before discarding everything it cannot show.
+
+What is left is the rest of the live pipeline, not the UI. The 307x69 A/B
+is ~21.7 s off against 29-38 s on, and pinning the gate shut so the
+snapshot work never happens still costs 28.0 s. That floor is the
+copy-on-write publishing itself — `emit_tree_updates` roughly doubles the
+process's CPU whether or not anything is drawn — and it is on the
+scheduler's own thread, where nothing the UI does can reach it.
 
 ### Color Schemes
 

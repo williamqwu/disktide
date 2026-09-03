@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from pathlib import Path
-from time import monotonic
+from time import monotonic, thread_time
 
 from textual import on, work
 from textual.app import ComposeResult
@@ -242,10 +242,13 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._current: FSNode | None = None
         self._live_snapshot: FSNode | None = None
         self._live_view_snapshot: LiveViewNode | None = None
-        # Duty-cycle state for the live chart: when the last frame was
-        # forwarded, and the one-shot that lands a skipped one.
-        self._live_chart_at = 0.0
-        self._live_chart_timer: Timer | None = None
+        # Duty-cycle state for the live UI: when the last snapshot was
+        # applied, what that cost the UI thread, the directories a skipped
+        # frame is still owed, and the one-shot that lands them.
+        self._live_ui_at = 0.0
+        self._live_ui_cpu = 0.0
+        self._live_ui_timer: Timer | None = None
+        self._live_changed: tuple[FSNode, ...] = ()
         self._active_run: ScanRun | None = None
         # True while a scan is in flight. Used to gate drill-into (which
         # would otherwise read stale aggregates off the live snapshot)
@@ -387,7 +390,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = True
         self._live_snapshot = None
         self._live_view_snapshot = None
-        self._reset_live_chart_pacing()
+        self._reset_live_ui_pacing()
         # What the scheduler's bounded view_root is weighted by, so a live
         # frame can tell whether the shipped one still answers.
         self._active_metric = MetricId.parse(request.metric)
@@ -528,12 +531,20 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             view_root = build_live_view(node, metric=metric)
         self._live_snapshot = node
         self._live_view_snapshot = view_root
-        tree.apply_live_update(node, changed_nodes)
-        # The tree panel and the progress overlay are ~2 % of the thread
-        # between them and stay per-frame; the chart is the other 97 % and
-        # is paced.
-        self._maybe_update_live_chart(node, self._live_view_snapshot)
+        # Only the newest frame's list, not the union of the ones that were
+        # skipped. `_record_changed` walks a settled directory's whole
+        # ancestor chain, so every row the tree has materialised -- the scan
+        # root's children, and whatever the user had expanded -- is in every
+        # publish that touches anything below it. Accumulating instead had
+        # 45,000 nodes in one apply, which `SizeTree.apply_live_update`
+        # sorts before discarding all but the few dozen it can show: the
+        # gate then measured a second, closed for eleven, and the panel it
+        # was meant to pace froze. The residue is a subtree that settles
+        # inside a skipped window and never changes again, whose row keeps
+        # the value it was last drawn with until the reload on completion.
+        self._live_changed = changed_nodes
         self._maybe_build_category_index(node)
+        self._maybe_apply_live_ui()
 
     def _on_scan_complete(
         self,
@@ -551,7 +562,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = False
         self._live_snapshot = None
         self._live_view_snapshot = None
-        self._reset_live_chart_pacing()
+        self._reset_live_ui_pacing()
         self._root = root
         self._current = root
 
@@ -597,106 +608,145 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._update_active_viz(root)
         self._update_status()
 
-    # One live chart frame is the most expensive thing that happens on the
-    # UI thread, and it is not close: 163 ms of pure Python at a 182x62
-    # sunburst before the geometry cache and ~45 ms after, against ~2 % of
-    # the thread for the size tree and the progress overlay together. The
-    # scan service coalesces the scheduler's publishes, so the frames
-    # arrive exactly as fast as the thread can draw them -- which meant it
-    # never stopped drawing, and since every millisecond of that is spent
-    # holding the GIL, the scan threads behind it stalled on each
-    # re-acquisition. A local home-shaped tree scanned in 21.0 s with the
-    # live chart off and 152.3 s with it on (119.1 s of it on the UI
-    # thread); a real home over NFS, 36.8 s against ~420 s.
+    # One gate covers everything a live snapshot costs the UI thread: the
+    # tree panel's relabelling, the chart, and the compositor pass those
+    # two queue. Pacing only the chart (round 1) got a third of the way
+    # there and left the rest running per frame; pacing a *predicted*
+    # cost got no further, because the prediction was wrong in both
+    # directions.
     #
-    # So the chart is paced by what it costs rather than by a constant,
-    # which would be wrong at both ends of a 33 ms (70x30) to 163 ms
-    # (182x62) range: the view times its own frame and one is forwarded
-    # per DUTY times that, holding the chart to ~1/DUTY of the thread. The
-    # floor is the scheduler's own publish interval, below which there is
-    # nothing new to draw.
-    _LIVE_CHART_DUTY = 5.0
-    _LIVE_CHART_MIN_GAP = 0.25
+    # The reason a UI-thread budget is a scan budget is the GIL. Every
+    # millisecond another thread spends running Python is a millisecond
+    # the walk does not, so "the chart only takes a fifth of a core" is a
+    # quarter off the scan, not a free lunch. Painting every frame cost a
+    # 700k-entry home over NFS ~420 s against 36.8 s with the chart off;
+    # a fifth of the thread brought that to 78.1 s.
+    #
+    # So this is a closed loop on what the thread actually used, not an
+    # estimate of what the next frame will cost. At each applied snapshot
+    # the screen stamps `thread_time` and `monotonic`; the next snapshot
+    # waits until the CPU spent since then is back under one part in
+    # `_LIVE_UI_DUTY` of the wall clock that passed. Nothing has to be
+    # predicted and nothing can be missed: a chart that grew from 500 arcs
+    # to 9,000 as the scan went on, a geometry table built for a new
+    # widget size, a compositor pass that landed three callbacks later --
+    # all of it is inside the window, because the window is "since last
+    # time" rather than "around the call".
+    #
+    # Measuring it any other way was tried and does not work. `SunburstView`
+    # timing its own `_build_layout` misses the strip rendering and the
+    # tree panel. Timing from the apply to a `call_after_refresh` callback
+    # misses the paint outright: the screen invokes pending callbacks on
+    # idle whenever it believes nothing is dirty, so 24 of 38 samples in
+    # one scan read one to nine milliseconds for frames that then took
+    # 56-236 ms to build, and the gate sat on its floor all scan.
+    #
+    # What the loop reads is the whole thread, though, not the snapshot's
+    # share of it, so the budget has to be the whole thread's too and
+    # cannot be as small. The progress overlay is not paced -- it is cheap
+    # per event, already throttled in the scheduler, and the one number a
+    # user watches -- and it costs ~10 % of the thread on its own, which
+    # it spends inside these windows. So at twelve the loop can almost
+    # never open: measured, that was three chart frames in a 32 s scan,
+    # seven and ten seconds apart, and not one second off the wall clock
+    # in return for them. Eight leaves the chart landing every one to two
+    # and a half seconds (thirteen frames in the same scan) and holds the
+    # whole thread to ~14 % of the wall clock; six, which draws twice as
+    # often, finishes in the same time. The scan is paying for the last
+    # few per cent either way.
+    _LIVE_UI_DUTY = 8.0
+    _LIVE_UI_MIN_GAP = 0.25
 
-    def _live_chart_gap(self) -> float:
-        """Seconds that must pass between two live chart frames."""
-        view = self._active_chart_view()
-        cost = 0.0 if view is None else view.last_paint_cost
-        return max(self._LIVE_CHART_MIN_GAP, self._LIVE_CHART_DUTY * cost)
+    def _live_ui_owed(self) -> float:
+        """Seconds still to wait before the UI thread may draw again."""
+        elapsed = monotonic() - self._live_ui_at
+        if elapsed < self._LIVE_UI_MIN_GAP:
+            return self._LIVE_UI_MIN_GAP - elapsed
+        # The thread has had `spent` of the last `elapsed` seconds; it may
+        # draw once that is a `_LIVE_UI_DUTY`-th of them or less.
+        spent = thread_time() - self._live_ui_cpu
+        return spent * self._LIVE_UI_DUTY - elapsed
 
-    def _active_chart_view(self) -> SunburstView | TreemapView | None:
-        """The chart the active tab paints, or None when it shows neither."""
-        active = self.query_one("#viz-tabs", TabbedContent).active
-        if active == "tab-sunburst":
-            return self.query_one("#sunburst-view", SunburstView)
-        if active == "tab-treemap":
-            return self.query_one("#treemap-view", TreemapView)
-        return None
+    def _maybe_apply_live_ui(self) -> None:
+        """Draw the newest snapshot if the thread is inside its budget.
 
-    def _maybe_update_live_chart(
-        self,
-        node: FSNode,
-        view_root: LiveViewNode | FSNode | None,
-    ) -> None:
-        """Forward a live frame to the chart if the last one has paid off.
-
-        Same shape as `_maybe_build_category_index` below: the work reports
-        what it cost and the gate is a multiple of it.
+        Same shape as `_maybe_build_category_index` below: the work
+        reports what it cost and the cadence follows it, so it fits the
+        terminal it is running in rather than a constant that is wrong at
+        both ends of the range.
         """
-        waited = monotonic() - self._live_chart_at
-        gap = self._live_chart_gap()
-        if waited >= gap:
-            self._paint_live_chart(node, view_root)
+        owed = self._live_ui_owed()
+        if owed <= 0.0:
+            self._apply_live_ui()
             return
         # Skipped -- but a scan can go quiet at any moment (a deep subtree
         # that takes seconds, or simply the last frame before completion),
-        # and a chart frozen mid-scan on a snapshot that will never be
-        # superseded is worse than a late one. Arm a one-shot for the rest
-        # of the gap, replacing any pending one so there is only ever the
-        # single trailing frame.
-        self._arm_live_chart_timer(gap - waited)
+        # and a panel frozen mid-scan on a snapshot that will never be
+        # superseded is worse than a late one. Arm a one-shot for what is
+        # still owed, replacing any pending one so there is only ever the
+        # single trailing frame. It converges: the debt shrinks as the
+        # wall clock runs and the thread does not.
+        self._arm_live_ui_timer(owed)
 
-    def _paint_live_chart(
-        self,
-        node: FSNode,
-        view_root: LiveViewNode | FSNode | None,
-    ) -> None:
-        self._cancel_live_chart_timer()
-        self._live_chart_at = monotonic()
-        self._update_active_viz(node, visual_node=view_root)
-
-    def _arm_live_chart_timer(self, delay: float) -> None:
-        self._cancel_live_chart_timer()
-        self._live_chart_timer = self.set_timer(delay, self._flush_live_chart)
-
-    def _cancel_live_chart_timer(self) -> None:
-        timer = self._live_chart_timer
-        self._live_chart_timer = None
-        if timer is not None:
-            timer.stop()
-
-    def _reset_live_chart_pacing(self) -> None:
-        """Open the gate: the next live frame of a scan is never skipped."""
-        self._cancel_live_chart_timer()
-        self._live_chart_at = 0.0
-
-    def _flush_live_chart(self) -> None:
-        """Paint the newest snapshot that a skipped frame left behind."""
-        self._live_chart_timer = None
-        if not self.is_mounted or not self._scan_in_progress:
-            return
+    def _apply_live_ui(self) -> None:
+        """Push the newest snapshot to the tree panel and the chart."""
         node = self._live_snapshot
         if node is None:
             return
-        self._paint_live_chart(node, self._live_view_snapshot)
+        self._cancel_live_ui_timer()
+        # Stamped before the work rather than after it: the paint this
+        # queues happens later, on the compositor's own schedule, and the
+        # window has to be wide enough to contain it.
+        self._live_ui_at = monotonic()
+        self._live_ui_cpu = thread_time()
+        self.query_one("#size-tree", SizeTree).apply_live_update(
+            node, self._live_changed or (node,)
+        )
+        self._update_active_viz(node, visual_node=self._live_view_snapshot)
+
+    def _arm_live_ui_timer(self, delay: float) -> None:
+        self._cancel_live_ui_timer()
+        self._live_ui_timer = self.set_timer(delay, self._flush_live_ui)
+
+    def _cancel_live_ui_timer(self) -> None:
+        timer = self._live_ui_timer
+        self._live_ui_timer = None
+        if timer is not None:
+            timer.stop()
+
+    def _reset_live_ui_pacing(self) -> None:
+        """Open the gate: the next snapshot of a scan is never skipped."""
+        self._cancel_live_ui_timer()
+        self._live_ui_at = 0.0
+        self._live_ui_cpu = 0.0
+        self._live_changed = ()
+
+    def _flush_live_ui(self) -> None:
+        """Apply the newest snapshot that a skipped frame left behind.
+
+        Through the gate again rather than straight past it: the paint the
+        skipped frame was waiting on may still be running up the bill.
+        """
+        self._live_ui_timer = None
+        if not self.is_mounted or not self._scan_in_progress:
+            return
+        self._maybe_apply_live_ui()
 
     # A category rollup is one pass over every node, so it cannot run per
     # live frame. It is thrown at a worker whenever it has been idle for
-    # several times its own last duration: on a small tree that is almost
-    # every frame, and on a large one it settles to a few seconds apart,
-    # which caps the cost at a fixed fraction of one core however big the
-    # scan gets.
-    _CATEGORY_INDEX_DUTY = 8.0
+    # some multiple of its own last duration, which caps the cost at a
+    # fixed fraction of one core however big the scan gets.
+    #
+    # That multiple was 8, and an eighth of a core is not cheap when it is
+    # bought with the GIL: py-spy put the rollup at 12 % of everything the
+    # process ran during a live scan, against 44 % for the walk it was
+    # taking that time from. At 40 a 0.8 s pass on a local home-shaped
+    # tree runs every ~32 s, and a 1-5 s pass on a real home once or twice
+    # in the whole scan -- which is what a *provisional* tint is worth, a
+    # directory being named for whatever landed first and free to change
+    # later. The rollup at completion is untouched, so the finished chart
+    # is tinted either way.
+    _CATEGORY_INDEX_DUTY = 40.0
     _CATEGORY_INDEX_MIN_GAP = 0.5
 
     def _maybe_build_category_index(self, root: FSNode) -> None:
@@ -877,7 +927,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = False
         self._live_snapshot = None
         self._live_view_snapshot = None
-        self._reset_live_chart_pacing()
+        self._reset_live_ui_pacing()
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_cancelled(run_id=event.run_id)
         tree_panel = self.query_one("#tree-panel")
@@ -920,7 +970,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = False
         self._live_snapshot = None
         self._live_view_snapshot = None
-        self._reset_live_chart_pacing()
+        self._reset_live_ui_pacing()
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_failed(run_id=run_id)

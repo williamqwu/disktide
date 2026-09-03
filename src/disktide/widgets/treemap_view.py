@@ -8,7 +8,7 @@ from textual.events import Click, Leave, MouseMove, Resize
 from textual.message import Message
 from textual.strip import Strip
 
-from disktide.widgets import LivePaintCostMixin, OpaqueStripMixin
+from disktide.widgets import OpaqueStripMixin
 from textual.widget import Widget
 
 from disktide.domain.live_view import LiveViewNode
@@ -33,7 +33,7 @@ from disktide.viz.treemap import (
 )
 
 
-class TreemapView(LivePaintCostMixin, OpaqueStripMixin, Widget):
+class TreemapView(OpaqueStripMixin, Widget):
     """Widget that renders a treemap visualization.
 
     Mouse handling mirrors SunburstView: hover only hit-tests the layout's
@@ -234,16 +234,7 @@ class TreemapView(LivePaintCostMixin, OpaqueStripMixin, Widget):
         self.refresh()
 
     def _build_layout(self, epoch: int) -> None:
-        """Rebuild the cached layout, timing it when it is a live frame."""
-        self._timed_live_layout(lambda: self._compose_layout(epoch))
-
-    def _materialize_layout(self) -> object | None:
-        """Nothing to force: `compute_layout` builds the lookup grid, and
-        `render_line` reads rectangles straight off it."""
-        return self._layout
-
-    def _compose_layout(self, epoch: int) -> None:
-        """Recompute the tiling at the widget's current size."""
+        """Rebuild the cached layout at the widget's current size."""
         self._stale = False
         self._layout_epoch = epoch
         if self._node is None:
