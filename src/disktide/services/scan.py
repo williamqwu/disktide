@@ -808,6 +808,12 @@ class ScanService:
             # unreadable direct entry has nothing to report, and that is
             # every file and nearly every directory. Only survivors pay for
             # the scan over their children.
+            #
+            # Entries that vanished mid-scan are excluded by construction:
+            # they land in `vanished_count`, never in `inaccessible_count`,
+            # and a vanished directory leaves `error` at None. A tree that
+            # merely changed under the scan therefore raises no AccessError
+            # and finishes COMPLETED rather than PARTIAL.
             if node.error is None and not node.inaccessible_count:
                 continue
             represented_children = sum(

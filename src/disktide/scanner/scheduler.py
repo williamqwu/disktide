@@ -27,6 +27,7 @@ from disktide.scanner.walker import (
     classify_symlink,
     make_file_node,
     make_symlink_node,
+    vanished,
 )
 
 
@@ -63,6 +64,7 @@ class DirectoryScanResult:
     child_count: int
     direct_inaccessible: int
     streamed: bool = False
+    direct_vanished: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,7 @@ class DirectoryEntryChunk:
     child_count: int
     child_ancestors: frozenset[tuple[int, int]]
     entry_count: int
+    direct_vanished_delta: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +133,7 @@ class _DirectoryState:
     generation: int
     parent_index: int | None = None
     direct_inaccessible: int = 0
+    direct_vanished: int = 0
     child_ancestors: frozenset[tuple[int, int]] = frozenset()
     next_child_index: int = 0
     remaining_children: int = 0
@@ -157,6 +161,8 @@ class _ChildContribution:
     partial_dir_subtree_count: int
     excluded_subtree_count: int
     depth_limited_subtree_count: int
+    vanished: int
+    vanished_subtree_count: int
 
 
 def _placeholder(job: DirectoryJob) -> FSNode:
@@ -170,7 +176,11 @@ def _placeholder(job: DirectoryJob) -> FSNode:
     )
 
 
-def _recalculate_directory(node: FSNode, direct_inaccessible: int) -> None:
+def _recalculate_directory(
+    node: FSNode,
+    direct_inaccessible: int,
+    direct_vanished: int = 0,
+) -> None:
     """Refresh inclusive aggregates from direct entries and current children."""
 
     directory_children = [child for child in node.children if child.is_dir]
@@ -187,6 +197,15 @@ def _recalculate_directory(node: FSNode, direct_inaccessible: int) -> None:
     )
     node.inaccessible_subtree_count = node.inaccessible_count + sum(
         child.inaccessible_subtree_count for child in directory_children
+    )
+
+    # A child directory that vanished is one vanished *entry* here, exactly
+    # as a denied child directory is one inaccessible entry.
+    node.vanished_count = direct_vanished + sum(
+        child.vanished for child in directory_children
+    )
+    node.vanished_subtree_count = node.vanished_count + sum(
+        child.vanished_subtree_count for child in directory_children
     )
 
     denied = 0
@@ -213,6 +232,7 @@ def _recalculate_directory(node: FSNode, direct_inaccessible: int) -> None:
 
 def _child_contribution(node: FSNode) -> _ChildContribution:
     denied = int(node.error is not None)
+    gone = int(node.vanished)
     return _ChildContribution(
         size=node.size,
         allocated_size=node.allocated_size,
@@ -231,6 +251,8 @@ def _child_contribution(node: FSNode) -> _ChildContribution:
         depth_limited_subtree_count=(
             node.depth_limited_subtree_count + int(node.depth_limited)
         ),
+        vanished=gone,
+        vanished_subtree_count=node.vanished_subtree_count + gone,
     )
 
 
@@ -269,6 +291,10 @@ def _replace_child(
     parent.depth_limited_subtree_count += (
         current.depth_limited_subtree_count - previous.depth_limited_subtree_count
     )
+    parent.vanished_count += current.vanished - previous.vanished
+    parent.vanished_subtree_count += (
+        current.vanished_subtree_count - previous.vanished_subtree_count
+    )
     parent.invalidate_sort()
 
 
@@ -302,7 +328,18 @@ def scan_directory_once(
         node.device_id = getattr(stat_result, "st_dev", None)
         node.inode = getattr(stat_result, "st_ino", None)
         node.link_count = getattr(stat_result, "st_nlink", 1)
-    except OSError:
+    except OSError as exc:
+        if job.parent_path is not None and vanished(exc):
+            # The parent listed this directory; it was gone before its own
+            # job ran. `error` stays None -- nothing denied us anything --
+            # and the node stays in the parent's children list, because the
+            # scheduler addresses children by position (invariant I2).
+            # The scan root is excluded: a root that does not exist is a bad
+            # argument and has to keep reporting itself as an error.
+            node.vanished = True
+            node.allocated_size = 0
+            node.own_allocated_size = 0
+            return DirectoryScanResult(job, node, frozenset(), 0, 0)
         stat_result = None
 
     filesystem_type = lookup_excluded_mount(
@@ -352,12 +389,18 @@ def scan_directory_once(
         node.error = f"Permission denied: {job.path}"
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
     except OSError as exc:
+        if job.parent_path is not None and vanished(exc):
+            node.vanished = True
+            node.allocated_size = 0
+            node.own_allocated_size = 0
+            return DirectoryScanResult(job, node, frozenset(), 0, 0)
         node.error = str(exc)
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
     own_size = 0
     own_allocated: int | None = 0
     direct_inaccessible = 0
+    direct_vanished = 0
     child_count = 0
     top_level_classified = 0
     chunk_children: list[FSNode] = []
@@ -365,6 +408,7 @@ def scan_directory_once(
     chunk_own_size = 0
     chunk_own_allocated: int | None = 0
     chunk_inaccessible = 0
+    chunk_vanished = 0
     streaming_open = True
 
     directory_metadata = copy.copy(node)
@@ -377,6 +421,7 @@ def scan_directory_once(
         nonlocal chunk_own_size
         nonlocal chunk_own_allocated
         nonlocal chunk_inaccessible
+        nonlocal chunk_vanished
         if chunk_size == 0:
             return True
         if checkpoint_callback is None:
@@ -393,6 +438,7 @@ def scan_directory_once(
                     child_count=sum(child.is_dir for child in chunk_children),
                     child_ancestors=child_ancestors,
                     entry_count=chunk_size,
+                    direct_vanished_delta=chunk_vanished,
                 )
             )
             if accepted is False:
@@ -402,6 +448,7 @@ def scan_directory_once(
         chunk_own_size = 0
         chunk_own_allocated = 0
         chunk_inaccessible = 0
+        chunk_vanished = 0
         return True
 
     try:
@@ -411,10 +458,15 @@ def scan_directory_once(
             chunk_size += 1
             try:
                 if entry.is_symlink():
-                    child = make_symlink_node(entry, job.depth + 1)
-                    if child is None:
-                        direct_inaccessible += 1
-                        chunk_inaccessible += 1
+                    try:
+                        child = make_symlink_node(entry, job.depth + 1)
+                    except OSError as exc:
+                        if vanished(exc):
+                            direct_vanished += 1
+                            chunk_vanished += 1
+                        else:
+                            direct_inaccessible += 1
+                            chunk_inaccessible += 1
                     else:
                         chunk_children.append(child)
                         own_size += child.own_size
@@ -464,18 +516,30 @@ def scan_directory_once(
                                 own_allocated += child_allocated
                             if chunk_own_allocated is not None:
                                 chunk_own_allocated += child_allocated
-                    except OSError:
-                        direct_inaccessible += 1
-                        chunk_inaccessible += 1
-            except OSError:
-                direct_inaccessible += 1
-                chunk_inaccessible += 1
+                    except OSError as exc:
+                        if vanished(exc):
+                            direct_vanished += 1
+                            chunk_vanished += 1
+                        else:
+                            direct_inaccessible += 1
+                            chunk_inaccessible += 1
+            except OSError as exc:
+                if vanished(exc):
+                    direct_vanished += 1
+                    chunk_vanished += 1
+                else:
+                    direct_inaccessible += 1
+                    chunk_inaccessible += 1
             if chunk_size >= entry_chunk_size and not flush_chunk():
                 streaming_open = False
                 break
-    except OSError:
-        direct_inaccessible += 1
-        chunk_inaccessible += 1
+    except OSError as exc:
+        if vanished(exc):
+            direct_vanished += 1
+            chunk_vanished += 1
+        else:
+            direct_inaccessible += 1
+            chunk_inaccessible += 1
         chunk_size += 1
     finally:
         scandir_iterator.close()
@@ -487,7 +551,7 @@ def scan_directory_once(
     node.own_allocated_size = own_allocated
     if checkpoint_callback is None:
         node.children.sort(key=_NAME_PATH_KEY)
-    _recalculate_directory(node, direct_inaccessible)
+    _recalculate_directory(node, direct_inaccessible, direct_vanished)
     return DirectoryScanResult(
         job=job,
         node=node,
@@ -495,6 +559,7 @@ def scan_directory_once(
         child_count=child_count,
         direct_inaccessible=direct_inaccessible,
         streamed=checkpoint_callback is not None,
+        direct_vanished=direct_vanished,
     )
 
 
@@ -819,16 +884,20 @@ class TreeScanScheduler:
                     child_count=result.child_count,
                     child_ancestors=result.child_ancestors,
                     entry_count=len(result.node.children),
+                    direct_vanished_delta=result.direct_vanished,
                 )
             )
         self._ensure_mutable(state)
         previous = _child_contribution(state.node)
         children = state.node.children
         result.node.children = children
-        _recalculate_directory(result.node, result.direct_inaccessible)
+        _recalculate_directory(
+            result.node, result.direct_inaccessible, result.direct_vanished
+        )
         state.node = result.node
         state.generation = self._generation
         state.direct_inaccessible = result.direct_inaccessible
+        state.direct_vanished = result.direct_vanished
         state.child_ancestors = result.child_ancestors
         state.scanned = True
 
@@ -919,8 +988,11 @@ class TreeScanScheduler:
         state.node.dir_count += chunk.child_count
         state.node.inaccessible_count += chunk.direct_inaccessible_delta
         state.node.inaccessible_subtree_count += chunk.direct_inaccessible_delta
+        state.node.vanished_count += chunk.direct_vanished_delta
+        state.node.vanished_subtree_count += chunk.direct_vanished_delta
         state.node.invalidate_sort()
         state.direct_inaccessible += chunk.direct_inaccessible_delta
+        state.direct_vanished += chunk.direct_vanished_delta
         state.child_ancestors = chunk.child_ancestors
         state.remaining_children += chunk.child_count
         state.discovered_children += chunk.child_count
@@ -940,6 +1012,9 @@ class TreeScanScheduler:
         )
         self._files_scanned += chunk_file_count
         self._logical_bytes += chunk.own_size_delta
+        # Vanished entries are deliberately absent here: `errors` drives the
+        # progress display's error count, and a tree that changed under the
+        # scan has not produced an error to show.
         self._errors += chunk.direct_inaccessible_delta
         self._propagate(state, previous)
         self._record_changed(state)
@@ -953,6 +1028,7 @@ class TreeScanScheduler:
         target.link_count = source.link_count
         target.error = source.error
         target.is_loop = source.is_loop
+        target.vanished = source.vanished
         target.excluded = source.excluded
         target.exclusion_reason = source.exclusion_reason
         target.filesystem_boundary = source.filesystem_boundary

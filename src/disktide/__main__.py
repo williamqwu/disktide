@@ -457,6 +457,7 @@ def scan(
                 "excluded_subtrees": root.excluded_subtree_count,
                 "depth_limited_subtrees": root.depth_limited_subtree_count,
                 "hardlink_duplicates": duplicate_links,
+                "vanished_entries": root.vanished_subtree_count,
             },
             "workers": (
                 None
@@ -516,6 +517,11 @@ def scan(
         click.echo(
             f"  Coverage: partial ({root.inaccessible_subtree_count:,} "
             "unreadable entries/subtrees)"
+        )
+    if root.vanished_subtree_count:
+        click.echo(
+            f"  Changed during scan: {root.vanished_subtree_count:,} "
+            "entries vanished"
         )
     if root.excluded_subtree_count or root.depth_limited_subtree_count:
         click.echo(

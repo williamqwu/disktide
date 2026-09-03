@@ -343,6 +343,11 @@ class SizeTree(Tree[FSNode]):
             text.append(f"{node.name}/", style=ink("dir"))
             if node.is_loop:
                 text.append(" (loop)", style=ink("warning_strong"))
+            elif node.vanished:
+                # Dim, not a warning colour: the directory was removed while
+                # the scan ran, which is a fact about the tree rather than
+                # something the user has to act on.
+                text.append(" (gone)", style=ink("muted"))
         elif node.is_symlink:
             text.append(node.name, style=ink("link"))
             if node.link_target:
@@ -404,8 +409,10 @@ class SizeTree(Tree[FSNode]):
             # Some descendant somewhere below has hidden state — dim hint
             indicator = (f" {partial_glyph()}", ink("warning_dim"))
 
-        # Proportional bar for directories (share of the scan root total)
-        if node.is_dir:
+        # Proportional bar for directories (share of the scan root total).
+        # A vanished directory has nothing to show a share of, and a 0.0%
+        # bar reads as a measurement rather than as an absence.
+        if node.is_dir and not node.vanished:
             ratio = self._metric_ratio(node)
             if ratio is not None:
                 reserved = cell_len(indicator[0]) if indicator else 0

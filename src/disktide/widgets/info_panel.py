@@ -159,7 +159,13 @@ class InfoPanel(Widget):
                 table.add_row("Policy", node.scan_policy.summary())
 
             # Access row — full denial / partial / hidden descendants only / ok
-            if node.error is not None:
+            if node.vanished:
+                # Not an access state at all, but this is the row a reader
+                # looks at to find out why a directory is empty.
+                table.add_row(
+                    "Access", Text("Removed during scan", style=ink("muted"))
+                )
+            elif node.error is not None:
                 # "Unreadable" rather than "Denied": node.error captures any
                 # OSError from scandir, not only PermissionError.
                 table.add_row("Access", Text(f"{denied_glyph()} Unreadable", style=ink("error_strong")))
@@ -182,6 +188,17 @@ class InfoPanel(Widget):
                 )
             else:
                 table.add_row("Access", Text("✓ Full", style=ink("bar")))
+
+            if node.vanished_subtree_count > 0:
+                entries = node.vanished_subtree_count
+                table.add_row(
+                    "Changed during scan",
+                    Text(
+                        f"{entries} {'entry' if entries == 1 else 'entries'} "
+                        "vanished",
+                        style=ink("muted"),
+                    ),
+                )
 
         if node.mtime > 0:
             dt = datetime.fromtimestamp(node.mtime)

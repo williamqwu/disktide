@@ -1,6 +1,7 @@
 """os.scandir()-based directory walker."""
 
 from __future__ import annotations
+import errno
 import os
 import stat
 import threading
@@ -11,7 +12,22 @@ from disktide.models.tree import FSNode
 from disktide.scanner.policy import lookup_excluded_mount
 
 
-def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
+#: An entry that was in the directory listing and is not there any more.
+#: ENOENT is the ordinary delete, ESTALE is the NFS form of it (the handle
+#: the server gave us no longer resolves), and ENOTDIR means a path component
+#: stopped being a directory -- somebody replaced a directory with a file
+#: while we were walking through it. None of the three is an access problem,
+#: and reporting them as "unreadable" told the user to check permissions on a
+#: tree that was merely busy.
+VANISHED_ERRNOS = frozenset({errno.ENOENT, errno.ESTALE, errno.ENOTDIR})
+
+
+def vanished(exc: OSError) -> bool:
+    """Whether this OSError means the tree changed rather than denied us."""
+    return exc.errno in VANISHED_ERRNOS
+
+
+def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode:
     """Build an FSNode for a symlink directory entry.
 
     Lazy by design. The walker pays exactly one syscall per symlink
@@ -24,12 +40,11 @@ def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode | None:
     one that takes 10x longer because every entry pays two or three
     server round-trips instead of one.
 
-    Returns None if the link itself cannot be stat'd.
+    Raises OSError if the link itself cannot be stat'd. It used to return
+    None, but the callers need the errno: a link that was unlinked between
+    the readdir and the stat is a changed tree, not a denied one.
     """
-    try:
-        st = entry.stat(follow_symlinks=False)
-    except OSError:
-        return None
+    st = entry.stat(follow_symlinks=False)
     # Positional construction, and the allocated bytes computed once rather
     # than twice: see make_file_node below for the measurement and for the
     # field-order contract this relies on.
@@ -136,7 +151,14 @@ def scan_directory(
         node.device_id = getattr(st, "st_dev", None)
         node.inode = getattr(st, "st_ino", None)
         node.link_count = getattr(st, "st_nlink", 1)
-    except OSError:
+    except OSError as exc:
+        if depth > 0 and vanished(exc):
+            # Listed by the parent, gone by the time we got here. Zero
+            # aggregates and no `error`: the scan is complete, the tree moved.
+            # Only below the root: a scan root that does not exist is a bad
+            # argument, and callers rely on `error` to say so.
+            node.vanished = True
+            return node
         st = None
 
     filesystem_type = lookup_excluded_mount(
@@ -187,6 +209,9 @@ def scan_directory(
         node.error = f"Permission denied: {path}"
         return node
     except OSError as e:
+        if depth > 0 and vanished(e):
+            node.vanished = True
+            return node
         node.error = str(e)
         return node
 
@@ -195,6 +220,7 @@ def scan_directory(
     file_count = 0
     dir_count = 0
     inaccessible = 0
+    gone = 0
     local_files = 0  # direct files + symlinks (for live progress ticks)
 
     try:
@@ -208,9 +234,13 @@ def scan_directory(
                     # info (readlink + follow-stat) is deferred to the
                     # UI's classify_symlink call so the scan stays at one
                     # syscall per entry instead of three.
-                    child = make_symlink_node(entry, depth + 1)
-                    if child is None:
-                        inaccessible += 1
+                    try:
+                        child = make_symlink_node(entry, depth + 1)
+                    except OSError as exc:
+                        if vanished(exc):
+                            gone += 1
+                        else:
+                            inaccessible += 1
                     else:
                         node.children.append(child)
                         own_size += child.own_size
@@ -232,6 +262,8 @@ def scan_directory(
                     file_count += child.file_count
                     if child.error is not None:
                         inaccessible += 1
+                    elif child.vanished:
+                        gone += 1
                 elif entry.is_file(follow_symlinks=False):
                     try:
                         st = entry.stat(follow_symlinks=False)
@@ -243,10 +275,16 @@ def scan_directory(
                         )
                         file_count += 1
                         local_files += 1
-                    except OSError:
-                        inaccessible += 1
-            except OSError:
-                inaccessible += 1
+                    except OSError as exc:
+                        if vanished(exc):
+                            gone += 1
+                        else:
+                            inaccessible += 1
+            except OSError as exc:
+                if vanished(exc):
+                    gone += 1
+                else:
+                    inaccessible += 1
                 continue
     finally:
         scandir_it.close()
@@ -265,6 +303,10 @@ def scan_directory(
     node.inaccessible_count = inaccessible
     node.inaccessible_subtree_count = inaccessible + sum(
         c.inaccessible_subtree_count for c in node.children if c.is_dir
+    )
+    node.vanished_count = gone
+    node.vanished_subtree_count = gone + sum(
+        c.vanished_subtree_count for c in node.children if c.is_dir
     )
     # Roll up subtree-wide counts of denied/partial *directories* so the
     # UI can show totals in O(1) without re-walking. Self counts: this

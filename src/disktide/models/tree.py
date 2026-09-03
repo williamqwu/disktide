@@ -62,6 +62,16 @@ class FSNode:
         excluded: Whether scan policy intentionally skipped this node.
         filesystem_boundary: Whether one-filesystem policy stopped here.
         depth_limited: Whether max-depth policy stopped here.
+        vanished: Whether this directory was listed by its parent but was
+            already gone when its own job ran (ENOENT/ESTALE/ENOTDIR on
+            scandir or stat). A changed tree, not an access problem, so
+            `error` stays None and every aggregate stays zero.
+        vanished_count: Direct entries -- files, symlinks or child
+            directories -- that disappeared between being listed and being
+            read. Counted separately from `inaccessible_count`: nothing was
+            denied, the tree simply moved under the scan.
+        vanished_subtree_count: Bottom-up aggregate of `vanished_count`
+            across this subtree, like the other `*_subtree_count` fields.
     """
 
     name: str
@@ -101,6 +111,13 @@ class FSNode:
     excluded_subtree_count: int = 0
     depth_limited_subtree_count: int = 0
     scan_policy: ScanPolicy | None = None
+    # Appended at the end on purpose: `scanner.walker.make_file_node` builds
+    # an FSNode positionally for the first 28 fields (see
+    # tests/test_tree.py::test_fsnode_positional_prefix), so a field inserted
+    # higher up would be a silent miscount rather than a type error.
+    vanished: bool = False
+    vanished_count: int = 0
+    vanished_subtree_count: int = 0
 
     _sorted_cache: list[FSNode] | None = field(
         default=None, repr=False, compare=False
