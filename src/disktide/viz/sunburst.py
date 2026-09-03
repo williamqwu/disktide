@@ -30,6 +30,7 @@ the ring and sibling separators that give the chart its structure.
 from __future__ import annotations
 
 import math
+from array import array
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Mapping, NamedTuple
@@ -538,6 +539,230 @@ def _build_rings(
     return rings
 
 
+# --- per-geometry sample plan ---------------------------------------------
+
+# What a subsample contributes depends on where it is and on what the tree
+# holds, and the first half is 97 % of the bill.  cProfile of one live
+# frame (182x62, max_depth 2, 553 arcs) counted 618k calls, of which
+# `ringshape._faces` 190k, `angle` 63k, `edge_per_radian` 63k, `cell_edge`
+# 63k, `radius` 86k and `cell_depth` 42k -- every one of them a function of
+# the offset from the centre and the band, and every one recomputed
+# unchanged on the next frame, because a live scan repaints the same
+# widget at the same size dozens of times.
+#
+# So the geometry is computed once per (shape, size, aspect, radial
+# layout) and kept.  What is left in the per-frame loop is the ring
+# lookup, one bisect, the seam comparisons and the colour accumulation:
+# 163 ms to 42 ms for that frame, 223 ms to 62 ms for the final
+# full-depth one.
+#
+# Stored as `array`, not lists: at a 307x69 pane this is 169k subsamples,
+# and boxed floats would be 40 bytes each against 8.
+
+
+class _SamplePlan(NamedTuple):
+    """Per-subsample geometry, flat and indexed by position.
+
+    Sample ``(dx_index, dy_index)`` lives at ``dy_index * 2 * char_width +
+    dx_index``, where a half-cell ``(hx, hy)`` owns the four samples
+    ``dx_index in (2 * hx, 2 * hx + 1)`` and ``dy_index in (2 * hy,
+    2 * hy + 1)`` -- the same quarter points the rasterizer always took.
+    """
+
+    #: Ring index the sample falls in, -1 inside the hole, and a sentinel
+    #: past the last ring the pane has room for.
+    depth: object
+    #: How many ring outer edges the sample is beyond.  The rasterizer's
+    #: ``radius >= reach`` test, asked without keeping the radius: `reach`
+    #: is the outer edge of the deepest ring the *tree* reached, so this
+    #: is the same comparison against every edge it could be.
+    slot: object
+    #: How far around its band the sample is, and what one radian is worth
+    #: in ring edge there.
+    theta: object
+    edge: object
+    #: One cell measured along the face, for the shapes that quantise
+    #: their seams (`ringshape.TileGeometry`); zero for the others.
+    cell: object
+    #: The radial separator's coverage here, for a ring that has another
+    #: painted outside it.  Whether it does is the tree's business, so the
+    #: value is stored and applied conditionally.
+    seam: object
+
+
+# Four entries covers what one explorer actually cycles through: the live
+# chart's geometry and the full-depth one it swaps to on completion, twice
+# over across a resize.  A plan is a few MB, so the ceiling matters.
+_PLAN_CACHE: dict[tuple, _SamplePlan] = {}
+_PLAN_CACHE_LIMIT = 4
+_PLAN_CACHE_ENABLED = True
+
+
+def set_sample_cache_enabled(enabled: bool) -> bool:
+    """Turn the geometry cache off, and return what it was.
+
+    Only `tests/test_sunburst_cache.py` calls this: a cache whose key is
+    incomplete draws a stale picture rather than raising, so the test
+    renders the same matrix with and without it and compares frames.
+    """
+    global _PLAN_CACHE_ENABLED
+    was = _PLAN_CACHE_ENABLED
+    _PLAN_CACHE_ENABLED = enabled
+    return was
+
+
+def clear_sample_cache() -> None:
+    """Drop every cached plan (a test seam, and a memory release valve)."""
+    _PLAN_CACHE.clear()
+
+
+def _sample_plan(layout: SunburstLayout, ring_width: float) -> _SamplePlan:
+    """The geometry table for this layout's shape and size."""
+    key = (
+        layout.geometry,
+        layout.shape,
+        layout.char_width,
+        layout.char_height,
+        layout.cell_aspect,
+        layout.hole_radius,
+        ring_width,
+        layout.radius,
+    )
+    if not _PLAN_CACHE_ENABLED:
+        return _build_sample_plan(layout, ring_width)
+    plan = _PLAN_CACHE.get(key)
+    if plan is not None:
+        # dict keeps insertion order, so re-inserting is what makes the
+        # eviction below least-recently-used rather than arbitrary.
+        del _PLAN_CACHE[key]
+        _PLAN_CACHE[key] = plan
+        return plan
+    plan = _build_sample_plan(layout, ring_width)
+    while len(_PLAN_CACHE) >= _PLAN_CACHE_LIMIT:
+        del _PLAN_CACHE[next(iter(_PLAN_CACHE))]
+    _PLAN_CACHE[key] = plan
+    return plan
+
+
+def _build_sample_plan(
+    layout: SunburstLayout, ring_width: float
+) -> _SamplePlan:
+    """Answer every geometry question the rasterizer asks, once.
+
+    Deliberately written as the same expressions in the same order the
+    rasterizer used inline, because the frames have to come out byte for
+    byte identical -- `radius >= reach` and `int((radius - hole) / w)` can
+    disagree by an ULP at a ring boundary, so both are kept rather than
+    one being derived from the other.
+    """
+    width = layout.char_width
+    height = layout.char_height
+    hole = layout.hole_radius
+    half_row = layout.cell_aspect / 2.0
+    cx = layout.center_x
+    cy = layout.center_y
+    inv_ring = 1.0 / ring_width
+
+    radius_of = layout.geometry.radius
+    angle_of = layout.geometry.angle
+    edge_per_radian = layout.geometry.edge_per_radian
+    row_half_width = layout.geometry.row_half_width
+    crisp = layout.geometry.crisp_seams
+    if crisp:
+        cell_depth = layout.geometry.cell_depth
+        cell_edge = layout.geometry.cell_edge
+
+    # Rings the pane has room for.  A sample past the last one is
+    # background whatever the tree turns out to hold, so the tables stop
+    # there (plus one, so the sentinel is never mistaken for a real ring
+    # at a boundary that rounded the wrong way).
+    ring_max = max(1, int(round((layout.radius - hole) / ring_width))) + 1
+    # Spelled the way `_build_arcs` spells them, not merely equal to them:
+    # `hole + d * w + w` and `hole + (d + 1) * w` can differ in the last
+    # place, and the whole point of `slot` is to answer `radius >= reach`
+    # against the very edges the arcs carry.
+    r_inner = [hole + d * ring_width for d in range(ring_max)]
+    r_outer = [inner + ring_width for inner in r_inner]
+    r_mid = [
+        (r_inner[d] + r_outer[d]) / 2.0 for d in range(ring_max)
+    ]
+
+    ring_seam_depth = min(_RING_SEAM, ring_width * _RING_SEAM_MAX_FRACTION)
+    max_seam_depth = ring_width * _RING_SEAM_MAX_FRACTION
+    foot = _FOOTPRINT_HALF
+    inv_foot = 1.0 / _SAMPLE_FOOTPRINT
+
+    two_w = 2 * width
+    # Two sample columns per cell column and two sample rows per half-cell
+    # row, so 2W by 4H.
+    total = two_w * 4 * height
+    # Untouched samples read as "inside the hole", which the frame loop
+    # already resolves to background: the corners a round chart never
+    # reaches are never written, and never read either.
+    # 36 bytes a sample for a shape with quantised seams and 28 for one
+    # without: 3.2 MB at the 182x62 chart a 307x69 terminal gives the
+    # explorer, 6.1 MB if the widget itself were that big.  Ring indices
+    # are single digits, so they are shorts.
+    depths = array("h", [-1]) * total
+    slots = array("h", [0]) * total
+    thetas = array("d", [0.0]) * total
+    edges = array("d", [0.0]) * total
+    # Only a crisp shape ever reads this one.
+    cells = array("d", [0.0]) * total if crisp else None
+    seams = array("d", [0.0]) * total
+
+    # `reach` is the tree's, and is never more than the radius the pane
+    # was fitted to, so bounding the build by the full radius covers every
+    # sample any frame can ask for and skips the corners a round chart
+    # never touches.
+    reach = layout.radius
+
+    for hy in range(2 * height):
+        dy0 = (hy + 0.25) * half_row - cy
+        dy1 = (hy + 0.75) * half_row - cy
+        nearest = 0.0 if dy0 * dy1 <= 0.0 else min(abs(dy0), abs(dy1))
+        chord = row_half_width(nearest, reach)
+        if chord < 0.0:
+            continue
+        x_lo = max(0, int(cx - chord) - 1)
+        x_hi = min(width - 1, int(cx + chord) + 1)
+        for dy, base in ((dy0, 2 * hy * two_w), (dy1, (2 * hy + 1) * two_w)):
+            for hx in range(x_lo, x_hi + 1):
+                for dx, index in (
+                    (hx + 0.25 - cx, base + 2 * hx),
+                    (hx + 0.75 - cx, base + 2 * hx + 1),
+                ):
+                    radius = radius_of(dx, dy)
+                    if radius < hole:
+                        continue
+                    slots[index] = bisect_right(r_outer, radius)
+                    depth = int((radius - hole) * inv_ring)
+                    if depth >= ring_max:
+                        depths[index] = ring_max
+                        continue
+                    depths[index] = depth
+                    mid = r_mid[depth]
+                    theta = angle_of(dx, dy, mid)
+                    thetas[index] = theta
+                    edges[index] = edge_per_radian(theta, radius, mid)
+                    r_out = r_outer[depth]
+                    if crisp:
+                        cells[index] = cell_edge(theta, mid)
+                        depth_one = cell_depth(dx, dy, mid)
+                        if (
+                            depth_one <= max_seam_depth
+                            and radius >= r_out - depth_one
+                        ):
+                            seams[index] = 1.0
+                    else:
+                        lo = max(r_out - ring_seam_depth, radius - foot)
+                        hi = min(r_out, radius + foot)
+                        if hi > lo:
+                            seams[index] = (hi - lo) * inv_foot
+
+    return _SamplePlan(depths, slots, thetas, edges, cells, seams)
+
+
 def _rasterize_arcs(
     layout: SunburstLayout,
     ring_width: float,
@@ -550,6 +775,11 @@ def _rasterize_arcs(
     the panel background; averaging the four is what anti-aliases the rim,
     the walls of empty wedges, and the separators alike.  A half-cell no
     subsample landed on stays None so the caller can leave it unstyled.
+
+    Where each sample is, which ring it lands in and how far around that
+    ring it sits are all answered by `_sample_plan`, which holds them for
+    as long as the widget keeps its shape and size.  Only what depends on
+    the *arcs* is done here.
     """
     arcs = layout.arcs
     if not arcs or ring_width <= 0.0:
@@ -559,7 +789,6 @@ def _rasterize_arcs(
     layout._rings = rings
     ring_count = len(rings)
     reach = max(arc.r_outer for arc in arcs)
-    hole = layout.hole_radius
 
     width = layout.char_width
     height = layout.char_height
@@ -572,23 +801,21 @@ def _rasterize_arcs(
     ]
     layout.frame = frame
 
-    # Bound once: the shape's arithmetic runs four times per half-cell.
-    radius_of = layout.geometry.radius
-    angle_of = layout.geometry.angle
+    plan = _sample_plan(layout, ring_width)
+    depths = plan.depth
+    slots = plan.slot
+    thetas = plan.theta
+    edges = plan.edge
+    plan_cells = plan.cell
+    seams = plan.seam
+
     row_half_width = layout.geometry.row_half_width
-    edge_per_radian = layout.geometry.edge_per_radian
     # A shape whose every edge already lands on a cell edge draws its
     # seams as whole cells instead: the anti-aliased hairline below is
     # the right answer for an edge that falls *between* two cells, and
     # the wrong one for the only soft thing left in the picture.
     crisp = layout.geometry.crisp_seams
-    if crisp:
-        cell_depth = layout.geometry.cell_depth
-        cell_edge = layout.geometry.cell_edge
-    inv_ring = 1.0 / ring_width
     bg_r, bg_g, bg_b = layout.panel_bg
-    ring_seam_depth = min(_RING_SEAM, ring_width * _RING_SEAM_MAX_FRACTION)
-    max_seam_depth = ring_width * _RING_SEAM_MAX_FRACTION
     seam_half = _ARC_SEAM / 2.0
     # Beyond this arc-length distance no part of a subsample's footprint can
     # touch the seam.
@@ -596,6 +823,7 @@ def _rasterize_arcs(
     seam_min_span = _ARC_SEAM * _SEAM_MIN_SPAN_FACTOR
     foot = _FOOTPRINT_HALF
     inv_foot = 1.0 / _SAMPLE_FOOTPRINT
+    two_w = 2 * width
 
     for hy in range(2 * height):
         dy0 = (hy + 0.25) * half_row - cy
@@ -610,60 +838,44 @@ def _rasterize_arcs(
         x_lo = max(0, int(cx - chord) - 1)
         x_hi = min(width - 1, int(cx + chord) + 1)
         row = frame[hy]
+        top = 2 * hy * two_w
+        bottom = top + two_w
         for hx in range(x_lo, x_hi + 1):
-            dx0 = hx + 0.25 - cx
-            dx1 = hx + 0.75 - cx
+            first = top + 2 * hx
+            third = bottom + 2 * hx
             total_r = total_g = total_b = 0
-            covered = 0
-            for dx, dy in ((dx0, dy0), (dx1, dy0), (dx0, dy1), (dx1, dy1)):
-                radius = radius_of(dx, dy)
-                if radius < hole or radius >= reach:
-                    total_r += bg_r
-                    total_g += bg_g
-                    total_b += bg_b
+            # Background subsamples are counted rather than added four
+            # times over: the rim and the walls of every empty wedge are
+            # made of them, and a half-cell that is all background is
+            # never written at all.
+            missed = 0
+            for index in (first, first + 1, third, third + 1):
+                depth = depths[index]
+                if depth < 0 or slots[index] >= ring_count:
+                    # Inside the hole, or past the outermost arc.
+                    missed += 1
                     continue
-                depth = int((radius - hole) * inv_ring)
                 ring = rings[depth] if depth < ring_count else None
                 if ring is None:
-                    total_r += bg_r
-                    total_g += bg_g
-                    total_b += bg_b
+                    missed += 1
                     continue
                 if ring.full:
-                    index = 0
+                    arc_index = 0
                     theta = 0.0
                 else:
-                    theta = angle_of(dx, dy, ring.r_mid)
-                    index = bisect_right(ring.starts, theta) - 1
-                    if index < 0 or theta >= ring.ends[index]:
+                    theta = thetas[index]
+                    arc_index = bisect_right(ring.starts, theta) - 1
+                    if arc_index < 0 or theta >= ring.ends[arc_index]:
                         # An empty slot: this ring has no child here, so the
                         # wedge is background and its walls anti-alias like
                         # any other edge.
-                        total_r += bg_r
-                        total_g += bg_g
-                        total_b += bg_b
+                        missed += 1
                         continue
-                seam_alpha = 0.0
-                if ring.ring_seam:
-                    # Radial separator: a band just inside the ring's outer
-                    # edge, dividing it from the ring beyond.
-                    r_out = ring.r_outer
-                    if crisp:
-                        # Exactly the outermost cell of the band, which is
-                        # a whole cell deep because the band's own edges
-                        # are on the grid.  Skipped where a cell is too
-                        # much of the ring to spend on a divider.
-                        depth_one = cell_depth(dx, dy, ring.r_mid)
-                        if (
-                            depth_one <= max_seam_depth
-                            and radius >= r_out - depth_one
-                        ):
-                            seam_alpha = 1.0
-                    else:
-                        lo = max(r_out - ring_seam_depth, radius - foot)
-                        hi = min(r_out, radius + foot)
-                        if hi > lo:
-                            seam_alpha = (hi - lo) * inv_foot
+                # Radial separator: a band just inside the ring's outer
+                # edge, dividing it from the ring beyond.  Whether the
+                # sample is in it is geometry; whether there is a ring out
+                # there to divide from is the tree's.
+                seam_alpha = seams[index] if ring.ring_seam else 0.0
                 if not ring.full:
                     # Angular separator: a hairline centred on the boundary
                     # with each neighbour, skipped where either neighbour is
@@ -672,40 +884,45 @@ def _rasterize_arcs(
                     # of edge in every shape — and, where the angle counts
                     # area rather than perimeter, on every face of the same
                     # ring — so each one is asked before the comparison.
-                    edge = edge_per_radian(theta, radius, ring.r_mid)
-                    span_start = ring.boundary_start[index]
-                    span_end = ring.boundary_end[index]
+                    span_end = ring.boundary_end[arc_index]
                     if crisp:
                         # One whole cell, and only on the far side of each
                         # arc: a cell on both sides of every boundary would
                         # be two cells of divider in a band a few cells
                         # thick.  Every internal boundary still gets its
                         # one, from the arc that ends there.
-                        one = cell_edge(theta, ring.r_mid)
-                        if (
-                            span_end > 0.0
-                            and span_end * edge >= one * _SEAM_MIN_SPAN_FACTOR
-                            and (ring.ends[index] - theta) * edge < one
-                        ):
-                            seam_alpha = 1.0
+                        if span_end > 0.0:
+                            edge = edges[index]
+                            one = plan_cells[index]
+                            if (
+                                span_end * edge >= one * _SEAM_MIN_SPAN_FACTOR
+                                and (ring.ends[arc_index] - theta) * edge < one
+                            ):
+                                seam_alpha = 1.0
                     else:
-                        arc_d = -1.0
-                        if span_start > 0.0 and span_start * edge >= seam_min_span:
-                            arc_d = (theta - ring.starts[index]) * edge
-                        if span_end > 0.0 and span_end * edge >= seam_min_span:
-                            other = (ring.ends[index] - theta) * edge
-                            if arc_d < 0.0 or other < arc_d:
-                                arc_d = other
-                        if 0.0 <= arc_d < seam_reach:
-                            lo = max(-seam_half, arc_d - foot)
-                            hi = min(seam_half, arc_d + foot)
-                            if hi > lo:
-                                alpha = (hi - lo) * inv_foot
-                                if alpha > seam_alpha:
-                                    seam_alpha = alpha
-                pixel = ring.colors[index]
+                        span_start = ring.boundary_start[arc_index]
+                        if span_start > 0.0 or span_end > 0.0:
+                            edge = edges[index]
+                            arc_d = -1.0
+                            if (
+                                span_start > 0.0
+                                and span_start * edge >= seam_min_span
+                            ):
+                                arc_d = (theta - ring.starts[arc_index]) * edge
+                            if span_end > 0.0 and span_end * edge >= seam_min_span:
+                                other = (ring.ends[arc_index] - theta) * edge
+                                if arc_d < 0.0 or other < arc_d:
+                                    arc_d = other
+                            if 0.0 <= arc_d < seam_reach:
+                                lo = max(-seam_half, arc_d - foot)
+                                hi = min(seam_half, arc_d + foot)
+                                if hi > lo:
+                                    alpha = (hi - lo) * inv_foot
+                                    if alpha > seam_alpha:
+                                        seam_alpha = alpha
+                pixel = ring.colors[arc_index]
                 if seam_alpha > 0.0:
-                    seam = ring.seam_colors[index]
+                    seam = ring.seam_colors[arc_index]
                     keep = 1.0 - seam_alpha
                     total_r += int(pixel[0] * keep + seam[0] * seam_alpha)
                     total_g += int(pixel[1] * keep + seam[1] * seam_alpha)
@@ -714,8 +931,11 @@ def _rasterize_arcs(
                     total_r += pixel[0]
                     total_g += pixel[1]
                     total_b += pixel[2]
-                covered += 1
-            if covered:
+            if missed < 4:
+                if missed:
+                    total_r += missed * bg_r
+                    total_g += missed * bg_g
+                    total_b += missed * bg_b
                 # Exact for uniform samples: four copies of c average to c.
                 row[hx] = (total_r >> 2, total_g >> 2, total_b >> 2)
 
