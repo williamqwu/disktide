@@ -641,10 +641,12 @@ tree. That was 97% of a frame (618k function calls for one 182×62 live
 frame, 190k of them `ringshape._faces`), recomputed unchanged dozens of
 times per scan. `viz/sunburst.py` now builds those answers once per
 `(geometry, size, aspect, hole, ring width, radius)` into flat `array`
-tables and keeps four of them, LRU: 163 ms → 48 ms for that frame,
-223 ms → 93 ms for the full-depth one. The first frame at a new geometry
-pays for the table (~165 ms at 182×62), which a live scan amortises over
-every frame after it. A plan is 36 bytes a subsample — 3.25 MB at 182×62.
+tables and keeps them LRU: 163 ms → 48 ms for that frame, 223 ms → 93 ms
+for the full-depth one. The first frame at a new geometry pays for the
+table (~165 ms at 182×62), which a live scan amortises over every frame
+after it. A plan is 36 bytes a subsample — 3.25 MB at 182×62, 6.1 MB at
+307×69 — so the cache is bounded by subsamples (400k, ~14 MB) as well as
+by entries (4); the newest plan is always kept whatever its size.
 
 The frames must be byte-identical to the uncached renderer, and a cache
 whose key misses a parameter draws a wrong picture rather than raising, so

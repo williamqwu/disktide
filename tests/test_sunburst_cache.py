@@ -36,6 +36,7 @@ from disktide.viz.ringshape import RING_SHAPES
 from disktide.viz.sunburst import (
     _PLAN_CACHE,
     _PLAN_CACHE_LIMIT,
+    _PLAN_CACHE_MAX_SAMPLES,
     clear_sample_cache,
     compute_sunburst,
     set_sample_cache_enabled,
@@ -361,7 +362,7 @@ def test_every_parameter_the_geometry_depends_on_is_in_the_key(changed):
     assert len(_PLAN_CACHE) == 2
 
 
-def test_the_cache_is_bounded():
+def test_the_cache_is_bounded_by_entries():
     """Each plan is a few MB; an unbounded one would follow a resize."""
     tree = build_tree("lopsided")
     clear_sample_cache()
@@ -371,6 +372,23 @@ def test_the_cache_is_bounded():
             panel_bg=(30, 30, 30), shape="tiles",
         )
     assert len(_PLAN_CACHE) == _PLAN_CACHE_LIMIT
+
+
+def test_the_cache_is_bounded_by_samples_too():
+    """Four entries is not a memory bound when one chart is 30x the other."""
+    tree = build_tree("lopsided")
+    clear_sample_cache()
+    for height in range(200, 204):
+        compute_sunburst(
+            tree, 400, height, max_depth=2, metric="logical", cell_aspect=2.0,
+            panel_bg=(30, 30, 30), shape="tiles",
+        )
+        held = sum(len(plan.depth) for plan in _PLAN_CACHE.values())
+        assert held <= _PLAN_CACHE_MAX_SAMPLES or len(_PLAN_CACHE) == 1
+    # One 400x200 chart is 640k subsamples on its own, so it is the only
+    # thing the cache can hold -- and it does hold it, rather than falling
+    # back to recomputing the geometry every frame.
+    assert len(_PLAN_CACHE) == 1
 
 
 def test_hit_test_reads_the_geometry_rather_than_the_plan():

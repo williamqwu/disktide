@@ -571,30 +571,40 @@ class _SamplePlan(NamedTuple):
 
     #: Ring index the sample falls in, -1 inside the hole, and a sentinel
     #: past the last ring the pane has room for.
-    depth: object
+    depth: array
     #: How many ring outer edges the sample is beyond.  The rasterizer's
     #: ``radius >= reach`` test, asked without keeping the radius: `reach`
     #: is the outer edge of the deepest ring the *tree* reached, so this
     #: is the same comparison against every edge it could be.
-    slot: object
+    slot: array
     #: How far around its band the sample is, and what one radian is worth
     #: in ring edge there.
-    theta: object
-    edge: object
+    theta: array
+    edge: array
     #: One cell measured along the face, for the shapes that quantise
-    #: their seams (`ringshape.TileGeometry`); zero for the others.
-    cell: object
+    #: their seams (`ringshape.TileGeometry`); None for the others, which
+    #: never read it.
+    cell: array | None
     #: The radial separator's coverage here, for a ring that has another
     #: painted outside it.  Whether it does is the tree's business, so the
     #: value is stored and applied conditionally.
-    seam: object
+    seam: array
 
 
 # Four entries covers what one explorer actually cycles through: the live
 # chart's geometry and the full-depth one it swaps to on completion, twice
-# over across a resize.  A plan is a few MB, so the ceiling matters.
+# over across a resize.
+#
+# Entries alone are not a bound, though: one plan is 9k subsamples at a
+# 70x30 chart and 336k at a 300x140 one, so the cache is held to a number
+# of *samples* as well -- 400k, about 14 MB, which is four plans at the
+# 182x62 a 307x69 terminal gives the explorer and one at any size a
+# terminal is unlikely to reach.  The newest plan is kept however big it
+# is: dropping it would mean paying for the geometry on every frame,
+# which is the thing this exists to stop.
 _PLAN_CACHE: dict[tuple, _SamplePlan] = {}
 _PLAN_CACHE_LIMIT = 4
+_PLAN_CACHE_MAX_SAMPLES = 400_000
 _PLAN_CACHE_ENABLED = True
 
 
@@ -638,9 +648,13 @@ def _sample_plan(layout: SunburstLayout, ring_width: float) -> _SamplePlan:
         _PLAN_CACHE[key] = plan
         return plan
     plan = _build_sample_plan(layout, ring_width)
-    while len(_PLAN_CACHE) >= _PLAN_CACHE_LIMIT:
-        del _PLAN_CACHE[next(iter(_PLAN_CACHE))]
     _PLAN_CACHE[key] = plan
+    while len(_PLAN_CACHE) > 1 and (
+        len(_PLAN_CACHE) > _PLAN_CACHE_LIMIT
+        or sum(len(held.depth) for held in _PLAN_CACHE.values())
+        > _PLAN_CACHE_MAX_SAMPLES
+    ):
+        del _PLAN_CACHE[next(iter(_PLAN_CACHE))]
     return plan
 
 
