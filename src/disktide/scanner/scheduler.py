@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from operator import attrgetter
 from typing import Callable, Mapping
 
-from disktide.domain.live_view import build_live_view
-from disktide.domain.metrics import MetricId, sum_available
+from disktide.domain.live_view import LiveViewNode, build_live_view
+from disktide.domain.metrics import MetricId
 from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate
 from disktide.models.tree import FSNode
@@ -39,12 +39,27 @@ _DEFAULT_ENTRY_CHUNK_SIZE = 256
 # Python frame per comparison key; attrgetter builds the same tuple in C.
 _NAME_PATH_KEY = attrgetter("name", "path")
 
+# The published frame lists its changed directories shallowest first. A few
+# hundred nodes per publish and a few hundred publishes: enough that the sort
+# key should not be a Python frame per comparison.
+_DEPTH_PATH_KEY = attrgetter("depth", "path")
+
+# Two module-global lookups saved per call, and this one runs twice per
+# directory: once for the job's own node and once for each child placeholder.
+_basename = os.path.basename
+
 # Generations only ever count up from zero, so this never matches a live one:
 # a state carrying it is always treated as stale and copied before mutation.
 _STALE_GENERATION = -1
 
 
-@dataclass(frozen=True, slots=True)
+# None of the four dataclasses below is frozen, and none is hashed, ordered,
+# or used as a dict key -- they are per-directory value carriers built once
+# and read once. A frozen dataclass routes every field through
+# `object.__setattr__`, which costs about 4x a plain slots `__init__`; the
+# scheduler builds three of these per directory and the file already pays
+# that lesson once, for `_ChildContribution`.
+@dataclass(slots=True)
 class DirectoryJob:
     """One non-recursive directory task submitted to the worker pool."""
 
@@ -54,7 +69,7 @@ class DirectoryJob:
     ancestors: frozenset[tuple[int, int]] = frozenset()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class DirectoryScanResult:
     """Direct entries discovered by one directory task."""
 
@@ -67,7 +82,7 @@ class DirectoryScanResult:
     direct_vanished: int = 0
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class DirectoryEntryChunk:
     """Bounded direct-entry handoff from one cursor-owning worker."""
 
@@ -83,7 +98,7 @@ class DirectoryEntryChunk:
     direct_vanished_delta: int = 0
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class SchedulerProgress:
     """Immutable scheduler counters forwarded to ``ScanProgress``."""
 
@@ -166,13 +181,12 @@ class _ChildContribution:
 
 
 def _placeholder(job: DirectoryJob) -> FSNode:
+    # Positional, like `walker.make_file_node` and for the same reason: two
+    # of these per directory, 176k on a home-shaped tree.
     return FSNode(
-        name=os.path.basename(job.path) or job.path,
-        path=job.path,
-        is_dir=True,
-        depth=job.depth,
-        allocated_size=0,
-        own_allocated_size=0,
+        _basename(job.path) or job.path, job.path, 0, 0, 0, 0, None, None,
+        0, 0, True, 0.0, job.depth, [], None, 0, 0, 0, 0, False,
+        None, False, False, False, False, None, None, 1,
     )
 
 
@@ -181,48 +195,65 @@ def _recalculate_directory(
     direct_inaccessible: int,
     direct_vanished: int = 0,
 ) -> None:
-    """Refresh inclusive aggregates from direct entries and current children."""
+    """Refresh inclusive aggregates from direct entries and current children.
 
-    directory_children = [child for child in node.children if child.is_dir]
-    node.size = node.own_size + sum(child.size for child in directory_children)
-    node.allocated_size = sum_available(
-        [node.own_allocated_size]
-        + [child.allocated_size for child in directory_children]
-    )
-    node.file_count = sum(child.file_count for child in node.children)
-    node.dir_count = sum(1 + child.dir_count for child in directory_children)
+    One pass over the child list. It used to be nine -- a filtered list
+    comprehension, six generator sums, a `sum_available` over two freshly
+    built lists, and a final loop -- and it runs once per directory per
+    result, which is 88k times on a home-shaped tree.
+    """
 
-    node.inaccessible_count = direct_inaccessible + sum(
-        child.error is not None for child in directory_children
-    )
-    node.inaccessible_subtree_count = node.inaccessible_count + sum(
-        child.inaccessible_subtree_count for child in directory_children
-    )
-
-    # A child directory that vanished is one vanished *entry* here, exactly
-    # as a denied child directory is one inaccessible entry.
-    node.vanished_count = direct_vanished + sum(
-        child.vanished for child in directory_children
-    )
-    node.vanished_subtree_count = node.vanished_count + sum(
-        child.vanished_subtree_count for child in directory_children
-    )
-
+    size = node.own_size
+    allocated = node.own_allocated_size
+    file_count = 0
+    dir_count = 0
+    denied_children = 0
+    gone_children = 0
+    inaccessible_subtree = 0
     denied = 0
     partial = 0
     excluded = 0
     depth_limited = 0
-    for child in directory_children:
-        denied += child.denied_dir_subtree_count
-        partial += child.partial_dir_subtree_count
+    gone_subtree = 0
+    for child in node.children:
+        file_count += child.file_count
+        if not child.is_dir:
+            continue
+        size += child.size
+        if allocated is not None:
+            child_allocated = child.allocated_size
+            allocated = (
+                None if child_allocated is None else allocated + child_allocated
+            )
+        dir_count += 1 + child.dir_count
         if child.error is not None:
+            denied_children += 1
             denied += 1
         elif child.inaccessible_count > 0:
             partial += 1
+        # A child directory that vanished is one vanished *entry* here, exactly
+        # as a denied child directory is one inaccessible entry.
+        if child.vanished:
+            gone_children += 1
+        inaccessible_subtree += child.inaccessible_subtree_count
+        denied += child.denied_dir_subtree_count
+        partial += child.partial_dir_subtree_count
         excluded += child.excluded_subtree_count + int(child.excluded)
         depth_limited += (
             child.depth_limited_subtree_count + int(child.depth_limited)
         )
+        gone_subtree += child.vanished_subtree_count
+
+    node.size = size
+    node.allocated_size = allocated
+    node.file_count = file_count
+    node.dir_count = dir_count
+    node.inaccessible_count = direct_inaccessible + denied_children
+    node.inaccessible_subtree_count = (
+        node.inaccessible_count + inaccessible_subtree
+    )
+    node.vanished_count = direct_vanished + gone_children
+    node.vanished_subtree_count = node.vanished_count + gone_subtree
     node.denied_dir_subtree_count = denied
     node.partial_dir_subtree_count = partial
     node.excluded_subtree_count = excluded
@@ -254,48 +285,6 @@ def _child_contribution(node: FSNode) -> _ChildContribution:
         vanished=gone,
         vanished_subtree_count=node.vanished_subtree_count + gone,
     )
-
-
-def _replace_child(
-    parent: FSNode,
-    index: int,
-    child: FSNode,
-    previous: _ChildContribution,
-) -> None:
-    """Replace one directory child and apply aggregate deltas in O(1)."""
-
-    current = _child_contribution(child)
-    parent.children[index] = child
-    parent.size += current.size - previous.size
-    if parent.allocated_size is not None:
-        if current.allocated_size is None:
-            parent.allocated_size = None
-        elif previous.allocated_size is not None:
-            parent.allocated_size += current.allocated_size - previous.allocated_size
-    parent.file_count += current.file_count - previous.file_count
-    parent.dir_count += current.dir_count - previous.dir_count
-
-    parent.inaccessible_count += current.denied - previous.denied
-    parent.inaccessible_subtree_count += (
-        current.inaccessible_subtree_count - previous.inaccessible_subtree_count
-    )
-    parent.denied_dir_subtree_count += (
-        current.denied_dir_subtree_count - previous.denied_dir_subtree_count
-    )
-    parent.partial_dir_subtree_count += (
-        current.partial_dir_subtree_count - previous.partial_dir_subtree_count
-    )
-    parent.excluded_subtree_count += (
-        current.excluded_subtree_count - previous.excluded_subtree_count
-    )
-    parent.depth_limited_subtree_count += (
-        current.depth_limited_subtree_count - previous.depth_limited_subtree_count
-    )
-    parent.vanished_count += current.vanished - previous.vanished
-    parent.vanished_subtree_count += (
-        current.vanished_subtree_count - previous.vanished_subtree_count
-    )
-    parent.invalidate_sort()
 
 
 def scan_directory_once(
@@ -410,12 +399,20 @@ def scan_directory_once(
     chunk_inaccessible = 0
     chunk_vanished = 0
     streaming_open = True
+    published_chunk = False
 
-    directory_metadata = copy.copy(node)
-    directory_metadata.children = []
-    directory_metadata._sorted_cache = None
+    # The node itself, not a copy of it. `_copy_directory_metadata` reads
+    # only mtime, the identity triple and the six scope/error flags, and
+    # every one of those is written above -- before the first entry is read
+    # -- and never again for a directory that reaches this line. What the
+    # worker keeps writing afterwards is `own_size`, `own_allocated_size` and
+    # `children`, which no consumer of `chunk.directory` looks at. Copying it
+    # cost a 41-field clone per directory, 6-11% of a scan of an
+    # 88k-directory tree.
+    directory_metadata = node
 
     def flush_chunk() -> bool:
+        nonlocal published_chunk
         nonlocal chunk_children
         nonlocal chunk_size
         nonlocal chunk_own_size
@@ -443,6 +440,7 @@ def scan_directory_once(
             )
             if accepted is False:
                 return False
+            published_chunk = True
         chunk_children = []
         chunk_size = 0
         chunk_own_size = 0
@@ -457,7 +455,52 @@ def scan_directory_once(
                 break
             chunk_size += 1
             try:
-                if entry.is_symlink():
+                # Ordered by how often each branch is taken, not by kind.
+                # `is_file`/`is_dir`/`is_symlink` answer from the type
+                # readdir already returned, but each is still a method call,
+                # and files outnumber everything else nine to one on a
+                # home-shaped tree -- asking about symlinks first spent two
+                # extra calls on 894k of 982k entries. With
+                # follow_symlinks=False a symlink is neither a file nor a
+                # directory, so the order is free to change; an entry that is
+                # none of the three (a socket, a fifo, a device node) is
+                # skipped, exactly as before.
+                if entry.is_file(follow_symlinks=False):
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                        child = make_file_node(entry, entry_stat, job.depth + 1)
+                        chunk_children.append(child)
+                        own_size += entry_stat.st_size
+                        chunk_own_size += entry_stat.st_size
+                        # sum_available inlined: two calls per entry, each
+                        # building a tuple and running a generic loop, were
+                        # 12% of the scanner profile at 200k entries.
+                        child_allocated = child.own_allocated_size
+                        if child_allocated is None:
+                            own_allocated = None
+                            chunk_own_allocated = None
+                        else:
+                            if own_allocated is not None:
+                                own_allocated += child_allocated
+                            if chunk_own_allocated is not None:
+                                chunk_own_allocated += child_allocated
+                    except OSError as exc:
+                        if vanished(exc):
+                            direct_vanished += 1
+                            chunk_vanished += 1
+                        else:
+                            direct_inaccessible += 1
+                            chunk_inaccessible += 1
+                elif entry.is_dir(follow_symlinks=False):
+                    child_job = DirectoryJob(
+                        path=entry.path,
+                        depth=job.depth + 1,
+                        parent_path=job.path,
+                        ancestors=child_ancestors,
+                    )
+                    child_count += 1
+                    chunk_children.append(_placeholder(child_job))
+                elif entry.is_symlink():
                     try:
                         child = make_symlink_node(entry, job.depth + 1)
                     except OSError as exc:
@@ -471,9 +514,6 @@ def scan_directory_once(
                         chunk_children.append(child)
                         own_size += child.own_size
                         chunk_own_size += child.own_size
-                        # sum_available inlined: two calls per entry, each
-                        # building a tuple and running a generic loop, were
-                        # 12% of the scanner profile at 200k entries.
                         child_allocated = child.own_allocated_size
                         if child_allocated is None:
                             own_allocated = None
@@ -489,40 +529,6 @@ def scan_directory_once(
                         ):
                             classify_symlink(child)
                             top_level_classified += 1
-                    continue
-
-                if entry.is_dir(follow_symlinks=False):
-                    child_job = DirectoryJob(
-                        path=entry.path,
-                        depth=job.depth + 1,
-                        parent_path=job.path,
-                        ancestors=child_ancestors,
-                    )
-                    child_count += 1
-                    chunk_children.append(_placeholder(child_job))
-                elif entry.is_file(follow_symlinks=False):
-                    try:
-                        entry_stat = entry.stat(follow_symlinks=False)
-                        child = make_file_node(entry, entry_stat, job.depth + 1)
-                        chunk_children.append(child)
-                        own_size += entry_stat.st_size
-                        chunk_own_size += entry_stat.st_size
-                        child_allocated = child.own_allocated_size
-                        if child_allocated is None:
-                            own_allocated = None
-                            chunk_own_allocated = None
-                        else:
-                            if own_allocated is not None:
-                                own_allocated += child_allocated
-                            if chunk_own_allocated is not None:
-                                chunk_own_allocated += child_allocated
-                    except OSError as exc:
-                        if vanished(exc):
-                            direct_vanished += 1
-                            chunk_vanished += 1
-                        else:
-                            direct_inaccessible += 1
-                            chunk_inaccessible += 1
             except OSError as exc:
                 if vanished(exc):
                     direct_vanished += 1
@@ -544,8 +550,22 @@ def scan_directory_once(
     finally:
         scandir_iterator.close()
 
+    # A directory that fits in one chunk hands its entries back in the
+    # result instead of publishing them. On a home-shaped tree that is
+    # almost every directory -- 88,000 of them at about seven entries each,
+    # against a 256-entry chunk -- and the round trip it saves is a queue
+    # put, a queue get, an Event set with its notify, and one more pass
+    # through the scheduler loop, per directory. Directories big enough to
+    # stream still stream, so live updates for the ones that actually take
+    # time to read are unchanged.
+    single_chunk = (
+        streaming_open and checkpoint_callback is not None and not published_chunk
+    )
     if streaming_open:
-        flush_chunk()
+        if single_chunk:
+            node.children.extend(chunk_children)
+        else:
+            flush_chunk()
 
     node.own_size = own_size
     node.own_allocated_size = own_allocated
@@ -558,7 +578,7 @@ def scan_directory_once(
         child_ancestors=child_ancestors,
         child_count=child_count,
         direct_inaccessible=direct_inaccessible,
-        streamed=checkpoint_callback is not None,
+        streamed=checkpoint_callback is not None and not single_chunk,
         direct_vanished=direct_vanished,
     )
 
@@ -586,16 +606,23 @@ def clone_tree(root: FSNode, *, share_leaves: bool = False) -> FSNode:
         # directories are traversed; a cloned directory rebuilds its child
         # list by taking the clone for a directory child and the original
         # object for everything else.
-        stack: list[tuple[FSNode, bool]] = [(root, False)]
-        while stack:
-            node, visited = stack.pop()
-            if not visited:
-                stack.append((node, True))
-                stack.extend(
-                    (child, False) for child in node.children if child.is_dir
-                )
-                continue
-            cloned = copy.copy(node)
+        # Collect the directories in pre-order, then clone in reverse: a
+        # parent always precedes its descendants in a depth-first pre-order,
+        # so reversing that order puts every child's clone in `clones` before
+        # its parent needs it. One list append and one index step per
+        # directory, against the visited-flag walk's two pushes, two pops and
+        # a tuple.
+        order: list[FSNode] = [root]
+        cursor = 0
+        while cursor < len(order):
+            node = order[cursor]
+            cursor += 1
+            for child in node.children:
+                if child.is_dir:
+                    order.append(child)
+        for index in range(len(order) - 1, -1, -1):
+            node = order[index]
+            cloned = node.shallow_copy()
             cloned.children = [
                 clones[id(child)] if child.is_dir else child
                 for child in node.children
@@ -672,6 +699,11 @@ class TreeScanScheduler:
             else max(2, workers * 2)
         )
         self._directory_observer = directory_observer
+        # Copy-on-write exists to keep a published frame from being rewritten
+        # under the UI. With no tree callback nothing is ever published, so
+        # the generation never advances and every placeholder clone would be
+        # thrown away unread -- one per directory, plus its child list.
+        self._copy_on_write = tree_callback is not None
 
         self._states: dict[str, _DirectoryState] = {}
         self._root_path = ""
@@ -682,6 +714,11 @@ class TreeScanScheduler:
         self._changed_nodes: dict[str, FSNode] = {}
         self._stable_paths: set[str] = set()
         self._settled_paths: set[str] = set()
+        # Converted view nodes for settled directories, reused across
+        # publishes. Settled means "never mutated again", so the conversion
+        # can only produce the same answer; the entry pins the source node so
+        # its id cannot be reused by a later one.
+        self._live_view_cache: dict[int, tuple[FSNode, int, LiveViewNode]] = {}
 
         self._dirs_scanned = 0
         self._files_scanned = 0
@@ -698,9 +735,10 @@ class TreeScanScheduler:
         self._max_in_flight = 0
         self._max_pending = 1
         self._max_queue_depth = 1
+        self._progress_reported_at = 0.0
+        self._current_path = ""
         self._entry_chunks_processed = 0
         self._max_entry_chunk_queue = 0
-        self._entry_chunk_stats_lock = threading.Lock()
 
     def scan(self, path: str) -> ScheduledTree:
         root_path = os.path.abspath(path)
@@ -725,6 +763,16 @@ class TreeScanScheduler:
         root_device: int | None = None
         wait_for_workers = True
         scheduler_activity = threading.Event()
+        # Futures announce themselves instead of being polled. Asking every
+        # in-flight future whether it is done takes that future's condition
+        # lock, once per future per loop iteration -- 346k lock acquisitions
+        # on an 88k-directory tree. `deque.append` and `popleft` are atomic
+        # under the GIL, so the callback can hand the future straight over.
+        finished: deque[Future[DirectoryScanResult]] = deque()
+
+        def on_future_done(future: Future[DirectoryScanResult]) -> None:
+            finished.append(future)
+            scheduler_activity.set()
 
         def publish_checkpoint(checkpoint: DirectoryEntryChunk) -> bool:
             while not self._cancel_event.is_set():
@@ -732,11 +780,6 @@ class TreeScanScheduler:
                     entry_chunks.put(checkpoint, timeout=0.05)
                 except queue.Full:
                     continue
-                with self._entry_chunk_stats_lock:
-                    self._max_entry_chunk_queue = max(
-                        self._max_entry_chunk_queue,
-                        entry_chunks.qsize(),
-                    )
                 scheduler_activity.set()
                 return True
             return False
@@ -773,7 +816,8 @@ class TreeScanScheduler:
                     if source.next_child_index < len(source.node.children):
                         sources.append(source)
                         source_paths.add(source.job.path)
-                    self._max_pending = max(self._max_pending, len(pending))
+                    if len(pending) > self._max_pending:
+                        self._max_pending = len(pending)
 
                 while (
                     pending
@@ -794,21 +838,27 @@ class TreeScanScheduler:
                         directory_observer=self._directory_observer,
                     )
                     futures[future] = job
-                    future.add_done_callback(
-                        lambda _future: scheduler_activity.set()
-                    )
+                    future.add_done_callback(on_future_done)
                     self._submitted_tasks += 1
-                    self._max_in_flight = max(self._max_in_flight, len(futures))
+                    if len(futures) > self._max_in_flight:
+                        self._max_in_flight = len(futures)
 
-                self._max_pending = max(self._max_pending, len(pending))
+                if len(pending) > self._max_pending:
+                    self._max_pending = len(pending)
                 if not futures:
                     continue
 
-                completed = {
-                    future for future in futures if future.done()
-                }
-                if not completed:
+                if not finished:
                     scheduler_activity.wait(timeout=0.05)
+                    continue
+                completed = []
+                while finished:
+                    future = finished.popleft()
+                    # A future cancelled on the way out fires the callback
+                    # too, after this loop has already let go of it.
+                    if future in futures:
+                        completed.append(future)
+                if not completed:
                     continue
                 root_device = self._drain_entry_chunks(
                     entry_chunks,
@@ -850,6 +900,15 @@ class TreeScanScheduler:
         finally:
             executor.shutdown(wait=wait_for_workers, cancel_futures=True)
 
+        # One unconditional report at the end: everything above it is
+        # rate-limited, and `errors`, `dirs_queued` and `top_dirs_done` reach
+        # the caller only through this path.
+        self._report_progress(
+            current_path=self._current_path,
+            queue_depth=self._outstanding_tasks,
+            active_workers=0,
+            force=True,
+        )
         root = self._states[root_path].node
         root.scan_policy = self._policy
         stats = SchedulerStats(
@@ -901,11 +960,8 @@ class TreeScanScheduler:
         state.child_ancestors = result.child_ancestors
         state.scanned = True
 
-        self._outstanding_tasks = max(0, self._outstanding_tasks - 1)
-        self._max_queue_depth = max(
-            self._max_queue_depth,
-            self._outstanding_tasks,
-        )
+        outstanding = self._outstanding_tasks - 1
+        self._outstanding_tasks = outstanding if outstanding > 0 else 0
 
         if result.job.depth > 0:
             self._dirs_scanned += 1
@@ -926,6 +982,18 @@ class TreeScanScheduler:
         root_device: int | None,
         active_workers: int,
     ) -> int | None:
+        # The high-watermark is taken here rather than at every publish: this
+        # is the only consumer thread, so the read needs no lock, and the
+        # queue is at its deepest exactly when the drain starts.
+        depth = entry_chunks.qsize()
+        if depth == 0:
+            # Almost every drain finds an empty queue now that a directory
+            # small enough to fit one chunk returns its entries in the
+            # result. One `qsize` beats a `get_nowait` that has to raise and
+            # catch `queue.Empty` to say the same thing.
+            return root_device
+        if depth > self._max_entry_chunk_queue:
+            self._max_entry_chunk_queue = depth
         while True:
             try:
                 chunk = entry_chunks.get_nowait()
@@ -961,36 +1029,38 @@ class TreeScanScheduler:
     ) -> _DirectoryState:
         state = self._states[chunk.job.path]
         self._ensure_mutable(state)
-        previous = _child_contribution(state.node)
-        self._copy_directory_metadata(state.node, chunk.directory)
-        state.node.children.extend(chunk.children)
-        state.node.own_size += chunk.own_size_delta
-        state.node.own_allocated_size = sum_available(
-            (
-                state.node.own_allocated_size,
-                chunk.own_allocated_size_delta,
-            )
-        )
-        state.node.size += chunk.own_size_delta
-        state.node.allocated_size = sum_available(
-            (
-                state.node.allocated_size,
-                chunk.own_allocated_size_delta,
-            )
-        )
+        node = state.node
+        previous = _child_contribution(node)
+        self._copy_directory_metadata(node, chunk.directory)
+        node.children.extend(chunk.children)
+        node.own_size += chunk.own_size_delta
+        node.size += chunk.own_size_delta
+        # sum_available inlined: two calls per chunk, and with ~7 entries to
+        # a directory a home-shaped tree publishes one chunk per directory.
+        chunk_allocated = chunk.own_allocated_size_delta
+        if chunk_allocated is None:
+            node.own_allocated_size = None
+            node.allocated_size = None
+        else:
+            own_allocated = node.own_allocated_size
+            if own_allocated is not None:
+                node.own_allocated_size = own_allocated + chunk_allocated
+            allocated = node.allocated_size
+            if allocated is not None:
+                node.allocated_size = allocated + chunk_allocated
         # Counted once and reused below: the same generator sum ran twice
         # per chunk, once for the directory and once for the scan total.
         chunk_file_count = 0
         for child in chunk.children:
             if not child.is_dir:
                 chunk_file_count += child.file_count
-        state.node.file_count += chunk_file_count
-        state.node.dir_count += chunk.child_count
-        state.node.inaccessible_count += chunk.direct_inaccessible_delta
-        state.node.inaccessible_subtree_count += chunk.direct_inaccessible_delta
-        state.node.vanished_count += chunk.direct_vanished_delta
-        state.node.vanished_subtree_count += chunk.direct_vanished_delta
-        state.node.invalidate_sort()
+        node.file_count += chunk_file_count
+        node.dir_count += chunk.child_count
+        node.inaccessible_count += chunk.direct_inaccessible_delta
+        node.inaccessible_subtree_count += chunk.direct_inaccessible_delta
+        node.vanished_count += chunk.direct_vanished_delta
+        node.vanished_subtree_count += chunk.direct_vanished_delta
+        node.invalidate_sort()
         state.direct_inaccessible += chunk.direct_inaccessible_delta
         state.direct_vanished += chunk.direct_vanished_delta
         state.child_ancestors = chunk.child_ancestors
@@ -1006,10 +1076,8 @@ class TreeScanScheduler:
                 child.path for child in reversed(chunk.children) if child.is_dir
             )
         self._outstanding_tasks += chunk.child_count
-        self._max_queue_depth = max(
-            self._max_queue_depth,
-            self._outstanding_tasks,
-        )
+        if self._outstanding_tasks > self._max_queue_depth:
+            self._max_queue_depth = self._outstanding_tasks
         self._files_scanned += chunk_file_count
         self._logical_bytes += chunk.own_size_delta
         # Vanished entries are deliberately absent here: `errors` drives the
@@ -1070,7 +1138,11 @@ class TreeScanScheduler:
                 # have gone out in a published frame. Claiming the parent's
                 # generation would let the first entry chunk fill it in place
                 # and rewrite a frame the UI has already drawn.
-                generation=_STALE_GENERATION,
+                generation=(
+                    _STALE_GENERATION
+                    if self._copy_on_write
+                    else self._generation
+                ),
                 parent_index=index,
                 next_checkpoint_publish_at=self._entry_chunk_size,
             )
@@ -1082,22 +1154,165 @@ class TreeScanScheduler:
         changed: _DirectoryState,
         previous: _ChildContribution,
     ) -> None:
+        """Push one directory's aggregate change up to the scan root.
+
+        The delta is computed once, at the node that changed, and applied
+        unchanged at every ancestor: each update in the loop is additive, so
+        an ancestor's own contribution moves by exactly what its child's did.
+        Recomputing a `_ChildContribution` at both ends of every level cost
+        two 10-field objects per ancestor per directory -- 14% of a raw scan
+        of an 88k-directory tree, called twice per directory (once for the
+        entry chunk, once for the result).
+
+        Two counters are not subtree aggregates and stop at the direct
+        parent: `inaccessible_count` and `vanished_count` count *this*
+        directory's own entries, and only the direct parent's list changed.
+        `partial_dir_subtree_count` is the one that needs a correction for
+        it -- a parent whose `inaccessible_count` crosses zero becomes (or
+        stops being) a partial directory in its own ancestors' totals.
+        """
+
+        parent_path = changed.job.parent_path
+        if parent_path is None:
+            return
+
+        # Read straight off the node rather than through a second
+        # `_ChildContribution`: only the eleven differences are wanted, and
+        # this runs 170k times on an 88k-directory tree.
+        changed_node = changed.node
+        denied = 1 if changed_node.error is not None else 0
+        gone = 1 if changed_node.vanished else 0
+        allocated = changed_node.allocated_size
+
+        delta_size = changed_node.size - previous.size
+        delta_files = changed_node.file_count - previous.file_count
+        delta_dirs = changed_node.dir_count - previous.dir_count
+        delta_denied = denied - previous.denied
+        delta_gone = gone - previous.vanished
+        delta_inaccessible_subtree = (
+            changed_node.inaccessible_subtree_count
+            + denied
+            - previous.inaccessible_subtree_count
+        )
+        delta_denied_subtree = (
+            changed_node.denied_dir_subtree_count
+            + denied
+            - previous.denied_dir_subtree_count
+        )
+        delta_partial_subtree = (
+            changed_node.partial_dir_subtree_count
+            + (
+                1
+                if changed_node.error is None
+                and changed_node.inaccessible_count > 0
+                else 0
+            )
+            - previous.partial_dir_subtree_count
+        )
+        delta_excluded = (
+            changed_node.excluded_subtree_count
+            + changed_node.excluded
+            - previous.excluded_subtree_count
+        )
+        delta_depth_limited = (
+            changed_node.depth_limited_subtree_count
+            + changed_node.depth_limited
+            - previous.depth_limited_subtree_count
+        )
+        delta_gone_subtree = (
+            changed_node.vanished_subtree_count
+            + gone
+            - previous.vanished_subtree_count
+        )
+
+        if allocated is None:
+            # Unavailable propagates all the way to the root: an ancestor of
+            # a node with no allocated size cannot have one either.
+            delta_allocated: int | None = None
+        elif previous.allocated_size is None:
+            # A value arriving where there was none adds nothing: the old
+            # `_replace_child` left the parent alone in this case, and every
+            # ancestor of a None child is already None.
+            delta_allocated = 0
+        else:
+            delta_allocated = allocated - previous.allocated_size
+
+        parent = self._states[parent_path]
+        if changed.parent_index is None:
+            raise RuntimeError(f"missing parent index for {changed.job.path}")
+
+        if (
+            delta_allocated == 0
+            and not (
+                delta_size
+                or delta_files
+                or delta_dirs
+                or delta_denied
+                or delta_gone
+                or delta_inaccessible_subtree
+                or delta_denied_subtree
+                or delta_partial_subtree
+                or delta_excluded
+                or delta_depth_limited
+                or delta_gone_subtree
+            )
+        ):
+            # Nothing moved -- the common case for a streamed directory's
+            # result, whose entry chunks already carried every byte. The node
+            # *object* was still replaced, so the direct parent has to point
+            # at the new one and drop its size-ordered cache; no ancestor's
+            # child list or totals changed, so the walk is skipped.
+            if parent.generation != self._generation:
+                self._ensure_mutable(parent)
+            parent_node = parent.node
+            parent_node.children[changed.parent_index] = changed.node
+            parent_node._sorted_cache = None
+            return
+
         child = changed
-        parent_path = child.job.parent_path
+        direct = True
         while parent_path is not None:
             parent = self._states[parent_path]
-            self._ensure_mutable(parent)
-            parent_previous = _child_contribution(parent.node)
+            # The generation check inline rather than through the call: an
+            # ancestor of a node that is already current is current too --
+            # `_ensure_mutable` clones a whole stale chain at once -- so
+            # every one of these 760k calls was a function call to compare
+            # two integers and return.
+            if parent.generation != self._generation:
+                self._ensure_mutable(parent)
+            node = parent.node
             if child.parent_index is None:
                 raise RuntimeError(f"missing parent index for {child.job.path}")
-            _replace_child(
-                parent.node,
-                child.parent_index,
-                child.node,
-                previous,
-            )
+            node.children[child.parent_index] = child.node
+            node.size += delta_size
+            if delta_allocated is None:
+                node.allocated_size = None
+            elif delta_allocated and node.allocated_size is not None:
+                node.allocated_size += delta_allocated
+            node.file_count += delta_files
+            node.dir_count += delta_dirs
+            if direct:
+                partial_before = (
+                    node.error is None and node.inaccessible_count > 0
+                )
+                node.inaccessible_count += delta_denied
+                node.vanished_count += delta_gone
+                partial_after = (
+                    node.error is None and node.inaccessible_count > 0
+                )
+            node.inaccessible_subtree_count += delta_inaccessible_subtree
+            node.denied_dir_subtree_count += delta_denied_subtree
+            node.partial_dir_subtree_count += delta_partial_subtree
+            node.excluded_subtree_count += delta_excluded
+            node.depth_limited_subtree_count += delta_depth_limited
+            node.vanished_subtree_count += delta_gone_subtree
+            node.invalidate_sort()
+            if direct:
+                # Applied from the grandparent up, never at the parent
+                # itself: a directory is not its own partial descendant.
+                delta_partial_subtree += int(partial_after) - int(partial_before)
+                direct = False
             child = parent
-            previous = parent_previous
             parent_path = child.job.parent_path
 
     def _ensure_mutable(self, state: _DirectoryState) -> None:
@@ -1113,7 +1328,7 @@ class TreeScanScheduler:
             current = self._states[current.job.parent_path]
 
         for item in reversed(chain):
-            cloned = copy.copy(item.node)
+            cloned = item.node.shallow_copy()
             cloned.children = list(item.node.children)
             cloned._sorted_cache = None
             item.node = cloned
@@ -1125,9 +1340,20 @@ class TreeScanScheduler:
                 parent.node.children[item.parent_index] = cloned
 
     def _record_changed(self, state: _DirectoryState) -> None:
+        changed = self._changed_nodes
         current = state
         while True:
-            self._changed_nodes[current.job.path] = current.node
+            path = current.job.path
+            node = current.node
+            if changed.get(path) is node:
+                # This node was already recorded in this generation, and the
+                # chain is always recorded whole, so every ancestor above it
+                # is recorded too. Identity is what makes that safe:
+                # `_ensure_mutable` clones a stale ancestor together with
+                # everything below it, so an unchanged node object here means
+                # an unchanged node object all the way to the root.
+                return
+            changed[path] = node
             parent_path = current.job.parent_path
             if parent_path is None:
                 return
@@ -1159,15 +1385,30 @@ class TreeScanScheduler:
             self._states.pop(current.job.path, None)
             current = parent
 
+    #: Reports below this spacing are dropped before the payload is built.
+    #: The engine throttles the callback it forwards to at 0.1 s, so a
+    #: report closer than half of that could never reach a display -- it
+    #: only paid for a `SchedulerProgress` and eleven `setattr`s, once per
+    #: entry chunk and once per result, 176k times on an 88k-directory tree.
+    _PROGRESS_MIN_INTERVAL = 0.05
+
     def _report_progress(
         self,
         *,
         current_path: str,
         queue_depth: int,
         active_workers: int,
+        force: bool = False,
     ) -> None:
         if self._progress_callback is None:
             return
+        self._current_path = current_path
+        now = time.monotonic()
+        if not force and now - self._progress_reported_at < (
+            self._PROGRESS_MIN_INTERVAL
+        ):
+            return
+        self._progress_reported_at = now
         self._progress_callback(
             SchedulerProgress(
                 dirs_scanned=self._dirs_scanned,
@@ -1202,10 +1443,7 @@ class TreeScanScheduler:
             self._tree_first_after_force = False
         root = self._states[self._root_path].node
         changed_nodes = tuple(
-            sorted(
-                self._changed_nodes.values(),
-                key=lambda node: (node.depth, node.path),
-            )
+            sorted(self._changed_nodes.values(), key=_DEPTH_PATH_KEY)
         )
         stable_paths = frozenset(self._stable_paths)
         self._tree_callback(
@@ -1216,7 +1454,12 @@ class TreeScanScheduler:
                 view_root=build_live_view(
                     root,
                     metric=self._metric,
-                    stable_paths=frozenset(self._settled_paths),
+                    # The live set, not a copy of it: `build_live_view` runs
+                    # synchronously on this thread and only reads it, and
+                    # copying 88,000 settled paths into a frozenset on each
+                    # of a few hundred publishes was pure overhead.
+                    stable_paths=self._settled_paths,
+                    stable_cache=self._live_view_cache,
                 ),
             )
         )

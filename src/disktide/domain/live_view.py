@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Set as AbstractSet
 from dataclasses import dataclass
 from heapq import nsmallest
+from typing import MutableMapping
 
 from disktide.domain.metrics import MetricId, StorageMeasurements
 from disktide.models.tree import FSNode
@@ -50,15 +51,34 @@ class LiveViewNode:
         )
 
 
+#: What a `stable_cache` entry holds: the source node (kept alive so its
+#: `id()` cannot be handed to a later object), the depth it was converted at,
+#: and the view node itself.
+StableCache = MutableMapping[int, "tuple[FSNode, int, LiveViewNode]"]
+
+
 def build_live_view(
     root: FSNode,
     *,
     metric: MetricId | str = MetricId.LOGICAL,
-    stable_paths: frozenset[str] = frozenset(),
+    stable_paths: AbstractSet[str] = frozenset(),
     max_depth: int = DEFAULT_LIVE_MAX_DEPTH,
     max_children: int = DEFAULT_LIVE_MAX_CHILDREN,
+    stable_cache: StableCache | None = None,
 ) -> LiveViewNode:
-    """Build a bounded immutable visualization model from a COW tree root."""
+    """Build a bounded immutable visualization model from a COW tree root.
+
+    `stable_paths` is read, never stored, so any set will do -- the scan
+    scheduler hands its live settled-path set straight in rather than copying
+    88,000 strings into a frozenset on each of a few hundred publishes.
+
+    `stable_cache` memoises the conversion of nodes that are already in
+    `stable_paths`. A settled directory is never mutated again and its
+    `stable` flag can never go back to False, so its converted subtree is
+    reusable verbatim. The cache is only valid while `metric`, `max_depth`
+    and `max_children` hold still, which is why it belongs to one scan rather
+    than to this module.
+    """
 
     if max_depth < 0:
         raise ValueError("max_depth must be zero or greater")
@@ -76,6 +96,12 @@ def build_live_view(
         return node.file_count
 
     def convert(node: FSNode, depth: int) -> LiveViewNode:
+        stable = node.path in stable_paths
+        if stable_cache is not None and stable:
+            cached = stable_cache.get(id(node))
+            if cached is not None and cached[0] is node and cached[1] == depth:
+                return cached[2]
+
         children: tuple[LiveViewNode, ...] = ()
         if depth < max_depth and node.children:
             key = lambda child: (
@@ -105,7 +131,7 @@ def build_live_view(
                 )
             children = tuple(converted)
 
-        return LiveViewNode(
+        view = LiveViewNode(
             name=node.name,
             path=node.path,
             size=node.size,
@@ -120,8 +146,11 @@ def build_live_view(
             inaccessible_subtree_count=node.inaccessible_subtree_count,
             depth=depth,
             children=children,
-            stable=node.path in stable_paths,
+            stable=stable,
         )
+        if stable_cache is not None and stable:
+            stable_cache[id(node)] = (node, depth, view)
+        return view
 
     return convert(root, 0)
 
@@ -141,7 +170,7 @@ def count_live_nodes(root: LiveViewNode) -> int:
 def _aggregate_omitted(
     parent: FSNode,
     omitted: Iterable[FSNode],
-    stable_paths: frozenset[str],
+    stable_paths: AbstractSet[str],
     *,
     depth: int,
 ) -> LiveViewNode:

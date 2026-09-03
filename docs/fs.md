@@ -105,6 +105,18 @@ A `PermissionError` on the directory itself (`os.scandir()` fails) records the e
 
 Errors are stored in `FSNode.error` and displayed in the TUI details panel.
 
+**Changed during the scan is not the same as unreadable.** An `OSError` whose
+`errno` is `ENOENT`, `ESTALE` or `ENOTDIR` means the entry was listed by its
+parent's `readdir` and was gone by the time the `stat` reached it -- the tree
+moved under the walk, and nothing denied us anything. Those entries land in
+`FSNode.vanished_count` / `vanished_subtree_count`, a directory that
+disappeared before its own job ran is marked `vanished` with `error` left at
+`None`, and none of it reaches `inaccessible_count`, the progress error count,
+`AccessError` events or the run's `partial` status. Every other errno,
+`PermissionError` included, behaves exactly as it did. The scan root is the
+exception: a root that does not exist is a bad argument and still reports an
+error.
+
 ### Monitor and snapshot repository -- `repositories/sqlite.py`, `storage/database.py`
 
 SQLite database stored at `~/.local/share/disktide/data.db` for new installs.

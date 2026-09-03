@@ -123,6 +123,44 @@ class FSNode:
         default=None, repr=False, compare=False
     )
 
+    def shallow_copy(self) -> FSNode:
+        """Shallow copy without the generic `copy` machinery.
+
+        `copy.copy` on a slots dataclass has no `__dict__` to duplicate, so
+        it falls through to `__reduce_ex__`/`__deepcopy__`-style
+        reconstruction: 4.2 us per node. The scan scheduler copies a node
+        every time it makes a published directory writable again
+        (`_ensure_mutable`) and once more per directory in `clone_tree`, and
+        that showed up as 6-11% of the scan on an 88k-directory tree. Calling
+        the generated `__init__` positionally with every field is the same
+        object for 1.27 us.
+
+        Field order is the declaration order above -- the same contract
+        `scanner.walker.make_file_node` relies on, gated by
+        `tests/test_tree.py::test_fsnode_field_order`.
+        """
+        return FSNode(
+            self.name, self.path, self.size, self.own_size,
+            self.allocated_size, self.own_allocated_size,
+            self.unique_allocated_size, self.own_unique_allocated_size,
+            self.file_count, self.dir_count, self.is_dir, self.mtime,
+            self.depth, self.children, self.error, self.inaccessible_count,
+            self.inaccessible_subtree_count, self.denied_dir_subtree_count,
+            self.partial_dir_subtree_count, self.is_symlink, self.link_target,
+            self.link_is_dir, self.link_broken, self.link_classified,
+            self.is_loop, self.device_id, self.inode, self.link_count,
+            self.hardlink_owner_path, self.excluded, self.exclusion_reason,
+            self.filesystem_boundary, self.filesystem_type, self.depth_limited,
+            self.excluded_subtree_count, self.depth_limited_subtree_count,
+            self.scan_policy, self.vanished, self.vanished_count,
+            self.vanished_subtree_count, self._sorted_cache,
+        )
+
+    #: `copy.copy(node)` and `node.shallow_copy()` are the same call. The
+    #: scanner's hot paths use the method directly, which skips `copy.copy`'s
+    #: own type dispatch; everything else keeps working through the stdlib.
+    __copy__ = shallow_copy
+
     @property
     def sorted_children(self) -> list[FSNode]:
         """Children sorted by size descending (cached on first access)."""
@@ -151,10 +189,22 @@ class FSNode:
                 stack.extend(reversed(node.children))
 
     def walk_dirs(self) -> Iterator[FSNode]:
-        """Depth-first iteration over directories only."""
-        for node in self.walk():
-            if node.is_dir:
-                yield node
+        """Depth-first iteration over directories only.
+
+        Its own stack rather than a filter over `walk()`: on a home-shaped
+        tree the filter form stepped through 982k nodes to yield 88k of
+        them, and `finalize_unique_allocated` runs it over the whole tree.
+        Order is unchanged -- the same depth-first, leftmost-first sequence.
+        """
+        if not self.is_dir:
+            return
+        stack: list[FSNode] = [self]
+        while stack:
+            node = stack.pop()
+            yield node
+            for child in reversed(node.children):
+                if child.is_dir:
+                    stack.append(child)
 
     @property
     def measurements(self) -> StorageMeasurements:

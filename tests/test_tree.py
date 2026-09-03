@@ -1,5 +1,6 @@
 """Tests for FSNode data model."""
 
+import copy
 import dataclasses
 
 import pytest
@@ -143,3 +144,71 @@ def test_fsnode_positional_prefix():
         "make_file_node / make_symlink_node build an FSNode positionally for "
         "these fields; append new fields at the end of the dataclass instead."
     )
+
+
+# `FSNode.__copy__` calls the generated `__init__` positionally with every
+# field, which is 3x faster than the generic slots-dataclass copy the
+# scheduler was paying per directory. That makes the *whole* declaration
+# order a contract, not just the 28-field prefix above.
+FSNODE_FIELD_ORDER = FSNODE_POSITIONAL_PREFIX + [
+    "hardlink_owner_path",
+    "excluded",
+    "exclusion_reason",
+    "filesystem_boundary",
+    "filesystem_type",
+    "depth_limited",
+    "excluded_subtree_count",
+    "depth_limited_subtree_count",
+    "scan_policy",
+    "vanished",
+    "vanished_count",
+    "vanished_subtree_count",
+    "_sorted_cache",
+]
+
+
+def test_fsnode_field_order():
+    names = [field.name for field in dataclasses.fields(FSNode)]
+    assert names == FSNODE_FIELD_ORDER, (
+        "FSNode.__copy__ passes every field positionally; update it (and this "
+        "list) when the dataclass changes."
+    )
+
+
+def _populated_node() -> FSNode:
+    """One node with a distinct value in every field, for copy checks."""
+    node = FSNode(name="leaf", path="/root/leaf")
+    for index, field in enumerate(dataclasses.fields(FSNode), start=1):
+        current = getattr(node, field.name)
+        if field.name in ("name", "path", "children", "_sorted_cache"):
+            continue
+        if isinstance(current, bool):
+            setattr(node, field.name, not current)
+        elif isinstance(current, int):
+            setattr(node, field.name, index)
+        elif isinstance(current, float):
+            setattr(node, field.name, float(index))
+        else:
+            setattr(node, field.name, f"value-{index}")
+    node.children = [FSNode(name="child", path="/root/leaf/child")]
+    node._sorted_cache = list(node.children)
+    return node
+
+
+class TestShallowCopy:
+    def test_copy_reproduces_every_field(self):
+        node = _populated_node()
+        clone = copy.copy(node)
+        assert clone is not node
+        for field in dataclasses.fields(FSNode):
+            assert getattr(clone, field.name) == getattr(node, field.name), (
+                field.name
+            )
+
+    def test_copy_shares_the_children_list(self):
+        # The scheduler relies on this: `_ensure_mutable` replaces the list
+        # itself right after copying, and `clone_tree` rebuilds it.
+        node = _populated_node()
+        clone = copy.copy(node)
+        assert clone.children is node.children
+        assert clone._sorted_cache is node._sorted_cache

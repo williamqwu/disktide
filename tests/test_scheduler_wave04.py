@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import replace
@@ -640,3 +641,84 @@ def test_published_frame_survives_late_dispatch_of_its_placeholders(
         if fingerprint(published_root) != taken
     ]
     assert rewritten == []
+
+
+# `_propagate` computes one aggregate delta at the directory that changed and
+# applies it at every ancestor, instead of recomputing a contribution at both
+# ends of every level (14% of a raw scan of an 88k-directory tree, twice per
+# directory). Two of the twelve counters are not subtree aggregates and stop
+# at the direct parent, and `partial_dir_subtree_count` needs a correction
+# when a parent's own `inaccessible_count` crosses zero -- which only a
+# denied directory two or more levels down ever exercises. The recursive
+# walker computes all twelve bottom-up from scratch, so it is the reference.
+_AGGREGATE_FIELDS = (
+    "size",
+    "allocated_size",
+    "file_count",
+    "dir_count",
+    "inaccessible_count",
+    "inaccessible_subtree_count",
+    "denied_dir_subtree_count",
+    "partial_dir_subtree_count",
+    "excluded_subtree_count",
+    "depth_limited_subtree_count",
+    "vanished_count",
+    "vanished_subtree_count",
+    "error",
+)
+
+
+def _aggregates(root: FSNode) -> dict[str, tuple]:
+    return {
+        node.path: tuple(getattr(node, name) for name in _AGGREGATE_FIELDS)
+        for node in root.walk()
+    }
+
+
+@pytest.mark.parametrize("workers", [1, 2, 4, 8])
+def test_scheduler_aggregates_match_the_walker_through_denied_subtrees(
+    tmp_path, workers
+):
+    denied = []
+    (tmp_path / "keep.txt").write_text("k")
+    nested = tmp_path / "L1" / "L2"
+    nested.mkdir(parents=True)
+    (tmp_path / "L1" / "other.txt").write_text("o")
+    (nested / "ok.txt").write_text("z")
+    first = nested / "denied"
+    first.mkdir()
+    (first / "x").write_text("x")
+    denied.append(first)
+
+    sibling = tmp_path / "L1b"
+    sibling.mkdir()
+    second = sibling / "denied"
+    second.mkdir()
+    (second / "y").write_text("y")
+    denied.append(second)
+
+    # Four levels of ancestors above a denial, so the correction is applied
+    # somewhere other than the node that produced it.
+    deep = tmp_path / "L1c" / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "f").write_text("f")
+    third = deep / "denied"
+    third.mkdir()
+    denied.append(third)
+
+    for directory in denied:
+        os.chmod(directory, 0o000)
+    try:
+        reference = _aggregates(scan_directory(str(tmp_path)))
+        scheduled = _aggregates(ScanEngine(workers=workers).scan(str(tmp_path)))
+    finally:
+        for directory in denied:
+            os.chmod(directory, 0o700)
+
+    assert scheduled == reference
+    root_totals = dict(zip(_AGGREGATE_FIELDS, reference[str(tmp_path)]))
+    # The fixture is worth what it asserts: three denied directories and two
+    # partial ones (`L2` and `L1b`) below a root with no direct issue.
+    assert root_totals["denied_dir_subtree_count"] == 3
+    assert root_totals["partial_dir_subtree_count"] == 3
+    assert root_totals["inaccessible_count"] == 0

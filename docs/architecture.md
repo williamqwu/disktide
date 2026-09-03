@@ -282,9 +282,15 @@ Key behaviors: `sorted_children` (lazy-cached sort by size descending),
 lookup), `size_percent(parent_size)`.
 
 The model also carries `StorageMeasurements`, device/inode/link identity,
-hardlink ownership, partial-access aggregates, lazy symlink classification,
-filesystem-boundary/pseudo exclusion markers, max-depth truncation, and the
-root `ScanPolicy`.
+hardlink ownership, partial-access aggregates, changed-during-scan counts
+(`vanished`, `vanished_count`, `vanished_subtree_count`), lazy symlink
+classification, filesystem-boundary/pseudo exclusion markers, max-depth
+truncation, and the root `ScanPolicy`.
+
+Two hot paths make the field order a contract: `scanner.walker.make_file_node`
+constructs a node positionally for the first 28 fields, and
+`FSNode.shallow_copy` (also bound as `__copy__`) does the same for all of
+them. New fields go at the end; `tests/test_tree.py` pins both lists.
 
 ### Snapshot
 
