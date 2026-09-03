@@ -47,7 +47,13 @@ jobs:
               --output release-metadata/disktide.cdx.json
           cp doctor.json release-metadata/doctor.json
           cp doctor-sdist.json release-metadata/doctor-sdist.json
+      # Attestations are only available for public repositories on the Free,
+      # Pro and Team plans; a private repository needs Enterprise Cloud. The
+      # guard keeps a private-repository release from failing here instead of
+      # reaching the publish job, and re-engages by itself once the repository
+      # is public -- there is nothing to remember to switch back on.
       - name: Attest Python distributions
+        if: ${{ github.event.repository.visibility == 'public' }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |

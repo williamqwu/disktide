@@ -80,7 +80,10 @@ Pushing a `v*` tag runs the release workflow. It:
 1. builds and verifies the wheel and sdist;
 2. performs a clean-wheel doctor and dependency-budget smoke test;
 3. generates SHA-256 checksums and a CycloneDX SBOM;
-4. creates GitHub build-provenance attestations;
+4. creates GitHub build-provenance attestations, on a public repository
+   only -- attestations require Enterprise Cloud on a private one, so the
+   step is guarded by repository visibility and skips itself rather than
+   failing the release;
 5. uploads immutable workflow artifacts;
 6. publishes wheel and sdist through the protected `pypi` environment.
 
@@ -101,6 +104,6 @@ pipx install --force disktide
 pipx run disktide doctor --json
 ```
 
-Compare the published wheel checksum with `SHA256SUMS`, retain the SBOM and
-attestation links with the release notes, and only then mark the release
-complete.
+Compare the published wheel checksum with `SHA256SUMS`, retain the SBOM and,
+where the repository was public at build time, the attestation links with the
+release notes, and only then mark the release complete.
