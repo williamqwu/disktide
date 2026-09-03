@@ -96,7 +96,7 @@ src/disktide/
   viz/
     layout.py            Viewport-bounded top-N + aggregate remainder
     treemap.py           Squarified treemap layout + rendering
-    sunburst.py          Ring chart via braille canvas
+    sunburst.py          Ring chart, supersampled half-block rasterizer
     braille.py           ColorBrailleCanvas -- per-cell color voting
     cellgeom.py          Layered cell-aspect resolver + XTWINOPS probe
     colors.py            5 color schemes, HSL utilities
@@ -624,13 +624,35 @@ Squarified layout via the `squarify` library:
 Ring chart where each ring = one depth level, arc angle ∝ size:
 
 - **Ring width**: `max_radius // (max_depth + 1)`.
-- **Arc rendering**: `ColorBrailleCanvas.fill_arc()` fills ring segments by
-  sampling many radii per arc.
+- **Arc rendering**: a supersampled half-block pass — each half-cell
+  averages four subsamples, and vertically adjacent halves that disagree
+  become U+2580/U+2584.
 - **Labels**: arcs > 30° at depth 1 get labeled; collision detection
   prevents overlaps.
 - **Legend**: bottom-left, categories with byte shares.
 - **Growth overlay**: diff frames replace category hue with delta state.
 - **Narrow fallback**: canvases below 40×12 render a text summary.
+
+**Frame cost**: `_rasterize_arcs` supersamples the pane four times per
+half-cell, and what it asks the shape for — how far out the sample is, how
+far around, what one radian is worth in ring edge there, how deep one cell
+is — depends only on the offset from the centre and the band, never on the
+tree. That was 97% of a frame (618k function calls for one 182×62 live
+frame, 190k of them `ringshape._faces`), recomputed unchanged dozens of
+times per scan. `viz/sunburst.py` now builds those answers once per
+`(geometry, size, aspect, hole, ring width, radius)` into flat `array`
+tables and keeps four of them, LRU: 163 ms → 48 ms for that frame,
+223 ms → 93 ms for the full-depth one. The first frame at a new geometry
+pays for the table (~165 ms at 182×62), which a live scan amortises over
+every frame after it. A plan is 36 bytes a subsample — 3.25 MB at 182×62.
+
+The frames must be byte-identical to the uncached renderer, and a cache
+whose key misses a parameter draws a wrong picture rather than raising, so
+`tests/test_sunburst_cache.py` pins the framebuffer digest of 108
+(tree, shape, size, aspect, depth) combinations taken from the renderer
+before the cache existed, and re-renders the same matrix with the cache
+switched off to check the key. `hit_test` is untouched: a mouse lookup
+does its own arithmetic for one point rather than consulting either.
 
 ### Ring Shapes
 
@@ -714,8 +736,42 @@ Tree, Sunburst, and Treemap update throughout a scan:
 - Treemap and Sunburst consume the immutable model, limited to depth 2 and
   96 children per node. Excess children collapse into an aggregate "Other."
 - Late updates from an older scan cannot replace a newer run.
-- `live_scan_render = "auto"` (default) requires ≥ 80×24 and ≥ 4 CPUs;
-  otherwise progress-only mode.
+- `live_scan_render = "auto"` (default) requires ≥ 80×24; otherwise
+  progress-only mode. It is a legibility check, not a capacity one.
+
+**The chart is duty-cycled; nothing else is.** The service coalesces
+`NodeAggregateUpdated`, so the explorer is handed a frame exactly as fast
+as it can draw one — and a chart frame is the most expensive thing on the
+UI thread by two orders of magnitude (163 ms at a 182×62 sunburst before
+the geometry cache, ~48 ms after; the size tree and the progress overlay
+are ~2% of the thread between them). Every millisecond of it is spent
+holding the GIL, so the scan threads behind it stall on each
+re-acquisition: a 982k-entry local tree scanned in 21.0 s with the chart
+off and 152.3 s with it on, and a 700k-entry home over NFS in 36.8 s
+against ~420 s.
+
+`SunburstView` / `TreemapView` time their own live frame
+(`widgets.LivePaintCostMixin.last_paint_cost` — the layout plus the fold
+into cells the first `render_line` would pay for), and
+`ExplorerScreen._maybe_update_live_chart` forwards a frame only once
+`_LIVE_CHART_DUTY` (5) times that has passed, floored at the scheduler's
+own 0.25 s publish interval. That holds the chart to ~1/5 of the thread
+at any widget size, where a constant would be wrong at both ends of a
+33 ms (70×30) to 163 ms (182×62) range. A skipped frame arms one
+`set_timer` for the rest of the gap and is replaced by the next, so a
+scan that goes quiet still lands its last frame; completion always
+paints. `tool/bench_scan.py --mode live --paint COLSxROWS` runs the same
+loop on the service's dispatch thread without a terminal, and
+`--paint-every-frame` reproduces what it looked like before (39.8 s / 37.8 s
+/ 62.4 s on the same 88k-directory tree).
+
+What is left is the rest of the live pipeline, not the chart: the same
+307x69 A/B is 21.9 s off against 48.5 s on, and pinning the duty cycle so
+the chart paints once still costs 40.4 s. The gap is the bounded view the
+scheduler builds on every publish (~6 s on its own thread), the category
+rollup worker (4-6 s), and the tree panel, the progress overlay and
+Textual's compositor (~4 s on the UI thread) — each of them contending for
+the same GIL the walk needs.
 
 ### Color Schemes
 

@@ -92,6 +92,68 @@ def test_bench_scan_live_mode_reports_event_and_visual_metrics(tmp_path):
     assert "bench: done in" in cp.stdout
 
 
+def test_bench_scan_paints_a_chart_on_the_consumer_thread(tmp_path):
+    """`--paint` is what makes the live-render cost measurable headlessly.
+
+    A live paint is pure Python and holds the GIL for its whole duration,
+    so `--mode live` on its own measures the transport and none of the
+    thing that made a live scan on a real terminal ten times slower than
+    the same scan with the chart off.
+    """
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py", str(tmp_path), "--workers", "1", "--mode", "live",
+        "--paint", "96x36",
+    )
+    assert cp.returncode == 0, cp.stderr
+    assert "bench: paint=96x36" in cp.stdout
+    assert "painted=" in cp.stdout and "skipped=" in cp.stdout
+    assert "pacing=duty cycle" in cp.stdout
+    assert "bench: done in" in cp.stdout
+
+
+def test_bench_scan_can_paint_every_frame(tmp_path):
+    """The pre-duty-cycle behaviour, kept so the regression stays runnable."""
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py", str(tmp_path), "--workers", "1", "--mode", "live",
+        "--paint", "96x36", "--paint-every-frame",
+    )
+    assert cp.returncode == 0, cp.stderr
+    assert "pacing=every frame" in cp.stdout
+    assert "skipped=0" in cp.stdout
+
+
+def test_bench_scan_paint_reports_its_own_share_in_json(tmp_path):
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py", str(tmp_path), "--workers", "1", "--mode", "live",
+        "--paint", "96x36", "--json",
+    )
+    assert cp.returncode == 0, cp.stderr
+    payload = json.loads(cp.stdout)
+    paint = payload["paint"]
+    assert paint["size"] == "96x36"
+    assert paint["every_frame"] is False
+    assert paint["painted"] >= 1
+    assert paint["paint_seconds"] > 0.0
+
+
+def test_bench_scan_rejects_a_paint_size_it_cannot_use(tmp_path):
+    _make_tree(tmp_path)
+    bad = _run(
+        "bench_scan.py", str(tmp_path), "--mode", "live", "--paint", "wide",
+    )
+    assert bad.returncode == 2
+    assert "COLSxROWS" in bad.stderr
+
+    wrong_mode = _run(
+        "bench_scan.py", str(tmp_path), "--mode", "raw", "--paint", "96x36",
+    )
+    assert wrong_mode.returncode == 2
+    assert "--mode live" in wrong_mode.stderr
+
+
 def test_bench_scan_json_is_machine_readable(tmp_path):
     _make_tree(tmp_path)
     cp = _run(
