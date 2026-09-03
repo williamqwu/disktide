@@ -9,217 +9,154 @@ git clone <repo-url> disktide && cd disktide
 uv sync --locked
 ```
 
-This creates an editable `.venv` from the committed `uv.lock`, including the
-default development dependency group (pytest, pytest-asyncio, textual-dev).
+Creates an editable `.venv` from the committed `uv.lock`, including dev
+dependencies (pytest, pytest-asyncio, textual-dev).
 
 ## Running Tests
 
 ```bash
-# full locked suite
-uv run pytest tests/ -v
-
-# specific module
-uv run pytest tests/test_scanner.py -v
-
-# with coverage (if pytest-cov installed)
-uv run pytest tests/ --cov=disktide
+uv run pytest tests/ -v                    # full suite
+uv run pytest tests/test_scanner.py -v     # specific module
+uv run pytest tests/ --cov=disktide        # with coverage
 ```
 
-The test suite covers the scanner and tree model, configuration,
-snapshot/database storage, cleanup rule-pack validation/scoring/plans/actions,
-visualizations, TUI navigation and modals, FS Overview/block
-devices/benchmarking, progress reporting, system detection, welcome flow, and
-migrations. Wave-specific cleanup contracts live in
-`tests/test_cleanup_wave08.py`, `tests/test_cleanup_wave09.py`, and
-`tests/test_cleanup_wave14.py`.
-Filesystem-event normalization, dirty coalescing, overflow recovery, optional
-dependency fallback, and MonitorService integration live in
-`tests/test_watch_wave10.py`. Adaptive worker selection, giant-directory chunk
-checkpoints, resource queue cancellation, and Monitor queue projection live in
-`tests/test_scan_wave13.py`. The startup import boundary -- what `import
-disktide.app` is allowed to pull in before the welcome screen -- is asserted in
-`tests/test_startup_imports.py`.
+`PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app
+tests wrap an async helper with `asyncio.run(...)` and `app.run_test()` —
+follow the style of the nearby tests.
 
-`PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app tests instead wrap an async helper with `asyncio.run(...)` and use `app.run_test()`; follow the style of the nearby tests.
+### Reproducing a CI-only Failure
 
-### Reproducing a CI-only failure
-
-The GitHub runners are two-core containers on ext4; a developer machine is
-usually neither. Four times now the suite has been green locally and red on
-a push, and every time the cause was a test reading something about the
-*host* rather than about disktide. `tests/hostshape.py` models those
-differences so you can reproduce them in seconds instead of by pushing:
+GitHub runners are two-core ext4 containers. Four host-sensitive failures
+have passed locally and failed in CI. `tests/hostshape.py` models those
+differences:
 
 ```bash
-# what the `host-shapes` CI job runs
 DISKTIDE_HOST_SHAPE=readdir,medium,cores uv run pytest -q -n auto
-
-# one axis at a time, when you are bisecting
 DISKTIDE_HOST_SHAPE=readdir uv run pytest -q tests/test_scheduler_cursor.py
 ```
 
-| Shape | Models | Has caused |
-| --- | --- | --- |
-| `readdir` | `os.scandir` returning entries in the filesystem's order, not creation order | v0.2.26: a chunked sort window that fell back to the filesystem's order at `entry_chunk_size=1` |
-| `medium` | a mount whose rotational bit sysfs cannot read, so every medium is `unknown` | v0.2.29: an unknown-medium badge holding a raw Rich style where an ink role belonged |
-| `cores` | two cores, reported through `os.cpu_count()` **and** `os.sched_getaffinity()` | the `live_scan_render` auto-gate resolving to off, so `_start_scan` skipped `begin_live()` |
-| `sleepless` | every `time.sleep` collapsing to nothing, as a parked coroutine does under load | v0.2.24: a pilot test asserting a button label straight after an async stop |
+| Shape | Models | Example failure |
+|-------|--------|-----------------|
+| `readdir` | `os.scandir` returning filesystem order, not creation order | Chunked sort window falling back to filesystem order at `entry_chunk_size=1` |
+| `medium` | Mount whose rotational bit sysfs can't read → `unknown` medium | Unknown-medium badge holding a raw Rich style instead of an ink role |
+| `cores` | Two cores via `os.cpu_count()` and `os.sched_getaffinity()` | `live_scan_render` auto-gate resolving to off, skipping `begin_live()` |
+| `sleepless` | Every `time.sleep` collapsing to nothing | Diagnostic only, not in CI — trips tests that use sleep as an instrument |
 
-Two things are worth knowing:
+Two things to know:
 
-- **The core count is pinned for every test run**, shape or no shape, to a
-  fixed `DEFAULT_CPUS`. `os.cpu_count()` is an input to product behaviour --
-  the `live_scan_render` auto-gate reads it -- so leaving it to the machine
-  means a test can silently assert "this developer's core count". The
-  `cores` shape is how you deliberately ask for the other answer.
-- **`taskset` and a container's `--cpus` do not reproduce the `cores`
-  shape.** Both change scheduling, and neither changes what `os.cpu_count()`
-  returns, which is the value the gate actually reads.
-
-`sleepless` is a diagnostic, not a gate, and is deliberately absent from CI:
-it also trips the few tests that use a sleep as an *instrument* (measuring
-elapsed time, standing in for a slow scan) rather than as pacing.
-
+- **Core count is pinned for every test run** (shape or no shape) to
+  `DEFAULT_CPUS`. The `cores` shape is how you deliberately test the other
+  answer.
+- **`taskset` / `--cpus` don't reproduce `cores`** — they change scheduling
+  without changing what `os.cpu_count()` returns.
 
 ## Project Structure
 
-See [architecture.md](architecture.md) for the full layout. In brief:
+See [architecture.md](architecture.md) for the full layout and module
+boundaries. In brief:
 
-- `src/disktide/` -- all source code
-- `tests/` -- test suite (no subdirectories, flat layout)
-- `assets/` -- TCSS stylesheets
-- `src/disktide/collectors/platform/` -- isolated OS/procfs/sysfs/command probes
-- `src/disktide/extensions/` -- typed capability contracts and strict declarative policy loaders
-- `src/disktide/repositories/` -- persistence-neutral protocols and adapters
-- `src/disktide/services/` -- CLI/TUI-neutral application services such as doctor and scan orchestration
-- `tool/` -- development utilities (e.g., `gen_activity` for generating test data)
-- `docs/` -- documentation
+- `src/disktide/` — all source code
+- `tests/` — flat test suite
+- `assets/` — TCSS stylesheets
+- `tool/` — dev utilities (`gen_activity`, `bench_scan`, `diag_scan`)
+- `docs/` — documentation
 
 ## Key Conventions
 
 ### Code Style
 
-- Python >= 3.10 features are used freely: `X | Y` union syntax, `slots=True` and
-  `kw_only=True` dataclasses, `zip(strict=True)`. `match` statements are not used.
-- `tomllib` and `StrEnum` are 3.11 additions, so import both from
-  `disktide._compat` rather than from the standard library.
-- Type annotations on all public APIs. `from __future__ import annotations` at the top of every module.
-- Dataclasses with `slots=True` for models (`FSNode`, `Snapshot`, `SizeDelta`).
+- Python ≥ 3.10 features: `X | Y` unions, `slots=True`/`kw_only=True`
+  dataclasses, `zip(strict=True)`. No `match` statements.
+- Import `tomllib` and `StrEnum` from `disktide._compat` (backport on 3.10).
+- Type annotations on all public APIs. `from __future__ import annotations`
+  at the top of every module.
+- Dataclasses with `slots=True` for models.
 
 ### Module Boundaries
 
-- **models/** -- legacy-compatible pure data structures; new snapshot contracts live in `domain/`.
-- **collectors/platform/** -- all platform-specific probes; callers consume structured results rather than `/proc`, `/sys`, or commands directly.
-- **domain/** -- framework-independent metric, policy, scan, snapshot, compatibility, delta, and visualization contracts.
-- **services/** -- application orchestration with no Textual dependency.
-- **repositories/** -- persistence-neutral protocols plus concrete adapters; product entry points use factories/protocols rather than importing SQLite.
-- **collectors/local_scanner.py** -- the only product adapter that constructs the compatibility `ScanEngine`.
-- **scanner/** -- filesystem I/O only. No Textual imports.
-- **storage/** -- SQLite I/O only. No Textual imports.
-- **cleanup/** -- detectors, explainable scoring, packaged TOML rule packs, and low-level executors. No Textual imports and no product policy decisions.
-- **services/cleanup.py** -- the only product cleanup policy/execution entry point; owns plan, revalidation, audit, and undo.
-- **monitor/** -- alerting, tree diffs, scan scheduling. No Textual imports.
-- **viz/** -- rendering logic. Produces Rich Segments, no direct Textual widget deps.
-- **presentation/tui/viewmodels/** -- shared TUI vocabulary and formatting; no repository access.
-- **screens/** and **widgets/** -- Textual UI layer. Can import everything above.
+The layering in [architecture.md](architecture.md#project-layout) is
+enforced by convention:
 
-This layering means the scanner, storage, cleanup, and viz modules are testable without a running Textual app. CLI and TUI must never call `delete_targets()` or permanent filesystem primitives directly.
-
-Declarative policy loaders must never execute user-authored content. Treat rule
-scores as ordering metadata; every filesystem action still passes through
-`CleanupService` identity/boundary revalidation and audit.
+- `scanner/`, `storage/`, `cleanup/`, `viz/` have no Textual imports and are
+  testable without a running app.
+- `services/` has no Textual dependency; `screens/` and `widgets/` can
+  import everything above.
+- CLI and TUI must never call `delete_targets()` or permanent filesystem
+  primitives directly — only through `CleanupService`.
+- Declarative policy loaders must never execute user-authored content.
 
 ### Startup Import Boundary
 
-- `app.py` must not import the mode screens or the services at module scope.
-  The screens are imported inside `_launch_explorer()`; the services are lazy
-  properties on `DiskTideApp` that import their module on first access.
-- Reaching the welcome screen is almost pure import cost, and on shared storage
-  that cost is the startup time: on a cold NFSv4 cluster home a module file
-  measured ~16 ms to fault in against ~0.4 ms once cached, so every module on
-  the pre-welcome path is worth roughly 40x its size on a first launch.
-  Deferring dropped 153 module files from that path, ~2.5 s off a cold launch
-  and ~0.15 s off a warm one.
-- Teardown-only code reads the backing fields (`self.__scan_service`) rather
-  than the properties, so quitting from the welcome screen does not build a
-  service purely to discard it. Follow that pattern for anything else that only
-  needs a service if it already exists.
-- `tests/test_startup_imports.py` enforces the boundary with a budget on the
-  resident `disktide` module count. A failure there means something landed at
-  module scope that belongs at first use.
+`app.py` must not import mode screens or services at module scope:
+
+- Screens are imported inside `_launch_explorer()`.
+- Services are lazy properties that import their module on first access.
+- Teardown reads backing fields (`self.__scan_service`) so quitting from the
+  welcome screen doesn't build a service to discard it.
+
+`tests/test_startup_imports.py` enforces this with a budget on the resident
+`disktide` module count.
 
 ### Scan Service and Consumers
 
-- Product code submits `ScanRequest` to `ScanService`; screens and CLI commands do not construct `ScanEngine`.
-- Every event consumer must tolerate delivery from the service dispatcher thread. Textual consumers may only call `app.call_from_thread()` from that callback.
-- Do not compute a second set of totals in a consumer. Consume `ScanProgressSnapshot`, `NodeAggregateUpdated`, and the terminal `ScanRun` result.
-- Consumer exceptions are isolated by the service. Add a regression test whenever a new consumer is introduced.
-- Use `ScanEventRecorder` plus `ProgressViewModel`/`TreeViewModel` for replay tests. Journals must have one run id, contiguous sequences, and one final terminal event.
-- Keep high-frequency event payloads coalescible. Do not bypass the bounded run mailbox with direct presentation callbacks.
-- Directory workers scan direct entries only; descendants must return through `TreeScanScheduler` rather than recursively occupying a worker.
-- Keep one owner per `scandir` cursor. Direct entries cross the worker/coordinator boundary only through bounded chunks.
-- Automatic worker selection must remain explainable and path-aware; explicit `workers` is an exact override.
-- All product scans must acquire `ScanResourcePolicy` slots so queue state and cancellation remain observable.
-- Keep `ScanEngine().scan(path)` compatibility for `tool/bench_scan.py` and `tool/diag_scan.py` until the compatibility facade is intentionally retired.
+- Product code submits `ScanRequest` to `ScanService` — never constructs
+  `ScanEngine` directly.
+- Textual consumers may only call `app.call_from_thread()` from the
+  dispatcher callback.
+- Consume `ScanProgressSnapshot`, `NodeAggregateUpdated`, and the terminal
+  `ScanRun` result — don't compute a second set of totals.
+- Consumer exceptions are isolated; add a regression test for new consumers.
+- Directory workers scan direct entries only; descendants return through
+  `TreeScanScheduler`, never by recursing in a worker.
+- Keep `ScanEngine().scan(path)` compatibility for `tool/` scripts.
 
 ### Filesystem Event Backends
 
-- Backends implement `collectors.events.base.EventBackend` and emit normalized
-  hints only. They do not import presentation or persistence adapters.
-- Optional packages must be probed and imported lazily. Core periodic scans,
-  doctor, CLI, and TUI must work when no backend package is installed.
-- Never treat events as authoritative totals or an audit stream. Local dirty
-  scans use `ScanService`; only successful full reconciliation writes snapshots.
-- Overflow, watch limits, root loss, restart, and lease expiry must persist a
-  degraded/full-reconciliation-required state.
-- Add backend-neutral tests with a fake backend. Platform integration tests may
-  require the `[watch]` extra but cannot weaken the core clean-install gate.
+- Backends implement `collectors.events.base.EventBackend` and emit
+  normalized hints only. No presentation or persistence imports.
+- Optional packages must be probed and imported lazily.
+- Events are never authoritative totals. Only full reconciliation writes
+  snapshots.
+- Overflow, watch limits, root loss, and restart must persist a degraded
+  state.
 
 ## Distribution Checks
 
 ```bash
 uv build
 uv run python tool/verify_distribution.py
-uv run python tool/benchmark_wave13.py --output /tmp/wave-13-benchmark.json
-uv run python tool/benchmark_wave15.py --output /tmp/wave-15-benchmark.json
 ```
 
-The CI minimal-install job installs the wheel into a fresh environment, runs
-`disktide doctor`, a small scan, and periodic watch smoke, and enforces at most
-20 runtime distributions, at most 20 MiB of installed files, and no native
-extension. A second clean environment installs `disktide[watch]`, verifies
-backend discovery, and runs strict `watch --events` smoke.
+CI installs the wheel into a clean environment and enforces ≤ 20 runtime
+distributions, ≤ 20 MiB, no native extension. A second environment installs
+`disktide[watch]` and verifies event backend discovery.
 See [release-process.md](release-process.md) for the tag and PyPI flow.
 
-### Configuration
+## How-To Guides
 
-`config.py` uses plain dataclasses (not Pydantic). TOML serialization is manual (line-by-line string building in `save_config`). When adding a new config field:
+### Adding a Config Field
 
-1. Add the field to the appropriate dataclass (`ScanConfig`, `MonitorConfig`, `UIConfig`, or `HostPaths`)
-2. Add serialization in `save_config()` -- skip `None` values for optional fields
-3. Add deserialization in `load_config()` with a sensible default
-4. Add a roundtrip test in `tests/test_config.py`
+1. Add the field to the appropriate dataclass (`ScanConfig`, `MonitorConfig`,
+   `UIConfig`, or `HostPaths`).
+2. Add serialization in `save_config()` — skip `None` for optional fields.
+3. Add deserialization in `load_config()` with a sensible default.
+4. Add a roundtrip test in `tests/test_config.py`.
 
-### Database Migrations
+### Adding a Database Migration
 
-`storage/migrations.py` uses a `schema_version` table. Snapshot format and API
-versions are separate domain metadata and must not be inferred from that table.
-To add a migration:
+1. Increment `CURRENT_VERSION`.
+2. Add DDL statements under the new key in `MIGRATIONS`.
+3. Put data backfill in `MIGRATION_CALLBACKS` — runs in the same transaction.
+4. Keep pre-migration backup and rollback intact.
+5. Add success, legacy-preservation, and interrupted-migration tests.
 
-1. Increment `CURRENT_VERSION`
-2. Add the ordered SQL statements under the new integer key in `MIGRATIONS`
-3. Put data backfill in a `MIGRATION_CALLBACKS` entry; it runs inside the same transaction
-4. Keep the pre-migration backup and rollback behavior intact
-5. Add success, legacy-data-preservation, and interrupted-migration tests
+Never commit a schema version before DDL/backfill succeeds, fill unknown
+legacy policy with current defaults, or delete a corrupt database as repair.
 
-Do not commit a schema version before its DDL/backfill succeeds, silently fill
-unknown legacy policy with current defaults, or delete a corrupt database as a
-repair strategy.
+### Adding a Cleanup Rule
 
-## Adding a New Cleanup Rule
-
-1. Add the rule to the appropriate schema-v1 TOML file under
-   `cleanup/rulepacks/`, or add a new pack with unique lowercase identifiers:
+Add a rule to an existing schema-v1 TOML under `cleanup/rulepacks/`, or
+create a new pack:
 
 ```toml
 schema_version = 1
@@ -242,62 +179,62 @@ confidence = 0.9
 default_action = "safe"
 ```
 
-2. Do not add command, import, hook, script, or arbitrary executor fields. Use
-   `default_action = "detection-only"` when generic filesystem execution is not
-   the correct provider boundary.
-3. Add positive, negative, parent-indicator/path-context, age-boundary, invalid
-   schema, scoring, and detection-only cases in `tests/test_cleanup_wave09.py`,
-   plus Wave08 revalidation coverage when the safety contract changes.
-4. Preserve old CleanupPlan payload readers when adding plan metadata. The
-   schema-v6 cleanup base tables, current database schema v10, and CleanupPlan
-   payload v2 are independent version numbers. Runtime action transitions must
-   use `update_cleanup_action()` rather than rewriting the full plan.
+- No command, hook, or executor fields in the schema.
+- Use `default_action = "detection-only"` when generic execution is wrong.
+- Add positive, negative, indicator, age-boundary, invalid schema, scoring,
+  and detection-only tests.
+- Preserve old CleanupPlan payload readers when adding plan metadata.
 
-## Adding a New Screen
+### Adding a Screen
 
 1. Create `screens/my_screen.py` subclassing `textual.screen.Screen`.
 2. Define `BINDINGS` and `compose()`.
-3. Install the screen in `app.py` `_launch_explorer()`, importing it there
-   rather than at module scope -- see [Startup Import Boundary](#startup-import-boundary):
+3. Install in `app.py` `_launch_explorer()` (not at module scope):
    ```python
    from disktide.screens.my_screen import MyScreen
-
    self.install_screen(MyScreen(...), name="myscreen")
    ```
-4. Add a key binding in `DiskTideApp.BINDINGS` and a case in `action_switch_mode()`.
+4. Add a key binding in `DiskTideApp.BINDINGS` and a case in
+   `action_switch_mode()`.
 5. Add styles in `assets/default.tcss`.
 
-## Adding a New Visualization
+### Adding a Visualization
 
-1. Create the layout/rendering logic in `viz/my_viz.py`. It should produce Rich `Segment` objects or use the braille canvas.
-2. Reuse `VisualState`/`VisualDelta` and the shared presentation vocabulary for snapshot-time semantics; do not classify growth independently in the widget.
-3. Create a Textual widget in `widgets/my_viz_view.py` that calls the renderer and consumes a prebuilt model rather than a repository.
-4. Add a `TabPane` in the relevant screen and a screen-local key binding.
-5. Add current, diff, partial/incompatible, safe/no-color, narrow, resize, and bounded-large-tree tests.
+1. Create layout/rendering in `viz/my_viz.py` — produce Rich Segments or use
+   the braille canvas.
+2. Reuse `VisualState`/`VisualDelta` — don't classify growth independently.
+3. Create a Textual widget in `widgets/my_viz_view.py` that consumes a
+   prebuilt model (not a repository).
+4. Add a `TabPane` and screen-local key binding.
+5. Test: current, diff, partial/incompatible, safe/no-color, narrow, resize,
+   and bounded-large-tree cases.
 
 ## Testing Tips
 
-- **Scanner tests**: Use `tmp_path` fixtures to create real directory trees. The scanner operates on real filesystems, not mocks.
-- **Scan service tests**: Cover complete, partial, cancelled, and failed terminals; assert no events follow a terminal event and replay reconstructs the same view model.
-- **Database tests**: Use in-memory SQLite (`:memory:`) or `tmp_path` for the db file. The `db` fixture in `tests/test_storage.py` provides a connected, migrated database.
-- **Async tests**: Use `@pytest.mark.asyncio` for focused coroutine tests. For Textual app flows, use the established `asyncio.run(go())` + `app.run_test()` pattern.
-- **Do not read the host**: a test that branches on the real core count, the real `/proc/mounts`, the real `os.scandir` order, or on how long something took is asserting something about the machine it runs on. Inject the value (`resolve_live_scan_render(..., cpu_count=2)`), pin the config (`config.ui.live_scan_render = "on"`), or build the window out of a `threading.Event` rather than a sleep. See *Reproducing a CI-only failure* above.
-- **Visualization tests**: Test layout computation separately from rendering. Verify shared state classification, rectangle coordinates, arc angles, gap handling, selected-path identity, 80x24/safe/no-color fallback, and the 100k-node performance bound.
+- **Scanner**: use `tmp_path` fixtures with real directory trees.
+- **Scan service**: cover all four terminals; assert no events after terminal;
+  replay reconstructs the same view model.
+- **Database**: use `:memory:` or `tmp_path`. The `db` fixture in
+  `tests/test_storage.py` provides a migrated database.
+- **Async**: `@pytest.mark.asyncio` for coroutines; `asyncio.run(go())` +
+  `app.run_test()` for Textual flows.
+- **Don't read the host**: inject values (`resolve_live_scan_render(...,
+  cpu_count=2)`), pin config, or use `threading.Event` instead of sleep.
+- **Visualization**: test layout separately from rendering. Cover state
+  classification, coordinates, gap handling, selected-path identity,
+  80×24/safe/no-color fallback, and 100k-node performance.
 
 ## Dev Utilities
 
-The `tool/` directory contains helper scripts:
-
-- `gen_activity` -- generates filesystem activity (creates/modifies/deletes files) for testing the watch/monitor features. Supports `--max-files` and `--max-size` caps.
-- `bench_scan` -- one-shot scan timing. Default `--mode raw` prints the stable `wall-time / dirs / files / size / rate` compatibility baseline through `ScanEngine().scan()`. `--mode events` measures service delivery, and `--mode live` additionally measures bounded view-model delivery without starting Textual. All modes accept `--workers N`.
-- `diag_scan` -- diagnostic scan with a 1-second heartbeat (current path + dirs/files/GB), a stall detector (`STALL <sec>` when no counter has moved for 5 s), and a per-directory hotspot table at the end ranked by wall-clock time. `--profile` wraps the scan in `cProfile` and dumps the top callees by cumulative time at the end. `--workers N` pins thread count. Designed for diagnosing remote/NFS slowness where the TUI's progress bar pulses but you can't see *what* is slow. The scripts degrade gracefully across internal API changes; see `tests/test_tools.py` for the contract they rely on.
+| Script | Purpose |
+|--------|---------|
+| `tool/gen_activity` | Generate filesystem activity for testing watch/monitor. `--max-files`, `--max-size` caps. |
+| `tool/bench_scan` | Scan timing. `--mode raw` (compatibility baseline), `events` (service delivery), `live` (view-model delivery). `--workers N`. |
+| `tool/diag_scan` | Diagnostic scan: 1s heartbeat, 5s stall detector, per-directory hotspot table. `--profile` for `cProfile`. Designed for NFS/remote slowness where the TUI progress bar pulses but you can't see what's slow. |
 
 ## Running the TUI in Dev Mode
 
 ```bash
-# normal launch
-disktide
-
-# with Textual dev tools (live CSS reloading, DOM inspector)
-textual run --dev -c disktide
+disktide                                   # normal launch
+textual run --dev -c disktide              # live CSS reloading, DOM inspector
 ```
