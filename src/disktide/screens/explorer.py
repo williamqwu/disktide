@@ -242,6 +242,10 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._current: FSNode | None = None
         self._live_snapshot: FSNode | None = None
         self._live_view_snapshot: LiveViewNode | None = None
+        # Duty-cycle state for the live chart: when the last frame was
+        # forwarded, and the one-shot that lands a skipped one.
+        self._live_chart_at = 0.0
+        self._live_chart_timer: Timer | None = None
         self._active_run: ScanRun | None = None
         # True while a scan is in flight. Used to gate drill-into (which
         # would otherwise read stale aggregates off the live snapshot)
@@ -383,6 +387,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = True
         self._live_snapshot = None
         self._live_view_snapshot = None
+        self._reset_live_chart_pacing()
         # What the scheduler's bounded view_root is weighted by, so a live
         # frame can tell whether the shipped one still answers.
         self._active_metric = MetricId.parse(request.metric)
@@ -524,7 +529,10 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._live_snapshot = node
         self._live_view_snapshot = view_root
         tree.apply_live_update(node, changed_nodes)
-        self._update_active_viz(node, visual_node=self._live_view_snapshot)
+        # The tree panel and the progress overlay are ~2 % of the thread
+        # between them and stay per-frame; the chart is the other 97 % and
+        # is paced.
+        self._maybe_update_live_chart(node, self._live_view_snapshot)
         self._maybe_build_category_index(node)
 
     def _on_scan_complete(
@@ -543,6 +551,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = False
         self._live_snapshot = None
         self._live_view_snapshot = None
+        self._reset_live_chart_pacing()
         self._root = root
         self._current = root
 
@@ -587,6 +596,99 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # Update only the active viz tab
         self._update_active_viz(root)
         self._update_status()
+
+    # One live chart frame is the most expensive thing that happens on the
+    # UI thread, and it is not close: 163 ms of pure Python at a 182x62
+    # sunburst before the geometry cache and ~45 ms after, against ~2 % of
+    # the thread for the size tree and the progress overlay together. The
+    # scan service coalesces the scheduler's publishes, so the frames
+    # arrive exactly as fast as the thread can draw them -- which meant it
+    # never stopped drawing, and since every millisecond of that is spent
+    # holding the GIL, the scan threads behind it stalled on each
+    # re-acquisition. A local home-shaped tree scanned in 21.0 s with the
+    # live chart off and 152.3 s with it on (119.1 s of it on the UI
+    # thread); a real home over NFS, 36.8 s against ~420 s.
+    #
+    # So the chart is paced by what it costs rather than by a constant,
+    # which would be wrong at both ends of a 33 ms (70x30) to 163 ms
+    # (182x62) range: the view times its own frame and one is forwarded
+    # per DUTY times that, holding the chart to ~1/DUTY of the thread. The
+    # floor is the scheduler's own publish interval, below which there is
+    # nothing new to draw.
+    _LIVE_CHART_DUTY = 5.0
+    _LIVE_CHART_MIN_GAP = 0.25
+
+    def _live_chart_gap(self) -> float:
+        """Seconds that must pass between two live chart frames."""
+        view = self._active_chart_view()
+        cost = 0.0 if view is None else view.last_paint_cost
+        return max(self._LIVE_CHART_MIN_GAP, self._LIVE_CHART_DUTY * cost)
+
+    def _active_chart_view(self) -> SunburstView | TreemapView | None:
+        """The chart the active tab paints, or None when it shows neither."""
+        active = self.query_one("#viz-tabs", TabbedContent).active
+        if active == "tab-sunburst":
+            return self.query_one("#sunburst-view", SunburstView)
+        if active == "tab-treemap":
+            return self.query_one("#treemap-view", TreemapView)
+        return None
+
+    def _maybe_update_live_chart(
+        self,
+        node: FSNode,
+        view_root: LiveViewNode | FSNode | None,
+    ) -> None:
+        """Forward a live frame to the chart if the last one has paid off.
+
+        Same shape as `_maybe_build_category_index` below: the work reports
+        what it cost and the gate is a multiple of it.
+        """
+        waited = monotonic() - self._live_chart_at
+        gap = self._live_chart_gap()
+        if waited >= gap:
+            self._paint_live_chart(node, view_root)
+            return
+        # Skipped -- but a scan can go quiet at any moment (a deep subtree
+        # that takes seconds, or simply the last frame before completion),
+        # and a chart frozen mid-scan on a snapshot that will never be
+        # superseded is worse than a late one. Arm a one-shot for the rest
+        # of the gap, replacing any pending one so there is only ever the
+        # single trailing frame.
+        self._arm_live_chart_timer(gap - waited)
+
+    def _paint_live_chart(
+        self,
+        node: FSNode,
+        view_root: LiveViewNode | FSNode | None,
+    ) -> None:
+        self._cancel_live_chart_timer()
+        self._live_chart_at = monotonic()
+        self._update_active_viz(node, visual_node=view_root)
+
+    def _arm_live_chart_timer(self, delay: float) -> None:
+        self._cancel_live_chart_timer()
+        self._live_chart_timer = self.set_timer(delay, self._flush_live_chart)
+
+    def _cancel_live_chart_timer(self) -> None:
+        timer = self._live_chart_timer
+        self._live_chart_timer = None
+        if timer is not None:
+            timer.stop()
+
+    def _reset_live_chart_pacing(self) -> None:
+        """Open the gate: the next live frame of a scan is never skipped."""
+        self._cancel_live_chart_timer()
+        self._live_chart_at = 0.0
+
+    def _flush_live_chart(self) -> None:
+        """Paint the newest snapshot that a skipped frame left behind."""
+        self._live_chart_timer = None
+        if not self.is_mounted or not self._scan_in_progress:
+            return
+        node = self._live_snapshot
+        if node is None:
+            return
+        self._paint_live_chart(node, self._live_view_snapshot)
 
     # A category rollup is one pass over every node, so it cannot run per
     # live frame. It is thrown at a worker whenever it has been idle for
@@ -775,6 +877,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = False
         self._live_snapshot = None
         self._live_view_snapshot = None
+        self._reset_live_chart_pacing()
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_cancelled(run_id=event.run_id)
         tree_panel = self.query_one("#tree-panel")
@@ -817,6 +920,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._scan_in_progress = False
         self._live_snapshot = None
         self._live_view_snapshot = None
+        self._reset_live_chart_pacing()
 
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         overlay.scan_failed(run_id=run_id)
