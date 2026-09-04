@@ -9,7 +9,80 @@ permissions:
   contents: read
 
 jobs:
+  # One wheel per interpreter and platform, because the scanner carries an
+  # optional C extension now (`disktide/scanner/_scanfast`). The pure
+  # `py3-none-any` wheel has left the artifact set: a version publishes
+  # either one pure wheel or a set of platform wheels, and the sdist is what
+  # everything else installs -- it rebuilds the extension where there is a
+  # compiler and runs the Python fallback where there is not. The
+  # compiler-less install is checked in `build` below, so that path cannot
+  # rot unnoticed.
+  wheels:
+    name: Wheels ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: manylinux + musllinux x86_64
+            os: ubuntu-latest
+            archs: x86_64
+            qemu: false
+          - name: manylinux + musllinux aarch64
+            os: ubuntu-latest
+            archs: aarch64
+            # No native ARM runner is assumed: aarch64 builds run under
+            # binfmt emulation, which is slow and available on every plan.
+            # A repository with `ubuntu-24.04-arm` available should switch
+            # to it and drop the QEMU step.
+            qemu: true
+          - name: macOS arm64
+            os: macos-14
+            archs: arm64
+            qemu: false
+          - name: macOS x86_64
+            os: macos-13
+            archs: x86_64
+            qemu: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Enable emulation for foreign architectures
+        if: matrix.qemu
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        with:
+          platforms: arm64
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074 # v4.2.0
+        env:
+          # 3.10 is the floor in `requires-python`; 3.14 is the newest the
+          # CI matrix covers. Free-threaded builds are off by default and
+          # stay off -- the extension keeps no interpreter state, but
+          # nothing here has been run under one.
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          CIBW_ARCHS: "${{ matrix.archs }}"
+          # PyPI rejects a plain `linux_x86_64` tag; cibuildwheel's
+          # `auditwheel repair` step is what turns what the build hook
+          # produced into a manylinux/musllinux wheel. The extension links
+          # libc and nothing else, so there is nothing to vendor.
+          CIBW_BUILD_VERBOSITY: "1"
+          # A wheel is only worth shipping if it actually carries the
+          # accelerator. The build hook is deliberately forgiving -- no
+          # compiler means a pure wheel, quietly -- and without this check
+          # a broken toolchain in one container would publish a
+          # platform-tagged wheel with nothing platform-specific in it.
+          CIBW_TEST_COMMAND: >-
+            python -c "from disktide.scanner.accel import ACCEL_BACKEND;
+            assert ACCEL_BACKEND == 'native', ACCEL_BACKEND;
+            print('scanner backend:', ACCEL_BACKEND)"
+      - name: Upload wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-wheels-${{ strategy.job-index }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
   build:
+    needs: wheels
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,20 +97,47 @@ jobs:
           enable-cache: true
       - name: Sync locked environment
         run: uv sync --locked --python 3.13
+      - name: Build the source distribution
+        run: uv build --sdist
+      - name: Collect the platform wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: python-wheels-*
+          merge-multiple: true
+          path: dist
       - name: Build and verify
         run: |
-          uv build
+          ls -l dist
           .venv/bin/python tool/verify_distribution.py
+          VERSION="$(.venv/bin/python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          # dist/ holds a wheel per interpreter and platform now, so the
+          # glob names the one this runner can install -- and fails the job
+          # if the wheels job did not produce it.
+          WHEEL="$(ls dist/disktide-${VERSION}-cp313-cp313-manylinux*_x86_64.whl)"
+          echo "installing ${WHEEL}"
           uv venv --python 3.13 .venv-release
-          uv pip install --python .venv-release/bin/python dist/disktide-*.whl
+          uv pip install --python .venv-release/bin/python "${WHEEL}"
           uv venv --python 3.13 .venv-release-sdist
-          uv pip install --python .venv-release-sdist/bin/python dist/disktide-*.tar.gz
+          uv pip install --python .venv-release-sdist/bin/python "dist/disktide-${VERSION}.tar.gz"
           .venv-release/bin/disktide doctor --json > doctor.json
           .venv-release-sdist/bin/disktide doctor --json > doctor-sdist.json
           .venv-release/bin/sizetrail --version
           .venv-release/bin/fsmonitor --version
           .venv-release/bin/fsmonitor-cli --version
           .venv-release/bin/python tool/check_dependency_budget.py
+      - name: Check both scanner backends install
+        run: |
+          VERSION="$(.venv/bin/python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          # The wheel for this interpreter, and the sdist built on a runner
+          # that has a compiler, both have to report the extension.
+          .venv/bin/python tool/check_doctor_backend.py native doctor.json doctor-sdist.json
+          # And the path every platform without a wheel takes: the sdist,
+          # with nothing to compile it. It must still install, and report
+          # the fallback rather than failing.
+          uv venv --python 3.13 .venv-release-fallback
+          CC=/bin/false uv pip install --no-cache --python .venv-release-fallback/bin/python "dist/disktide-${VERSION}.tar.gz"
+          .venv-release-fallback/bin/disktide doctor --json > doctor-fallback.json
+          .venv/bin/python tool/check_doctor_backend.py python doctor-fallback.json
       - name: Generate checksums and SBOM
         run: |
           mkdir -p release-metadata
@@ -47,6 +147,7 @@ jobs:
               --output release-metadata/disktide.cdx.json
           cp doctor.json release-metadata/doctor.json
           cp doctor-sdist.json release-metadata/doctor-sdist.json
+          cp doctor-fallback.json release-metadata/doctor-fallback.json
       # Attestations are only available for public repositories on the Free,
       # Pro and Team plans; a private repository needs Enterprise Cloud. The
       # guard keeps a private-repository release from failing here instead of

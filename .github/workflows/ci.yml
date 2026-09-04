@@ -181,5 +181,21 @@ jobs:
           .venv-sdist-smoke/bin/fsmonitor-cli --version
           .venv-sdist-smoke/bin/disktide doctor --json > doctor-sdist.json
           .venv-sdist-smoke/bin/python -c 'import json; json.load(open("doctor-sdist.json"))'
+      - name: Check which scanner backend each install reports
+        run: |
+          # The wheel this runner built carries the optional C extension
+          # because ubuntu-latest has a compiler; so does the sdist install.
+          .venv/bin/python tool/check_doctor_backend.py native doctor.json doctor-sdist.json
+          # The path a platform with no wheel and no compiler takes. It has
+          # to install, and it has to say so rather than fail.
+          uv venv --python 3.13 .venv-fallback-smoke
+          CC=/bin/false uv pip install --no-cache \
+            --python .venv-fallback-smoke/bin/python dist/disktide-*.tar.gz
+          .venv-fallback-smoke/bin/disktide doctor --json > doctor-fallback.json
+          .venv/bin/python tool/check_doctor_backend.py python doctor-fallback.json
+          .venv-fallback-smoke/bin/disktide scan /tmp/disktide-smoke --workers 1
+          # And the escape hatch, on an install that does have the extension.
+          DISKTIDE_ACCEL=0 .venv-smoke/bin/disktide doctor --json > doctor-forced.json
+          .venv/bin/python tool/check_doctor_backend.py python doctor-forced.json
       - name: Enforce core dependency budget
         run: .venv-smoke/bin/python tool/check_dependency_budget.py

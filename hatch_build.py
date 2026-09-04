@@ -22,6 +22,11 @@ Two things this hook is careful about, both learned the hard way:
    sysconfig's, then plain `cc`, `gcc`, `clang`: the first one on `PATH`
    wins.
 
+And one platform difference: a CPython extension on macOS is a *bundle*
+(`-bundle -undefined dynamic_lookup`), not a shared library. `-shared` there
+fails to link, because the Python symbols the module calls are resolved by
+the interpreter that loads it and are in no library at build time.
+
 No setuptools: it would be a second build requirement for a hundred lines of
 compiler invocation, and this project ships `hatchling` alone.
 """
@@ -29,8 +34,10 @@ compiler invocation, and this project ships `hatchling` alone.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import sysconfig
 import tempfile
 
@@ -102,12 +109,21 @@ class CustomBuildHook(BuildHookInterface):
         self._scratch = tempfile.mkdtemp(prefix="disktide-scanfast-")
         output = os.path.join(self._scratch, "_scanfast" + suffix)
         include = sysconfig.get_paths()["include"]
+        # cibuildwheel sets ARCHFLAGS when it cross-compiles on macOS; a
+        # build that ignored it would put the host's architecture in a wheel
+        # tagged for another one.
+        archflags = shlex.split(os.environ.get("ARCHFLAGS", ""))
+        if sys.platform == "darwin":
+            link = ["-bundle", "-undefined", "dynamic_lookup"]
+        else:
+            link = ["-shared"]
         command = [
             *compiler,
             "-O2",
             "-Wall",
-            "-shared",
+            *link,
             "-fPIC",
+            *archflags,
             "-I" + include,
             "-o",
             output,
