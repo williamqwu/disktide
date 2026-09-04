@@ -10,6 +10,7 @@ from time import perf_counter
 from disktide.collectors.platform import get_platform_adapter
 from disktide.collectors.platform.models import (
     NETWORK_FS_TYPES,
+    is_latency_bound,
     unescape_mount_path,
 )
 from disktide.domain.scan import ScanWorkerSelection
@@ -42,6 +43,31 @@ _SYSTEM_UID_CEILING = 1000
 # already burn 1.54 cores against 0.42 for one.
 _NETWORK_WORKER_CAP = 8
 
+# Above that base the right number depends on how slow the mount is, and the
+# curve is steep. Measured with a probe that wraps `os.scandir` so every
+# entry costs `--latency-ms` of GIL-free sleep, running the real engine over
+# local subtrees (wall seconds):
+#
+#   latency  entries  1w    2w    4w    8w    16w   32w   64w
+#   5 ms      4,936   25.1  12.7  6.4   3.38  1.84  1.06  0.88
+#   1 ms     28,174   30.3  15.3  7.8   3.92  2.18  1.13  1.20
+#   0.2 ms  125,716   33.9  18.4  10.0  5.71  5.74  6.56  --
+#   0 (local) 125,716  2.40  3.11 3.39  4.05  --    --    --
+#
+# The knee moves with the latency: about 8 workers at 0.2 ms, 32 at 1 ms,
+# 64 at 5 ms. A fixed cap of 8 leaves 3x on the table for the sshfs, CIFS
+# and WAN-NFS class of mount, where a stat costs 1-5 ms. Read highest tier
+# first; the seconds are per-entry so 0.0005 is half a millisecond.
+_LATENCY_WORKER_TIERS = (
+    (0.003, 64),
+    (0.001, 32),
+    (0.0005, 16),
+)
+
+# Nothing above the widest measured tier: past 64 the 5 ms curve is flat and
+# the 1 ms curve has already turned back up.
+_MAX_LATENCY_WORKERS = 64
+
 # Slow *local* metadata gets the older, more conservative bound. The curve
 # above was measured over a network mount; a local mount that samples slow is
 # usually a busy or failing disk, where queueing more concurrent requests is
@@ -64,7 +90,8 @@ class HostAllocation:
       us, either as a cpuset or as a CPU quota. That subset is ours; host-wide
       load reflects other jobs we are isolated from and must not throttle us.
     * ``shared`` -- no allocation, and other people have processes here. This is
-      the cluster login node case: stay modest whatever the storage suggests.
+      the cluster login node case: stay modest whatever the storage suggests,
+      latency-bound mounts included.
     * ``dedicated`` -- no allocation and nobody else is present, so the machine
       is effectively ours.
     """
@@ -392,6 +419,7 @@ def _compute_recommended_workers(
     """Choose a conservative local default and bounded latency parallelism."""
     cpu_cap = max(1, min(available_cpus, 8))
     medium = classify_medium(fs_type, is_network_fs, is_rotational)
+    latency_bound = is_latency_bound(fs_type, is_network_fs)
     reasons: list[str] = []
 
     average = (
@@ -399,9 +427,22 @@ def _compute_recommended_workers(
         if sample_entries > 0
         else 0.0
     )
-    if is_network_fs:
-        base = min(cpu_cap, _NETWORK_WORKER_CAP)
-        reasons.append("network filesystem favors bounded latency parallelism")
+    if latency_bound:
+        # No `cpu_cap` here. A thread waiting on a server is descheduled for
+        # the whole wait; it does not need a core to hold that wait open, and
+        # capping the count at the cores we can see throttled a mount whose
+        # bottleneck is a wire.
+        base = _NETWORK_WORKER_CAP
+        tier = "measured network base"
+        for threshold, workers in _LATENCY_WORKER_TIERS:
+            if sample_entries > 0 and average >= threshold:
+                base = workers
+                tier = f"{threshold * 1000:g} ms/entry tier"
+                break
+        reasons.append(
+            f"latency-bound {fs_type} mount at {average * 1000:.2f} ms/entry "
+            f"takes {base} workers ({tier})"
+        )
     elif sample_entries > 0 and average >= 0.002:
         base = min(cpu_cap, _SLOW_LOCAL_WORKER_CAP)
         reasons.append(
@@ -426,6 +467,10 @@ def _compute_recommended_workers(
     # Being a guest costs more than being slow. On a machine that handed us no
     # allocation and that other people are using -- a cluster login node, the
     # canonical case -- stay modest no matter how much the storage would bear.
+    # Latency-bound storage does not buy an exemption. The threads sleep, but
+    # the node building between the sleeps does not: eight workers on a warm
+    # NFS mount burn 1.54 cores against 0.42 for one, on a box we were given
+    # no claim to.
     if allocation is not None and allocation.kind == "shared":
         if base > _SHARED_HOST_WORKER_CAP:
             base = _SHARED_HOST_WORKER_CAP
@@ -458,7 +503,7 @@ def _compute_recommended_workers(
         base = 1
         reasons.append("low memory forced serial scheduling")
 
-    result = max(1, min(base, 8))
+    result = max(1, min(base, _MAX_LATENCY_WORKERS if latency_bound else 8))
     reason = f"{result} ({'; '.join(reasons)})"
     return (result, reason)
 

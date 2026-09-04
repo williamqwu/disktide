@@ -14,9 +14,37 @@ from disktide.extensions.capabilities import (
 )
 
 
+#: Mounts whose metadata costs a network round trip. Worker selection reads
+#: this to decide that waiting, not CPU, is what a scan of this mount spends
+#: its time on. `smb3`/`smbfs` are the same protocol as `cifs` under other
+#: kernel names; `9p` is the virtio-9p transport a VM shares a host directory
+#: over. `virtiofs` is deliberately absent -- it is a shared-memory transport
+#: with local-order latency -- and so is `overlay`, which is a local stack.
 NETWORK_FS_TYPES = frozenset({
-    "nfs", "nfs4", "cifs", "fuse.sshfs", "lustre", "gpfs", "afs",
+    "nfs", "nfs4", "cifs", "smb3", "smbfs", "fuse.sshfs", "lustre", "gpfs",
+    "afs", "ceph", "9p", "glusterfs", "beegfs", "panfs",
+    "fuse.rclone", "fuse.s3fs", "fuse.gcsfuse", "fuse.goofys",
+    "fuse.blobfuse2", "fuse.juicefs", "fuse.mountpoint-s3", "fuse.davfs2",
+    "davfs",
 })
+
+
+def is_latency_bound(fs_type: str, is_network_fs: bool) -> bool:
+    """Whether one stat on this mount costs a wait rather than a page fault.
+
+    Every network filesystem qualifies, and so does every FUSE mount whether
+    or not its backend is remote: a FUSE round trip is two context switches
+    to a userspace daemon at best, and a request to an object store at
+    worst, and neither is something a thread can do without being descheduled
+    for it. That distinction is what worker selection needs -- threads asleep
+    in a syscall overlap with each other and do not need a core each -- so
+    the list above cannot be the whole answer. It names the FUSE backends
+    worth naming; this catches the rest, including the ones nobody has
+    written a driver for yet.
+    """
+    if is_network_fs or fs_type in NETWORK_FS_TYPES:
+        return True
+    return fs_type == "fuse" or fs_type.startswith("fuse.")
 
 _OCTAL_ESCAPE = re.compile(r"\\([0-7]{3})")
 

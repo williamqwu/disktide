@@ -10,9 +10,10 @@ How disktide interacts with the filesystem, and what works (or breaks) on differ
 | ZFS | Full | Full | Full | |
 | NTFS (via fuse) | Full | Full | Full | Case-preserving; see [Case Sensitivity](#case-sensitivity) |
 | FAT32/exFAT (via fuse) | Full | Full | Full | No symlinks; mtime resolution is 2s |
-| NFS/NFS4 | Full | Full | Full | Workers capped at 4; latency may be high |
-| CIFS/SMB | Full | Full | Full | Workers capped at 4 |
-| sshfs (FUSE) | Full | Full | Caution | Workers capped at 4; deletion over sshfs can be slow |
+| NFS/NFS4 | Full | Full | Full | 8 workers, more when the mount samples slow; see [Network Filesystems](#network-filesystems-nfs-cifs-sshfs) |
+| CIFS/SMB | Full | Full | Full | Same tiering; `cifs`, `smb3` and `smbfs` all recognised |
+| Ceph, GlusterFS, BeeGFS, Lustre, GPFS, PanFS, AFS, 9p | Full | Full | Full | Same tiering |
+| sshfs, rclone, s3fs, gcsfuse, JuiceFS and other FUSE | Full | Full | Caution | Same tiering; deletion over sshfs can be slow |
 | tmpfs, ramfs | Full | Full | Full | |
 | OverlayFS | Partial | Partial | Caution | Sees merged view; deletions affect upper layer only |
 | macOS APFS/HFS+ | Scanning works | Watch works | Cleanup works | sysinfo falls back to defaults; see [Platform](#platform-support) |
@@ -66,14 +67,17 @@ On Windows, `os.scandir` and `os.stat` work, but `os.getloadavg()` and `os.sched
 The scanner is the most filesystem-intensive component. Here is exactly what it calls for each directory:
 
 ```
-os.stat(path).st_mtime           # root directory mtime + cycle-guard identity
-os.scandir(path)                 # iterate directory entries
+os.open(path, O_RDONLY|O_DIRECTORY|O_CLOEXEC)  # once per directory
+                                 # + O_NOFOLLOW below the scan root
+os.fstat(fd).st_mtime            # this directory's mtime + cycle-guard identity
+os.scandir(fd)                   # iterate directory entries, fd-relative
   entry.is_symlink()             # classify: symlink?
   entry.is_dir(follow_symlinks=False)   # classify: directory?
   entry.is_file(follow_symlinks=False)  # classify: regular file?
-  entry.stat(follow_symlinks=False)     # st_size, st_blocks, dev/inode/nlink, mtime
+  entry.stat(follow_symlinks=False)     # fstatat(fd, name): st_size, st_blocks,
+                                        # dev/inode/nlink, mtime
   entry.name                     # basename (str)
-  entry.path                     # full path (str)
+os.close(fd)                     # two descriptors in flight per worker, no more
 
 # Deferred work, runs on demand when the UI looks at a symlink
 # (Details panel render, or `i` to navigate into a symlinked dir),
@@ -86,7 +90,13 @@ os.scandir(path)                 # iterate directory entries
 
 **Metadata NOT captured:** permissions, ownership (uid/gid), extended attributes, ACLs, creation time, filesystem compression ratio, reflink sharing, or snapshot-exclusive physical blocks.
 
-`os.scandir()` is used instead of `os.listdir()` + `os.stat()` because it avoids a second syscall per entry on Linux (the kernel returns `d_type` from `getdents64`).
+`os.scandir()` is used instead of `os.listdir()` + `os.stat()` because it avoids a second syscall per entry on Linux (the kernel returns `d_type` from `getdents64`). It is handed a *descriptor* rather than a path so that each entry's stat is an `fstatat` of one name instead of an `lstat` of a whole path: measured on one thread with no node building, 3.14 us per entry against 3.58 warm on local xfs and 11.0 against 13.0 on warm NFSv4. The full child path is then joined in Python, which is what `FSNode.path` stores; it is never handed back to the kernel. `scanner/walker.py::scan_directory`, the recursive compatibility walker, is deliberately still path-based -- it recurses one Python frame per level, so it runs out of interpreter stack long before it runs out of pathname.
+
+### Deep trees
+
+PATH_MAX -- 4,096 bytes on Linux -- is a limit on the pathname *argument* of a syscall, not on the depth of a tree, and the scan no longer runs into it. Nothing below the scan root is ever named by its whole path, and the scan root's own path is opened in PATH_MAX-sized steps, each relative to the descriptor the last step returned (four opens for a 10,900-byte path). A chain of 1,200 directories with an eight-letter name at each level scans to the bottom; before this it stopped at level 442 and recorded `[Errno 36] File name too long` as a *denied* directory, so the tree looked like a permissions problem rather than a deep one.
+
+Two things still use whole paths and still fail past 4,096 bytes: `os.readlink` and the follow-stat in `classify_symlink`, so a symlink deeper than PATH_MAX is reported as broken rather than classified; and every cleanup action -- trash, quarantine, delete -- which builds the full path to hand to `shutil` and the trash spec. Deleting a directory *containing* such a path works, because `shutil.rmtree` is fd-relative itself; naming one of its descendants directly does not.
 
 ### Symlink Handling
 
@@ -322,7 +332,32 @@ Directory metadata blocks are not included in the 0.2.0 metrics, so Allocated/Un
 
 ### Network Filesystems (NFS, CIFS, sshfs)
 
-- Worker count is automatically capped at 4 when a network filesystem is detected (via `/proc/mounts`)
+Worker count is chosen from a *measured* per-entry latency, not from the
+filesystem name alone. The mount type (via `/proc/mounts`) decides whether the
+scan is latency-bound at all; a 64-entry, 75 ms metadata sample of the scan root
+then decides how many workers that buys:
+
+| Sampled latency per entry | Workers |
+|---|---|
+| under 0.5 ms (warm NFS, GPFS) | 8 |
+| 0.5 ms and up | 16 |
+| 1 ms and up (sshfs, CIFS over a WAN) | 32 |
+| 3 ms and up (an object store behind FUSE) | 64 |
+
+The tiers come from a sweep that wrapped `os.scandir` so every entry cost a
+fixed sleep and then ran the real engine: at 5 ms per entry the wall time falls
+from 25.1 s at one worker to 3.38 s at eight and 0.88 s at 64, and at 1 ms it
+bottoms out at 32. A fixed cap of 8 left roughly 3x on the table for those
+mounts. The `min(available_cpus, 8)` cap that applies to local storage does not
+apply here: a thread waiting on a server is descheduled for the whole wait and
+does not need a core to hold it open.
+
+Two limits still win over the tier. A *shared* host -- no CPU allocation and
+other people's processes present, the cluster login-node case -- caps at 2
+whatever the storage says, because the node building between the waits is real
+CPU on a machine we are a guest on. Under 512 MB of available memory the scan
+goes serial.
+
 - Latency per `os.scandir()` call is higher, so scans take longer
 - `st_mtime` may have lower resolution or be subject to clock skew between client and server
 - The snapshot database is stored locally by default (`XDG_DATA_HOME`), not on the scanned network share
@@ -330,6 +365,15 @@ Directory metadata blocks are not included in the 0.2.0 metrics, so Allocated/Un
 ### FUSE Filesystems
 
 FUSE filesystems (sshfs, rclone, s3fs) generally work since the scanner only uses standard POSIX calls. Performance depends entirely on the FUSE implementation. `os.scandir()` may not benefit from kernel `d_type` optimization through FUSE, falling back to per-entry `stat()` calls.
+
+Every `fuse.*` mount is treated as latency-bound and tiered exactly as a network
+mount is, whether or not its backend is remote and whether or not the specific
+backend is named in `NETWORK_FS_TYPES`: a FUSE round trip is two context
+switches to a userspace daemon at best and a request to an object store at
+worst, and neither is something a thread can do without being descheduled. A
+mount backed by an object store routinely samples above 3 ms per entry and takes
+the 64-worker tier. `virtiofs` is *not* in that group -- it is a shared-memory
+transport with local-order latency -- and neither is `overlay`.
 
 ### OverlayFS
 

@@ -347,7 +347,11 @@ class TestComputeRecommendedWorkers:
         assert workers == 1
 
     def test_network_fs_caps_at_8(self):
-        """8 is where the measured cold-NFS curve flattens; see _LATENCY_WORKER_CAP."""
+        """8 is where the measured cold-NFS curve flattens; see _NETWORK_WORKER_CAP.
+
+        With no metadata sample there is no latency to tier on, so the base
+        is what a network mount gets.
+        """
         workers, reason = _compute_recommended_workers(
             available_cpus=16,
             load_average=(0.0, 0.0, 0.0),
@@ -356,7 +360,8 @@ class TestComputeRecommendedWorkers:
             available_mb=4096,
         )
         assert workers <= 8
-        assert "network filesystem" in reason
+        assert "latency-bound" in reason
+        assert "measured network base" in reason
 
     def test_hdd_caps_at_4(self):
         workers, reason = _compute_recommended_workers(
@@ -410,7 +415,7 @@ class TestComputeRecommendedWorkers:
         )
         assert workers >= 1
         assert "host load" in reason
-        assert "network filesystem" in reason
+        assert "latency-bound" in reason
         assert "low memory" in reason
 
     def test_zero_memory_not_flagged(self):
@@ -840,3 +845,153 @@ class TestCpuCountUnderAQuota:
                 allocation = detect_host_allocation()
         assert allocation.confined is False
         assert allocation.kind == "dedicated"
+
+
+# --- latency tiers --------------------------------------------------------
+
+
+def _latency_pick(fs_type, ms, *, cpus=4, is_network=None, **kwargs):
+    from disktide.collectors.platform.models import NETWORK_FS_TYPES
+
+    network = fs_type in NETWORK_FS_TYPES if is_network is None else is_network
+    return _compute_recommended_workers(
+        available_cpus=cpus,
+        load_average=(0.0, 0.0, 0.0),
+        is_network_fs=network,
+        is_rotational=False,
+        available_mb=8192,
+        fs_type=fs_type,
+        sample_entries=16,
+        sample_elapsed_seconds=16 * ms / 1000.0,
+        sample_outcome="sampled",
+        **kwargs,
+    )
+
+
+class TestLatencyBoundClassification:
+    @pytest.mark.parametrize(
+        "fs_type",
+        [
+            "nfs4", "cifs", "smb3", "smbfs", "ceph", "9p", "glusterfs",
+            "beegfs", "panfs", "davfs", "fuse.sshfs", "fuse.rclone",
+            "fuse.s3fs", "fuse.gcsfuse", "fuse.goofys", "fuse.blobfuse2",
+            "fuse.juicefs", "fuse.mountpoint-s3", "fuse.davfs2",
+        ],
+    )
+    def test_known_remote_types_are_latency_bound(self, fs_type):
+        from disktide.collectors.platform.models import (
+            NETWORK_FS_TYPES,
+            is_latency_bound,
+        )
+
+        assert fs_type in NETWORK_FS_TYPES
+        assert is_latency_bound(fs_type, True) is True
+
+    def test_an_unlisted_fuse_backend_is_still_latency_bound(self):
+        """A FUSE round trip is a context switch per call at best."""
+        from disktide.collectors.platform.models import is_latency_bound
+
+        assert is_latency_bound("fuse.somethingnew", False) is True
+        assert is_latency_bound("fuse", False) is True
+
+    @pytest.mark.parametrize("fs_type", ["virtiofs", "overlay", "xfs", "zfs"])
+    def test_local_types_stay_local(self, fs_type):
+        from disktide.collectors.platform.models import is_latency_bound
+
+        assert is_latency_bound(fs_type, False) is False
+
+
+class TestLatencyWorkerTiers:
+    """The knee moves with the latency; see `_LATENCY_WORKER_TIERS`."""
+
+    @pytest.mark.parametrize(
+        "ms, expected, tier",
+        [
+            (0.1, 8, "measured network base"),
+            (0.49, 8, "measured network base"),
+            (0.5, 16, "0.5 ms/entry tier"),
+            (0.99, 16, "0.5 ms/entry tier"),
+            (1.0, 32, "1 ms/entry tier"),
+            (2.9, 32, "1 ms/entry tier"),
+            (3.0, 64, "3 ms/entry tier"),
+            (12.0, 64, "3 ms/entry tier"),
+        ],
+    )
+    def test_each_tier_and_its_reason(self, ms, expected, tier):
+        workers, reason = _latency_pick("nfs4", ms)
+        assert workers == expected
+        assert tier in reason
+        assert f"{expected} workers" in reason
+
+    def test_an_unsampled_latency_mount_keeps_the_measured_base(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=4,
+            load_average=(0.0, 0.0, 0.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            sample_entries=0,
+            sample_outcome="not-run",
+        )
+        assert workers == 8
+        assert "measured network base" in reason
+
+    def test_the_cpu_cap_does_not_apply_to_a_latency_bound_mount(self):
+        """A thread asleep in a syscall is not holding a core open."""
+        workers, _reason = _latency_pick("fuse.sshfs", 5.0, cpus=2)
+        assert workers == 64
+
+    def test_the_cpu_cap_still_applies_to_a_slow_local_mount(self):
+        workers, reason = _latency_pick("xfs", 5.0, cpus=2)
+        assert workers == 2
+        assert "high latency" in reason
+
+    def test_a_slow_local_mount_keeps_its_conservative_cap(self):
+        """A local mount that samples slow is a busy or failing disk."""
+        workers, reason = _latency_pick("ext4", 5.0, cpus=16)
+        assert workers == 4
+        assert "high latency" in reason
+
+    def test_a_fast_local_mount_is_unchanged(self):
+        workers, reason = _latency_pick("xfs", 0.004, cpus=16)
+        assert workers == 1
+        assert "low-latency local metadata" in reason
+
+    def test_a_shared_host_still_caps_a_latency_bound_mount_at_two(self):
+        """Being a guest is not latency-dependent.
+
+        The threads sleep, but the node building between the sleeps does
+        not: eight workers on a warm NFS mount burn 1.54 cores against 0.42
+        for one, on a box nobody gave us a claim to.
+        """
+        workers, reason = _latency_pick(
+            "fuse.rclone",
+            5.0,
+            allocation=_allocation("shared", total=16, available=16, others=3),
+        )
+        assert workers == 2
+        assert "shared host" in reason
+
+    def test_an_allocated_host_gets_the_whole_tier(self):
+        workers, _reason = _latency_pick(
+            "fuse.rclone",
+            5.0,
+            allocation=_allocation("allocated", total=128, available=10),
+        )
+        assert workers == 64
+
+    def test_low_memory_still_forces_serial(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=16,
+            load_average=(0.0, 0.0, 0.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=256,
+            fs_type="fuse.s3fs",
+            sample_entries=16,
+            sample_elapsed_seconds=0.08,
+            sample_outcome="sampled",
+        )
+        assert workers == 1
+        assert "low memory" in reason
