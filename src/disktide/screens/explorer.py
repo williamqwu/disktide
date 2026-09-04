@@ -48,6 +48,7 @@ from disktide.rendering import (
     set_ring_shape,
 )
 from disktide.models.tree import FSNode
+from disktide.scanner.gcpause import FREEZE_MIN_ENTRIES, recollect_retained
 from disktide.scanner.walker import classify_symlink
 from disktide.screens import (
     RenderEpochRefreshMixin,
@@ -249,6 +250,9 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._live_ui_at = 0.0
         self._live_ui_cpu = 0.0
         self._live_ui_timer: Timer | None = None
+        #: One-shot that reclaims what the finished scan's freeze pinned.
+        #: See `_arm_retained_recollect`.
+        self._recollect_timer: Timer | None = None
         self._live_changed: tuple[FSNode, ...] = ()
         #: Acknowledgement for the newest frame the scan has handed over.
         #: Called once the frame has been *applied*, not when it arrives:
@@ -617,6 +621,10 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # Update only the active viz tab
         self._update_active_viz(root)
         self._update_status()
+        # Last, and on a delay: the frames this scan published are still
+        # pinned in the permanent generation, and the rows that held them
+        # only became garbage in the lines above.
+        self._arm_retained_recollect()
 
     # One gate covers everything a live snapshot costs the UI thread: the
     # tree panel's relabelling, the chart, and the compositor pass those
@@ -732,6 +740,63 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             node, self._live_changed or (node,)
         )
         self._update_active_viz(node, visual_node=self._live_view_snapshot)
+
+    #: How long after a completion the collector is handed the old frames.
+    #: Long enough that the completion render -- the tree reload, the
+    #: full-depth chart, the category index -- is done and its intermediates
+    #: are garbage too, short enough that a user pressing `r` twice in a row
+    #: is unlikely to land inside it.
+    _RECOLLECT_DELAY = 1.0
+
+    def _arm_retained_recollect(self) -> None:
+        """Reclaim what the scan's freeze pinned, once the screen has settled.
+
+        The scanner freezes the tree at the end of the walk, which is the
+        cheapest moment to do it but the wrong moment to *reclaim* from: what
+        is alive then is the live snapshot the scan was publishing, still held
+        by the rows drawn from it. This screen swaps that for the final tree a
+        moment later, and only then do those rows become garbage -- pinned,
+        and so invisible to the collector until some later scan unfreezes
+        them. Left alone that is one whole tree of steady state: three
+        rescans of an 88,000-directory tree sat at 1245, 1703, 1700 MB where
+        the same three before any of this sat at 1249-1267.
+
+        So: one deliberate full collection, ~0.7 s, once per completed large
+        scan, on this thread and visible as a pause. What it buys is that
+        nothing pauses while the user is browsing, because everything that
+        survives it goes straight back into the permanent generation where no
+        collection looks. A scan is what a user expects to cost something;
+        scrolling a finished tree is not.
+
+        Skipped below `FREEZE_MIN_ENTRIES`, because nothing was frozen; the
+        timer replaces any pending one, and `recollect_retained` itself does
+        nothing while a scan is running.
+        """
+        self._cancel_retained_recollect()
+        root = self._root
+        if root is None:
+            return
+        if root.file_count + root.dir_count < FREEZE_MIN_ENTRIES:
+            return
+        self._recollect_timer = self.set_timer(
+            self._RECOLLECT_DELAY, self._run_retained_recollect
+        )
+
+    def _run_retained_recollect(self) -> None:
+        self._recollect_timer = None
+        if self._scan_in_progress:
+            # A new scan started inside the delay. Its own completion will
+            # arm this again, and `recollect_retained` would refuse anyway.
+            return
+        seconds = recollect_retained()
+        if seconds:
+            self.log.debug(f"retained-tree recollect took {seconds:.3f}s")
+
+    def _cancel_retained_recollect(self) -> None:
+        timer = self._recollect_timer
+        self._recollect_timer = None
+        if timer is not None:
+            timer.stop()
 
     def _arm_live_ui_timer(self, delay: float) -> None:
         self._cancel_live_ui_timer()
@@ -976,6 +1041,9 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             severity="warning",
             timeout=4,
         )
+        # A cancelled scan froze whatever it had published by the time it
+        # stopped, and this screen has just dropped the live snapshot.
+        self._arm_retained_recollect()
 
     def _on_scan_failed(
         self,
@@ -1022,6 +1090,9 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             severity="error",
             timeout=8,
         )
+        # Same as a completion: whatever the failed scan had published is
+        # pinned, and the live snapshot holding it has just gone.
+        self._arm_retained_recollect()
 
     def _update_active_viz(
         self,

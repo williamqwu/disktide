@@ -34,6 +34,12 @@ Prints one JSON line:
                     that stops saying "Scanning", so without the second it
                     is in there too
     peak_rss_mb     VmHWM
+    rescans         with `--rescans N`, one entry per extra scan driven from
+                    the keyboard, each with its own wall time and the RSS
+                    the process was holding when it finished -- the real-TUI
+                    half of `tool/soak_memory.py`, and the only place the
+                    cyclic garbage a live app makes while the collector is
+                    paused can actually be seen
 
 The thread keys are `main` and `python#<tid>`: CPython 3.12 does not set the
 OS thread name, so every `/proc/<pid>/task/*/comm` reads `python` and the tid
@@ -63,6 +69,9 @@ ap.add_argument("--python", default=os.path.expanduser("~/.local/share/uv/tools/
 ap.add_argument("--aspect", default="2.43")
 ap.add_argument("--pyspy", default=None, help="record a py-spy raw profile to this file")
 ap.add_argument("--timeout", type=float, default=1200)
+ap.add_argument("--rescans", type=int, default=0,
+                help="after the first scan, press r,r this many times and "
+                     "report RSS after each -- the real-TUI memory soak")
 a = ap.parse_args()
 
 cols, rows = a.size.split("x")
@@ -177,11 +186,91 @@ while True:
     time.sleep(0.1)
 
 sample_threads(pid, threads)
+
+
+def _read_rss():
+    for line in pathlib.Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("VmRSS"):
+            return int(line.split()[1]) // 1024
+    return None
+
+
+rss_after_first = _read_rss()
+
+
+def memory_mb():
+    """(current, peak) resident MiB. Peak only rises, current can fall."""
+    current = peak = None
+    for line in pathlib.Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("VmHWM"):
+            peak = int(line.split()[1]) // 1024
+        elif line.startswith("VmRSS"):
+            current = int(line.split()[1]) // 1024
+    return current, peak
+
+
+def watch_one_scan(limit):
+    """Wait for "Scanning" to appear in the pane and then to leave again."""
+    started = None
+    silent = 0
+    while True:
+        text = pane()
+        moment = time.monotonic()
+        if "Scanning" in text:
+            silent = 0
+            if started is None:
+                started = moment
+        elif started is not None and "Explore" not in text:
+            silent += 1
+            if silent >= 3:
+                return started, moment
+        if moment > limit:
+            sys.exit("a rescan never finished:\n" + text)
+        time.sleep(0.1)
+
+
+# The real-TUI half of `tool/soak_memory.py`. Pausing the collector for a
+# walk and freezing the finished tree are both bets about a process that
+# keeps scanning; a headless loop cannot see what a live Textual app
+# allocates while the collector is off, and this can.
+rescans = []
+for attempt in range(a.rescans):
+    # `r` opens a confirm modal and `r` again answers it; a rescan is slow
+    # enough that the app gates it behind a keystroke. Re-sent until the
+    # scan actually starts: the screen reclaims the last scan's frames a
+    # second after it finishes, which holds the GIL for the better part of a
+    # second, and a keystroke that lands in there can be dropped.
+    began = None
+    for _ in range(6):
+        tmux("send-keys", "-t", "cap", "r")
+        time.sleep(0.6)
+        tmux("send-keys", "-t", "cap", "r")
+        started_by = time.monotonic() + 5
+        while time.monotonic() < started_by:
+            if "Scanning" in pane():
+                began = True
+                break
+            time.sleep(0.1)
+        if began:
+            break
+    if not began:
+        sys.exit("a rescan never started:\n" + pane())
+    began, ended = watch_one_scan(time.monotonic() + a.timeout)
+    current, high = memory_mb()
+    rescans.append({
+        "rescan": attempt + 1,
+        "scan_wall_s": round(ended - began, 2),
+        "rss_mb": current,
+        "peak_rss_mb": high,
+    })
+    # Long enough for the screen's post-completion recollect to have run and
+    # finished before the next rescan is asked for, so the RSS above is the
+    # settled number rather than a snapshot taken mid-reclaim.
+    time.sleep(3.0)
+    rescans[-1]["settled_rss_mb"] = memory_mb()[0]
+
 proc = read_stat(f"/proc/{pid}/stat")
-rss = None
-for line in pathlib.Path(f"/proc/{pid}/status").read_text().splitlines():
-    if line.startswith("VmHWM"):
-        rss = int(line.split()[1]) // 1024
+rss = memory_mb()[1]
 if spy is not None:
     spy.send_signal(signal.SIGINT)
     try:
@@ -202,4 +291,6 @@ print(json.dumps({
     "threads_walking": {
         k: round(v, 2) for k, v in sorted(walking.items(), key=lambda kv: -kv[1])
     },
+    "rss_after_first_scan_mb": rss_after_first,
+    "rescans": rescans,
 }))

@@ -235,6 +235,7 @@ default_action = "safe"
 | `tool/make_homelike` | Build the benchmark fixture: 88,000 dirs / 888,100 files, deterministic for a seed. |
 | `tool/tui_time` | Time one scan in the *real* TUI, under a private tmux server, with per-thread CPU. |
 | `tool/spy_agg` | Aggregate a `py-spy record --format raw --threads` profile per thread. |
+| `tool/soak_memory` | Scan one tree N times in one process and watch RSS. The memory half of `soak_scan`, which is a randomised *invariants* soak. |
 
 ### Benchmarking a scan
 
@@ -301,6 +302,31 @@ read as walk workers, then the scheduler (which runs inside Textual's
 `--pyspy FILE` records a profile over the scan; aggregate it per thread with
 `tool/spy_agg.py --grep <function>`. Sample counts only compare at the same
 `--rate`.
+
+**A profile cannot see the garbage collector.** A collection runs inside
+whichever allocation crossed the threshold, so py-spy charges its time to the
+scanner's own frames — two rounds of profiling attributed a live scan's floor
+to the publish path before `gc.callbacks` showed that a quarter of the scan
+was collection. `bench_scan --json` reports a `gc` object
+(`full_collections`, `young_collections`, `seconds`, `paused`) for exactly
+this reason; read it before believing a profile about where a scan's time
+went.
+
+Memory is its own measurement and needs its own tool, because
+`scanner/gcpause.py` pauses the collector for a walk and freezes the finished
+tree:
+
+```bash
+python tool/soak_memory.py $FIX/d1 --iterations 20 --mode raw   # and --mode live
+python tool/tui_time.py $FIX --rescans 3 --src $PWD/src --xdg /tmp/xdg ...
+```
+
+Two traps in reading those numbers. `gc.get_objects()` does **not** report the
+permanent generation, so after a freeze it reads as an almost-empty heap and a
+leak check built on it always passes. And repeated scans in one process grow
+RSS by about 2 MB an iteration through allocator fragmentation, on this branch
+and on every revision before it — so a soak's verdict is only meaningful
+against the same soak on the base, never against zero.
 
 ## Running the TUI in Dev Mode
 

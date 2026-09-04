@@ -62,6 +62,7 @@ is best effort and degrades gracefully if it changes upstream.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import platform
@@ -71,6 +72,47 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from disktide.scanner.engine import ScanEngine
+
+
+class _GCWatch:
+    """What the cyclic collector did during the run.
+
+    A collection runs inside whichever allocation crossed the threshold, so
+    py-spy charges its time to the scanner's own frames and a profile cannot
+    show it at all. `gc.callbacks` can: it fires around every collection with
+    the generation it is collecting. On the 88,000-directory fixture that was
+    22 % of a raw scan and 30 % of a live one before the walk started pausing
+    the collector, and it is the first thing to look at if a scan gets slower
+    for no visible reason.
+    """
+
+    def __init__(self):
+        self.young = 0
+        self.full = 0
+        self.seconds = 0.0
+        self._started = 0.0
+        self._paused_seen = False
+
+    def __call__(self, phase, info):
+        if phase == "start":
+            self._started = time.perf_counter()
+            return
+        self.seconds += time.perf_counter() - self._started
+        if info.get("generation", 0) >= 2:
+            self.full += 1
+        else:
+            self.young += 1
+
+    def note_pause(self) -> None:
+        self._paused_seen = True
+
+    def summary(self) -> dict:
+        return {
+            "full_collections": self.full,
+            "young_collections": self.young,
+            "seconds": round(self.seconds, 3),
+            "paused": self._paused_seen,
+        }
 
 
 def _print_summary(root, elapsed: float) -> None:
@@ -84,6 +126,28 @@ def _print_summary(root, elapsed: float) -> None:
         f"dirs={dirs:,}  files={files:,}  "
         f"size={size:,}B ({gb:.2f}GB)  "
         f"rate={rate:,.0f} files/sec",
+        flush=True,
+    )
+
+
+def _watched_scan(engine, path: str, watch: _GCWatch):
+    """`engine.scan`, noting whether the collector was off while it ran."""
+
+    def note(_path: str) -> None:
+        if not gc.isenabled():
+            watch.note_pause()
+
+    engine._directory_observer = note
+    return engine.scan(path)
+
+
+def _print_gc(watch: _GCWatch) -> None:
+    data = watch.summary()
+    print(
+        f"bench: gc full={data['full_collections']} "
+        f"young={data['young_collections']} "
+        f"time={data['seconds']:.2f}s "
+        f"paused_during_walk={data['paused']}",
         flush=True,
     )
 
@@ -246,6 +310,9 @@ def main() -> int:
             print(f"bench: {exc}", file=sys.stderr)
             return 2
 
+    watch = _GCWatch()
+    gc.callbacks.append(watch)
+
     path = os.path.abspath(os.path.expanduser(args.path))
     if not args.json_output:
         print(f"bench: scanning {path}", flush=True)
@@ -259,7 +326,7 @@ def main() -> int:
 
     if args.mode == "raw":
         t0 = time.monotonic()
-        root = engine.scan(path)
+        root = _watched_scan(engine, path, watch)
         elapsed = time.monotonic() - t0
         if args.json_output:
             stats = engine.scheduler_stats
@@ -284,11 +351,13 @@ def main() -> int:
                             else None
                         ),
                         "scheduler": asdict(stats) if stats is not None else None,
+                        "gc": watch.summary(),
                     },
                     sort_keys=True,
                 )
             )
             return 0
+        _print_gc(watch)
         _print_summary(root, elapsed)
         return 0
 
@@ -347,6 +416,14 @@ def main() -> int:
             pending, held = held, None
             apply(pending, now)
 
+    directory_seen = [False]
+
+    def note_directory(_path: str) -> None:
+        if not directory_seen[0]:
+            directory_seen[0] = True
+            if not gc.isenabled():
+                watch.note_pause()
+
     run = ScanService().scan(
         ScanRequest(
             path=path,
@@ -355,6 +432,7 @@ def main() -> int:
             source=f"bench-{args.mode}",
         ),
         consumers=(consume,),
+        directory_observer=note_directory,
     )
     elapsed = time.monotonic() - t0
     if run.root is None:
@@ -408,6 +486,7 @@ def main() -> int:
                     "live_frames_applied": live_applied,
                     "consume_every_frame": every_frame,
                     "paint": None if painter is None else painter.summary(),
+                    "gc": watch.summary(),
                     "resource_wait_seconds": run.resource_wait_seconds,
                     "worker_selection": (
                         asdict(run.worker_selection)
@@ -467,6 +546,7 @@ def main() -> int:
             f"pacing={'every frame' if painter.every_frame else 'duty cycle'}",
             flush=True,
         )
+    _print_gc(watch)
     _print_summary(run.root, elapsed)
     return 0
 

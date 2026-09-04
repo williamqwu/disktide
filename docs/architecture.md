@@ -199,6 +199,94 @@ The recursive `scanner.walker.scan_directory()` and `ScanEngine().scan(path)`
 APIs remain for diagnostics and `tool/` scripts; product code does not
 construct the engine directly.
 
+### The Collector and the Scan
+
+A scan builds about a million objects the cyclic garbage collector tracks —
+one `LeafNode` per file, one `FSNode` and one child list per directory — and
+every one of them is acyclic. A node points at its children, at strings and
+at numbers; `parent_path` is spelled from the path string, `_sorted_cache`
+points down, `LiveViewNode.children` is a tuple of children, and the
+scheduler's `_DirectoryState` holds a node without the node holding it. So a
+full collection during a scan walks the whole tree looking for cycles it
+cannot find, and does that again every time the allocation counter crosses
+its threshold — nine to twelve times on a tree that size.
+
+Measured on the 88,000-directory fixture at one worker, that is **22% of a
+raw scan and 30% of a live one**. Two rounds of profiling missed it, and
+could not have found it: a collection runs inside whichever allocation
+triggered it, so py-spy charges its time to `_scan_open_directory`,
+`make_file_node` and `_apply_result`. `gc.callbacks` is what sees it, which
+is why `tool/bench_scan.py --json` now reports a `gc` object.
+
+`scanner/gcpause.py` has two halves, and they answer different questions:
+
+- **`collector_paused()`** covers the walk. Counted and thread-safe, so
+  `ScanEngine.scan` and `ScanService._execute_active` can both take it; it
+  restores whatever state it found, including leaving the collector off for
+  an embedder that had turned it off. It is process-wide — there is no
+  per-thread collector — so cyclic garbage that a live UI makes during a scan
+  is deferred until the scan ends.
+- **`freeze_retained_tree()`** covers what is left. A finished tree is
+  usually the tree the process keeps, so every full collection after it walks
+  a million objects again, this time as a pause on whichever thread Python
+  was running — 720-770 ms with the fixture's tree resident, and 0.0 ms once
+  it is frozen. Called from `ScanEngine.scan` inside the pause, and gated at
+  `FREEZE_MIN_ENTRIES`, below which freezing buys nothing and a suite of
+  twenty-node fixtures would freeze its heap hundreds of times. **The first
+  freeze in a process collects nothing**: there is nothing pinned to hand
+  back and the walk's own objects are acyclic, so that collection could only
+  walk a million nodes and find none — 0.7 to 1.3 s that `disktide scan` paid
+  on its way out and got nothing for. Every freeze after it unfreezes first
+  and then must collect, because what the last one pinned is now partly dead.
+- **`recollect_retained()`** is the same three steps run by whoever *owns*
+  the tree, and it exists because the walk cannot do this part. What the walk
+  freezes is the live snapshot it was publishing, still held by the rows
+  drawn from it; the screen swaps that for the final tree a moment later, and
+  only then do those rows become garbage — after the freeze, so pinned.
+  `ExplorerScreen` arms a one-shot a second after completion (and after
+  cancel or failure) that runs it on the UI thread. It is one deliberate
+  pause per completed large scan — 2.2-2.8 s measured in the real TUI on the
+  88,000-directory fixture, where the heap at that moment holds the finished
+  tree, the frames the scan published and the widget graph — in exchange for
+  none at all while the user browses afterwards. It refuses while a scan is
+  running.
+
+The tree being acyclic is necessary and **not sufficient**, and the
+difference is the whole reason for the unfreeze and the recollect.
+Refcounting frees a frozen tree when the next scan replaces it, which is what
+`tests/test_gc_floor.py` pins for all four node types. But what matters is
+whether anything *holding* the tree is cyclic, and behind the explorer it is:
+a Textual widget graph is full of cycles and keeps node data on the rows it
+has materialised. Pinned, those widgets stopped being collected once they
+became garbage, and each held a whole tree — three rescans of the fixture in
+the real TUI went 654 MB, 1251, 1847, 2440 and climbing, against a flat
+1250-1260 on the base. Handing the last freeze back at the next one bounded
+that; reclaiming after completion, where the garbage actually is, brings it
+back to the base — three rescans at 1249, 1256, 1254 MB resident (1264 once
+settled) against a base at 1248, 1272, 1259.
+
+One trap that cost a whole round of measurements. The embedder check —
+"has anything been frozen that we did not freeze" — was asked as
+`gc.get_freeze_count() != 0`, and that is **not** zero on every interpreter:
+the one `uv tool install` builds starts with 375 objects in the permanent
+generation where a plain venv starts with none. So the freeze quietly turned
+itself off on the interpreter the app and every benchmark run on, and stayed
+on in the venv the tests run in. Nothing failed and no test caught it; the
+numbers were simply measuring the pause alone. It is asked against
+`_BASELINE_FROZEN`, captured at import, and `tests/test_gc_floor.py` pins
+that a non-empty starting permanent generation still freezes.
+
+`tests/test_gc_floor.py` also pins that the collector comes back on from
+every exit a scan has, and that each freeze hands the last one back. If a
+node ever grows a back-reference, that test fails before the leak reaches
+`watch`, which scans the same tree for days.
+
+Two things to know when measuring: `gc.get_objects()` does **not** report the
+permanent generation, so after a freeze it reads as an almost empty heap; and
+repeated scans in one process grow RSS by 1-2 MB an iteration through
+allocator fragmentation, which predates all of this and is smaller with the
+freeze than without it (`tool/soak_memory.py`).
+
 ### Adaptive Worker Count
 
 `sysinfo.select_scan_workers()` resolves policy against the actual scan

@@ -11,7 +11,11 @@ from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate, ScanWorkerSelection
 from disktide.models.tree import FSNode
 from disktide.scanner.accounting import finalize_unique_allocated
-from disktide.scanner.gcpause import collector_paused
+from disktide.scanner.gcpause import (
+    FREEZE_MIN_ENTRIES,
+    collector_paused,
+    freeze_retained_tree,
+)
 from disktide.scanner.policy import discover_pseudo_mounts, paths_stay_canonical
 from disktide.scanner.progress import ProgressThrottle, ScanProgress
 from disktide.scanner.scheduler import (
@@ -80,6 +84,9 @@ class ScanEngine:
         self._directory_observer = directory_observer
         self._walk_complete_callback = walk_complete_callback
         self._scheduler_stats: SchedulerStats | None = None
+        #: Seconds the post-scan collect-and-freeze took, or 0.0 when
+        #: the tree was too small to be worth freezing.
+        self._freeze_seconds = 0.0
 
     def cancel(self) -> None:
         self._cancel_event.set()
@@ -93,6 +100,12 @@ class ScanEngine:
         return self._scheduler_stats
 
     @property
+    def freeze_seconds(self) -> float:
+        """Seconds spent collecting and freezing after the last scan."""
+
+        return self._freeze_seconds
+
+    @property
     def workers(self) -> int:
         return self._workers
 
@@ -104,7 +117,23 @@ class ScanEngine:
         """Scan a directory tree while preserving ``ScanEngine().scan()``."""
 
         with collector_paused():
-            return self._scan(path)
+            root = self._scan(path)
+            # Inside the pause, deliberately. A paused walk leaves every
+            # object it built in the young generation, so the first
+            # collection after the collector comes back walks the whole tree
+            # -- 0.67 s on the 88,000-directory fixture -- and the ones after
+            # that walk it again as it is promoted. `freeze_retained_tree`
+            # pays that once, here, and moves what survives where no later
+            # collection looks.
+            #
+            # Here rather than in `ScanService`, which is where "the tree the
+            # process keeps" is decided, because this is the one place every
+            # tree in the codebase is finished: the service's `LocalScanner`
+            # comes through here, and so do the `tool/` scripts that do not
+            # use the service at all.
+            if root.file_count + root.dir_count >= FREEZE_MIN_ENTRIES:
+                self._freeze_seconds = freeze_retained_tree()
+            return root
 
     def _scan(self, path: str) -> FSNode:
         # Paused here as well as in `ScanService._execute_active`, and the
