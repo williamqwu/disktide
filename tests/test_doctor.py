@@ -113,7 +113,7 @@ def test_doctor_reports_watch_backend_version_and_configured_mode(
     payload = report.to_dict()
     watch = payload["optional_extras"]["watch"]
 
-    assert payload["schema_version"] == 6
+    assert payload["schema_version"] == 7
     assert payload["config"]["monitor_event_mode"] == "auto"
     assert watch["available"] is True
     assert watch["version"] == "2.0.1"

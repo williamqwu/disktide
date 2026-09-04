@@ -252,7 +252,11 @@ def test_dump_tree_emits_one_sorted_line_per_node(tmp_path):
     cp = _run("dump_tree.py", str(tmp_path))
     assert cp.returncode == 0, cp.stderr
     lines = cp.stdout.splitlines()
-    header, rows = lines[0], lines[1:]
+    # Two header lines: which directory reader produced the dump, then the
+    # columns. The backend line is the only one allowed to differ between
+    # two dumps of the same tree.
+    backend, header, rows = lines[0], lines[1], lines[2:]
+    assert backend in ("#backend=native", "#backend=python")
     assert header.startswith("#path\tis_dir\t")
     assert header.split("\t")[1:] == list(
         (
@@ -271,10 +275,32 @@ def test_dump_tree_emits_one_sorted_line_per_node(tmp_path):
     assert by_path[str(tmp_path / "a.txt")][2] == "5"
 
 
+def test_dump_tree_backend_flag_selects_the_reader(tmp_path):
+    """`--backend` picks the directory reader and the header says which.
+
+    The bodies have to match: the two readers exist to produce the same
+    tree, and this is the check that runs on every commit rather than only
+    when somebody remembers to diff two fixtures.
+    """
+    _make_tree(tmp_path)
+    dumps = {}
+    for backend in ("native", "python"):
+        cp = _run("dump_tree.py", str(tmp_path), "--backend", backend)
+        assert cp.returncode == 0, cp.stderr
+        dumps[backend] = cp.stdout.splitlines()
+    assert dumps["python"][0] == "#backend=python"
+    # The extension is optional; where it is not built, `--backend native`
+    # honestly reports the fallback rather than pretending.
+    assert dumps["native"][0] in ("#backend=native", "#backend=python")
+    assert dumps["native"][1:] == dumps["python"][1:]
+
+
 def test_dump_tree_writes_a_file_when_asked(tmp_path):
     _make_tree(tmp_path)
     out = tmp_path.parent / "dump.txt"
     cp = _run("dump_tree.py", str(tmp_path), "-o", str(out))
     assert cp.returncode == 0, cp.stderr
     assert "dump_tree: 6 nodes ->" in cp.stderr
-    assert out.read_text().startswith("#path\t")
+    written = out.read_text().splitlines()
+    assert written[0].startswith("#backend=")
+    assert written[1].startswith("#path\t")

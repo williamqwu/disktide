@@ -17,14 +17,20 @@ The columns are the ones a scanner change can plausibly break -- sizes,
 counts, and the four "why is this subtree not here" flags -- and
 deliberately not mtime or inode, which move on their own between runs on a
 live tree.
+
+The first header line names the directory reader the dump was produced with
+-- `--backend native|python|auto` picks it -- so two dumps say what made
+them. It is the one line that legitimately differs between a native dump and
+a fallback dump of the same tree, so an identity check compares the rest:
+
+    diff <(tail -n +2 native.tsv) <(tail -n +2 python.tsv)
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-
-from disktide.scanner.engine import ScanEngine
 
 
 COLUMNS = (
@@ -61,9 +67,17 @@ def format_node(node) -> str:
 
 
 def dump(path: str, workers: int, stream) -> int:
+    # Imported here, not at module scope: `--backend` sets DISKTIDE_ACCEL,
+    # and `disktide.scanner.accel` reads it once, at import.
+    from disktide.scanner.accel import ACCEL_BACKEND
+    from disktide.scanner.engine import ScanEngine
+
     root = ScanEngine(workers=workers, scan_path=path).scan(path)
     lines = [format_node(node) for node in root.walk()]
     lines.sort()
+    # Its own line, not a column: a row and the column header have to keep
+    # the same field count for anything that reads this as a TSV.
+    stream.write(f"#backend={ACCEL_BACKEND}\n")
     stream.write("#" + "\t".join(COLUMNS) + "\n")
     stream.write("\n".join(lines))
     stream.write("\n")
@@ -75,7 +89,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("path", help="directory to scan")
     parser.add_argument("-o", "--out", default=None, help="output file")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "native", "python"),
+        default="auto",
+        help="directory reader: the extension, the fallback, or whatever "
+             "the environment already selects",
+    )
     args = parser.parse_args(argv)
+
+    if args.backend == "python":
+        os.environ["DISKTIDE_ACCEL"] = "0"
+    elif args.backend == "native":
+        os.environ.pop("DISKTIDE_ACCEL", None)
 
     if args.out is None:
         count = dump(args.path, args.workers, sys.stdout)

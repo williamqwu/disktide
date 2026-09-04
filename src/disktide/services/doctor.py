@@ -24,12 +24,13 @@ from disktide.extensions.capabilities import (
     CapabilityStatus,
 )
 from disktide.paths import cache_root, config_file, data_root, state_log_file
+from disktide.scanner.accel import ACCEL_BACKEND, ACCEL_REASON, NATIVE_AVAILABLE
 from disktide.scanner.sysinfo import detect_cpu_count, detect_cpu_quota
 from disktide.storage.database import Database
 from disktide.storage.migrations import CURRENT_VERSION, get_version
 
 
-DOCTOR_SCHEMA_VERSION = 6
+DOCTOR_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +182,14 @@ def build_doctor_report(
             "python_executable": Path(sys.executable).name,
             "textual_version": _distribution_version("textual"),
             "textual_plotext_version": _distribution_version("textual-plotext"),
-            "core_install": "pure-python",
+            # A wheel built where a compiler was found carries one optional
+            # C extension, the scanner's directory reader; a pure wheel and
+            # a compiler-less sdist install carry none and run the Python
+            # fallback. Which one is installed is a different question from
+            # which one is *in use* -- see the scanner block below.
+            "core_install": (
+                "native-accelerated" if NATIVE_AVAILABLE else "pure-python"
+            ),
         },
         platform={
             "system": platform_adapter.system,
@@ -192,6 +200,11 @@ def build_doctor_report(
             "cpu_available": cpu_available,
             "cgroup_cpu_quota": cpu_quota,
             "memory": memory,
+            "scanner": {
+                "backend": ACCEL_BACKEND,
+                "native_available": NATIVE_AVAILABLE,
+                "reason": ACCEL_REASON,
+            },
         },
         terminal=_terminal_report(),
         colour=_colour_report(config.ui.color_depth),
@@ -246,6 +259,7 @@ def render_doctor_report(report: DoctorReport) -> str:
             f" ({_cpu_quota_text(platform_info.get('cgroup_cpu_quota'))})"
         ),
         _memory_line(platform_info.get("memory")),
+        _scanner_line(platform_info.get("scanner")),
         "",
     ]
     lines.extend(_render_terminal_block(payload["terminal"]))
@@ -851,6 +865,22 @@ def _memory_line(memory: object) -> str:
     if isinstance(limit, int):
         line = f"{line} (cgroup limit: {limit} MB)"
     return line
+
+
+def _scanner_line(scanner: object) -> str:
+    """Which directory reader a scan on this machine will use.
+
+    The distinction the line has to carry is between "there is no extension
+    here" and "there is one and something switched it off", because the
+    answers are different: install a wheel for this platform, or unset
+    `DISKTIDE_ACCEL`.
+    """
+    if not isinstance(scanner, dict):
+        return "  Scanner: unknown"
+    backend = scanner.get("backend")
+    if backend == "native":
+        return "  Scanner: native (_scanfast)"
+    return f"  Scanner: python fallback ({scanner.get('reason', 'no reason given')})"
 
 
 def _safe_cpu_quota() -> float | None:

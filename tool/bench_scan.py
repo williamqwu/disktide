@@ -73,6 +73,11 @@ from datetime import datetime, timezone
 
 from disktide.scanner.engine import ScanEngine
 
+try:
+    from disktide.scanner.accel import ACCEL_BACKEND
+except ImportError:  # a disktide from before the accelerator
+    ACCEL_BACKEND = "python"
+
 
 class _GCWatch:
     """What the cyclic collector did during the run.
@@ -323,6 +328,9 @@ def main() -> int:
     if not args.json_output:
         print(f"bench: workers={workers}", flush=True)
         print(f"bench: mode={args.mode}", flush=True)
+        # Two runs of this script on one tree can differ by 40% on nothing
+        # but which directory reader was live; the line says which.
+        print(f"bench: scanner={ACCEL_BACKEND}", flush=True)
 
     if args.mode == "raw":
         t0 = time.monotonic()
@@ -339,6 +347,7 @@ def main() -> int:
                             "python": platform.python_version(),
                             "platform": platform.platform(),
                         },
+                        "scanner_backend": ACCEL_BACKEND,
                         "path": path,
                         "mode": args.mode,
                         "elapsed_seconds": elapsed,
@@ -468,6 +477,7 @@ def main() -> int:
                         "python": platform.python_version(),
                         "platform": platform.platform(),
                     },
+                    "scanner_backend": ACCEL_BACKEND,
                     "path": path,
                     "mode": args.mode,
                     "status": run.status.value,
