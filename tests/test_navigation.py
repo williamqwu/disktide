@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 
 from disktide.app import DiskTideApp
 from disktide.config import load_config
@@ -202,30 +203,49 @@ def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
     Regression: hit-test points across the viz panel during a live
     scan and assert the viz widget is what owns them.
     """
-    # A small tree, then we slow each subdir scan by monkey-patching the
-    # walker so the test reliably catches the mid-scan window even on a
-    # fast tmpfs / fast CI box.
-    for i in range(40):
+    # The mid-scan window is held open by a `threading.Event`, this
+    # suite's standing rule for a mid-scan observation, rather than by
+    # sleeping the walker and hoping the test gets there in time. The
+    # sleeping version bought ~1.2s of scan and started counting only
+    # once `wait_until` returned, so on a loaded two-core runner the
+    # explorer's boot and first 160x50 layout ate the whole window and
+    # the test failed with "scan finished before we could observe a
+    # mid-scan snapshot". A gate does not care how slow the boot was:
+    # the scan stops after a few directories and stays stopped until the
+    # hit-tests are done.
+    for i in range(8):
         d = tmp_path / f"top_{i:02d}"
         d.mkdir()
-        for j in range(5):
+        for j in range(3):
             (d / f"f_{j}.txt").write_text("x")
 
+    # The root plus the first two children go through; the next call
+    # blocks. One worker means one blocked call freezes the scan.
+    let_through = 3
+
     async def go():
-        import time
         from disktide.config import AppConfig
         from disktide.scanner import scheduler as scheduler_mod
         from disktide.widgets.sunburst_view import SunburstView
 
-        # Slow each directory task by 30ms so a 40-top-dir tree takes ~1.2s
-        # with workers=1, leaving comfortable mid-scan windows.
         orig_scan = scheduler_mod.scan_directory_once
+        gate = threading.Event()
+        admitted = 0
+        admitted_lock = threading.Lock()
 
-        def slow_scan(*args, **kwargs):
-            time.sleep(0.03)
+        def gated_scan(*args, **kwargs):
+            nonlocal admitted
+            with admitted_lock:
+                admitted += 1
+                index = admitted
+            if index > let_through:
+                # Bounded, so a test that never opens the gate fails on
+                # its own assertion instead of wedging the suite: the
+                # timeout expiring only lets the scan run to completion.
+                gate.wait(timeout=10.0)
             return orig_scan(*args, **kwargs)
 
-        scheduler_mod.scan_directory_once = slow_scan
+        scheduler_mod.scan_directory_once = gated_scan
 
         try:
             cfg = AppConfig()
@@ -235,49 +255,56 @@ def test_live_render_viz_visible_during_scan_not_occluded_by_overlay(tmp_path):
                 scan_path=str(tmp_path), show_welcome=False, config=cfg
             )
             async with app.run_test(size=(160, 50)) as pilot:
-                await wait_until(
-                    pilot,
-                    lambda: isinstance(app.screen, ExplorerScreen)
-                    and bool(app.screen.query("#sunburst-view")),
-                    what="the explorer never mounted its sunburst",
-                    tries=50,
-                    delay=0.05,
-                )
-                screen = app.screen
-                sv = screen.query_one("#sunburst-view", SunburstView)
-                # Wait until the live snapshot has actual children and
-                # the scan is still running.
-                saw_mid_scan = False
-                for _ in range(200):
-                    await pilot.pause(delay=0.02)
-                    if (
-                        sv._node is not None
-                        and len(sv._node.children) > 3
-                        and screen._scan_in_progress
-                    ):
-                        saw_mid_scan = True
-                        break
-                assert saw_mid_scan, (
-                    "scan finished before we could observe a mid-scan "
-                    "snapshot; the slow-scan monkey patch is not taking "
-                    "effect, or the tree is too small"
-                )
-
-                # The overlay panel is 60x12 centered on a 160x50 canvas:
-                # rows ~19-30, cols ~50-110. Probe points well outside.
-                outside_overlay = [
-                    (140, 10),   # upper-right of viz panel
-                    (130, 40),   # lower-right of viz panel
-                    (130, 5),    # right side, near top
-                ]
-                for x, y in outside_overlay:
-                    widget = screen.get_widget_at(x, y)[0]
-                    assert widget.__class__.__name__ == "SunburstView", (
-                        f"at ({x},{y}) during scan, expected SunburstView "
-                        f"to own the cell, got {widget.__class__.__name__} "
-                        f"id={widget.id}"
+                try:
+                    await wait_until(
+                        pilot,
+                        lambda: isinstance(app.screen, ExplorerScreen)
+                        and bool(app.screen.query("#sunburst-view")),
+                        what="the explorer never mounted its sunburst",
+                        tries=50,
+                        delay=0.05,
                     )
+                    screen = app.screen
+                    sv = screen.query_one("#sunburst-view", SunburstView)
+                    # The gate holds the scan, so this is a wait on the
+                    # live snapshot reaching the chart, not a race with
+                    # the scan finishing.
+                    await wait_until(
+                        pilot,
+                        lambda: (
+                            sv._node is not None
+                            and len(sv._node.children) > 3
+                            and screen._scan_in_progress
+                        ),
+                        what=(
+                            "the live snapshot never reached the sunburst "
+                            "while the scan was held at the gate"
+                        ),
+                        tries=100,
+                        delay=0.02,
+                    )
+
+                    # The overlay panel is 60x12 centered on a 160x50
+                    # canvas: rows ~19-30, cols ~50-110. Probe points
+                    # well outside.
+                    outside_overlay = [
+                        (140, 10),   # upper-right of viz panel
+                        (130, 40),   # lower-right of viz panel
+                        (130, 5),    # right side, near top
+                    ]
+                    for x, y in outside_overlay:
+                        widget = screen.get_widget_at(x, y)[0]
+                        assert widget.__class__.__name__ == "SunburstView", (
+                            f"at ({x},{y}) during scan, expected SunburstView "
+                            f"to own the cell, got {widget.__class__.__name__} "
+                            f"id={widget.id}"
+                        )
+                finally:
+                    # Before the app is torn down, so the held worker is
+                    # released by the test and not by the timeout.
+                    gate.set()
         finally:
+            gate.set()
             scheduler_mod.scan_directory_once = orig_scan
 
     asyncio.run(go())
