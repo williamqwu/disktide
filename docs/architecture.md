@@ -238,18 +238,37 @@ is why `tool/bench_scan.py --json` now reports a `gc` object.
   walk a million nodes and find none — 0.7 to 1.3 s that `disktide scan` paid
   on its way out and got nothing for. Every freeze after it unfreezes first
   and then must collect, because what the last one pinned is now partly dead.
-- **`recollect_retained()`** is the same three steps run by whoever *owns*
-  the tree, and it exists because the walk cannot do this part. What the walk
-  freezes is the live snapshot it was publishing, still held by the rows
-  drawn from it; the screen swaps that for the final tree a moment later, and
-  only then do those rows become garbage — after the freeze, so pinned.
-  `ExplorerScreen` arms a one-shot a second after completion (and after
-  cancel or failure) that runs it on the UI thread. It is one deliberate
-  pause per completed large scan — 2.2-2.8 s measured in the real TUI on the
-  88,000-directory fixture, where the heap at that moment holds the finished
-  tree, the frames the scan published and the widget graph — in exchange for
-  none at all while the user browses afterwards. It refuses while a scan is
-  running.
+- **`recollect_retained()`** runs the same three steps from whoever *owns*
+  the tree rather than from the walk that built it. Nothing in the app calls
+  it: it is kept, and tested, for an embedder that holds trees across scans
+  and has no equivalent of the releases below. The explorer used to arm it a
+  second after every completion, and that cost 2.2-2.8 s of stop-the-world on
+  the 88,000-directory fixture — a freeze right after a scan, which is
+  exactly when a user is looking at the screen.
+
+**The releases are what replaced it, and they are the better answer**: a
+refcount that reaches zero costs nothing, where a collection that finds the
+same garbage has to walk a million nodes first. Three references to a
+replaced tree outlive it, and each one is now dropped by assignment at the
+moment it goes stale:
+
+- **Every materialised row.** `Tree.clear()` does not delete rows, it stops
+  referring to them, and a `TreeNode` graph is cyclic — so the old rows
+  survive as an island still holding the `FSNode`s they were drawn from.
+  `SizeTree._release_row_data` walks them before `clear()`; `_unregister_subtree`
+  does the same for rows removed during a live update.
+- **`ScanRun.root`**, a second reference to a tree the screen already holds.
+  It outlives the run by more than it looks: `_run_scan` is a
+  `@work(thread=True)` and Textual keeps a worker's arguments for the life of
+  the worker record. `ExplorerScreen._release_retiring_run` nulls it once the
+  replacement tree is installed.
+- **The category rollup's worker argument**, for the same reason — a root
+  passed positionally to `@work` stays referenced by the `functools.partial`
+  Textual holds. It goes through `_category_index_source` instead.
+
+Measured in the real TUI, three rescans of the fixture: **1069, 1123, 1165 MB
+resident against a base at 1261, 1273, 1263** — the branch settles 8 % *below*
+the revision that never froze anything, with no collection pause at all.
 
 The tree being acyclic is necessary and **not sufficient**, and the
 difference is the whole reason for the unfreeze and the recollect.
@@ -261,9 +280,8 @@ has materialised. Pinned, those widgets stopped being collected once they
 became garbage, and each held a whole tree — three rescans of the fixture in
 the real TUI went 654 MB, 1251, 1847, 2440 and climbing, against a flat
 1250-1260 on the base. Handing the last freeze back at the next one bounded
-that; reclaiming after completion, where the garbage actually is, brings it
-back to the base — three rescans at 1249, 1256, 1254 MB resident (1264 once
-settled) against a base at 1248, 1272, 1259.
+that; releasing the three references above, so the tree's refcount reaches
+zero without any collection at all, is what removed it.
 
 One trap that cost a whole round of measurements. The embedder check —
 "has anything been frozen that we did not freeze" — was asked as

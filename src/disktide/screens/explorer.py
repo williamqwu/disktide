@@ -48,7 +48,6 @@ from disktide.rendering import (
     set_ring_shape,
 )
 from disktide.models.tree import FSNode
-from disktide.scanner.gcpause import FREEZE_MIN_ENTRIES, recollect_retained
 from disktide.scanner.walker import classify_symlink
 from disktide.screens import (
     RenderEpochRefreshMixin,
@@ -250,9 +249,6 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._live_ui_at = 0.0
         self._live_ui_cpu = 0.0
         self._live_ui_timer: Timer | None = None
-        #: One-shot that reclaims what the finished scan's freeze pinned.
-        #: See `_arm_retained_recollect`.
-        self._recollect_timer: Timer | None = None
         self._live_changed: tuple[FSNode, ...] = ()
         #: Acknowledgement for the newest frame the scan has handed over.
         #: Called once the frame has been *applied*, not when it arrives:
@@ -261,6 +257,15 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         #: "not until this screen has drawn the last".
         self._live_ack: Callable[[], None] | None = None
         self._active_run: ScanRun | None = None
+        #: The run whose tree the one now starting is about to replace. Its
+        #: `root` is a second reference to a tree this screen also holds, and
+        #: it outlives the run: Textual keeps the `@work` call's arguments
+        #: alive, so the `ScanRun` survives as long as the worker record
+        #: does. Released in `_release_retiring_run`.
+        self._retiring_run: ScanRun | None = None
+        #: The tree the category rollup should read. An attribute rather
+        #: than a worker argument; see `_build_category_index`.
+        self._category_index_source: FSNode | None = None
         # True while a scan is in flight. Used to gate drill-into (which
         # would otherwise read stale aggregates off the live snapshot)
         # and to decide whether to forward tree snapshots to the viz.
@@ -346,6 +351,11 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             if not force:
                 return
             self._scan_service.cancel(self._active_run.run_id)
+
+        # Whatever is on screen now is about to be replaced; remember which
+        # run is holding a second reference to it.
+        if self._active_run is not None:
+            self._retiring_run = self._active_run
 
         self._diff_mode = False
         self._space_time = None
@@ -621,10 +631,11 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # Update only the active viz tab
         self._update_active_viz(root)
         self._update_status()
-        # Last, and on a delay: the frames this scan published are still
-        # pinned in the permanent generation, and the rows that held them
-        # only became garbage in the lines above.
-        self._arm_retained_recollect()
+        # The tree this replaced is now unreferenced everywhere this screen
+        # can reach; drop the run's copy of it too and its refcount goes to
+        # zero here, rather than waiting for a collection that would have to
+        # walk a million nodes to find it.
+        self._release_retiring_run()
 
     # One gate covers everything a live snapshot costs the UI thread: the
     # tree panel's relabelling, the chart, and the compositor pass those
@@ -741,62 +752,22 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         )
         self._update_active_viz(node, visual_node=self._live_view_snapshot)
 
-    #: How long after a completion the collector is handed the old frames.
-    #: Long enough that the completion render -- the tree reload, the
-    #: full-depth chart, the category index -- is done and its intermediates
-    #: are garbage too, short enough that a user pressing `r` twice in a row
-    #: is unlikely to land inside it.
-    _RECOLLECT_DELAY = 1.0
+    def _release_retiring_run(self) -> None:
+        """Drop the previous run's hold on the tree it produced.
 
-    def _arm_retained_recollect(self) -> None:
-        """Reclaim what the scan's freeze pinned, once the screen has settled.
+        `ScanRun.root` is a second reference to a tree this screen keeps in
+        `_root`, and it outlives the run by more than it looks: `_run_scan`
+        is a `@work(thread=True)`, and Textual holds the call's arguments for
+        the life of the worker record, so the finished run -- and through it
+        a whole tree -- stays reachable long after anything wants it.
 
-        The scanner freezes the tree at the end of the walk, which is the
-        cheapest moment to do it but the wrong moment to *reclaim* from: what
-        is alive then is the live snapshot the scan was publishing, still held
-        by the rows drawn from it. This screen swaps that for the final tree a
-        moment later, and only then do those rows become garbage -- pinned,
-        and so invisible to the collector until some later scan unfreezes
-        them. Left alone that is one whole tree of steady state: three
-        rescans of an 88,000-directory tree sat at 1245, 1703, 1700 MB where
-        the same three before any of this sat at 1249-1267.
-
-        So: one deliberate full collection, ~0.7 s, once per completed large
-        scan, on this thread and visible as a pause. What it buys is that
-        nothing pauses while the user is browsing, because everything that
-        survives it goes straight back into the permanent generation where no
-        collection looks. A scan is what a user expects to cost something;
-        scrolling a finished tree is not.
-
-        Skipped below `FREEZE_MIN_ENTRIES`, because nothing was frozen; the
-        timer replaces any pending one, and `recollect_retained` itself does
-        nothing while a scan is running.
+        Nulling it is safe because nothing reads a *previous* run's root: the
+        screen takes its tree from the completion event, and the service
+        writes `run.root` rather than reading it back.
         """
-        self._cancel_retained_recollect()
-        root = self._root
-        if root is None:
-            return
-        if root.file_count + root.dir_count < FREEZE_MIN_ENTRIES:
-            return
-        self._recollect_timer = self.set_timer(
-            self._RECOLLECT_DELAY, self._run_retained_recollect
-        )
-
-    def _run_retained_recollect(self) -> None:
-        self._recollect_timer = None
-        if self._scan_in_progress:
-            # A new scan started inside the delay. Its own completion will
-            # arm this again, and `recollect_retained` would refuse anyway.
-            return
-        seconds = recollect_retained()
-        if seconds:
-            self.log.debug(f"retained-tree recollect took {seconds:.3f}s")
-
-    def _cancel_retained_recollect(self) -> None:
-        timer = self._recollect_timer
-        self._recollect_timer = None
-        if timer is not None:
-            timer.stop()
+        retiring, self._retiring_run = self._retiring_run, None
+        if retiring is not None and retiring is not self._active_run:
+            retiring.root = None
 
     def _arm_live_ui_timer(self, delay: float) -> None:
         self._cancel_live_ui_timer()
@@ -863,9 +834,19 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         marks a running pass cancelled -- this flag is what keeps two
         rollups off the CPU at once, and it has to be set on the UI thread
         here rather than inside a worker that may not have started yet.
+
+        The tree goes through an attribute rather than an argument, and that
+        is not a style choice. Textual keeps a worker's callable -- a
+        `functools.partial` over the arguments it was given -- for the life
+        of the worker record, so a root passed positionally is still
+        referenced long after the pass that used it finished. That was the
+        last thing holding a whole previous tree alive after a rescan, and
+        the only way to reclaim it was a full collection. One slot, always
+        the newest tree, which this screen is holding anyway.
         """
         self._category_index_running = True
-        self._category_index_worker(root)
+        self._category_index_source = root
+        self._category_index_worker()
 
     @work(
         thread=True,
@@ -880,8 +861,14 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # the worker even starts.
         description="build category index",
     )
-    def _category_index_worker(self, root: FSNode) -> None:
+    def _category_index_worker(self) -> None:
         """Roll a tree up into per-directory content shares.
+
+        Reads its tree from `_category_index_source` -- see
+        `_build_category_index` for why it is not an argument. A newer
+        request may have replaced it between the call and this line; that is
+        the right answer, and `_apply_category_index` is handed whichever
+        tree was actually read.
 
         Runs against live snapshots too. Their aggregates are partial, so a
         directory can be named for whatever landed first and change its
@@ -889,6 +876,10 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         carries, and far better than the alternative, which is a disc drawn
         entirely in the neutral directory colour until the scan ends.
         """
+        root = self._category_index_source
+        if root is None:
+            self.app.call_from_thread(self._settle_category_index, 0.0)
+            return
         started = monotonic()
         try:
             index = build_category_index(root)
@@ -1041,9 +1032,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             severity="warning",
             timeout=4,
         )
-        # A cancelled scan froze whatever it had published by the time it
-        # stopped, and this screen has just dropped the live snapshot.
-        self._arm_retained_recollect()
+        self._release_retiring_run()
 
     def _on_scan_failed(
         self,
@@ -1090,9 +1079,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             severity="error",
             timeout=8,
         )
-        # Same as a completion: whatever the failed scan had published is
-        # pinned, and the live snapshot holding it has just gone.
-        self._arm_retained_recollect()
+        self._release_retiring_run()
 
     def _update_active_viz(
         self,

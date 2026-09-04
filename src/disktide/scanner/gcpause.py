@@ -205,11 +205,15 @@ def recollect_retained() -> float:
     unfreezes them. That is one whole tree's worth of steady state, about a
     third of a rescanning explorer's resident memory.
 
-    So the reclaim belongs after completion, in the process that owns the
-    widgets. It costs a full collection with the tree resident, which is
-    ~0.7 s of one deliberate pause; in exchange nothing pauses while the user
-    browses, because everything that survives goes straight back into the
-    permanent generation.
+    Nothing in this application calls it. The explorer used to, a second
+    after every completion, and on the 88,000-directory fixture that was
+    2.2-2.8 s of stop-the-world at the moment a user has just got their
+    answer. It lets go of the three references that were holding the old
+    tree instead -- the size tree's discarded rows, the finished
+    `ScanRun.root`, and the category rollup's worker argument -- so the
+    refcount reaches zero and there is nothing left for a collection to
+    find. This is kept, and tested, for an embedder that holds trees across
+    scans and has no equivalent of those releases.
 
     Returns the seconds it took, or 0.0 when it did nothing. It does nothing
     when this module has never frozen anything -- there is no pin to hand

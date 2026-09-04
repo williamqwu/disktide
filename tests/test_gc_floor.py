@@ -522,3 +522,136 @@ def test_a_small_tree_is_not_worth_freezing(tmp_path):
 
     assert root.file_count + root.dir_count < FREEZE_MIN_ENTRIES
     assert engine.freeze_seconds == 0.0
+
+
+# --- releasing, rather than collecting -------------------------------------
+
+
+def test_a_rescan_releases_the_previous_tree_without_a_collection(tmp_path):
+    """The whole point of W11: no stop-the-world after a scan.
+
+    A finished tree is hundreds of megabytes and it is reachable from three
+    places that all outlive it, every one of which needs a *collection* to
+    reclaim rather than a refcount:
+
+    * every `TreeNode` the size tree had materialised. `Tree.clear()` does
+      not delete rows, it stops referring to them, and a `TreeNode` graph is
+      cyclic -- so the rows survive as an island still holding the nodes they
+      were drawn from. 282 rows kept 1,961 nodes alive on a small fixture.
+    * `ScanRun.root`, a second reference to the tree the screen already has,
+      kept alive by Textual holding a `@work` call's arguments for the life
+      of the worker record.
+    * the category rollup's own worker, which took the root positionally and
+      so kept a `functools.partial` over it for exactly as long.
+
+    All three are released by assignment now, at the moment they go stale.
+    This test is the one that says so: after a rescan, a weakref to the old
+    root is dead *before* anything collects. If it starts failing, the
+    explorer is back to needing `recollect_retained()` and a user is back to
+    a multi-second freeze after every scan.
+    """
+    import asyncio
+    import weakref
+
+    from disktide.app import DiskTideApp
+    from disktide.config import load_config
+    from tests.waiting import wait_for_explorer, wait_until
+
+    class _Marker:
+        """Weakref-able stand-in: a slotted node cannot carry one itself."""
+
+    was_enabled = gc.isenabled()
+    for index in range(24):
+        nested = tmp_path / f"d{index:02d}" / "inner"
+        nested.mkdir(parents=True)
+        for leaf in range(6):
+            (nested / f"f{leaf}").write_bytes(b"x" * 64)
+
+    async def go():
+        config = load_config()
+        config.ui.live_scan_render = "on"
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=config
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await wait_for_explorer(pilot, app)
+            # Off for the window this asserts in, and not as a nicety: a
+            # fixture small enough to run in a test is small enough that an
+            # ordinary young-generation pass reclaims the orphaned rows on
+            # its own, which would let this pass with every release below
+            # deleted. The tree is under `FREEZE_MIN_ENTRIES`, so nothing in
+            # the scan path collects either.
+            gc.disable()
+            marker = _Marker()
+            screen._root.scan_policy = marker
+            probe = weakref.ref(marker)
+            first_id = id(screen._root)
+            del marker
+
+            screen._start_scan(force=True)
+            await wait_until(
+                pilot,
+                lambda: screen._scan_in_progress,
+                what="the rescan never started",
+                tries=300,
+                delay=0.05,
+            )
+            await wait_until(
+                pilot,
+                lambda: (
+                    not screen._scan_in_progress and id(screen._root) != first_id
+                ),
+                what="the rescan never installed a new tree",
+                tries=600,
+                delay=0.05,
+            )
+            for _ in range(20):
+                await pilot.pause(0.05)
+
+            outlived = probe() is not None
+            gc.enable()
+            assert not outlived, (
+                "the previous scan's tree outlived the rescan that replaced "
+                "it, and only a full collection can reclaim it now -- which "
+                "on a real tree is a multi-second freeze right after a scan"
+            )
+
+    try:
+        asyncio.run(go())
+    finally:
+        if was_enabled:
+            gc.enable()
+        else:
+            gc.disable()
+
+
+def test_a_row_that_is_discarded_lets_go_of_its_node(tmp_path):
+    """The size tree's half of it, without booting an app."""
+    import weakref
+
+    from disktide.models.tree import FSNode
+    from disktide.widgets.size_tree import SizeTree
+
+    class _Marker:
+        pass
+
+    first = FSNode(name="a", path="/a", is_dir=True, size=10)
+    first.children = [FSNode(name="b", path="/a/b", is_dir=True, size=5)]
+    marker = _Marker()
+    first.scan_policy = marker
+    probe = weakref.ref(marker)
+    del marker
+
+    tree = SizeTree()
+    tree.reload(first)
+    assert any(
+        node.data is first for node in tree._tree_nodes.values()
+    ), "the fixture never materialised a row for the root"
+
+    second = FSNode(name="a", path="/a", is_dir=True, size=20)
+    tree.reload(second)
+    del first
+
+    assert probe() is None, (
+        "a reloaded tree still holds the nodes its old rows were drawn from"
+    )

@@ -416,10 +416,14 @@ def test_category_rollup_backs_off_by_its_own_cost(monkeypatch):
     screen._category_index_running = False
     screen._category_index_cost = 0.4
     screen._category_index_at = time.monotonic()
+    # The worker reads its tree from `_category_index_source` rather than
+    # taking it as an argument, so that Textual's hold on a worker's
+    # arguments cannot keep a whole scan tree alive after a rescan; see
+    # `ExplorerScreen._build_category_index`.
     monkeypatch.setattr(
         ExplorerScreen,
         "_category_index_worker",
-        lambda self, root: dispatched.append(root),
+        lambda self: dispatched.append(self._category_index_source),
     )
     root = _small_tree()
 
