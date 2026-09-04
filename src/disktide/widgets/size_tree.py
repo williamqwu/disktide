@@ -224,7 +224,21 @@ class SizeTree(Tree[FSNode]):
             self._live_update_count += 1
             return
 
-        changed_by_path = {node.path: node for node in changed_nodes}
+        # Filtered to the rows that exist before anything is sorted. A frame
+        # carries every directory that settled since the last one plus each
+        # of their ancestor chains -- thousands of nodes, tens of thousands
+        # when the frames are paced by this widget rather than by a clock --
+        # and this tree has materialised the scan root's children and
+        # whatever the user expanded, which is dozens. Sorting the full set
+        # with a lambda key (one Python frame per item) to discard all but
+        # those dozens measured a second inside one apply, and the apply runs
+        # on the UI thread, which is the scan's thread too.
+        materialised = self._tree_nodes
+        changed_by_path = {
+            node.path: node
+            for node in changed_nodes
+            if node.path in materialised
+        }
         changed_by_path[root_node.path] = root_node
         self._fs_root = root_node
 
@@ -232,7 +246,7 @@ class SizeTree(Tree[FSNode]):
             changed_by_path.items(),
             key=lambda item: (item[1].depth, item[0]),
         ):
-            tree_node = self._tree_nodes.get(path)
+            tree_node = materialised.get(path)
             if tree_node is None:
                 continue
             tree_node.data = node

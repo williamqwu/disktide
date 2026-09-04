@@ -35,10 +35,16 @@ _DEFAULT_ENTRY_CHUNK_SIZE = 256
 # Python frame per comparison key; attrgetter builds the same tuple in C.
 _NAME_PATH_KEY = attrgetter("name", "path")
 
-# The published frame lists its changed directories shallowest first. A few
-# hundred nodes per publish and a few hundred publishes: enough that the sort
-# key should not be a Python frame per comparison.
-_DEPTH_PATH_KEY = attrgetter("depth", "path")
+# A published frame used to list its changed directories shallowest first.
+# Nothing consumed that order: the one consumer that cares about depth --
+# `SizeTree.apply_live_update` -- builds a path->node dict from the tuple and
+# sorts the handful of rows it has actually materialised. Sorting a few
+# thousand nodes on the scheduler thread to have every one of them thrown
+# away was 24 % of that thread's self time in a live scan, and every
+# millisecond of it is a millisecond the walk does not run (one GIL).
+# The tuple now ships in `_changed_nodes` insertion order, which is
+# `_record_changed`'s: a settled directory first, then its ancestors up to
+# the first one already recorded this generation.
 
 # Results are applied in path order within each batch the scheduler picks up,
 # so a tree is built the same way whatever order the workers happen to
@@ -1694,10 +1700,13 @@ class TreeScanScheduler:
         if not force:
             self._tree_first_after_force = False
         root = self._states[self._root_path].node
-        changed_nodes = tuple(
-            sorted(self._changed_nodes.values(), key=_DEPTH_PATH_KEY)
-        )
-        stable_paths = frozenset(self._stable_paths)
+        changed_nodes = tuple(self._changed_nodes.values())
+        # Handed over, not copied. `_stable_paths` only ever holds the
+        # directories that settled since the last publish, and the scheduler
+        # stops touching this one the moment it goes out -- so a fresh set
+        # below is the whole cost, against a `frozenset()` rebuild of a few
+        # hundred paths on every publish.
+        stable_paths = self._stable_paths
         self._tree_callback(
             ScanTreeUpdate(
                 root=root,
@@ -1716,8 +1725,8 @@ class TreeScanScheduler:
             )
         )
         self._published_snapshots += 1
-        self._changed_nodes.clear()
-        self._stable_paths.clear()
+        self._changed_nodes = {}
+        self._stable_paths = set()
         self._generation += 1
 
     @staticmethod

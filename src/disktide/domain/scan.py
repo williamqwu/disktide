@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AbstractSet
 
 from disktide._compat import StrEnum
 from disktide.domain.metrics import MetricId
@@ -249,11 +249,18 @@ class DirectoryQueued(ScanEvent):
 
 @dataclass(frozen=True, slots=True)
 class ScanTreeUpdate:
-    """One immutable live-tree handoff produced by the local scheduler."""
+    """One immutable live-tree handoff produced by the local scheduler.
+
+    `stable_paths` is an `AbstractSet` rather than a `frozenset` because the
+    scheduler hands its own set over and allocates a new one instead of
+    copying: the set it gives away is never written to again. Read it, do
+    not store it expecting a hashable value.
+
+    """
 
     root: FSNode
     changed_nodes: tuple[FSNode, ...] = ()
-    stable_paths: frozenset[str] = frozenset()
+    stable_paths: AbstractSet[str] = frozenset()
     view_root: LiveViewNode | None = None
 
 
@@ -276,7 +283,7 @@ class NodeAggregateUpdated(ScanEvent):
     root: FSNode
     final: bool = False
     changed_nodes: tuple[FSNode, ...] = ()
-    stable_paths: frozenset[str] = frozenset()
+    stable_paths: AbstractSet[str] = frozenset()
     view_root: LiveViewNode | None = None
 
 
