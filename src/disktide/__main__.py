@@ -82,10 +82,17 @@ def cli(
                 "machine-readable output)."
             )
 
-        from disktide.app import DiskTideApp
+        # `load_config` deliberately comes first and `disktide.app`
+        # second: `_pin_color_system` has to run before anything imports
+        # Textual, since `textual.constants` reads TEXTUAL_COLOR_SYSTEM
+        # once at its own import and never looks again.
         from disktide.config import load_config
 
         config = load_config()
+        _pin_color_system(config)
+
+        from disktide.app import DiskTideApp
+
         if max_depth is not None:
             config.scan.max_depth = max_depth
         if workers is not None:
@@ -129,6 +136,31 @@ def cli(
         # both streams were flushed right before this block.
         import os as _os
         _os._exit(0)
+
+
+def _pin_color_system(config) -> None:
+    """Resolve the terminal's colour depth and hand it to Textual.
+
+    Two things happen here and both have to happen before the app is
+    imported. The depth is stashed where the app and `doctor` read it, and
+    `TEXTUAL_COLOR_SYSTEM` is set from it -- which only works this early,
+    because `textual.constants` reads that variable at import time.
+
+    Rich's own detection is what this replaces. It reads `TERM` and
+    `COLORTERM` out of the pty, which inside tmux describe the pty and not
+    the client looking at it, so an Open OnDemand web shell -- a 16-colour
+    xterm.js client attached to a `tmux-256color` session -- has the app
+    writing 256-colour SGRs that tmux then quantises through a static
+    table. Asking tmux which clients are attached is the only way to see
+    that from in here.
+    """
+    import os
+
+    from disktide.viz import colordepth
+
+    depth = colordepth.resolve_color_depth(config_depth=config.ui.color_depth)
+    colordepth.set_active_color_depth(depth)
+    colordepth.apply_textual_color_system(depth, os.environ)
 
 
 def _probe_terminal_if_unmeasured(config) -> None:

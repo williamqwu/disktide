@@ -15,6 +15,7 @@ from disktide.themes import resolve_theme
 # Pure stdlib, unlike the rest of `viz` — the reason `resolve_theme` had to
 # be split out of `viz.colors` does not apply to it, so the vocabulary can
 # live in one place instead of being restated here.
+from disktide.viz.colordepth import normalize_depth
 from disktide.viz.ringshape import DEFAULT_RING_SHAPE, resolve_ring_shape
 
 _DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -119,6 +120,13 @@ class UIConfig:
     # shells, ConPTY, mosh, screen — where every automatic layer comes up
     # empty and the disc falls back to the historical 2.0.
     cell_aspect: float | None = None
+    # "auto" | "truecolor" | "256" | "16": how many colours the terminal
+    # is painted with. `auto` resolves it in layers (`viz.colordepth`),
+    # which is right everywhere except a terminal that lies about itself
+    # — an xterm.js web shell announces `xterm-16color` and can in fact
+    # do RGB, and this is where a user says so once instead of exporting
+    # a variable every login.
+    color_depth: str = "auto"
     # "disc" | "fill" | "tiles": whether the ring chart's rings are
     # circles, rectangles stretched to the pane's own edges, or those same
     # rectangles cut into blocks by straight lines instead of by rays. A
@@ -298,6 +306,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append(f"cell_aspect = {rendered}")
     if config.ui.ring_shape != DEFAULT_RING_SHAPE:
         lines.append(f'ring_shape = "{config.ui.ring_shape}"')
+    if config.ui.color_depth != "auto":
+        lines.append(f'color_depth = "{config.ui.color_depth}"')
     if config.ui.live_scan_render != "auto":
         lines.append(f'live_scan_render = "{config.ui.live_scan_render}"')
     if config.ui.default_scan_path is not None:
@@ -424,6 +434,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.mouse = bool(ui.get("mouse", True))
         config.ui.cell_aspect = _parse_cell_aspect(ui.get("cell_aspect"))
         config.ui.ring_shape = resolve_ring_shape(ui.get("ring_shape"))
+        # An unusable value reads as `auto` rather than as an error: the
+        # fallback is the detection the key exists to override, and a
+        # config file is not a place to fail a launch over a typo.
+        config.ui.color_depth = (
+            normalize_depth(ui.get("color_depth")) or "auto"
+        )
         raw_live = ui.get("live_scan_render", "auto")
         config.ui.live_scan_render = (
             raw_live if raw_live in ("auto", "on", "off") else "auto"
