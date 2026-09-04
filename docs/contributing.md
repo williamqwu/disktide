@@ -121,6 +121,68 @@ enforced by convention:
 - Overflow, watch limits, root loss, and restart must persist a degraded
   state.
 
+## The Scanner Extension
+
+`src/disktide/scanner/_scanfast.c` reads a whole directory and lstats its
+entries in one GIL release. It is optional: `disktide/scanner/accel.py`
+falls back to `_scanfast_py.py` when it is not importable, and the two
+produce identical trees.
+
+`uv sync` does **not** build it — the editable install has no build hook to
+run. Build it in place when you want the fast path locally:
+
+```bash
+PY=.venv/bin/python
+INC=$($PY -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+EXT=$($PY -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')
+gcc -O2 -Wall -shared -fPIC -I"$INC" \
+    -o "src/disktide/scanner/_scanfast$EXT" src/disktide/scanner/_scanfast.c
+.venv/bin/disktide doctor | grep Scanner
+```
+
+`.so` is gitignored. Delete it to go back to the fallback, or set
+`DISKTIDE_ACCEL=0` for one command. The suite has to pass both ways:
+
+```bash
+uv run pytest -q -n 4
+DISKTIDE_ACCEL=0 uv run pytest -q -n 4
+```
+
+`tests/test_scan_accel.py` parametrises over both readers and skips the
+native half where it was not built. `tool/dump_tree.py --backend
+native|python` is the whole-tree version of the same check:
+
+```bash
+uv run python tool/dump_tree.py /some/tree --backend native -o a.tsv
+uv run python tool/dump_tree.py /some/tree --backend python -o b.tsv
+diff <(tail -n +2 a.tsv) <(tail -n +2 b.tsv)   # line 1 names the backend
+```
+
+### The two packaging traps
+
+`hatch_build.py` compiles the extension for wheel builds and *skips
+silently* when it cannot, so an sdist installs everywhere. Two things it has
+to keep getting right:
+
+1. **Compile outside the source tree.** A `.so` left under
+   `src/disktide/scanner/` — which is exactly what the in-place build above
+   leaves — is an ordinary package file to the next build, and one was swept
+   into a *pure* wheel that then claimed `py3-none-any` while carrying an
+   x86_64 binary. The hook compiles into a temporary directory and
+   `force_include`s the result; `exclude = ["*.so", "*.pyd", "*.dylib",
+   "*.c"]` on the wheel target is the belt to that brace.
+2. **Find a compiler that exists.** `sysconfig`'s `CC` is whatever built the
+   interpreter, and a uv-managed CPython says `clang`, which most Linux
+   runners do not have. The hook tries `$CC`, then sysconfig's, then `cc`,
+   `gcc`, `clang`, and takes the first one on `PATH`. `CC=/bin/false uv
+   build --wheel` is the quickest way to exercise the pure path; so is
+   `DISKTIDE_NO_EXTENSION=1`.
+
+On macOS a Python extension is a bundle, not a shared library
+(`-bundle -undefined dynamic_lookup`); the hook branches on that, and honours
+`ARCHFLAGS` so a cibuildwheel cross-compile cannot silently produce a
+host-architecture object.
+
 ## Distribution Checks
 
 ```bash
@@ -128,9 +190,17 @@ uv build
 uv run python tool/verify_distribution.py
 ```
 
+Two wheel shapes are valid and `verify_distribution.py` accepts both: a
+`cp3xx` wheel carrying `disktide/scanner/_scanfast*.so`, or a `py3-none-any`
+wheel carrying no compiled code. Anything *else* native in there is a
+dependency that has stopped being pure, which is what the check is for.
+
 CI installs the wheel into a clean environment and enforces ≤ 20 runtime
-distributions, ≤ 20 MiB, no native extension. A second environment installs
-`disktide[watch]` and verifies event backend discovery.
+distributions, ≤ 20 MiB, and no third-party native extension — disktide's own
+accelerator is exempt, because nothing requires it. CI also installs the
+sdist twice, once with a compiler and once with `CC=/bin/false`, and asserts
+the backend each one reports (`tool/check_doctor_backend.py`). A second
+environment installs `disktide[watch]` and verifies event backend discovery.
 See [release-process.md](release-process.md) for the tag and PyPI flow.
 
 ## How-To Guides
@@ -239,6 +309,8 @@ default_action = "safe"
 | `tool/tui_time` | Time one scan in the *real* TUI, under a private tmux server, with per-thread CPU. |
 | `tool/spy_agg` | Aggregate a `py-spy record --format raw --threads` profile per thread. |
 | `tool/soak_memory` | Scan one tree N times in one process and watch RSS. The memory half of `soak_scan`, which is a randomised *invariants* soak. |
+| `tool/dump_tree` | Every node of one scan as sorted text, for byte-identity diffs. `--backend native\|python` picks the directory reader; the first header line names it. |
+| `tool/check_doctor_backend` | Assert which scanner backend a `doctor --json` report names. Used by CI on each install shape. |
 
 ### Benchmarking a scan
 

@@ -16,6 +16,13 @@ disktide
 The installed command is always `disktide`; `sizetrail`, `fsmonitor`, and
 `fsmonitor-cli` remain compatibility aliases.
 
+The dependency list is unchanged by any of them. On Linux and macOS the
+install picks up a prebuilt wheel carrying one small optional C extension
+that makes scanning several times faster on multiple workers — nothing to
+choose, nothing to add. Anywhere without a prebuilt wheel, pip falls back to
+the source distribution, which compiles the same extension if a C compiler
+is around and quietly does without it if not. See *Scanner backend* below.
+
 The welcome screen shows a path input with suggested starting directories
 (current directory, saved default, last visited, recent scan/watch paths).
 Type any path or press Up/Down to cycle through suggestions. Right arrow
@@ -239,7 +246,8 @@ disktide doctor --json     # versioned JSON, suitable for issue reports
 ```
 
 Reports version, Python/Textual versions, terminal geometry, colour depth,
-database status, platform capabilities, watch backend, and scan policy.
+database status, platform capabilities, watch backend, scan policy, and
+which scanner backend is live (see *Scanner backend* below).
 
 The Colour block prints `TERM`, `COLORTERM`, `TEXTUAL_COLOR_SYSTEM`, the tmux
 clients attached to your session, and the depth that was resolved from them —
@@ -422,6 +430,52 @@ The sunburst draws in one of three shapes, cycled with `g`:
 
 `tiles` looks the same at any cell aspect. Pick `disc` if you want to read
 the chart as rays fanning out from the root.
+
+### Scanner backend
+
+Reading a directory means listing it and then asking the size of every entry
+in it. Done one entry at a time from Python, each of those questions hands
+the interpreter lock back and forth, and on a big tree the handoffs cost more
+than the syscalls: eight scanning threads used to finish *slower* than one.
+DiskTide ships a small C extension that reads a whole directory and measures
+everything in it in one go, which is where most of the speed of a parallel
+scan now comes from.
+
+It is optional. Everything works without it; scans on several workers are
+just slower.
+
+**Which one am I on?**
+
+```bash
+disktide doctor | grep Scanner
+#   Scanner: native (_scanfast)
+#   Scanner: python fallback (_scanfast is not built for this interpreter ...)
+```
+
+`disktide doctor --json` carries the same under `platform.scanner`, and
+`tool/bench_scan.py --json` records it next to every timing.
+
+**Turning it off** — `DISKTIDE_ACCEL=0` (also `off`, `no`, `false`) forces
+the pure-Python reader for one run:
+
+```bash
+DISKTIDE_ACCEL=0 disktide scan /path
+```
+
+The two produce identical trees, so this is for comparing speeds or ruling
+the extension out of a bug, not for changing what a scan reports.
+
+**If the fallback is what you have.** A wheel for your platform and Python
+version carries the extension; a source install builds it when a C compiler
+is present. `pip install disktide` on a platform PyPI has no wheel for
+therefore needs `cc`/`gcc`/`clang` and your Python's development headers
+(`python3-dev` / `python3-devel`) to get the fast path — and installs
+successfully either way, because a missing compiler is not an error.
+
+One thing to know about the fast path: a single directory read is not
+interruptible, so cancelling a scan inside one enormous directory (hundreds
+of thousands of entries in one place) waits out that read — about a third of
+a second. Ordinary directories are microseconds.
 
 ### Cell aspect
 

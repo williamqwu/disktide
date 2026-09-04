@@ -101,9 +101,10 @@ class TestFSNode:
         assert node.size_percent(0) == 0.0
 
 
-# `scanner.walker.make_file_node` and `make_symlink_node` construct a
-# `LeafNode` positionally for these 20 fields -- 0.83 us against 1.12 us for
-# the keyword form, once per file, on the hottest path in the scanner.
+# `scheduler._scan_open_directory`, `scanner.walker.make_file_node` and
+# `make_symlink_node` all construct a `LeafNode` positionally for these 20
+# fields -- 0.83 us against 1.12 us for the keyword form, once per file, on
+# the hottest path in the scanner.
 # Positional construction makes declaration order part of the contract: a
 # field inserted or reordered anywhere above `link_count` would silently
 # write a size into the wrong slot, so it fails here instead.
@@ -138,8 +139,9 @@ LEAFNODE_FIELD_ORDER = LEAFNODE_POSITIONAL_PREFIX + ["hardlink_owner_path"]
 def test_leafnode_positional_prefix():
     names = [field.name for field in dataclasses.fields(LeafNode)][:20]
     assert names == LEAFNODE_POSITIONAL_PREFIX, (
-        "make_file_node / make_symlink_node build a LeafNode positionally for "
-        "these fields; append new fields at the end of the dataclass instead."
+        "the scheduler's entry loop, make_file_node and make_symlink_node all "
+        "build a LeafNode positionally for these fields; append new fields at "
+        "the end of the dataclass instead."
     )
 
 

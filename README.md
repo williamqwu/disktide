@@ -52,7 +52,12 @@
 
 ## Installation
 
-Python 3.10–3.14, pure Python, nothing compiles.
+Python 3.10–3.14, five runtime dependencies, nothing to configure. The
+scanner carries one small optional C extension, prebuilt in the Linux and
+macOS wheels; where there is no wheel for your platform the source
+distribution builds it if a compiler is present and runs a pure-Python
+fallback if not, so the install never fails for the want of one.
+`disktide doctor` says which is live.
 
 ```bash
 git clone https://github.com/williamqwu/disktide && cd disktide

@@ -22,7 +22,7 @@ prints which one is live.
 from __future__ import annotations
 
 import os
-from typing import Callable
+from typing import Callable, Mapping
 
 from disktide.scanner._scanfast_py import (
     DT_BLK,
@@ -57,7 +57,7 @@ __all__ = [
 _DISABLED_VALUES = frozenset({"0", "off", "no", "false"})
 
 
-def accel_disabled(environ: dict[str, str] | os._Environ | None = None) -> bool:
+def accel_disabled(environ: Mapping[str, str] | None = None) -> bool:
     """Whether `DISKTIDE_ACCEL` asks for the pure-Python reader."""
     source = os.environ if environ is None else environ
     return (source.get("DISKTIDE_ACCEL") or "").strip().lower() in _DISABLED_VALUES

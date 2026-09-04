@@ -179,8 +179,8 @@ ADR 0012 (adaptive live scan engine).
 `ScanEngine`, a compatibility facade over `TreeScanScheduler`. Each
 directory is one non-recursive task:
 
-- One worker owns its `scandir` cursor and streams entries in bounded chunks
-  (256 entries by default).
+- One worker reads its directory whole (below) and streams the entries in
+  bounded chunks (256 entries by default).
 - Child-directory jobs materialize only as slots open — no queue holds the
   full tree.
 - Each chunk installs file nodes and zero-valued directory placeholders.
@@ -207,6 +207,63 @@ them to the UI thread via `app.call_from_thread()`.
 The recursive `scanner.walker.scan_directory()` and `ScanEngine().scan(path)`
 APIs remain for diagnostics and `tool/` scripts; product code does not
 construct the engine directly.
+
+### One GIL Release Per Directory
+
+The scanner's remaining distance from `du`, `diskus` and `gdu` was never
+syscalls; it was the GIL. `DirEntry.stat` releases the GIL for the `fstatat`
+and takes it again afterwards, so a scan of the 88,000-directory fixture
+made about 976,000 handoffs — one per entry — and every one of them put the
+worker at the back of a queue behind the scheduler thread. With a busy
+scheduler each handoff can cost up to the 5 ms switch interval, which is why
+**eight workers finished a warm local tree slower than one** (raw 1w 13.2 s,
+raw 8w 22.5–24.1 s, of which 17–18 s was system time).
+
+`disktide/scanner/accel.py` picks a `scan_dir(fd, stat_dirs=False)` at
+import. It returns one tuple per entry —
+`(name, d_type, errno, mode, size, blocks, dev, ino, nlink, mtime)` — for a
+whole directory:
+
+- **`_scanfast`**, a ~200-line C extension, does the `fdopendir`, the
+  `readdir` loop and an `fstatat(AT_SYMLINK_NOFOLLOW)` for every
+  non-directory entry inside a single `Py_BEGIN_ALLOW_THREADS`. One handoff
+  per directory instead of one per entry: 88,000 instead of 976,000.
+- **`_scanfast_py`** does the same work through `os.scandir(fd)` and
+  `DirEntry.stat(follow_symlinks=False)`, one entry at a time, and produces
+  the same tuples.
+
+The scheduler has one entry loop, not two, and it consumes tuples. That is
+the property the two backends are held to: `tool/dump_tree.py --backend`
+and `tests/test_scan_accel.py` compare them node for node, and the trees are
+byte-identical. Neither reader owns the caller's descriptor — both `dup` it
+before `fdopendir`, exactly as `os.scandir(fd)` does — so the scheduler
+still closes the fd it opened, in the `finally` it always had.
+
+Directories are not statted by the read (there is nothing in a directory's
+own stat the walk needs at that point); a filesystem that answers
+`DT_UNKNOWN` falls through to `S_ISDIR` on the mode, which is the same
+branch it always took.
+
+Two consequences worth knowing:
+
+- **Chunking is unchanged.** The read is whole-directory; the flush is not.
+  A 300,000-entry directory still publishes a checkpoint every 256 entries,
+  so a live scan of one updates as it goes.
+- **Cancellation is coarser inside a single directory.** It is still checked
+  between directories and between entries, but a C directory read is not
+  interruptible: about 0.3 s for a 300,000-entry directory, microseconds for
+  an ordinary one.
+- **One directory's listing is held whole.** `os.scandir` was lazy; a batched
+  read is a list of tuples the size of the directory. At seven entries per
+  directory — a home-shaped tree — that is nothing, and it is bounded by the
+  largest single directory rather than by the tree, but a directory with
+  hundreds of thousands of entries in it costs tens of megabytes for as long
+  as the loop takes to drain it.
+
+The extension is optional at every level. It is compiled by the build hook
+when a compiler is present (see `docs/contributing.md`), absent from a pure
+wheel, and switched off by `DISKTIDE_ACCEL=0`; `disktide doctor` prints
+which reader is live. What the fallback loses is speed and nothing else.
 
 ### The Collector and the Scan
 
@@ -365,17 +422,21 @@ See ADR 0001 for the storage metric contract.
 
 ### Error Resilience
 
-Each `os.scandir()` entry is wrapped in try/except. A permission error on
-one directory stores the error in `FSNode.error` and the scan continues with
-partial results.
+Each entry carries its own errno from the directory read, and the scheduler
+sorts it into *vanished* (`ENOENT`, `ESTALE`, `ENOTDIR` — the tree moved) or
+*inaccessible* (everything else). A permission error on a directory stores
+the error in `FSNode.error` and the scan continues with partial results. A
+`readdir` that fails part way through a directory comes back as one final
+entry carrying that errno, so everything read before it is kept and the
+failure is counted once.
 
 ### Symlink Handling
 
 Symlinks are never recursed into — stored as leaf nodes sized by the link
 itself (`lstat`). Target classification (readlink + follow stat) is
-**deferred**: `make_symlink_node` pays only the one `entry.stat`, and
-`classify_symlink` runs on demand (Details panel, `i` navigation). The
-result is cached via `link_classified`.
+**deferred**: the scan pays only the one `lstat` the directory read already
+made, and `classify_symlink` runs on demand (Details panel, `i`
+navigation). The result is cached via `link_classified`.
 
 The engine eagerly classifies the first 100 symlinks at the scan root so
 `disktide ~` shows `→ target` decorations immediately without regressing
@@ -1096,4 +1157,5 @@ on 3.10.
 
 `uv.lock` is committed. CI tests 3.10–3.14 with `uv sync --locked`, then
 installs the wheel into a clean environment. Budget: ≤ 20 runtime
-distributions, ≤ 20 MiB, no native extension.
+distributions, ≤ 20 MiB, no third-party native extension — the scanner's own
+optional `_scanfast` is exempt, because nothing requires it.
