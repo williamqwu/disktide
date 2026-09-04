@@ -306,6 +306,14 @@ read as walk workers, then the scheduler (which runs inside Textual's
 `tool/spy_agg.py --grep <function>`. Sample counts only compare at the same
 `--rate`.
 
+Read the *scheduler* thread as its own number. It is one thread applying
+every directory result, so its share of the process is a per-directory
+price: on the 88,000-directory fixture at one worker, 100 Hz, it was 270 of
+960 samples (28.1 % of the process, 31 µs a directory) and is now 152 of 822
+(18.5 %, 17 µs). In `bench_scan` it is `MainThread`; in `tui_time` it is the
+second-largest `python#<tid>` after the walk workers, because it runs inside
+Textual's `asyncio_0` worker thread.
+
 **A profile cannot see the garbage collector.** A collection runs inside
 whichever allocation crossed the threshold, so py-spy charges its time to the
 scanner's own frames — two rounds of profiling attributed a live scan's floor

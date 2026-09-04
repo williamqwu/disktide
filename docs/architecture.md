@@ -184,6 +184,15 @@ directory is one non-recursive task:
 - Child-directory jobs materialize only as slots open — no queue holds the
   full tree.
 - Each chunk installs file nodes and zero-valued directory placeholders.
+- A directory that fits one chunk never streams: it comes back whole, and
+  `_apply_whole_directory` installs it in a single pass — the worker's node
+  replaces the placeholder, its aggregates are taken as summed rather than
+  recomputed, and one `_propagate` walk carries the delta to the root.
+  Streaming directories keep both passes, because their result really does
+  arrive after their entries. On a home-shaped tree that fast path is nearly
+  every directory — 88,000 of them at about seven entries each, against a
+  256-entry chunk — and it is most of what the scheduler thread's
+  per-directory bill was: 31 µs a directory before it, 17 µs after.
 - Aggregates update in O(1) deltas; children sort only when a directory
   settles.
 - Live roots use generation-based copy-on-write: once published, later
@@ -330,6 +339,17 @@ An explicit `workers` value skips all detection.
 active workers, files, bytes, current path, and elapsed time. Progress
 reports Logical bytes because Unique requires global hardlink reconciliation;
 the final tree additionally carries Allocated and Unique.
+
+That reconciliation only has something to decide when two paths share an
+inode. `_recalculate_directory` already touches every child of every
+directory, so it answers "was any direct entry a hardlinked leaf" on the way
+past, and the scheduler carries the answer out on `ScheduledTree`. When it is
+no — which is every tree that is not a package cache —
+`accounting.mirror_allocated_as_unique` writes the answer instead of deriving
+it, because with no inode shared a node's unique allocated size *is* its
+allocated size, None propagation included. On the 88,000-directory fixture
+that is 114 ms against 368 ms, on the tail every caller waits through with an
+empty queue and no workers.
 
 ### Measurement and Scope Policy
 

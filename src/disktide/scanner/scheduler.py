@@ -1059,13 +1059,27 @@ class TreeScanScheduler:
         threads: list[threading.Thread] = []
         in_flight = 0
 
+        # `Event.set` takes the event's condition lock and notifies every
+        # waiter on it whether or not the flag was already up, and the only
+        # waiter is the scheduler, which clears the flag at the top of each
+        # pass and re-checks `finished` before it waits again. So a worker
+        # that finds the flag already up has nothing to say: the scheduler
+        # is awake, or is about to look. Losing the race costs one extra
+        # `set`, never a missed wakeup -- the append happens before the
+        # read, so a clear that lands after it is followed by a `finished`
+        # check that sees the result. It was 5% of the worker thread at
+        # 88,000 directories.
+        def wake_scheduler() -> None:
+            if not scheduler_activity.is_set():
+                scheduler_activity.set()
+
         def publish_checkpoint(checkpoint: DirectoryEntryChunk) -> bool:
             while not self._cancel_event.is_set():
                 try:
                     entry_chunks.put(checkpoint, timeout=0.05)
                 except queue.Full:
                     continue
-                scheduler_activity.set()
+                wake_scheduler()
                 return True
             return False
 
@@ -1107,7 +1121,8 @@ class TreeScanScheduler:
                     # directory carries the failure instead.
                     result = self._failed_result(job, exc)
                 finished.append(result)
-                scheduler_activity.set()
+                if not scheduler_activity.is_set():
+                    scheduler_activity.set()
 
         def start_workers(count: int) -> None:
             while len(threads) < count:
