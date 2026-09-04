@@ -197,7 +197,10 @@ default_action = "safe"
    ```
 4. Add a key binding in `DiskTideApp.BINDINGS` and a case in
    `action_switch_mode()`.
-5. Add styles in `assets/default.tcss`.
+5. Add styles in the screen's own `DEFAULT_CSS`. Nothing loads
+   `assets/default.tcss` — there is no `CSS_PATH` in `src/`. Rules that have
+   to outrank a Textual widget's `DEFAULT_CSS` (including its `!important`
+   ones) go in `DiskTideApp.CSS` instead.
 
 ### Adding a Visualization
 

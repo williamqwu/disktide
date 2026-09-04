@@ -13,7 +13,7 @@ src/disktide/
   __main__.py            CLI entry point (Click)
   app.py                 Textual App, screen management
   config.py              TOML config load/save, dataclasses
-  glyphs.py              Unicode/ASCII glyph selection
+  glyphs.py              Unicode/ASCII glyph selection + the WGL4 policy
   metrics.py             Size vs. file-count view metric helpers
   rendering.py           Process-wide safe-rendering state and render epoch
 
@@ -980,6 +980,35 @@ dataviz validator. `tool/gen_palette.py --check` prints measured numbers.
 `tests/test_palette_gates.py` pins them — including byte-for-byte
 reproduction, equality with shipped literal values, and theme
 distinguishability.
+
+### Web-Shell Glyph Set
+
+A browser terminal (xterm.js: Open OnDemand, JupyterLab) draws from the
+browser's monospace face and falls back to a proportional one for glyphs that
+face lacks — at the fallback's advance, not at one cell. The line is WGL4: the
+box-drawing block and the block elements that stop at halves (`▀ ▄ █ ▌ ▐ ░ ▒
+▓`) are in it; the eighth blocks and the quadrants are not, and a border row
+built from those comes out 1.2–1.8× too wide.
+
+`disktide/glyphs.py` is the single source: `UNSAFE_GLYPHS` (the rest of
+U+2580–U+259F), `WEB_SAFE_GLYPHS` (the reviewed allowlist), `SAFE_BORDER_STYLES`
+/ `UNSAFE_BORDER_STYLES` (a partition of Textual's `BORDER_CHARS`), and the two
+replacement `ScrollBarRender` bar lists. It imports nothing, including Textual.
+
+Two places consume it. `DiskTideApp.CSS` restates every Textual border that
+would resolve to an unsafe style — `tall` on Input/Button/ToggleButton/Switch/
+Select, `hkey` on Collapsible and the command palette, `vkey` on the footer and
+the key panels, `outer` on toasts — at the same geometry in `solid`, `blank`
+and `thick`; app-level CSS outranks every `DEFAULT_CSS` rule including
+`!important` ones, so one rule per widget covers all of its states.
+`use_web_safe_scrollbars()` runs from `DiskTideApp.__init__`, before the first
+screen, because `render_bar` is a classmethod reading two class attributes.
+
+`tests/test_web_glyphs.py` gates it host-independently (resolved border styles
+across every screen, both colour modes, plus a rendered-thumb sweep);
+`tool/capture_glyphs.py` checks real panes under tmux at 307×71 and 120×32.
+`ui.safe_rendering` is a separate, orthogonal switch for the tree's
+proportional bar.
 
 ## Screen Architecture
 

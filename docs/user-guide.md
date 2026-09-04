@@ -527,6 +527,28 @@ itself rather than override it:
 feature lists, the depth that was resolved and which of those decided it, and
 the one line to change when there is color left on the table.
 
+### Glyphs in a browser terminal
+
+The other half of a web shell is the font. xterm.js draws from the browser's
+monospace face and falls back to a proportional one for anything that face does
+not carry — at *that* font's width, not at one cell. The glyphs it misses are
+the eighth blocks (`▁▂▃▅▆▇`, `▏▎▍▋▊▉`, `▔▕`) and the quadrants (`▖▗▘▝▛▜▙▟`),
+none of which are in WGL4, the set Courier New and Consolas cover. A border row
+drawn from them comes out 1.2–1.8× wider than the box it belongs to, and the
+widget's right edge lands in a different column on every row.
+
+DiskTide draws its chrome from WGL4 only — the box-drawing characters, and the
+block elements that stop at halves (`▀ ▄ █ ▌ ▐ ░ ▒ ▓`) — so there is no setting
+for this and nothing to turn on. Panel borders, input and button outlines, the
+tree guides, the sunburst and treemap fills and the scrollbars are all inside
+that set. `tool/capture_glyphs.py` re-checks it against real panes, and
+`tests/test_web_glyphs.py` gates it in CI.
+
+`ui.safe_rendering` is a different switch and still the one you want for a
+terminal whose font is *narrower* than its cells rather than missing glyphs: it
+drops the proportional bar in the tree to ASCII (`.:-=+*#`) and simplifies the
+charts.
+
 ## File-Type Categories
 
 Extensions determine category; six categories carry a color, unrecognized

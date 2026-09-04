@@ -21,6 +21,7 @@ from disktide.rendering import (
     set_ring_shape,
     set_safe_rendering,
 )
+from disktide.glyphs import use_web_safe_scrollbars
 from disktide.commands import BindingCommands
 from disktide.keys import MODE, resolve_keymap
 from disktide.repositories import default_snapshot_repository
@@ -59,6 +60,116 @@ class DiskTideApp(App):
     # Textual's own providers (themes, quit, screenshot) plus one that walks
     # this app's bindings, so every action is findable by name.
     COMMANDS = App.COMMANDS | {BindingCommands}
+
+    # Textual draws a good deal of its stock chrome from the eighth-block
+    # and quadrant glyphs -- `tall` on Input, Button, Checkbox, Switch and
+    # Select, `hkey` on Collapsible and the command palette, `vkey` on the
+    # footer's palette key and the help panel, `outer` on toasts. A browser
+    # terminal has no monospace face for any of them, falls back to a
+    # proportional font and draws them at that font's advance: on the
+    # welcome screen in an Open OnDemand web shell a 72-cell Input drew its
+    # `▔` row 129 cells wide and its `▁` row 86, tearing the widget apart.
+    # These rules redraw the same geometry from the WGL4 set (see
+    # `disktide.glyphs` for what that set is and why it is the line).
+    #
+    # They are here, and not in `assets/default.tcss`, because nothing
+    # loads that file -- there is no `CSS_PATH` anywhere in `src/`, and all
+    # of this app's real styling is inline `DEFAULT_CSS`. App-level CSS is
+    # also what makes one rule per widget enough: Textual ranks every
+    # `App.CSS` rule above every `DEFAULT_CSS` rule whatever the selectors
+    # say, `!important` included, so a single rule covers a widget's
+    # variants and states without restating them.
+    #
+    # Where two of these tie on specificity the later one wins, as in CSS,
+    # so each widget reads base rule first, then its variants, then the
+    # `:ansi` and compact forms that have to beat them.
+    CSS = """
+    /* Input: a full box either way, `tall` -> `solid`. */
+    Input { border: solid $border-blurred; }
+    Input:focus { border: solid $border; }
+    Input.-invalid { border: solid $error 60%; }
+    Input.-invalid:focus { border: solid $error; }
+    Input.-textual-compact { border: none; }
+
+    /* Button: Textual gives the default variant two bevel rows and no
+       sides, and a full box under `:ansi`, where the terminal's own
+       background cannot carry the shape. Both kept, both redrawn. */
+    Button.-style-default {
+        border-left: none;
+        border-right: none;
+        border-top: solid $surface-lighten-1;
+        border-bottom: solid $surface-darken-1;
+    }
+    Button.-style-default.-primary {
+        border-top: solid $primary-lighten-3;
+        border-bottom: solid $primary-darken-3;
+    }
+    Button.-style-default.-success {
+        border-top: solid $success-lighten-2;
+        border-bottom: solid $success-darken-3;
+    }
+    Button.-style-default.-warning {
+        border-top: solid $warning-lighten-2;
+        border-bottom: solid $warning-darken-3;
+    }
+    Button.-style-default.-error {
+        border-top: solid $error-lighten-2;
+        border-bottom: solid $error-darken-3;
+    }
+    Button:ansi { border: solid $border-blurred; }
+    Button:ansi.-primary { border: solid $primary; }
+    Button:ansi.-success { border: solid $success; }
+    Button:ansi.-warning { border: solid $warning; }
+    Button:ansi.-error { border: solid $error; }
+    Button.-textual-compact { border: none; }
+
+    /* Checkbox and RadioButton (ToggleButton), and Switch. */
+    ToggleButton { border: solid $border-blurred; }
+    ToggleButton:focus { border: solid $border; }
+    ToggleButton.-textual-compact { border: none; }
+    Switch { border: solid $border-blurred; }
+    Switch:focus { border: solid $border; }
+
+    /* Select: the closed control, its dropdown, and any other OptionList
+       (the command palette's results list is one). */
+    SelectCurrent { border: solid $border-blurred; }
+    Select:focus > SelectCurrent { border: solid $border; }
+    SelectCurrent.-textual-compact { border: none; }
+    SelectOverlay { border: solid $border-blurred; }
+    OptionList { border: solid $border-blurred; }
+    OptionList:focus { border: solid $border; }
+    OptionList.-textual-compact { border: none; }
+
+    /* Collapsible's title rule. */
+    Collapsible { border-top: solid $background; }
+    Collapsible:ansi { border-top: solid ansi_blue; }
+
+    /* The footer's command-palette key is fenced off by a `vkey` rule. */
+    FooterKey.-command-palette { border-left: solid $foreground 20%; }
+
+    /* Toast: `outer` puts a coloured bar down the left edge. `thick` is
+       the WGL4 way to say the same thing. */
+    Toast.-information { border-left: thick $success; }
+    Toast.-warning { border-left: thick $warning; }
+    Toast.-error { border-left: thick $error; }
+
+    /* The command palette. `hkey` reserves a column on each side and
+       draws it blank, so the sides stay `blank` and only the rows that
+       were `▔`/`▁` become `solid`. */
+    CommandList { border-bottom: solid black; }
+    CommandPalette #--input {
+        border-top: solid black 50%;
+        border-bottom: solid black 50%;
+        border-left: blank black 50%;
+        border-right: blank black 50%;
+    }
+    CommandPalette #--input.--list-visible { border-bottom: none; }
+    CommandPalette LoadingIndicator { border-bottom: solid $border; }
+
+    /* Textual's own help and key panels, reachable from the palette. */
+    HelpPanel { border-left: solid $foreground 30%; }
+    KeyPanel { border-left: solid $foreground 30%; }
+    """
 
     BINDINGS = [
         # The four mode digits are one control, so they are one footer group.
@@ -112,6 +223,12 @@ class DiskTideApp(App):
         # once the App exists, Textual has already installed (or not) the
         # filter that rewrites ANSI colour names into RGB, and that is
         # exactly what an ANSI theme must not have happen to it.
+        # Before any screen exists, because `ScrollBarRender.render_bar`
+        # is a classmethod reading two class attributes and the first
+        # scrollbar to paint would otherwise draw a stock eighth-block
+        # thumb end. Cheap and idempotent, so every entry point that
+        # builds an app -- CLI, `run_test`, `textual-serve` -- gets it.
+        use_web_safe_scrollbars()
         self._config = config or load_config()
         self._color_depth = colordepth.active_color_depth()
         saved_theme = resolve_theme(self._config.ui.color_theme)
