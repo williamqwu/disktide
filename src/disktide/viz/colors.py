@@ -118,6 +118,112 @@ _MONO_INK = _ink_table(
 )
 
 
+# `ansi` is the sixth ink table and the only one whose colours the terminal
+# owns outright. It is `disktide`'s -- which was already ANSI names -- with
+# one change: `muted` cannot stay bare `dim`. `dim` names no colour, so on
+# the cursor row it modulates whatever the terminal is already painting,
+# and a web shell renders that by blending toward the selection background
+# until the size column is gone. That is the invisible-text half of the
+# original bug report, and the fix is to give the role a colour that is
+# legible on the selection bar and quiet everywhere else.
+_ANSI_INK = {
+    **_ink_table(
+        directory="cyan", file="white", link="cyan", crumb="blue",
+        bar="green", warning="yellow", error="red", accent="magenta",
+    ),
+    "muted": "bright_black",
+}
+
+
+# ---------------------------------------------------------------------------
+# The sixteen ANSI colours
+# ---------------------------------------------------------------------------
+
+# The vocabulary, in index order. A 16-colour terminal defines what each of
+# these looks like -- the OnDemand web shell paints them from xterm.js's
+# "Monokai Remastered", a Linux console from its own table -- so naming one
+# is the only way to ask for a colour a 16-colour terminal actually has.
+ANSI_NAMES: tuple[str, ...] = (
+    "black", "red", "green", "yellow",
+    "blue", "magenta", "cyan", "white",
+    "bright_black", "bright_red", "bright_green", "bright_yellow",
+    "bright_blue", "bright_magenta", "bright_cyan", "bright_white",
+)
+
+ANSI_INDEX: dict[str, int] = {name: i for i, name in enumerate(ANSI_NAMES)}
+
+# The sRGB values Rich matches against when it downgrades a colour to the
+# standard system (`rich.color.STANDARD_PALETTE`, the classic VGA table).
+#
+# These are *not* what an ANSI name looks like on screen -- the terminal
+# decides that -- they are the coordinates a name has to be carried at so
+# that the sunburst's blend can be snapped back onto the same name it
+# started from. The renderer supersamples in RGB and there is no way to
+# average two colour *names*, so a fill goes in at its palette coordinate
+# and comes out at the nearest one; carrying `bright_blue` at Rich's
+# terminal-theme value (0,0,255) instead would come back as plain `blue`.
+ANSI_STANDARD_RGB: dict[int, tuple[int, int, int]] = {
+    0: (0, 0, 0), 1: (170, 0, 0), 2: (0, 170, 0), 3: (170, 85, 0),
+    4: (0, 0, 170), 5: (170, 0, 170), 6: (0, 170, 170), 7: (170, 170, 170),
+    8: (85, 85, 85), 9: (255, 85, 85), 10: (85, 255, 85), 11: (255, 255, 85),
+    12: (85, 85, 255), 13: (255, 85, 255), 14: (85, 255, 255),
+    15: (255, 255, 255),
+}
+
+# The six categories, on the six saturated hues, in the same order around
+# the wheel every chromatic theme uses: `ephemeral` at the warm end,
+# `docs` and `archive` at the cool end. `data` takes the bright blue so it
+# is separable from `docs` at a glance, which is the pair a downgraded
+# chart loses first.
+ANSI_CATEGORY: dict[str, str] = {
+    "code": "green",
+    "docs": "blue",
+    "data": "bright_blue",
+    "media": "magenta",
+    "archive": "cyan",
+    "ephemeral": "red",
+}
+
+# Uncategorised files: the light gray, which is what `other` is in every
+# other theme and the nearest thing sixteen colours have to one.
+ANSI_OTHER_FILE = "white"
+
+# Directories, alternating by depth. Two colours rather than a ladder,
+# because sixteen colours have no ladder: what a ring boundary needs is
+# for consecutive depths to differ, not for them to darken. `yellow` at
+# index 3 is the VGA brown, which is why the inner rings read as the same
+# tan `disktide` paints them rather than as a highlighter.
+ANSI_NEUTRAL_DIR: tuple[str, str] = ("yellow", "bright_black")
+
+# Held back from the palette so selection has somewhere to go: there is no
+# lightening an ANSI name, so the RGB path's mix toward white becomes a
+# substitution and needs a colour nothing else claims.
+ANSI_SELECTED_ARC = "bright_white"
+
+# Light enough to carry near-black text, by the same WCAG crossover the
+# RGB path measures. Fixed rather than measured because the terminal owns
+# the actual values and a theme may make any of them anything; these six
+# are the ones no reasonable palette puts below the crossover.
+_ANSI_LIGHT = frozenset({
+    "white", "bright_white", "yellow", "bright_yellow",
+    "bright_green", "bright_cyan",
+})
+
+# The eight diff states, on eight names. Growth and shrink take the
+# warm/cool poles a dichromat keeps; UNCHANGED and MISSING take the two
+# grays, which is the whole of what "nothing to report" can say here.
+ANSI_DELTA: dict[VisualState, str] = {
+    VisualState.NEW: "green",
+    VisualState.REMOVED: "blue",
+    VisualState.GROWTH: "red",
+    VisualState.SHRINK: "cyan",
+    VisualState.UNCHANGED: "bright_black",
+    VisualState.PARTIAL: "yellow",
+    VisualState.INCOMPATIBLE: "magenta",
+    VisualState.MISSING: "black",
+}
+
+
 # ---------------------------------------------------------------------------
 # Color scheme definition
 # ---------------------------------------------------------------------------
@@ -167,6 +273,13 @@ class ColorScheme:
     # mutable mapping does not make the frozen dataclass any less frozen
     # in practice — nothing hashes a scheme.
     inks: dict[str, str]
+
+    # Whether every colour this scheme names is one of the sixteen ANSI
+    # names rather than an sRGB value. That is a different *kind* of
+    # colour, not a darker one: it cannot be mixed, darkened or tinted,
+    # and the terminal — not this table — decides what it looks like. Each
+    # function below that would otherwise interpolate branches on it.
+    ansi: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -233,11 +346,35 @@ _MONO = ColorScheme(
     inks=_MONO_INK,
 )
 
+# The 16-colour theme. Not a fallback and not a downgrade of one of the
+# others: those are sRGB tables, and every route from sRGB to sixteen
+# colours goes through somebody's nearest-match — Rich's, then tmux's —
+# which is what turns `archive`, `ephemeral` and the directory ring into
+# one red. Naming the colours instead means the terminal paints its own
+# palette and the six categories stay six.
+#
+# It rides Textual's built-in `ansi-dark` for chrome, with one variable
+# changed: that theme's block cursor is `ansi_white`, which is also the
+# `file` ink, so the highlighted row printed white on white. See
+# `viz/chrome.py`.
+_ANSI = ColorScheme(
+    name="ansi",
+    label="ANSI 16",
+    textual_theme="disktide-ansi",
+    category_key=None,
+    neutral_key="ansi",
+    delta_key="ansi",
+    border_bg="black",
+    dir_leaf_bg="bright_black",
+    inks=_ANSI_INK,
+    ansi=True,
+)
+
 # Keyed and ordered by `THEME_KEYS`: the picker reads its order from here,
 # and `config.py` validates against the same tuple without importing this
 # module.
 SCHEMES: dict[str, ColorScheme] = {
-    s.name: s for s in [_DISKTIDE, _COLD, _COLORBLIND, _CYBERPUNK, _MONO]
+    s.name: s for s in [_DISKTIDE, _COLD, _COLORBLIND, _CYBERPUNK, _MONO, _ANSI]
 }
 
 # Module-level active scheme
@@ -504,7 +641,14 @@ def _file_ladder(scheme: ColorScheme, category: str) -> dict[int, tuple[int, int
 
 
 def category_file_color(category: str, depth: int) -> str:
-    """File-arc fill for a content category at a ring depth."""
+    """File-arc fill for a content category at a ring depth.
+
+    Depth is ignored under `ansi`: sixteen colours have no ladder to walk,
+    and spending a second index on "the same category, one ring deeper"
+    would cost a category its own colour.
+    """
+    if _active.ansi:
+        return ANSI_CATEGORY.get(category, ANSI_OTHER_FILE)
     ladder = _file_ladder(_active, category)
     if ladder is None:
         return _rgb_text(OTHER_FILE_RGB[_level(depth)])
@@ -513,11 +657,33 @@ def category_file_color(category: str, depth: int) -> str:
 
 def neutral_dir_color(depth: int) -> str:
     """Untinted directory fill at a ring depth, in the theme's temperature."""
+    if _active.ansi:
+        return ANSI_NEUTRAL_DIR[_level(depth) % 2]
     return _rgb_text(NEUTRAL_DIR_RGB[_active.neutral_key][_level(depth)])
 
 
+def alternate_neutral_dir_color(depth: int) -> str:
+    """The other neutral, for a marking the RGB path draws by mixing.
+
+    Zebra striping is a 6 % lift in the RGB themes; there is no 6 % of an
+    ANSI name, so adjacent directory arcs swap onto the neutral their
+    depth does not use instead.
+    """
+    if _active.ansi:
+        return ANSI_NEUTRAL_DIR[(_level(depth) + 1) % 2]
+    return neutral_dir_color(depth)
+
+
 def category_dir_tint(category: str, share: float, depth: int) -> str:
-    """Directory fill pulled towards the category that dominates it."""
+    """Directory fill pulled towards the category that dominates it.
+
+    Under `ansi` a directory is never tinted: a tint is a weighted mix,
+    and the nearest thing sixteen colours offer is *replacing* the neutral
+    with the category colour — which would make a code-heavy directory
+    look like a `.py` file rather than like a directory holding some.
+    """
+    if _active.ansi:
+        return neutral_dir_color(depth)
     level = _level(depth)
     neutral = NEUTRAL_DIR_RGB[_active.neutral_key][level]
     key = _active.category_key
@@ -544,8 +710,30 @@ def scheme_legend_rgb(scheme: ColorScheme) -> dict[str, tuple[int, int, int]]:
     return CATEGORY_LEGEND_RGB[scheme.category_key]
 
 
+def scheme_swatches(scheme: ColorScheme) -> tuple[list[str], list[str]]:
+    """(three directory neutrals, six category swatches) as colour strings.
+
+    What the settings preview draws, for any scheme, without the caller
+    having to know that `mono` reaches a different table and `ansi`
+    reaches none at all.
+    """
+    if scheme.ansi:
+        return (
+            [ANSI_NEUTRAL_DIR[depth % 2] for depth in (0, 1, 2)],
+            [ANSI_CATEGORY[category] for category in CATEGORIES[:-1]],
+        )
+    neutrals = NEUTRAL_DIR_RGB[scheme.neutral_key]
+    legend = scheme_legend_rgb(scheme)
+    return (
+        [_rgb_text(neutrals[depth]) for depth in (0, 1, 2)],
+        [_rgb_text(legend[category]) for category in CATEGORIES[:-1]],
+    )
+
+
 def category_legend_color(category: str) -> str:
     """Swatch colour for a legend entry."""
+    if _active.ansi:
+        return ANSI_CATEGORY.get(category, ANSI_OTHER_FILE)
     swatch = scheme_legend_rgb(_active).get(category)
     if swatch is None:
         return _rgb_text(OTHER_FILE_RGB[2])
@@ -582,7 +770,14 @@ def _as_triple(color: str) -> tuple[int, int, int] | None:
 
 
 def darken_rgb(color: str, factor: float = 0.4) -> str:
-    """Darken an ``rgb(R,G,B)`` color string by *factor*."""
+    """Darken an ``rgb(R,G,B)`` color string by *factor*.
+
+    Under `ansi` there is no darker shade of a name, so the one backdrop
+    every 16-colour terminal has stands in: an arc label sits on black
+    whatever the arc under it is painted.
+    """
+    if _active.ansi:
+        return "black"
     parsed = _as_triple(color)
     if parsed is None:
         return color
@@ -606,6 +801,8 @@ def label_ink(background: str) -> str:
     ink is measured rather than assumed: whichever of white and near-black
     has the better WCAG ratio against this fill.
     """
+    if _active.ansi:
+        return "black" if background in _ANSI_LIGHT else "bright_white"
     parsed = _as_triple(background)
     if parsed is None:
         return "white"
@@ -620,6 +817,12 @@ def delta_background(state: VisualState, intensity: int = 4) -> str:
     no-colour terminal has left, where the ramp collapsed them all onto the
     same gray.
     """
+    if "NO_COLOR" not in os.environ and _active.ansi:
+        # Eight states on eight names. There is nothing for `intensity` to
+        # scale here: a diff cell is either its state's colour or it is
+        # not, and the glyph and label each cell already carries are what
+        # made the ramp optional in the first place.
+        return ANSI_DELTA[state]
     key = "mono" if "NO_COLOR" in os.environ else _active.delta_key
     red, green, blue = DELTA_RGB[key][state]
     strength = max(1, min(4, intensity)) / 4

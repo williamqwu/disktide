@@ -25,8 +25,8 @@ from disktide.commands import BindingCommands
 from disktide.keys import MODE, resolve_keymap
 from disktide.repositories import default_snapshot_repository
 from disktide.repositories.snapshots import SnapshotRepository
-from disktide.themes import resolve_theme
-from disktide.viz import cellgeom
+from disktide.themes import ANSI_THEME, resolve_theme
+from disktide.viz import cellgeom, colordepth
 from disktide.viz.chrome import CHROME_THEMES
 from disktide.viz.colors import SCHEMES, set_color_scheme
 from disktide.widgets.confirm_modal import ConfirmModal
@@ -107,8 +107,28 @@ class DiskTideApp(App):
         snapshot_repository: SnapshotRepository | None = None,
         **kwargs,
     ):
+        # The config is read before `super().__init__` because
+        # `ansi_color` is a constructor argument and the theme decides it:
+        # once the App exists, Textual has already installed (or not) the
+        # filter that rewrites ANSI colour names into RGB, and that is
+        # exactly what an ANSI theme must not have happen to it.
+        self._config = config or load_config()
+        self._color_depth = colordepth.active_color_depth()
+        saved_theme = resolve_theme(self._config.ui.color_theme)
+        # A 16-colour terminal is rendered with the theme designed for
+        # sixteen colours, whatever is saved. Not written back: the depth
+        # is a property of where the session is being read, and the next
+        # one may be somewhere else.
+        self._forced_ansi = (
+            self._color_depth.value == "16" and saved_theme != ANSI_THEME
+        )
+        self._session_theme = ANSI_THEME if self._forced_ansi else saved_theme
         ansi_only = "NO_COLOR" in os.environ
-        if ansi_only:
+        if ansi_only or self._session_theme == ANSI_THEME:
+            # Names go out as names. Without this Textual converts every
+            # ANSI colour to RGB through its own ANSI theme on the way to
+            # the terminal, which is the whole thing the ANSI theme exists
+            # to avoid.
             kwargs["ansi_color"] = True
         super().__init__(**kwargs)
         self._ansi_only = ansi_only
@@ -125,7 +145,6 @@ class DiskTideApp(App):
         if not os.environ.get("TEXTUAL_ANIMATIONS"):
             self.animation_level = "none"
         self._scan_path = str(Path(scan_path).resolve()) if scan_path else None
-        self._config = config or load_config()
         self._snapshot_repository = (
             snapshot_repository or default_snapshot_repository()
         )
@@ -237,9 +256,11 @@ class DiskTideApp(App):
         # declared keys.
         self._apply_keymap()
 
-        self._config.ui.color_theme = self.apply_color_theme(
-            self._config.ui.color_theme
-        )
+        # The saved key is normalised, then the *session's* theme is
+        # applied — the two differ only when the terminal turned out to
+        # have sixteen colours, and the saved one has to survive that.
+        self._config.ui.color_theme = resolve_theme(self._config.ui.color_theme)
+        self.apply_color_theme(self._session_theme)
         set_safe_rendering(self._config.ui.safe_rendering)
         # The environment wins over the config so a shape can be asked for
         # per-launch — which is the whole of how the two are compared,
@@ -284,6 +305,7 @@ class DiskTideApp(App):
                 pass
 
         self._warn_if_degraded()
+        self._explain_ansi_fallback()
 
     def on_resize(self, event: events.Resize) -> None:
         """Take the terminal's pixel size from an in-band resize report.
@@ -338,6 +360,22 @@ class DiskTideApp(App):
             title="Running without persistence",
             severity="warning",
             timeout=10,
+        )
+
+    def _explain_ansi_fallback(self) -> None:
+        """Say once that the terminal, not the config, picked this theme.
+
+        Without it the user sees a theme they did not choose and has no
+        way to find out why — which is the same complaint the 16-colour
+        rendering exists to answer, one level up.
+        """
+        if not self._forced_ansi:
+            return
+        self.notify(
+            "16-colour terminal detected: using the ANSI theme. "
+            "`disktide doctor` explains how to get full colour.",
+            title="Colour depth",
+            timeout=8,
         )
 
     def _on_welcome_result(self, result: tuple[str, bool] | None) -> None:

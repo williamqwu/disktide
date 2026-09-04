@@ -20,9 +20,17 @@ DEFAULT_THEME = "disktide"
 # tuple rather than derived from `viz.colors.SCHEMES` because the point of
 # this module is not to import that one; `tests/test_palette_gates.py`
 # pins the two against each other.
+# `ansi` is last on purpose. It is the one theme whose colours the terminal
+# owns rather than this package, so it belongs at the end of a picker whose
+# other five are pictures the project chose; it is also the one the app
+# selects for itself when the terminal turns out to have sixteen colours,
+# which is a different route in than the picker.
 THEME_KEYS: tuple[str, ...] = (
-    "disktide", "cold", "colorblind", "cyberpunk", "mono",
+    "disktide", "cold", "colorblind", "cyberpunk", "mono", "ansi",
 )
+
+#: The theme every 16-colour terminal is rendered with, whatever is saved.
+ANSI_THEME = "ansi"
 
 LEGACY_THEMES: dict[str, str] = {
     "warm": DEFAULT_THEME,

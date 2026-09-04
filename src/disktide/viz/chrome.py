@@ -9,7 +9,8 @@ kept in separate modules and joined by one string, `ColorScheme.textual_theme`.
 `disktide` is not here. It names the built-in `textual-dark`, which is what
 shipped before the rename; giving it a copy under a new name would change
 nothing on screen and would put the README's hero shots at the mercy of a
-transcription error.
+transcription error. `ansi` is here, but only as `ansi-dark` with one
+variable moved -- see below.
 
 The `background`/`surface` pairs are not free choices. Each theme's category
 palette is validated for contrast against its own surface; every pair of
@@ -26,7 +27,9 @@ the ones the palettes were measured on.
 
 from __future__ import annotations
 
-from textual.theme import Theme
+import dataclasses
+
+from textual.theme import BUILTIN_THEMES, Theme
 
 # Deep navy. Primary is the steel blue the docs category sits near, and the
 # accent is the chart's single warm slot (`ephemeral`), so the one warm thing
@@ -95,4 +98,32 @@ MONO = Theme(
     panel="#1a1a1a",
 )
 
-CHROME_THEMES: tuple[Theme, ...] = (COLD, COLORBLIND, CYBERPUNK, MONO)
+# The 16-colour theme, derived from Textual's own `ansi-dark` rather than
+# transcribed off it: every field is an ANSI colour *name*, and `ansi=True`
+# is what stops Textual converting those names to RGB through its ANSI
+# theme on the way out. Copying the eighteen values here would only create
+# something to drift.
+#
+# One variable moves. `ansi-dark` puts the block cursor on `ansi_white`,
+# which is also the `file` ink and one shade off the `dir` ink, so the
+# highlighted row printed white on white — the invisible-size-text half of
+# the web-shell report, reproduced exactly by the theme that was supposed
+# to fix it. Blue is the classic selection bar and collides with none of
+# the four inks a tree row prints (`dir` cyan, `file` white, `bar` green,
+# `muted` bright black); `tests/test_palette_gates.py` holds it to that.
+def _ansi_dark_with_a_visible_cursor() -> Theme:
+    base = BUILTIN_THEMES["ansi-dark"]
+    return dataclasses.replace(
+        base,
+        name="disktide-ansi",
+        variables={
+            **base.variables,
+            "block-cursor-background": "ansi_blue",
+            "block-cursor-foreground": "ansi_bright_white",
+        },
+    )
+
+
+ANSI = _ansi_dark_with_a_visible_cursor()
+
+CHROME_THEMES: tuple[Theme, ...] = (COLD, COLORBLIND, CYBERPUNK, MONO, ANSI)

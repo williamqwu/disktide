@@ -35,7 +35,7 @@ from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Mapping, NamedTuple
 
-from rich.color import Color
+from rich.color import Color, ColorSystem
 from rich.segment import Segment
 from rich.style import Style
 
@@ -57,13 +57,18 @@ from disktide.rendering import (
 from disktide.viz.categories import CategoryIndex
 from disktide.viz.cellgeom import DEFAULT_CELL_ASPECT
 from disktide.viz.colors import (
+    ANSI_INDEX,
+    ANSI_SELECTED_ARC,
+    ANSI_STANDARD_RGB,
     CATEGORIES,
+    alternate_neutral_dir_color,
     category_dir_tint,
     category_file_color,
     category_legend_color,
     darken_rgb,
     delta_background,
     file_category,
+    get_color_scheme,
     neutral_dir_color,
 )
 from disktide.viz.ringshape import (
@@ -411,6 +416,15 @@ def _arc_color(
     else:
         color = category_file_color(file_category(node.name), depth)
         zebra = False
+    if get_color_scheme().ansi:
+        # There is no 6 % of an ANSI name and no mixing one toward white,
+        # so the two markings the RGB path draws by interpolation are
+        # drawn by substitution: a zebra-striped directory takes the
+        # neutral its own depth does not use, and a selected arc takes the
+        # one colour the palette holds back for it.
+        if arc.selected:
+            return ANSI_SELECTED_ARC
+        return alternate_neutral_dir_color(depth) if zebra else color
     if not zebra and not arc.selected:
         return color
     rgb = _parse_rgb(color)
@@ -422,7 +436,17 @@ def _arc_color(
 
 
 def _parse_rgb(color: str) -> RGB:
-    """Resolve a colour string to a triple, once per arc."""
+    """Resolve a colour string to a triple, once per arc.
+
+    ANSI names are carried at their `STANDARD_PALETTE` coordinates rather
+    than at the values Rich's terminal theme gives them, because that is
+    the table `_cell_color` snaps the blended result back onto: at Rich's
+    terminal-theme values, `bright_blue` would go in as (0,0,255) and come
+    back out as plain `blue`, which is `docs`.
+    """
+    index = ANSI_INDEX.get(color)
+    if index is not None:
+        return ANSI_STANDARD_RGB[index]
     if color.startswith("rgb(") and color.endswith(")"):
         parts = color[4:-1].split(",")
         if len(parts) == 3:
@@ -954,6 +978,28 @@ def _rasterize_arcs(
                 row[hx] = (total_r >> 2, total_g >> 2, total_b >> 2)
 
 
+def _cell_color(rgb: RGB) -> Color:
+    """The Rich colour one framebuffer entry is painted with.
+
+    The renderer supersamples in RGB and has to: there is no averaging two
+    colour *names*, and the rim, the wedge walls and every separator are
+    made of exactly that average. Under the ANSI scheme each fill goes in
+    at its palette coordinate, so a covered cell comes back out at the
+    name it started from and only the anti-aliased edges land between two
+    — and those are snapped to whichever they are nearer, which is the
+    only thing sixteen colours can do with an edge anyway.
+
+    Doing it here rather than leaving it to Rich's own downgrade at write
+    time is what makes the theme work at *any* depth: the style carries an
+    ANSI colour, so a truecolor terminal paints the sixteen colours of its
+    own scheme instead of this table's VGA coordinates.
+    """
+    color = Color.from_rgb(*rgb)
+    if get_color_scheme().ansi:
+        return color.downgrade(ColorSystem.STANDARD)
+    return color
+
+
 def _render_safe_cells(
     layout: SunburstLayout,
 ) -> list[list[tuple[str, Style | None]]]:
@@ -994,7 +1040,7 @@ def _render_safe_cells(
                 color = _mix_rgb(top, bottom, 0.5)
             cached = styles.get(color)
             if cached is None:
-                cached = Style(bgcolor=Color.from_rgb(*color))
+                cached = Style(bgcolor=_cell_color(color))
                 styles[color] = cached
             row.append((" ", cached))
         rows.append(row)
@@ -1032,15 +1078,15 @@ def _render_cells(layout: SunburstLayout) -> list[list[tuple[str, Style | None]]
             cached = styles.get(key)
             if cached is None:
                 if top is None:
-                    cached = Style(color=Color.from_rgb(*bottom))
+                    cached = Style(color=_cell_color(bottom))
                 elif bottom is None:
-                    cached = Style(color=Color.from_rgb(*top))
+                    cached = Style(color=_cell_color(top))
                 elif top == bottom:
-                    cached = Style(bgcolor=Color.from_rgb(*top))
+                    cached = Style(bgcolor=_cell_color(top))
                 else:
                     cached = Style(
-                        color=Color.from_rgb(*top),
-                        bgcolor=Color.from_rgb(*bottom),
+                        color=_cell_color(top),
+                        bgcolor=_cell_color(bottom),
                     )
                 styles[key] = cached
             if top is None:
@@ -1194,7 +1240,14 @@ def _compute_labels(
     )
 
     panel = layout.panel_bg
-    center_bg = f"rgb({panel[0]},{panel[1]},{panel[2]})"
+    # The centre label sits on the panel, which under the ANSI scheme has
+    # no sRGB value to name — and "black" is the backdrop every arc label
+    # already gets there, so the two agree.
+    center_bg = (
+        "black"
+        if get_color_scheme().ansi
+        else f"rgb({panel[0]},{panel[1]},{panel[2]})"
+    )
     _place_label(labels, occupied, center_cx, center_cy, root_name, "white", center_bg)
     _place_label(
         labels, occupied, center_cx, center_cy + 1, size_text, "bright_white", center_bg,
@@ -1399,7 +1452,7 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
                     legend_chars[offset] = (ch, color)
                     offset += 1
 
-    legend_bg = Color.from_rgb(*layout.panel_bg) if legend_chars else None
+    legend_bg = _cell_color(layout.panel_bg) if legend_chars else None
     segments: list[Segment] = []
     pending: list[str] = []
     pending_style: Style | None = None

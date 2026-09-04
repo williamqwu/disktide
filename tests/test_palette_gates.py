@@ -41,6 +41,11 @@ from disktide.domain.visualization import VisualState
 from disktide.themes import LEGACY_THEMES, THEME_KEYS, resolve_theme
 from disktide.viz.chrome import CHROME_THEMES
 from disktide.viz.colors import (
+    ANSI_CATEGORY,
+    ANSI_INDEX,
+    ANSI_NEUTRAL_DIR,
+    ANSI_OTHER_FILE,
+    ANSI_SELECTED_ARC,
     CATEGORIES,
     INK_ROLES,
     CATEGORY_DIR_RGB,
@@ -66,6 +71,14 @@ palette_checks = importlib.import_module("palette_checks")
 _COLORS = Path(__file__).resolve().parents[1] / "src" / "disktide" / "viz" / "colors.py"
 
 CHROMATIC = ("disktide", "cold", "colorblind", "cyberpunk")
+
+# Every theme whose colours are sRGB values this package chose. `ansi` is
+# not one: its six categories are ANSI colour *names*, and what those look
+# like is the terminal's decision -- there is no OKLab distance between
+# "green" and "blue" until a terminal says what it paints them as. Its own
+# gates are further down, on the indices, which are the thing this package
+# actually controls.
+RGB_THEMES = tuple(name for name in THEME_KEYS if name != "ansi")
 
 
 def _generated_block() -> str:
@@ -122,7 +135,7 @@ def test_the_generated_tables_cover_every_theme_and_category():
         assert set(CATEGORY_DIR_RGB[theme]) == set(CATEGORIES[:-1])
         assert set(CATEGORY_LEGEND_RGB[theme]) == set(CATEGORIES[:-1])
     assert set(MONO_LEGEND_RGB) == set(CATEGORIES[:-1])
-    assert set(NEUTRAL_DIR_RGB) == set(THEME_KEYS)
+    assert set(NEUTRAL_DIR_RGB) == set(RGB_THEMES)
 
 
 def test_the_scheme_table_and_the_theme_vocabulary_agree():
@@ -144,6 +157,12 @@ def test_the_registered_chrome_matches_the_surfaces_the_palettes_were_measured_o
     background is how a contrast number becomes fiction."""
     registered = {theme.name: theme for theme in CHROME_THEMES}
     for name, scheme in SCHEMES.items():
+        if name == "ansi":
+            # `ansi_default` is not a surface this package chose; the
+            # terminal's own background is what the marks land on, which
+            # is also why none of its contrast is measurable here.
+            assert registered[scheme.textual_theme].surface == "ansi_default"
+            continue
         expected = gen_palette.THEME_SURFACE[name]
         if scheme.textual_theme == "textual-dark":
             # Textual's own dark theme leaves surface unset and falls back
@@ -469,7 +488,7 @@ def test_two_chromatic_themes_are_visibly_different_palettes(first, second):
     assert max(swatches) >= 20.0, f"{first} vs {second}: max ΔE {max(swatches):.1f}"
 
 
-@pytest.mark.parametrize("first,second", _pairs(THEME_KEYS))
+@pytest.mark.parametrize("first,second", _pairs(RGB_THEMES))
 @pytest.mark.parametrize("depth", (0, 1, 2))
 def test_the_neutral_ladders_are_visibly_apart(first, second, depth):
     """Directories are most of a chart's area, and the three shallowest
@@ -484,7 +503,7 @@ def test_the_neutral_ladders_are_visibly_apart(first, second, depth):
     )
 
 
-@pytest.mark.parametrize("first,second", _pairs(THEME_KEYS))
+@pytest.mark.parametrize("first,second", _pairs(RGB_THEMES))
 def test_the_surfaces_are_visibly_apart(first, second):
     """Six ΔE, not twelve, and the reason is worth writing down.
 
@@ -601,3 +620,205 @@ def test_every_diff_background_carries_a_white_label():
         for state, rgb in table.items():
             ratio = palette_checks.contrast(rgb, "#ffffff")
             assert ratio >= 4.0, f"{key}/{state}: {ratio:.2f}:1"
+
+
+# ---------------------------------------------------------------------------
+# What the terminal actually receives
+#
+# Everything above measures 24-bit colour, which is what the chart is drawn
+# in and not always what lands. Two downgrades matter and both are real:
+# Rich to 256 followed by tmux's own `colour_256to16` (the Open OnDemand
+# path, where the app writes 256-colour SGRs to a client that has no `256`
+# feature), and Rich straight to STANDARD (JupyterLab's `xterm-color`, and
+# OnDemand's own pty outside tmux). `tool/palette_checks.py` models both.
+# ---------------------------------------------------------------------------
+
+_DEPTH_2 = 2
+
+
+def _distinct_at_256(theme: str) -> dict[int, list[str]]:
+    """The eight marks a chart has to keep apart, by their 256 index."""
+    scheme = SCHEMES[theme]
+    marks = {
+        category: gen_palette.legend_rgb(theme)[index]
+        for index, category in enumerate(CATEGORIES[:-1])
+    }
+    from disktide.viz.colors import NEUTRAL_DIR_RGB, OTHER_FILE_RGB
+
+    marks["other"] = OTHER_FILE_RGB[_DEPTH_2]
+    marks["neutral"] = NEUTRAL_DIR_RGB[scheme.neutral_key][_DEPTH_2]
+    collisions: dict[int, list[str]] = {}
+    for name, rgb in marks.items():
+        collisions.setdefault(palette_checks.rich_eight_bit(rgb), []).append(name)
+    return collisions
+
+
+@pytest.mark.parametrize("theme", RGB_THEMES)
+def test_every_rgb_theme_still_has_eight_marks_at_256_colours(theme):
+    """256 colours is where most terminals actually are.
+
+    `COLORTERM` is not forwarded by ssh and tmux does not set it, so a
+    session in a perfectly capable terminal still runs at 256 unless
+    somebody says otherwise -- which makes this, not truecolor, the depth
+    the shipped palettes are read at most of the time. All eight marks
+    survive it today; the gate is that a future anchor move notices if two
+    of them stop.
+    """
+    collisions = {
+        index: names
+        for index, names in _distinct_at_256(theme).items()
+        if len(names) > 1
+    }
+    assert not collisions, f"{theme} merges at 256: {collisions}"
+
+
+def test_disktide_keeps_thirty_of_its_thirty_nine_colours_at_256():
+    """The whole window, not just the eight marks: 39 -> 30."""
+    row = gen_palette.downgrade_summary("disktide")
+    assert (row["rgb"], row["eight_bit"]) == (39, 30)
+
+
+def test_disktide_at_sixteen_colours_is_the_collapse_the_screenshot_showed():
+    """The bug, pinned as a number so a palette change cannot hide it.
+
+    39 distinct colours reach the Open OnDemand web shell as 13, and the
+    three that merge are the three the screenshot showed merging:
+    `archive`, `ephemeral` and the neutral directory ring all arrive as
+    ANSI 1, which xterm.js's Monokai Remastered paints hot pink. `data`
+    lands on the same index as `$primary`, which is the window border.
+
+    This is documentation with an assertion on it, not a target. If a
+    future palette happens to fix any of it, this test is what says so.
+    """
+    row = gen_palette.downgrade_summary("disktide")
+    assert (row["rgb"], row["tmux16"], row["rich16"]) == (39, 13, 12)
+
+    index = row["tmux_index"]
+    assert index["file archive@2"] == index["file ephemeral@2"] == 1
+    assert index["neutral dir@2"] == 1
+    assert index["file data@2"] == index["tcss $primary"] == 12
+    assert index["tcss $border"] == index["tcss $block-cursor-background"] == 12
+
+
+# ---------------------------------------------------------------------------
+# The ANSI theme: designed for sixteen, not quantised onto it
+# ---------------------------------------------------------------------------
+
+def _ansi_ink_color(style: str) -> str | None:
+    """The one ANSI colour a Rich style string names, or None.
+
+    Written as a search rather than as `split()[-1]` because the ink table
+    composes attributes on both sides of the colour: `bold cyan` puts it
+    last and `blue underline` puts it first.
+    """
+    named = [token for token in style.split() if token in ANSI_INDEX]
+    assert len(named) <= 1, f"{style!r} names {len(named)} colours"
+    return named[0] if named else None
+
+
+def _ansi_marks() -> dict[str, str]:
+    """The nine fills that have to stay apart, by name."""
+    marks = dict(ANSI_CATEGORY)
+    marks["other"] = ANSI_OTHER_FILE
+    marks["neutral even"] = ANSI_NEUTRAL_DIR[0]
+    marks["neutral odd"] = ANSI_NEUTRAL_DIR[1]
+    return marks
+
+
+def test_the_ansi_theme_spends_nine_of_the_sixteen_indices_on_distinct_marks():
+    """Six categories, `other`, and both directory depths.
+
+    Nine of sixteen, which leaves black for the background, bright white
+    for text and selection, and five for the inks and chrome. That is the
+    entire budget and the reason the categories cannot have a depth ladder
+    as well.
+    """
+    marks = _ansi_marks()
+    indices = {name: ANSI_INDEX[color] for name, color in marks.items()}
+    assert len(set(indices.values())) == len(marks), indices
+    assert ANSI_INDEX["black"] not in indices.values()
+    assert ANSI_INDEX[ANSI_SELECTED_ARC] not in indices.values()
+
+
+def test_the_ansi_cursor_row_has_a_foreground_that_is_not_its_background():
+    """The invisible-size-text half of the bug, as a gate.
+
+    On the highlighted root row the size text was simply absent: it is
+    styled `muted`, which was bare `dim`, and `dim` over a selection
+    background is whatever the terminal decides to blend it to. Textual's
+    own `ansi-dark` would reintroduce a version of it -- its block cursor
+    is `ansi_white`, which is also the `file` ink -- so `disktide-ansi`
+    moves the cursor to blue and `muted` gets a colour of its own.
+    """
+    from disktide.viz.chrome import ANSI as ANSI_CHROME
+
+    cursor = ANSI_CHROME.variables["block-cursor-background"]
+    assert cursor.startswith("ansi_")
+    background = ANSI_INDEX[cursor[len("ansi_"):]]
+    inks = SCHEMES["ansi"].inks
+    for role in ("dir", "file", "bar", "muted", "warning", "error"):
+        name = _ansi_ink_color(inks[role])
+        assert name is not None, f"{role} is {inks[role]!r}, which names no colour"
+        assert ANSI_INDEX[name] != background, (
+            f"{role} ({name}) is the same index as the cursor row it is "
+            f"printed on ({cursor})"
+        )
+
+
+def test_everything_the_ansi_theme_emits_is_a_bare_ansi_name():
+    """No hex, no rgb(), nothing for a downgrade to get hold of.
+
+    A single `rgb(...)` left in a table would be quantised by Rich and
+    then by tmux, which is the exact path this theme exists to leave --
+    and it would do it silently, since a quantised colour still renders.
+    """
+    from disktide.viz import colors
+
+    previous = colors.get_color_scheme().name
+    try:
+        colors.set_color_scheme("ansi")
+        emitted = []
+        for role in INK_ROLES:
+            style = colors.ink(role)
+            assert "#" not in style and "rgb(" not in style, f"{role}: {style}"
+            named = _ansi_ink_color(style)
+            assert named is not None, (
+                f"{role} is {style!r}: every ANSI ink has to name a colour, "
+                "because bare `dim` over the selection bar is what made the "
+                "size column disappear in the first place"
+            )
+            emitted.append(named)
+        emitted += [
+            colors.category_file_color(category, depth)
+            for category in CATEGORIES
+            for depth in range(5)
+        ]
+        emitted += [colors.neutral_dir_color(depth) for depth in range(5)]
+        emitted += [colors.alternate_neutral_dir_color(depth) for depth in range(5)]
+        emitted += [
+            colors.category_dir_tint(category, share, depth)
+            for category in CATEGORIES[:-1]
+            for share in (0.4, 1.0)
+            for depth in (0, 2)
+        ]
+        emitted += [colors.category_legend_color(c) for c in CATEGORIES]
+        emitted += [colors.delta_background(state) for state in VisualState]
+        emitted += [colors.label_ink(c) for c in ANSI_INDEX]
+        emitted += [colors.darken_rgb("green"), SCHEMES["ansi"].border_bg,
+                    SCHEMES["ansi"].dir_leaf_bg]
+        neutrals, legend = colors.scheme_swatches(SCHEMES["ansi"])
+        emitted += neutrals + legend
+    finally:
+        colors.set_color_scheme(previous)
+    strays = sorted({value for value in emitted if value not in ANSI_INDEX})
+    assert not strays, f"the ansi scheme emitted non-ANSI colours: {strays}"
+
+
+def test_the_ansi_diff_states_stay_apart_too():
+    """Eight states, eight indices: a diff view whose poles merge is a
+    diff view that has stopped answering its own question."""
+    from disktide.viz.colors import ANSI_DELTA
+
+    indices = {state: ANSI_INDEX[name] for state, name in ANSI_DELTA.items()}
+    assert len(set(indices.values())) == len(VisualState)
+    assert indices[VisualState.GROWTH] != indices[VisualState.SHRINK]

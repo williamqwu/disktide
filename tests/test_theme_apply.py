@@ -27,6 +27,7 @@ and the layout rebuild is deliberately deferred a frame past the paint
 from __future__ import annotations
 
 import asyncio
+import io
 
 import pytest
 from rich.console import Console
@@ -413,6 +414,121 @@ def test_the_picker_seats_every_theme_name_on_one_line(tmp_path):
                 f"the open dropdown is {overlay.region.height} rows tall "
                 f"for {len(SCHEMES)} themes plus its border; a name is "
                 f"wrapping onto a second line in the list"
+            )
+
+    asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# The terminal picks the theme when the terminal has sixteen colours
+# ---------------------------------------------------------------------------
+
+def _at_depth(value: str, scan_path, theme: str = "disktide"):
+    """An app built as if the resolver had answered *value*."""
+    from disktide.viz.colordepth import ColorDepth, set_active_color_depth
+
+    set_active_color_depth(ColorDepth(value, "test", "pinned by a test"))
+    config = load_config()
+    config.ui.color_theme = theme
+    return DiskTideApp(
+        scan_path=str(scan_path), show_welcome=False, config=config
+    )
+
+
+def test_a_16_colour_terminal_renders_with_the_ansi_theme(tmp_path):
+    """Not a preference -- an observation about where the session is being
+    read. The saved theme is untouched, because the next session may be
+    read somewhere else."""
+    root = _scan_dir(tmp_path)
+
+    async def go():
+        app = _at_depth("16", root)
+        async with app.run_test(size=(100, 34)) as pilot:
+            await _settled_explorer(pilot, app)
+            assert get_color_scheme().name == "ansi"
+            assert app.theme == "disktide-ansi"
+            assert app._config.ui.color_theme == "disktide"
+
+    asyncio.run(go())
+
+
+def test_it_says_why_it_did_that(tmp_path):
+    """A theme the user did not choose, with no explanation, is the same
+    complaint one level up."""
+    root = _scan_dir(tmp_path)
+
+    async def go():
+        app = _at_depth("16", root)
+        notices = []
+        async with app.run_test(size=(100, 34)) as pilot:
+            app.notify = lambda message, **kwargs: notices.append(message)
+            await _settled_explorer(pilot, app)
+            app._explain_ansi_fallback()
+        assert any("16-colour terminal" in text for text in notices), notices
+        assert any("doctor" in text for text in notices), notices
+
+    asyncio.run(go())
+
+
+def test_a_deeper_terminal_keeps_the_theme_that_was_asked_for(tmp_path):
+    root = _scan_dir(tmp_path)
+
+    async def go():
+        app = _at_depth("256", root, theme="cyberpunk")
+        async with app.run_test(size=(100, 34)) as pilot:
+            await _settled_explorer(pilot, app)
+            assert get_color_scheme().name == "cyberpunk"
+            assert app._forced_ansi is False
+
+    asyncio.run(go())
+
+
+def test_choosing_ansi_yourself_works_at_any_depth(tmp_path):
+    """The picker offers it as a theme, not only as a fallback: a user in
+    a truecolor terminal who wants their own palette can have it."""
+    root = _scan_dir(tmp_path)
+
+    async def go():
+        app = _at_depth("truecolor", root, theme="ansi")
+        async with app.run_test(size=(100, 34)) as pilot:
+            await _settled_explorer(pilot, app)
+            assert get_color_scheme().name == "ansi"
+            # `ansi_color` is what stops Textual rewriting the names into
+            # RGB through its own ANSI theme on the way out.
+            assert app.ansi_color is True
+            assert app._forced_ansi is False
+
+    asyncio.run(go())
+
+
+def test_the_ansi_chart_emits_no_rgb_or_256_colour_codes(tmp_path):
+    """The bytes, not the picture.
+
+    Every other assertion here is about the objects the renderer builds;
+    this one renders the explorer through a truecolor console -- the most
+    permissive one there is, so nothing is being downgraded on the way --
+    and reads the escape codes back. An `rgb()` left anywhere in the ANSI
+    tables would show up as `38;2;` here and as a quantised colour on a
+    user's screen, silently.
+    """
+    root = _scan_dir(tmp_path)
+
+    async def go():
+        app = _at_depth("16", root)
+        async with app.run_test(size=(100, 34)) as pilot:
+            await _settled_explorer(pilot, app)
+            update = app.screen._compositor.render_update(full=True)
+            console = Console(
+                width=100, record=True, force_terminal=True,
+                color_system="truecolor", legacy_windows=False,
+                file=io.StringIO(),
+            )
+            console.print(update)
+            text = console.export_text(styles=True)
+        for sequence in ("38;2;", "48;2;", "38;5;", "48;5;"):
+            assert sequence not in text, (
+                f"the ANSI theme emitted {sequence} — something in the "
+                "chart, the chrome or the inks is still an RGB colour"
             )
 
     asyncio.run(go())

@@ -413,7 +413,13 @@ def ink_rows() -> list[dict]:
 
     rows = []
     for theme, scheme in SCHEMES.items():
-        surface = THEME_SURFACE[theme]
+        # `ansi` has no surface to measure on: its background is
+        # `ansi_default`, which is whatever the terminal's own theme says,
+        # so every contrast number here would be fiction. Its gate is
+        # index distinctness instead (`tests/test_palette_gates.py`).
+        surface = THEME_SURFACE.get(theme)
+        if surface is None:
+            continue
         measured = {
             role: (hexed, contrast(hexed, surface), oklch(hexed))
             for role in INK_ROLES
@@ -461,6 +467,95 @@ def cross_theme_rows() -> list[dict]:
                 "surface": delta_e(THEME_SURFACE[first], THEME_SURFACE[second]),
             })
     return rows
+
+
+def downgrade_rows(theme: str) -> list[tuple[str, tuple[int, int, int]]]:
+    """Every distinct colour a theme puts on screen, as 24-bit RGB.
+
+    The chart fills at three depths, the neutral ladder, the `other`
+    ladder, the fourteen text inks that name a colour, and the nine
+    Textual variables that reach a border, a panel, the footer or the
+    cursor row. ANSI names are resolved through Textual's own ANSI theme,
+    because that is what `ANSIToTruecolor` does to them on the way out
+    whenever the app is not in ansi mode.
+    """
+    import sys
+    from pathlib import Path
+
+    root = str(Path(__file__).resolve().parents[1] / "src")
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+    from rich.color import Color  # noqa: PLC0415
+    from rich.style import Style  # noqa: PLC0415
+    from textual._ansi_theme import MONOKAI  # noqa: PLC0415
+    from textual.theme import BUILTIN_THEMES  # noqa: PLC0415
+
+    from disktide.viz import colors as C  # noqa: PLC0415
+    from disktide.viz.chrome import CHROME_THEMES  # noqa: PLC0415
+
+    def rgb(value: str) -> tuple[int, int, int]:
+        triplet = Color.parse(value).get_truecolor(MONOKAI)
+        return (triplet.red, triplet.green, triplet.blue)
+
+    previous = C.get_color_scheme().name
+    rows: list[tuple[str, tuple[int, int, int]]] = []
+    try:
+        C.set_color_scheme(theme)
+        for category in C.CATEGORIES[:-1]:
+            for depth in (1, 2, 4):
+                rows.append((
+                    f"file {category}@{depth}",
+                    rgb(C.category_file_color(category, depth)),
+                ))
+        for depth in range(5):
+            rows.append((f"neutral dir@{depth}", rgb(C.neutral_dir_color(depth))))
+            rows.append((f"other file@{depth}", rgb(C.category_file_color("other", depth))))
+        for role in C.INK_ROLES:
+            style = Style.parse(C.ink(role))
+            if style.color is not None:
+                triplet = style.color.get_truecolor(MONOKAI)
+                rows.append((
+                    f"ink {role}",
+                    (triplet.red, triplet.green, triplet.blue),
+                ))
+        registered = {**BUILTIN_THEMES, **{t.name: t for t in CHROME_THEMES}}
+        variables = registered[
+            C.get_color_scheme().textual_theme
+        ].to_color_system().generate()
+        for key in (
+            "primary", "background", "surface", "panel",
+            "block-cursor-background", "foreground", "border",
+            "footer-background", "footer-key-foreground",
+        ):
+            value = variables.get(key)
+            if not value:
+                continue
+            try:
+                rows.append((f"tcss ${key}", rgb(value)))
+            except Exception:
+                # `auto 87%` and an eight-digit hex are not colours a
+                # terminal is ever asked for; they resolve later.
+                continue
+    finally:
+        C.set_color_scheme(previous)
+    return rows
+
+
+def downgrade_summary(theme: str) -> dict:
+    """How many of a theme's colours survive each downgrade, and what merges."""
+    from palette_checks import rich_standard, rich_eight_bit, through_tmux
+
+    rows = downgrade_rows(theme)
+    return {
+        "theme": theme,
+        "rows": rows,
+        "rgb": len({value for _name, value in rows}),
+        "eight_bit": len({rich_eight_bit(value) for _name, value in rows}),
+        "tmux16": len({through_tmux(value) for _name, value in rows}),
+        "rich16": len({rich_standard(value) for _name, value in rows}),
+        "tmux_index": {name: through_tmux(value) for name, value in rows},
+    }
 
 
 def check() -> None:
@@ -513,6 +608,15 @@ def check() -> None:
         print(f"  {row['theme']:<11} {row['surface']:<9} "
               f"{len(row['measured']):6d} {row['min_contrast']:6.2f} "
               f"{worst[0] + ' ' + worst[1][0]:<16} {row['max_chroma']:7.3f}")
+    print()
+    print("what the terminal receives (all colours a theme puts on screen)")
+    print(f"  {'theme':<11} {'rgb':>5} {'256':>5} {'tmux 16':>8} {'rich 16':>8}")
+    for theme in NEUTRAL_THEMES:
+        row = downgrade_summary(theme)
+        print(f"  {theme:<11} {row['rgb']:5d} {row['eight_bit']:5d} "
+              f"{row['tmux16']:8d} {row['rich16']:8d}")
+    print("  (tmux 16 = Rich->256 then tmux 3.2a colour_256to16, the Open")
+    print("   OnDemand path; rich 16 = Rich->STANDARD, the no-multiplexer one)")
     print()
     print("diff-view diverging tables")
     print(f"  {'table':<11} {'poles':>6} {'worst 5':>8} {'worst all':>10} {'white text':>11}")

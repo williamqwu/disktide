@@ -279,3 +279,74 @@ def check_categorical(
         "lightness_steps": lightness_steps(palette),
         "min_lightness_step": min(lightness_steps(palette), default=0.0),
     }
+
+
+# ---------------------------------------------------------------------------
+# What a terminal actually receives: the two downgrade models
+#
+# A palette validated in OKLab is a palette validated in 24-bit colour, and
+# the terminal the chart lands in may have far less than that. Two paths
+# matter, both verified against a live Open OnDemand session:
+#
+#   Rich -> 256 -> tmux -> 16.  Inside tmux the app sees TERM=tmux-256color
+#   and writes 256-colour SGRs; tmux, whose client lacks the `256` feature,
+#   maps every one through the static table below before the browser sees
+#   it. This is the path that produced the screenshot the ANSI theme exists
+#   for.
+#
+#   Rich -> 16 directly.  No multiplexer, TERM=xterm-16color (OnDemand's own
+#   pty) or TERM=xterm-color (JupyterLab): Rich picks STANDARD and matches
+#   every colour against its own sixteen.
+#
+# Both are modelled by calling Rich rather than by re-deriving its matcher.
+# The point of the gate is what Rich will *actually* do, and a second
+# implementation of a nearest-colour search is a second thing to be wrong.
+# `rich` is a hard dependency of the application (textual pulls it), so this
+# costs the lock file nothing; the import is local so the module itself
+# stays stdlib-only for every caller that does not ask.
+# ---------------------------------------------------------------------------
+
+# tmux 3.2a, `colour.c`, `colour_256to16()`. Copied whole rather than
+# summarised: it is a lookup table, the quantisation it performs is not
+# derivable from any formula, and it is the reason `archive`, `ephemeral`
+# and the neutral directory ring all arrive as ANSI 1.
+TMUX_256_TO_16: tuple[int, ...] = (
+     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+     0,  4,  4,  4, 12, 12,  2,  6,  4,  4, 12, 12,  2,  2,  6,  4,
+    12, 12,  2,  2,  2,  6, 12, 12, 10, 10, 10, 10, 14, 12, 10, 10,
+    10, 10, 10, 14,  1,  5,  4,  4, 12, 12,  3,  8,  4,  4, 12, 12,
+     2,  2,  6,  4, 12, 12,  2,  2,  2,  6, 12, 12, 10, 10, 10, 10,
+    14, 12, 10, 10, 10, 10, 10, 14,  1,  1,  5,  4, 12, 12,  1,  1,
+     5,  4, 12, 12,  3,  3,  8,  4, 12, 12,  2,  2,  2,  6, 12, 12,
+    10, 10, 10, 10, 14, 12, 10, 10, 10, 10, 10, 14,  1,  1,  1,  5,
+    12, 12,  1,  1,  1,  5, 12, 12,  1,  1,  1,  5, 12, 12,  3,  3,
+     3,  7, 12, 12, 10, 10, 10, 10, 14, 12, 10, 10, 10, 10, 10, 14,
+     9,  9,  9,  9, 13, 12,  9,  9,  9,  9, 13, 12,  9,  9,  9,  9,
+    13, 12,  9,  9,  9,  9, 13, 12, 11, 11, 11, 11,  7, 12, 10, 10,
+    10, 10, 10, 14,  9,  9,  9,  9,  9, 13,  9,  9,  9,  9,  9, 13,
+     9,  9,  9,  9,  9, 13,  9,  9,  9,  9,  9, 13,  9,  9,  9,  9,
+     9, 13, 11, 11, 11, 11, 11, 15,  0,  0,  0,  0,  0,  0,  8,  8,
+     8,  8,  8,  8,  7,  7,  7,  7,  7,  7, 15, 15, 15, 15, 15, 15
+)
+
+
+def rich_eight_bit(color) -> int:
+    """The xterm-256 index Rich downgrades *color* to."""
+    from rich.color import Color, ColorSystem
+
+    r, g, b = (round(c * 255) for c in parse_color(color))
+    return Color.from_rgb(r, g, b).downgrade(ColorSystem.EIGHT_BIT).number
+
+
+def rich_standard(color) -> int:
+    """The ANSI index Rich downgrades *color* to, with no multiplexer."""
+    from rich.color import Color, ColorSystem
+
+    r, g, b = (round(c * 255) for c in parse_color(color))
+    return Color.from_rgb(r, g, b).downgrade(ColorSystem.STANDARD).number
+
+
+def through_tmux(color) -> int:
+    """The ANSI index a 16-colour tmux client ends up painting *color* as."""
+    return TMUX_256_TO_16[rich_eight_bit(color) & 0xFF]
+

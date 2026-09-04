@@ -39,6 +39,27 @@ def reset_cell_geometry():
 
 
 @pytest.fixture(autouse=True)
+def pin_color_depth():
+    """Keep the developer's own terminal out of the test results.
+
+    The resolved depth is an *input to product behaviour*: at sixteen
+    colours the app renders with the ANSI theme whatever the config says,
+    so a suite run from an Open OnDemand web shell (`xterm-16color`, which
+    is what this project is developed in) would put every app test into a
+    theme none of them named. Pinned to 256 -- what nothing-detected has
+    always meant -- and reset after, so a test that wants a depth installs
+    one and cannot leak it into the next.
+    """
+    from disktide.viz.colordepth import (
+        ColorDepth, reset_color_depth, set_active_color_depth,
+    )
+
+    set_active_color_depth(ColorDepth("256", "test"))
+    yield
+    reset_color_depth()
+
+
+@pytest.fixture(autouse=True)
 def reset_global_rendering_state():
     """Return safe rendering and the colour scheme to their defaults.
 

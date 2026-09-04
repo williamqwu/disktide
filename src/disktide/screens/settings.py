@@ -44,12 +44,7 @@ from disktide.viz.cellgeom import (
     resolve_cell_aspect,
     set_configured_aspect,
 )
-from disktide.viz.colors import (
-    CATEGORIES,
-    NEUTRAL_DIR_RGB,
-    SCHEMES,
-    scheme_legend_rgb,
-)
+from disktide.viz.colors import SCHEMES, scheme_swatches
 
 
 # Display order and labels for the colour-theme picker, straight off the
@@ -102,30 +97,28 @@ def theme_preview(name: str) -> Text:
     Reads as the chart does: the three shallowest directory neutrals (which
     is most of a chart's area) then the six category swatches, over the
     theme's own panel colour. `mono` has to step visibly here too — its six
-    categories are a gray ladder rather than one flat gray — so the swatch
-    row is the same six lookups for every theme.
+    categories are a gray ladder rather than one flat gray — and `ansi`
+    names its colours instead of spelling them, so the lookup is one call
+    (`scheme_swatches`) that answers for all three shapes rather than a
+    branch repeated here.
     """
     scheme = SCHEMES[sanitize_theme(name)]
     glyph = "##" if is_safe_rendering() else "██"
     background = scheme.border_bg
-    legend = scheme_legend_rgb(scheme)
+    neutrals, legend = scheme_swatches(scheme)
 
-    def swatch(rgb: tuple[int, int, int]) -> tuple[str, Style]:
-        return glyph, Style(
-            color=f"rgb({rgb[0]},{rgb[1]},{rgb[2]})",
-            bgcolor=background,
-        )
+    def swatch(color: str) -> tuple[str, Style]:
+        return glyph, Style(color=color, bgcolor=background)
 
     # Exactly 20 cells wide, which is what the row has left at an
     # 80-column terminal.
     preview = Text()
     preview.append(" ", Style(bgcolor=background))
-    neutrals = NEUTRAL_DIR_RGB[scheme.neutral_key]
-    for depth in (0, 1, 2):
-        preview.append(*swatch(neutrals[depth]))
+    for color in neutrals:
+        preview.append(*swatch(color))
     preview.append(" ", Style(bgcolor=background))
-    for category in CATEGORIES[:-1]:  # "other" has no legend swatch
-        preview.append(*swatch(legend[category]))
+    for color in legend:  # "other" has no legend swatch
+        preview.append(*swatch(color))
     return preview
 
 
