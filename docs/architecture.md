@@ -242,9 +242,15 @@ still closes the fd it opened, in the `finally` it always had.
 Directories are not statted by the read (there is nothing in a directory's
 own stat the walk needs at that point); a filesystem that answers
 `DT_UNKNOWN` falls through to `S_ISDIR` on the mode, which is the same
-branch it always took.
+branch it always took. On such a filesystem an entry that vanishes between
+the readdir and the stat is now counted as vanished, where
+`DirEntry.is_file()` used to swallow the `ENOENT` and drop the entry from
+the counts entirely. It is a caveat about `d_type`-less filesystems in
+general and not about any particular mount -- ext4, xfs and the NFSv4 homes
+this was measured on all fill `d_type` in, which is why the byte-identity
+dumps against the pre-change build are identical.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
 - **Chunking is unchanged.** The read is whole-directory; the flush is not.
   A 300,000-entry directory still publishes a checkpoint every 256 entries,
@@ -256,9 +262,10 @@ Two consequences worth knowing:
 - **One directory's listing is held whole.** `os.scandir` was lazy; a batched
   read is a list of tuples the size of the directory. At seven entries per
   directory — a home-shaped tree — that is nothing, and it is bounded by the
-  largest single directory rather than by the tree, but a directory with
-  hundreds of thousands of entries in it costs tens of megabytes for as long
-  as the loop takes to drain it.
+  largest single directory rather than by the tree. On a directory of 300,000
+  files in one place it is 37 MB: peak RSS 200 → 237 MB raw, 205 → 244 MB
+  live, while the scan itself gets *faster* (1.30 → 1.07 s raw, 1.73 → 1.52 s
+  live) — the streaming path is not what the batch costs.
 
 The extension is optional at every level. It is compiled by the build hook
 when a compiler is present (see `docs/contributing.md`), absent from a pure

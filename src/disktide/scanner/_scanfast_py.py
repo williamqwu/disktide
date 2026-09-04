@@ -23,7 +23,9 @@ that is neither a file, a directory nor a symlink:
 * on a filesystem that returns `DT_UNKNOWN` for everything, both backends
   report an entry that vanished between the readdir and the stat as
   vanished; `DirEntry.is_file()` used to swallow that as "not a file" and
-  the entry was dropped from the counts entirely.
+  the entry was dropped from the counts entirely. That is a general caveat
+  about filesystems with no `d_type`, not a description of any particular
+  one: ext4, xfs and the NFSv4 mounts this was measured on all fill it in.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assert which directory reader a `disktide doctor --json` report names.
 
-The release workflow installs disktide four ways -- the platform wheel for
+The release workflow installs disktide three ways -- the platform wheel for
 the runner, the sdist with a compiler, the sdist without one -- and each of
 them has an expected scanner backend. The build hook is deliberately
 forgiving (no compiler means a pure wheel, quietly), so without a check like

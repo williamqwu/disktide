@@ -467,9 +467,9 @@ the extension out of a bug, not for changing what a scan reports.
 
 **If the fallback is what you have.** A wheel for your platform and Python
 version carries the extension; a source install builds it when a C compiler
-is present. `pip install disktide` on a platform PyPI has no wheel for
-therefore needs `cc`/`gcc`/`clang` and your Python's development headers
-(`python3-dev` / `python3-devel`) to get the fast path — and installs
+is present. So on a platform PyPI has no wheel for, `pip install disktide`
+needs `cc`/`gcc`/`clang` and your Python's development headers
+(`python3-dev` / `python3-devel`) to reach the fast path — and it installs
 successfully either way, because a missing compiler is not an error.
 
 One thing to know about the fast path: a single directory read is not
