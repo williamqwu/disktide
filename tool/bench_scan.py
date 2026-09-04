@@ -24,6 +24,20 @@ Usage:
               paint every delivered frame instead, which is what the
               explorer did before the duty cycle and what reproduces the
               starvation.
+    --consume-every-frame
+              apply and acknowledge every delivered live frame instead of
+              modelling the explorer's cadence. Measures the transport --
+              how fast frames *can* be pushed -- rather than the scan a
+              user sees.
+
+`--mode live` models the consumer, because the scheduler is paced by it.
+A live frame is acknowledged when it is applied, and the scheduler builds
+no further non-forced frame until then (see `ScanTreeUpdate.ack`), so a
+bench that applied every frame the instant it arrived would measure a
+cadence no UI has: the explorer applies the newest frame and only when its
+UI-duty loop opens, every 0.4-2.5 s on a 307x69 terminal. This applies the
+newest frame no more often than `_LIVE_APPLY_INTERVAL` and acknowledges
+that one, which puts the headless number within reach of `tui_time.py`.
 
 Output:
     one line at the end with elapsed time, dir/file counts, and total size.
@@ -86,6 +100,14 @@ def _parse_size(text: str) -> tuple[int, int]:
     if cols <= 0 or rows <= 0:
         raise ValueError(f"--paint wants a positive size, got {text!r}")
     return cols, rows
+
+
+#: How often the modelled consumer applies a live frame. The explorer's own
+#: cadence is a closed loop on UI-thread CPU (`ExplorerScreen._LIVE_UI_DUTY`)
+#: and lands between 0.4 and 2.5 s at 307x69; there is no UI thread here to
+#: measure, so this is the fast end of that range -- pessimistic, which is
+#: what a floor measurement wants.
+_LIVE_APPLY_INTERVAL = 0.5
 
 
 def _explorer_pacing() -> tuple[float, float]:
@@ -199,6 +221,11 @@ def main() -> int:
         help="paint every delivered frame, skipping the explorer's duty cycle",
     )
     ap.add_argument(
+        "--consume-every-frame",
+        action="store_true",
+        help="apply every live frame instead of the explorer's cadence",
+    )
+    ap.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -272,11 +299,28 @@ def main() -> int:
     first_event: float | None = None
     first_visual: float | None = None
     live_updates = 0
+    live_applied = 0
     max_live_nodes = 0
+    held: object | None = None
+    applied_at = 0.0
+    every_frame = args.consume_every_frame
     t0 = time.monotonic()
 
+    def apply(event, now: float) -> None:
+        """Do what the explorer does with a frame it has decided to draw."""
+        nonlocal live_applied, max_live_nodes, applied_at
+        live_applied += 1
+        applied_at = now
+        max_live_nodes = max(max_live_nodes, count_live_nodes(event.view_root))
+        if painter is not None:
+            painter(event.view_root)
+        # Last, as the screen does: the walk should be building the next
+        # frame while this one is still on screen.
+        if event.ack is not None:
+            event.ack()
+
     def consume(event) -> None:
-        nonlocal first_event, first_visual, live_updates, max_live_nodes
+        nonlocal first_event, first_visual, live_updates, held
         now = time.monotonic()
         if first_event is None:
             first_event = now - t0
@@ -289,9 +333,19 @@ def main() -> int:
             if first_visual is None:
                 first_visual = now - t0
             live_updates += 1
-            max_live_nodes = max(max_live_nodes, count_live_nodes(event.view_root))
-            if painter is not None:
-                painter(event.view_root)
+            if every_frame:
+                apply(event, now)
+                return
+            held = event
+        # Every event, not only tree updates: a frame held back because the
+        # gap had not opened yet has to be applied the moment it does, or
+        # the scheduler waits out its staleness cap instead of building the
+        # next one. Progress events arrive continuously, so this is the
+        # headless stand-in for the trailing one-shot timer the explorer
+        # arms.
+        if held is not None and now - applied_at >= _LIVE_APPLY_INTERVAL:
+            pending, held = held, None
+            apply(pending, now)
 
     run = ScanService().scan(
         ScanRequest(
@@ -350,6 +404,9 @@ def main() -> int:
                     "time_to_first_event_seconds": run.time_to_first_event_seconds,
                     "time_to_first_visual_seconds": run.time_to_first_visual_seconds,
                     "visual_updates": run.visual_update_count,
+                    "live_frames_delivered": live_updates,
+                    "live_frames_applied": live_applied,
+                    "consume_every_frame": every_frame,
                     "paint": None if painter is None else painter.summary(),
                     "resource_wait_seconds": run.resource_wait_seconds,
                     "worker_selection": (
@@ -394,8 +451,10 @@ def main() -> int:
     if args.mode == "live":
         print(
             f"bench: live_updates={live_updates:,} "
+            f"applied={live_applied:,} "
             f"max_live_nodes={max_live_nodes:,} "
-            f"first_visual={(first_visual or 0.0):.4f}s",
+            f"first_visual={(first_visual or 0.0):.4f}s "
+            f"consume={'every frame' if every_frame else f'{_LIVE_APPLY_INTERVAL}s'}",
             flush=True,
         )
     if painter is not None:

@@ -6,6 +6,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic, thread_time
+from typing import Callable
 
 from textual import on, work
 from textual.app import ComposeResult
@@ -249,6 +250,12 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._live_ui_cpu = 0.0
         self._live_ui_timer: Timer | None = None
         self._live_changed: tuple[FSNode, ...] = ()
+        #: Acknowledgement for the newest frame the scan has handed over.
+        #: Called once the frame has been *applied*, not when it arrives:
+        #: what the scheduler is waiting to learn is whether building
+        #: another one is worth the generation bump, and the answer is
+        #: "not until this screen has drawn the last".
+        self._live_ack: Callable[[], None] | None = None
         self._active_run: ScanRun | None = None
         # True while a scan is in flight. Used to gate drill-into (which
         # would otherwise read stale aggregates off the live snapshot)
@@ -517,10 +524,12 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             node = event
             changed_nodes = (event,)
             view_root = None
+            ack = None
         else:
             node = event.root
             changed_nodes = event.changed_nodes or (node,)
             view_root = event.view_root
+            ack = event.ack
         tree = self.query_one("#size-tree", SizeTree)
         metric = tree.metric
         # The scheduler already built a bounded view off the scan thread and
@@ -543,6 +552,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # inside a skipped window and never changes again, whose row keeps
         # the value it was last drawn with until the reload on completion.
         self._live_changed = changed_nodes
+        self._live_ack = ack
         self._maybe_build_category_index(node)
         self._maybe_apply_live_ui()
 
@@ -699,6 +709,14 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # window has to be wide enough to contain it.
         self._live_ui_at = monotonic()
         self._live_ui_cpu = thread_time()
+        # Told before the drawing rather than after it: the scheduler needs
+        # the next frame to be *building* while this one paints, or the
+        # walk goes quiet for as long as the paint takes. Acking the newest
+        # frame acks every frame the duty cycle skipped on the way to it --
+        # the scheduler keeps a high-water mark, not a queue.
+        ack, self._live_ack = self._live_ack, None
+        if ack is not None:
+            ack()
         self.query_one("#size-tree", SizeTree).apply_live_update(
             node, self._live_changed or (node,)
         )
@@ -720,6 +738,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._live_ui_at = 0.0
         self._live_ui_cpu = 0.0
         self._live_changed = ()
+        self._live_ack = None
 
     def _flush_live_ui(self) -> None:
         """Apply the newest snapshot that a skipped frame left behind.

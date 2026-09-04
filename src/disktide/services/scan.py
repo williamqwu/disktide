@@ -466,6 +466,7 @@ class ScanService:
                     changed_nodes=update.changed_nodes,
                     stable_paths=update.stable_paths,
                     view_root=update.view_root,
+                    ack=update.ack,
                 )
                 return
             emitter.emit(

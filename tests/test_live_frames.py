@@ -1,15 +1,23 @@
-"""What one live frame costs.
+"""What one live frame costs, and who decides when the next one is built.
 
-Two things happened on every publish that nobody had asked for: the
+Two things used to happen on every publish that nobody had asked for: the
 changed-directory list was sorted by (depth, path) although its only
 order-sensitive consumer re-sorts the handful of rows it can draw, and the
 settled-path set was copied into a `frozenset` that nothing reads at all.
-Both ran on the scan's own thread, and under one GIL that is scan time.
+
+The third is the cadence. A publish bumps the generation, and the next write
+into any directory chain then clones that chain's spine so the frame stays
+immutable -- so a frame nobody looks at costs the walk twice. The explorer
+applies only the newest frame, and only when its UI-duty loop opens, so at a
+0.25 s interval most frames were built, cloned for and dropped. Frames are
+now paced by the consumer's acknowledgement instead, with a cap so a consumer
+that never acknowledges anything is still fed.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 
 from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate
@@ -64,6 +72,18 @@ def _add_chain(scheduler, *names, depth_from=1):
     return states
 
 
+def _open_the_throttle(scheduler):
+    """Put the next publish in the steady state: clock open, no force credit.
+
+    The tests below are about back-pressure, which sits behind both the
+    interval clock and the one-frame credit a forced publish leaves behind;
+    without this a call would be answered for the wrong reason and the
+    assertions would pass on a bug.
+    """
+    scheduler._tree_last_emit = 0.0
+    scheduler._tree_first_after_force = False
+
+
 def test_a_frame_lists_its_changed_directories_in_record_order():
     """No sort on the scheduler thread: the consumer sorts what it can draw.
 
@@ -106,3 +126,128 @@ def test_a_frames_settled_paths_are_handed_over_not_copied():
     scheduler._stable_paths.add("/r/second")
     assert set(published) == {"/r/first"}, "a published frame was written to"
     assert scheduler._stable_paths is not published
+
+
+def test_a_non_forced_publish_waits_for_the_last_frame_to_be_applied():
+    frames: list[ScanTreeUpdate] = []
+    scheduler = _rooted_scheduler(frames)
+    scheduler._publish_tree(force=True)
+    assert len(frames) == 1
+
+    _open_the_throttle(scheduler)
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 1, "a second frame went out before the first was applied"
+
+    frames[0].ack()
+    _open_the_throttle(scheduler)
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 2
+
+
+def test_a_forced_publish_is_never_held_back():
+    """Depth-0 completions and entry-chunk checkpoints keep their semantics."""
+
+    frames: list[ScanTreeUpdate] = []
+    scheduler = _rooted_scheduler(frames)
+    scheduler._publish_tree(force=True)
+    scheduler._publish_tree(force=True)
+    assert len(frames) == 2
+
+
+def test_a_skipped_publish_keeps_its_changes_for_the_next_frame():
+    """Skipping must not clear the bookkeeping, or the difference is lost."""
+
+    frames: list[ScanTreeUpdate] = []
+    scheduler = _rooted_scheduler(frames)
+    scheduler._publish_tree(force=True)
+    generation_after_first = scheduler._generation
+
+    state = _add_chain(scheduler, "a")[0]
+    scheduler._record_changed(state)
+    scheduler._stable_paths.add("/r/a")
+    _open_the_throttle(scheduler)
+    scheduler._publish_tree(force=False)
+
+    assert len(frames) == 1
+    assert scheduler._generation == generation_after_first, (
+        "a skipped publish bumped the generation, which makes the walk clone "
+        "every touched chain for a frame that was never built"
+    )
+
+    frames[0].ack()
+    _open_the_throttle(scheduler)
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 2
+    assert "/r/a" in {node.path for node in frames[1].changed_nodes}
+    assert set(frames[1].stable_paths) == {"/r/a"}
+
+
+def test_the_frame_after_a_force_still_gets_out_unacknowledged():
+    """The force credit survives back-pressure.
+
+    A forced publish leaves one frame's worth of credit behind so the first
+    frame that shows what the force discovered reaches a consumer even inside
+    one throttle window. Holding *that* frame back would take a fast scan
+    from empty straight to done.
+    """
+
+    frames: list[ScanTreeUpdate] = []
+    scheduler = _rooted_scheduler(frames)
+    scheduler._publish_tree(force=True)
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 2
+
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 2, "the credit was worth more than one frame"
+
+
+def test_a_consumer_that_never_acknowledges_is_still_fed():
+    """The staleness cap, so an events-only consumer does not starve."""
+
+    frames: list[ScanTreeUpdate] = []
+    scheduler = _rooted_scheduler(frames)
+    scheduler._publish_tree(force=True)
+
+    _open_the_throttle(scheduler)
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 1
+
+    # Eight callback intervals later, with still no acknowledgement.
+    scheduler._frame_published_at = (
+        time.monotonic() - scheduler._unconsumed_frame_cap - 0.01
+    )
+    _open_the_throttle(scheduler)
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 2
+
+
+def test_an_unthrottled_callback_is_never_held_back():
+    """`tree_callback_interval=0.0` means "every frame", and still does."""
+
+    frames: list[ScanTreeUpdate] = []
+    scheduler = _rooted_scheduler(frames, interval=0.0)
+    assert scheduler._unconsumed_frame_cap == 0.0
+    scheduler._publish_tree(force=True)
+    for _ in range(4):
+        scheduler._publish_tree(force=False)
+    assert len(frames) == 5
+
+
+def test_acknowledging_an_old_frame_does_not_release_a_newer_one():
+    """The scheduler keeps a high-water mark, not a queue."""
+
+    frames: list[ScanTreeUpdate] = []
+    scheduler = _rooted_scheduler(frames)
+    scheduler._publish_tree(force=True)
+    scheduler._publish_tree(force=True)
+    assert len(frames) == 2
+
+    frames[0].ack()
+    _open_the_throttle(scheduler)
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 2, "a stale acknowledgement released the next frame"
+
+    frames[1].ack()
+    _open_the_throttle(scheduler)
+    scheduler._publish_tree(force=False)
+    assert len(frames) == 3

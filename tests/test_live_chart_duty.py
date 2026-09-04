@@ -56,7 +56,7 @@ def _live_tree(tmp_path: Path) -> None:
         (directory / "notes.txt").write_bytes(b"y" * 512)
 
 
-def _live_event(root: FSNode, view_root, changed=None) -> NodeAggregateUpdated:
+def _live_event(root: FSNode, view_root, changed=None, ack=None) -> NodeAggregateUpdated:
     return NodeAggregateUpdated(
         run_id="run",
         sequence=1,
@@ -65,6 +65,7 @@ def _live_event(root: FSNode, view_root, changed=None) -> NodeAggregateUpdated:
         final=False,
         changed_nodes=changed if changed is not None else (root,),
         view_root=view_root,
+        ack=ack,
     )
 
 
@@ -429,6 +430,45 @@ def test_the_newest_frames_changed_list_is_what_lands(tmp_path, monkeypatch):
         screen._apply_tree_snapshot(_live_event(root, None, changed=(first, second)))
 
         assert seen == [(first.path,), tuple(sorted((first.path, second.path)))]
+
+    _drive(tmp_path, body)
+
+
+def test_a_frame_is_acknowledged_when_it_is_drawn_not_when_it_arrives(
+    tmp_path,
+    monkeypatch,
+):
+    """The scheduler waits on this gate, so the ack has to sit behind it.
+
+    A frame the gate skips is never drawn; acknowledging it on arrival
+    would tell the scan to build the next one for a screen that has not
+    looked at this one, which is the cadence the back-pressure exists to
+    stop. Acknowledging the newest frame acknowledges the skipped ones with
+    it -- the scheduler keeps a high-water mark, not a queue.
+    """
+
+    async def body(pilot, app, screen):
+        clock = _FakeClock()
+        _arm_fakes(screen, monkeypatch, clock)
+        root = screen._root
+        acked: list[str] = []
+
+        screen._apply_tree_snapshot(
+            _live_event(root, None, ack=lambda: acked.append("first"))
+        )
+        assert acked == ["first"], "the first frame of a scan is never gated"
+
+        clock.advance(0.01)
+        screen._apply_tree_snapshot(
+            _live_event(root, None, ack=lambda: acked.append("skipped"))
+        )
+        assert acked == ["first"], "a frame the gate skipped was acknowledged"
+
+        clock.advance(0.30)
+        screen._apply_tree_snapshot(
+            _live_event(root, None, ack=lambda: acked.append("drawn"))
+        )
+        assert acked == ["first", "drawn"]
 
     _drive(tmp_path, body)
 

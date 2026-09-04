@@ -10,6 +10,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from functools import partial
 from operator import attrgetter
 from typing import Callable, Mapping
 
@@ -45,6 +46,24 @@ _NAME_PATH_KEY = attrgetter("name", "path")
 # The tuple now ships in `_changed_nodes` insertion order, which is
 # `_record_changed`'s: a settled directory first, then its ancestors up to
 # the first one already recorded this generation.
+
+# A publish costs more than the callback it makes. Every generation bump
+# makes the next write into a directory chain clone that chain's spine
+# (`_ensure_mutable`), so a frame nobody looks at is paid for twice: once to
+# build and once in the clones the new generation forces on the walk behind
+# it. The explorer applies only the newest frame, and only when its UI-duty
+# loop opens -- every 0.4-2.5 s on a 307x69 terminal -- so at a 0.25 s
+# interval most frames were built, cloned for, and dropped.
+#
+# So a non-forced publish is skipped while the last frame is still
+# unacknowledged. A consumer that never acknowledges anything (the
+# events-only service path, `bench_scan --mode events`, a future web UI)
+# still has to be fed, so the skip expires. The cap is counted in callback
+# intervals rather than in seconds, because `tree_callback_interval=0.0`
+# means "do not throttle me" and turning that into one frame every two
+# seconds would be the opposite: eight intervals is 2 s at the shipped
+# 0.25 s and no back-pressure at all at 0.0.
+_UNCONSUMED_FRAME_INTERVALS = 8
 
 # Results are applied in path order within each batch the scheduler picks up,
 # so a tree is built the same way whatever order the workers happen to
@@ -927,6 +946,17 @@ class TreeScanScheduler:
         self._published_snapshots = 0
         self._tree_last_emit = 0.0
         self._tree_first_after_force = True
+        # Back-pressure. Both counters are plain ints written by one thread
+        # and read by the other, which under the GIL needs no lock: the
+        # scheduler thread only ever raises `_frame_published_generation`,
+        # the consumer's thread only ever raises `_frame_consumed_generation`,
+        # and a read that loses a race just skips one frame.
+        self._frame_published_generation = -1
+        self._frame_consumed_generation = -1
+        self._frame_published_at = 0.0
+        self._unconsumed_frame_cap = (
+            self._tree_callback_interval * _UNCONSUMED_FRAME_INTERVALS
+        )
         self._changed_nodes: dict[str, FSNode] = {}
         self._stable_paths: set[str] = set()
         self._settled_paths: set[str] = set()
@@ -1696,9 +1726,35 @@ class TreeScanScheduler:
         ):
             return
 
+        if (
+            not bypass_throttle
+            and self._frame_published_generation > self._frame_consumed_generation
+            and now - self._frame_published_at < self._unconsumed_frame_cap
+        ):
+            # Not `not force`: the one frame that follows a forced publish
+            # bypasses this for the same reason it bypasses the interval
+            # clock. The force carries a depth-0 completion or an entry-chunk
+            # checkpoint, the frame after it is the first one that shows what
+            # the force discovered, and a scan that finishes inside one
+            # window would otherwise go from empty straight to done. It is
+            # one frame per force, and forces are rare.
+            #
+            # The frame that is out has not been applied yet. Return without
+            # the callback, without the generation bump and -- the part that
+            # makes it safe -- without clearing `_changed_nodes` or
+            # `_stable_paths`, so the next frame carries the union of this
+            # window and the ones after it rather than losing the difference.
+            # The frame already handed out belongs to the previous generation
+            # and is copy-on-write protected; writes keep landing on
+            # current-generation nodes either way.
+            return
+
         self._tree_last_emit = now
         if not force:
             self._tree_first_after_force = False
+        generation = self._generation
+        self._frame_published_generation = generation
+        self._frame_published_at = now
         root = self._states[self._root_path].node
         changed_nodes = tuple(self._changed_nodes.values())
         # Handed over, not copied. `_stable_paths` only ever holds the
@@ -1722,12 +1778,23 @@ class TreeScanScheduler:
                     stable_paths=self._settled_paths,
                     stable_cache=self._live_view_cache,
                 ),
+                ack=partial(self._mark_consumed, generation),
             )
         )
         self._published_snapshots += 1
         self._changed_nodes = {}
         self._stable_paths = set()
         self._generation += 1
+
+    def _mark_consumed(self, generation: int) -> None:
+        """Acknowledge that a published frame has been applied.
+
+        Called from whatever thread renders the frame -- the UI thread
+        behind the explorer, the event-dispatch thread behind `bench_scan`.
+        One int store, and a lost race costs at most one skipped frame.
+        """
+        if generation > self._frame_consumed_generation:
+            self._frame_consumed_generation = generation
 
     @staticmethod
     def _failed_result(job: DirectoryJob, exc: Exception) -> DirectoryScanResult:

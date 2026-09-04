@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, AbstractSet
+from typing import TYPE_CHECKING, AbstractSet, Callable
 
 from disktide._compat import StrEnum
 from disktide.domain.metrics import MetricId
@@ -256,12 +256,20 @@ class ScanTreeUpdate:
     copying: the set it gives away is never written to again. Read it, do
     not store it expecting a hashable value.
 
+    `ack` is the back-pressure signal. A consumer that renders frames calls
+    it once it has *applied* one; until then the scheduler builds no further
+    non-forced frame, so generations -- and the copy-on-write spine clones
+    each new generation forces on the walk -- advance at the rate frames are
+    actually looked at rather than at a fixed 0.25 s. A consumer that never
+    calls it is fed anyway, on the cap described at
+    `scheduler._UNCONSUMED_FRAME_INTERVALS`.
     """
 
     root: FSNode
     changed_nodes: tuple[FSNode, ...] = ()
     stable_paths: AbstractSet[str] = frozenset()
     view_root: LiveViewNode | None = None
+    ack: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -285,6 +293,10 @@ class NodeAggregateUpdated(ScanEvent):
     changed_nodes: tuple[FSNode, ...] = ()
     stable_paths: AbstractSet[str] = frozenset()
     view_root: LiveViewNode | None = None
+    #: See `ScanTreeUpdate.ack`, forwarded unchanged from the frame this
+    #: event carries. `None` on the final aggregate and on the legacy
+    #: plain-`FSNode` path, neither of which paces anything.
+    ack: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
