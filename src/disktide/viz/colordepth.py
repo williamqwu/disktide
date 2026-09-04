@@ -52,6 +52,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 #: The three answers.  Ordered most capable first; `_RANK` below is what
@@ -243,6 +244,36 @@ def normalize_depth(value: object) -> ColorDepthValue | None:
     if not text or text == AUTO:
         return None
     return _DEPTH_ALIASES.get(text)  # type: ignore[return-value]
+
+
+def config_color_depth(path: "os.PathLike[str] | str | None" = None) -> str | None:
+    """``[ui] color_depth`` read straight out of the config file.
+
+    Deliberately not through ``disktide.config``: that module reaches
+    ``disktide.keys``, which imports Textual, and ``textual.constants``
+    reads ``TEXTUAL_COLOR_SYSTEM`` once at its own import. So a launch that
+    loaded the config first to find out what depth to ask for would have
+    already lost the ability to ask -- the variable would be set and
+    nothing would be reading it any more. This layer therefore reads the
+    one key it needs, before anything else is imported at all.
+
+    Every failure is None: a missing file, an unreadable one, malformed
+    TOML, a value that is not a depth. What that costs is the config
+    layer, and what is left is the detection this key exists to override.
+    """
+    try:
+        from disktide._compat import tomllib
+        from disktide.paths import config_file
+
+        target = Path(config_file() if path is None else path).expanduser()
+        with open(target, "rb") as handle:
+            data = tomllib.load(handle)
+        ui = data.get("ui")
+        if not isinstance(ui, dict):
+            return None
+        return normalize_depth(ui.get("color_depth"))
+    except Exception:
+        return None
 
 
 def _run_tmux(args: list[str]) -> str | None:

@@ -322,3 +322,102 @@ class TestTheConfigKey:
         from disktide.config import AppConfig
 
         assert AppConfig().ui.color_depth == "auto"
+
+
+class TestItRunsBeforeTextual:
+    """`textual.constants` reads TEXTUAL_COLOR_SYSTEM once, at its import.
+
+    Which makes the *order* of two imports a product behaviour, and one
+    that fails silently: get it wrong and the variable is set, nothing
+    reads it, Rich falls back to auto-detection, and the only symptom is
+    the wrong colours in a web shell -- exactly the bug this was written
+    for. `disktide.config` reaches Textual through `disktide.keys`, so
+    even loading the config first is too late; the config layer reads its
+    one key by itself.
+
+    Driven in a subprocess, like `tests/test_startup_imports.py`, because
+    the suite has imported everything long before any test runs.
+    """
+
+    def _in_a_fresh_interpreter(self, tmp_path, source: str) -> str:
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(root / "src")
+        env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+        env["XDG_DATA_HOME"] = str(tmp_path / "data")
+        env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
+        env["XDG_STATE_HOME"] = str(tmp_path / "state")
+        env["DISKTIDE_COLOR_DEPTH"] = "truecolor"
+        env.pop("TEXTUAL_COLOR_SYSTEM", None)
+        result = subprocess.run(
+            [sys.executable, "-c", source],
+            capture_output=True, text=True, env=env, cwd=str(root), timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def test_the_pin_lands_before_textual_reads_it(self, tmp_path):
+        answer = self._in_a_fresh_interpreter(tmp_path, """
+import sys
+from disktide.__main__ import _pin_color_system
+assert "textual.constants" not in sys.modules, "too late already"
+_pin_color_system()
+import textual.constants
+print(textual.constants.COLOR_SYSTEM)
+""")
+        assert answer == "truecolor"
+
+    def test_loading_the_config_first_would_have_been_too_late(self, tmp_path):
+        """The trap, asserted so it cannot come back as a tidy-up.
+
+        This is the failing order, kept as a test: it documents *why*
+        `_pin_color_system` takes no config argument.
+        """
+        answer = self._in_a_fresh_interpreter(tmp_path, """
+import sys
+from disktide.config import load_config
+print("textual.constants" in sys.modules)
+""")
+        assert answer == "True"
+
+    def test_the_config_key_is_read_without_importing_textual(self, tmp_path):
+        answer = self._in_a_fresh_interpreter(tmp_path, """
+import sys
+from disktide.viz.colordepth import config_color_depth
+config_color_depth()
+print("textual" in sys.modules)
+""")
+        assert answer == "False"
+
+
+class TestTheConfigFileLayer:
+    def test_it_reads_the_key(self, tmp_path):
+        from disktide.viz.colordepth import config_color_depth
+
+        path = tmp_path / "config.toml"
+        path.write_text('[ui]\ncolor_depth = "truecolor"\n')
+        assert config_color_depth(path) == "truecolor"
+
+    def test_a_missing_file_is_not_an_answer(self, tmp_path):
+        from disktide.viz.colordepth import config_color_depth
+
+        assert config_color_depth(tmp_path / "nope.toml") is None
+
+    def test_malformed_toml_is_not_an_answer(self, tmp_path):
+        from disktide.viz.colordepth import config_color_depth
+
+        path = tmp_path / "config.toml"
+        path.write_text("[ui\ncolor_depth =")
+        assert config_color_depth(path) is None
+
+    def test_auto_is_not_an_answer(self, tmp_path):
+        from disktide.viz.colordepth import config_color_depth
+
+        path = tmp_path / "config.toml"
+        path.write_text('[ui]\ncolor_depth = "auto"\n')
+        assert config_color_depth(path) is None
