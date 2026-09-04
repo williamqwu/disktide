@@ -1,6 +1,6 @@
-"""Smoke tests for tool/bench_scan.py and tool/diag_scan.py.
+"""Smoke tests for tool/bench_scan.py, tool/diag_scan.py and tool/dump_tree.py.
 
-These two debug scripts are how regressions like the v0.1.5 symlink-scan
+These debug scripts are how regressions like the v0.1.5 symlink-scan
 slowdown got diagnosed. They depend on a small forward-compat contract
 with the scanner (see each script's module docstring); if a future
 refactor breaks that contract, we want it to fail loudly in CI, not the
@@ -11,6 +11,10 @@ a handful of files and assert the expected output shape: the bench
 prints `rate=N files/sec`, the diag prints a `=== SCAN COMPLETE in Xs`
 banner and either a hotspot table or the explicit "disabled" notice.
 We do not assert specific counts or rates; those are environmental.
+
+`dump_tree.py` is the third of the three and the one a scanner change
+is diffed with: it has to keep printing every node exactly once, in a
+stable order, or a diff of two builds stops meaning anything.
 """
 
 from __future__ import annotations
@@ -237,3 +241,40 @@ def test_diag_scan_imports_cleanly_even_if_walker_changes(tmp_path, monkeypatch)
         # failure points at the right thing.
         assert "scan_directory" in (cp.stdout + cp.stderr), \
             f"unexpected failure:\nSTDOUT:\n{cp.stdout}\nSTDERR:\n{cp.stderr}"
+
+
+# --- dump_tree -------------------------------------------------------
+
+
+def test_dump_tree_emits_one_sorted_line_per_node(tmp_path):
+    """The byte-identity harness: every node, one line, sorted by path."""
+    _make_tree(tmp_path)
+    cp = _run("dump_tree.py", str(tmp_path))
+    assert cp.returncode == 0, cp.stderr
+    lines = cp.stdout.splitlines()
+    header, rows = lines[0], lines[1:]
+    assert header.startswith("#path\tis_dir\t")
+    assert header.split("\t")[1:] == list(
+        (
+            "is_dir", "size", "allocated_size", "unique_allocated_size",
+            "file_count", "dir_count", "error", "vanished", "excluded",
+            "depth_limited",
+        )
+    )
+    # root, two files, one subdir, one nested file, one symlink
+    assert len(rows) == 6
+    assert rows == sorted(rows)
+    assert all(len(row.split("\t")) == len(header.split("\t")) for row in rows)
+    by_path = {row.split("\t")[0]: row.split("\t") for row in rows}
+    assert by_path[str(tmp_path)][1] == "1"
+    assert by_path[str(tmp_path / "a.txt")][1] == "0"
+    assert by_path[str(tmp_path / "a.txt")][2] == "5"
+
+
+def test_dump_tree_writes_a_file_when_asked(tmp_path):
+    _make_tree(tmp_path)
+    out = tmp_path.parent / "dump.txt"
+    cp = _run("dump_tree.py", str(tmp_path), "-o", str(out))
+    assert cp.returncode == 0, cp.stderr
+    assert "dump_tree: 6 nodes ->" in cp.stderr
+    assert out.read_text().startswith("#path\t")
