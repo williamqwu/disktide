@@ -190,6 +190,46 @@ def test_the_first_snapshot_of_a_scan_is_never_gated(tmp_path, monkeypatch):
     _drive(tmp_path, body)
 
 
+def test_the_first_snapshot_is_never_gated_on_a_young_host_either(
+    tmp_path, monkeypatch
+):
+    """The open gate is a state, not an arithmetic accident.
+
+    The reset used to stamp both clocks at zero and let the debt formula
+    sort it out, which works only while `thread_time() * DUTY` is smaller
+    than `monotonic()`: the whole of the thread's CPU history, measured
+    against the host's uptime. On a developer's node that is a few seconds
+    against weeks. On a CI runner booted five minutes earlier, inside an
+    xdist worker that has already run two minutes of CPU-bound tests, it
+    is 120 s * 8 against 300 s -- and the first frame of the scan was
+    deferred by eleven minutes, which is how the navigation test that
+    holds a scan at its first frames went red on every push.
+    """
+
+    async def body(pilot, app, screen):
+        clock = _FakeClock(now=300.0)
+        clock.cpu = 120.0
+        armed = _arm_fakes(screen, monkeypatch, clock)
+        view = screen.query_one("#sunburst-view", SunburstView)
+        view.set_live_mode(True)
+        before = view.live_update_count
+
+        assert screen._live_ui_owed() <= 0.0
+        _push(screen)
+
+        assert view.live_update_count == before + 1
+        assert armed.delays == []
+        # And from here the window starts at the frame just applied, not
+        # at the thread's birth: a second frame inside the publish
+        # interval is held for the remainder of it, nothing more.
+        clock.advance(0.1)
+        assert screen._live_ui_owed() == pytest.approx(
+            screen._LIVE_UI_MIN_GAP - 0.1
+        )
+
+    _drive(tmp_path, body)
+
+
 def test_nothing_is_drawn_twice_inside_the_publish_interval(
     tmp_path, monkeypatch
 ):

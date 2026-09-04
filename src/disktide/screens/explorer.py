@@ -246,7 +246,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # Duty-cycle state for the live UI: when the last snapshot was
         # applied, what that cost the UI thread, the directories a skipped
         # frame is still owed, and the one-shot that lands them.
-        self._live_ui_at = 0.0
+        self._live_ui_at: float | None = None
         self._live_ui_cpu = 0.0
         self._live_ui_timer: Timer | None = None
         self._live_changed: tuple[FSNode, ...] = ()
@@ -699,7 +699,17 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
 
     def _live_ui_owed(self) -> float:
         """Seconds still to wait before the UI thread may draw again."""
-        elapsed = monotonic() - self._live_ui_at
+        at = self._live_ui_at
+        if at is None:
+            # The gate is open: the first snapshot of a scan is never
+            # skipped, and both stamps are taken when it is applied, so
+            # the window this gate measures starts there. It used to
+            # start at zero, which charged the thread's whole CPU history
+            # against the host's uptime -- and on a freshly booted CI
+            # runner, with a test session's worth of CPU behind the
+            # thread, that deferred the first frame by minutes.
+            return 0.0
+        elapsed = monotonic() - at
         if elapsed < self._LIVE_UI_MIN_GAP:
             return self._LIVE_UI_MIN_GAP - elapsed
         # The thread has had `spent` of the last `elapsed` seconds; it may
@@ -782,7 +792,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
     def _reset_live_ui_pacing(self) -> None:
         """Open the gate: the next snapshot of a scan is never skipped."""
         self._cancel_live_ui_timer()
-        self._live_ui_at = 0.0
+        self._live_ui_at = None
         self._live_ui_cpu = 0.0
         self._live_changed = ()
         self._live_ack = None
