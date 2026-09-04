@@ -175,9 +175,9 @@ def test_giant_directory_cancellation_stops_at_chunk_boundary(
 
     original = scheduler_module.make_file_node
 
-    def slowed(entry, stat_result, depth):
+    def slowed(entry, stat_result, depth, path):
         time.sleep(0.001)
-        return original(entry, stat_result, depth)
+        return original(entry, stat_result, depth, path)
 
     monkeypatch.setattr(scheduler_module, "make_file_node", slowed)
     first_visual = threading.Event()

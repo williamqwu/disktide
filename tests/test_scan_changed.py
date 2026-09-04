@@ -299,19 +299,34 @@ class TestDeletionBetweenReaddirAndStat:
 
     def _deleting_shim(self, monkeypatch, module):
         real_scandir = os.scandir
+        # The scheduler scans a directory *descriptor*, so an entry knows its
+        # name and not its path. The shim keeps the same book the scheduler
+        # keeps -- which path each open produced -- rather than reading
+        # /proc, which only exists on Linux.
+        opened: dict[int, str] = {}
 
         class _Shim:
             def __getattr__(self, name):
                 return getattr(os, name)
 
             @staticmethod
-            def scandir(path):
-                with real_scandir(path) as entries:
+            def open(path, *args, **kwargs):
+                handle = os.open(path, *args, **kwargs)
+                opened[handle] = path
+                return handle
+
+            @staticmethod
+            def scandir(handle):
+                base = opened.get(handle, handle)
+                with real_scandir(handle) as entries:
                     listed = list(entries)
                 # Decide before deleting: a DirEntry's cached type is what
                 # readdir returned, but is_dir can still fall back to a stat.
                 doomed = [
-                    (entry.path, entry.is_dir(follow_symlinks=False))
+                    (
+                        os.path.join(base, entry.name),
+                        entry.is_dir(follow_symlinks=False),
+                    )
                     for entry in listed
                     if entry.name.startswith("gone-")
                 ]

@@ -27,8 +27,13 @@ def vanished(exc: OSError) -> bool:
     return exc.errno in VANISHED_ERRNOS
 
 
-def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode:
+def make_symlink_node(entry: os.DirEntry, depth: int, path: str) -> FSNode:
     """Build an FSNode for a symlink directory entry.
+
+    `path` is passed in rather than read off `entry.path` because the
+    scheduler iterates a directory *fd*, and an fd-relative `DirEntry`
+    knows only its name -- see `scheduler.scan_directory_once`. The
+    recursive walker below passes `entry.path` and gets the old string.
 
     Lazy by design. The walker pays exactly one syscall per symlink
     (entry.stat for the link's own size); the target text (readlink)
@@ -52,13 +57,18 @@ def make_symlink_node(entry: os.DirEntry, depth: int) -> FSNode:
     allocated = None if blocks is None else max(0, blocks) * 512
     size = st.st_size
     return FSNode(
-        entry.name, entry.path, size, size, allocated, allocated, None, None,
+        entry.name, path, size, size, allocated, allocated, None, None,
         1, 0, False, st.st_mtime, depth, [], None, 0, 0, 0, 0, True,
         None, False, False, False, False, st.st_dev, st.st_ino, st.st_nlink,
     )
 
 
-def make_file_node(entry: os.DirEntry, stat_result, depth: int) -> FSNode:
+def make_file_node(
+    entry: os.DirEntry,
+    stat_result,
+    depth: int,
+    path: str,
+) -> FSNode:
     """Build a regular-file node from the single stat already paid for.
 
     This runs once per file -- 200k times on the benchmark tree, 592k on a
@@ -73,6 +83,11 @@ def make_file_node(entry: os.DirEntry, stat_result, depth: int) -> FSNode:
     declaration order; `tests/test_tree.py::test_fsnode_positional_prefix`
     pins that order so a field inserted above `link_count` fails there
     rather than silently writing sizes into the wrong slots.
+
+    `path` is a parameter and not `entry.path` for the same reason as in
+    `make_symlink_node`: the scheduler scans a directory fd, where an entry
+    carries a name and nothing else, and joins the name onto the parent
+    path itself.
     """
     # getattr, not a bare attribute: st_blocks is the one field of the three
     # that genuinely does not exist on every platform (Windows).
@@ -80,7 +95,7 @@ def make_file_node(entry: os.DirEntry, stat_result, depth: int) -> FSNode:
     allocated = None if blocks is None else max(0, blocks) * 512
     size = stat_result.st_size
     return FSNode(
-        entry.name, entry.path, size, size, allocated, allocated, None, None,
+        entry.name, path, size, size, allocated, allocated, None, None,
         1, 0, False, stat_result.st_mtime, depth, [], None, 0, 0, 0, 0, False,
         None, False, False, False, False, stat_result.st_dev, stat_result.st_ino,
         stat_result.st_nlink,
@@ -129,6 +144,14 @@ def scan_directory(
 
     Uses os.scandir() with follow_symlinks=False.
     Per-entry try/except for resilience.
+
+    Deliberately still path-based, unlike `scheduler.scan_directory_once`:
+    this is the recursive compatibility walker, kept for callers that want
+    one directory tree and no scheduler, and it recurses one Python frame
+    per level. Trees deep enough for the fd-relative walk to matter -- past
+    PATH_MAX, about 450 levels of ordinary names -- would exhaust the
+    interpreter stack here long before the kernel refused the path, so
+    there is nothing for the fd machinery to buy.
 
     If `cancel_event` is provided and set during the scan, the walker
     returns the partial node it has built so far without descending
@@ -235,7 +258,9 @@ def scan_directory(
                     # UI's classify_symlink call so the scan stays at one
                     # syscall per entry instead of three.
                     try:
-                        child = make_symlink_node(entry, depth + 1)
+                        child = make_symlink_node(
+                            entry, depth + 1, entry.path
+                        )
                     except OSError as exc:
                         if vanished(exc):
                             gone += 1
@@ -267,7 +292,9 @@ def scan_directory(
                 elif entry.is_file(follow_symlinks=False):
                     try:
                         st = entry.stat(follow_symlinks=False)
-                        child = make_file_node(entry, st, depth + 1)
+                        child = make_file_node(
+                            entry, st, depth + 1, entry.path
+                        )
                         node.children.append(child)
                         own_size += st.st_size
                         own_allocated = sum_available(

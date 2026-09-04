@@ -394,12 +394,25 @@ def test_scan_driven_handoff_observes_each_directory_before_scandir(
     for name in ("a", "a/nested", "b"):
         (tmp_path / name).mkdir(exist_ok=True)
     events: list[tuple[str, str]] = []
+    original_open = os.open
     original_scandir = os.scandir
+    # The scheduler opens the directory and then scans the descriptor, so
+    # the name the scan is about is only visible at the open. An fd number
+    # is reused, but an open always precedes the scandir that uses it, so
+    # the latest writer is always the right one.
+    opened: dict[int, str] = {}
 
-    def traced_scandir(path):
-        events.append(("scan", str(Path(path).resolve())))
-        return original_scandir(path)
+    def traced_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if isinstance(path, str):
+            opened[handle] = path
+        return handle
 
+    def traced_scandir(handle):
+        events.append(("scan", str(Path(opened.get(handle, handle)).resolve())))
+        return original_scandir(handle)
+
+    monkeypatch.setattr(scheduler_module.os, "open", traced_open)
     monkeypatch.setattr(scheduler_module.os, "scandir", traced_scandir)
     run = ScanService().scan(
         ScanRequest(

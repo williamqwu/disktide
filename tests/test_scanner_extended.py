@@ -2,8 +2,10 @@
 
 import os
 import tempfile
+import threading
 
 import pytest
+from disktide.domain.policy import ScanPolicy
 from disktide.scanner.walker import scan_directory
 from disktide.scanner.engine import ScanEngine
 
@@ -289,3 +291,102 @@ class TestPartialInaccessibility:
         root = scan_directory(str(tmp_path))
         assert root.denied_dir_subtree_count == 0
         assert root.partial_dir_subtree_count == 0
+
+
+class TestPathsLongerThanPathMax:
+    """A path the kernel will not accept is not a limit on the walk.
+
+    Every syscall the scan makes below the scan root is relative to a
+    directory descriptor, so the 4,096-byte cap on a pathname argument
+    applies to the root's own path and to nothing else. Before that, a
+    1,200-level tree stopped at level 442 with `[Errno 36] File name too
+    long` recorded as a *denied* directory -- the scan reported a
+    permissions problem for a tree it simply could not name.
+    """
+
+    @staticmethod
+    def _build_chain(root, levels: int, name: str = "abcdefgh") -> int:
+        """mkdir `levels` deep with dir_fd, since the path stops being usable."""
+        handle = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for _ in range(levels):
+                os.mkdir(name, dir_fd=handle)
+                nested = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=handle
+                )
+                os.close(handle)
+                handle = nested
+            with open(
+                os.open("leaf.txt", os.O_WRONLY | os.O_CREAT, 0o644,
+                        dir_fd=handle),
+                "wb",
+            ) as leaf:
+                leaf.write(b"x" * 4096)
+        finally:
+            os.close(handle)
+        return len(str(root)) + levels * (len(name) + 1)
+
+    def test_engine_scans_past_path_max(self, tmp_path):
+        levels = 900
+        length = self._build_chain(tmp_path, levels)
+        assert length > 4096, "the fixture has to outgrow PATH_MAX to prove it"
+
+        root = ScanEngine(workers=1, scan_path=str(tmp_path)).scan(str(tmp_path))
+
+        assert root.dir_count == levels
+        assert root.file_count == 1
+        assert root.size == 4096
+        assert root.error is None
+        assert root.denied_dir_subtree_count == 0
+        assert root.partial_dir_subtree_count == 0
+        assert root.inaccessible_subtree_count == 0
+
+    def test_root_path_the_kernel_rejects_is_still_an_error(self, tmp_path):
+        """A component past NAME_MAX is a bad argument, not a deep tree."""
+        from disktide.scanner.scheduler import DirectoryJob, scan_directory_once
+
+        bad = str(tmp_path / ("y" * 300))
+        result = scan_directory_once(
+            DirectoryJob(bad, 0, None),
+            policy=ScanPolicy(),
+            cancel_event=threading.Event(),
+            root_device=None,
+            excluded_mounts={},
+        )
+        assert result.node.error is not None
+        assert "too long" in result.node.error.lower()
+        assert not result.node.vanished
+
+    @pytest.mark.skipif(
+        not os.path.isdir("/proc/self/fd"),
+        reason="descriptor accounting needs /proc",
+    )
+    def test_a_worker_holds_at_most_two_descriptors(self, tmp_path):
+        """One fd for the directory, one for the `scandir` dup it makes."""
+        for index in range(240):
+            branch = tmp_path / f"d{index:03d}"
+            branch.mkdir()
+            for leaf in range(20):
+                (branch / f"f{leaf:02d}").write_bytes(b"x")
+
+        workers = 8
+        baseline = len(os.listdir("/proc/self/fd"))
+        peak = 0
+
+        def observe(_path: str) -> None:
+            nonlocal peak
+            live = len(os.listdir("/proc/self/fd"))
+            if live > peak:
+                peak = live
+
+        ScanEngine(
+            workers=workers,
+            scan_path=str(tmp_path),
+            directory_observer=observe,
+        ).scan(str(tmp_path))
+
+        # +1 for the descriptor `os.listdir` itself holds while it reads
+        # /proc/self/fd from inside a worker.
+        assert peak - baseline <= 2 * workers + 1, (
+            f"peak {peak} against a baseline of {baseline} for {workers} workers"
+        )
