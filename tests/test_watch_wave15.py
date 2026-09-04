@@ -395,10 +395,10 @@ def test_scan_driven_handoff_observes_each_directory_before_scandir(
         (tmp_path / name).mkdir(exist_ok=True)
     events: list[tuple[str, str]] = []
     original_open = os.open
-    original_scandir = os.scandir
-    # The scheduler opens the directory and then scans the descriptor, so
+    original_scan_dir = scheduler_module.scan_dir
+    # The scheduler opens the directory and then reads the descriptor, so
     # the name the scan is about is only visible at the open. An fd number
-    # is reused, but an open always precedes the scandir that uses it, so
+    # is reused, but an open always precedes the read that uses it, so
     # the latest writer is always the right one.
     opened: dict[int, str] = {}
 
@@ -408,12 +408,12 @@ def test_scan_driven_handoff_observes_each_directory_before_scandir(
             opened[handle] = path
         return handle
 
-    def traced_scandir(handle):
+    def traced_scan_dir(handle, stat_dirs=False):
         events.append(("scan", str(Path(opened.get(handle, handle)).resolve())))
-        return original_scandir(handle)
+        return original_scan_dir(handle, stat_dirs)
 
     monkeypatch.setattr(scheduler_module.os, "open", traced_open)
-    monkeypatch.setattr(scheduler_module.os, "scandir", traced_scandir)
+    monkeypatch.setattr(scheduler_module, "scan_dir", traced_scan_dir)
     run = ScanService().scan(
         ScanRequest(
             path=str(tmp_path),

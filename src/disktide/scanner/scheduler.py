@@ -6,6 +6,7 @@ import copy
 import errno
 import os
 import queue
+import stat
 import threading
 import time
 from collections import deque
@@ -19,11 +20,11 @@ from disktide.domain.metrics import MetricId
 from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate
 from disktide.models.tree import FSNode, LeafNode
+from disktide.scanner.accel import DT_DIR, scan_dir
 from disktide.scanner.policy import lookup_excluded_mount
 from disktide.scanner.walker import (
+    VANISHED_ERRNOS,
     classify_symlink,
-    make_file_node,
-    make_symlink_node,
     vanished,
 )
 
@@ -617,8 +618,15 @@ def _scan_open_directory(
             node.error = str(open_error)
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
+    # The whole directory, and the lstat of every non-directory entry in
+    # it, in one call -- one GIL release instead of one per entry. What
+    # comes back is a list of ten-field tuples; `accel` decides once, at
+    # import, whether the C extension or the `os.scandir` fallback produces
+    # them, and both produce the same ones. The errors this used to raise
+    # part way through the listing arrive as a final entry carrying an
+    # errno, so they are still counted one for one.
     try:
-        scandir_iterator = os.scandir(dir_fd)
+        entries = scan_dir(dir_fd)
     except PermissionError:
         node.error = f"Permission denied: {job.path}"
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
@@ -701,113 +709,102 @@ def _scan_open_directory(
         chunk_vanished = 0
         return True
 
-    try:
-        for entry in scandir_iterator:
-            if cancel_event.is_set():
-                break
-            chunk_size += 1
-            try:
-                # Ordered by how often each branch is taken, not by kind.
-                # `is_file`/`is_dir`/`is_symlink` answer from the type
-                # readdir already returned, but each is still a method call,
-                # and files outnumber everything else nine to one on a
-                # home-shaped tree -- asking about symlinks first spent two
-                # extra calls on 894k of 982k entries. With
-                # follow_symlinks=False a symlink is neither a file nor a
-                # directory, so the order is free to change; an entry that is
-                # none of the three (a socket, a fifo, a device node) is
-                # skipped, exactly as before.
-                if entry.is_file(follow_symlinks=False):
-                    try:
-                        entry_stat = entry.stat(follow_symlinks=False)
-                        child = make_file_node(
-                            entry,
-                            entry_stat,
-                            job.depth + 1,
-                            child_prefix + entry.name,
-                        )
-                        chunk_children.append(child)
-                        own_size += entry_stat.st_size
-                        chunk_own_size += entry_stat.st_size
-                        # sum_available inlined: two calls per entry, each
-                        # building a tuple and running a generic loop, were
-                        # 12% of the scanner profile at 200k entries.
-                        child_allocated = child.own_allocated_size
-                        if child_allocated is None:
-                            own_allocated = None
-                            chunk_own_allocated = None
-                        else:
-                            if own_allocated is not None:
-                                own_allocated += child_allocated
-                            if chunk_own_allocated is not None:
-                                chunk_own_allocated += child_allocated
-                    except OSError as exc:
-                        if vanished(exc):
-                            direct_vanished += 1
-                            chunk_vanished += 1
-                        else:
-                            direct_inaccessible += 1
-                            chunk_inaccessible += 1
-                elif entry.is_dir(follow_symlinks=False):
-                    child_job = DirectoryJob(
-                        path=child_prefix + entry.name,
-                        depth=job.depth + 1,
-                        parent_path=job.path,
-                        ancestors=child_ancestors,
-                    )
-                    child_count += 1
-                    chunk_children.append(_placeholder(child_job))
-                elif entry.is_symlink():
-                    try:
-                        child = make_symlink_node(
-                            entry, job.depth + 1, child_prefix + entry.name
-                        )
-                    except OSError as exc:
-                        if vanished(exc):
-                            direct_vanished += 1
-                            chunk_vanished += 1
-                        else:
-                            direct_inaccessible += 1
-                            chunk_inaccessible += 1
-                    else:
-                        chunk_children.append(child)
-                        own_size += child.own_size
-                        chunk_own_size += child.own_size
-                        child_allocated = child.own_allocated_size
-                        if child_allocated is None:
-                            own_allocated = None
-                            chunk_own_allocated = None
-                        else:
-                            if own_allocated is not None:
-                                own_allocated += child_allocated
-                            if chunk_own_allocated is not None:
-                                chunk_own_allocated += child_allocated
-                        if (
-                            job.depth == 0
-                            and top_level_classified < _TOP_LEVEL_CLASSIFY_CAP
-                        ):
-                            classify_symlink(child)
-                            top_level_classified += 1
-            except OSError as exc:
-                if vanished(exc):
-                    direct_vanished += 1
-                    chunk_vanished += 1
-                else:
-                    direct_inaccessible += 1
-                    chunk_inaccessible += 1
-            if chunk_size >= entry_chunk_size and not flush_chunk():
-                streaming_open = False
-                break
-    except OSError as exc:
-        if vanished(exc):
-            direct_vanished += 1
-            chunk_vanished += 1
-        else:
-            direct_inaccessible += 1
-            chunk_inaccessible += 1
+    # Hoisted out of the loop: three module lookups and an attribute each,
+    # 976,000 times on a home-shaped tree, for constants that do not change.
+    _S_ISREG = stat.S_ISREG
+    _S_ISDIR = stat.S_ISDIR
+    _S_ISLNK = stat.S_ISLNK
+    _depth1 = job.depth + 1
+    # Branch order is by how often each is taken, not by kind: files
+    # outnumber everything else nine to one, and directories are settled
+    # from `d_type` without touching the stat fields at all. `LeafNode` is
+    # built positionally, and the twenty arguments are its first twenty
+    # fields in declaration order -- the contract
+    # `tests/test_tree.py::test_leafnode_field_order` pins, and the reason
+    # `walker.make_file_node` is not called here: it wants a `DirEntry`,
+    # and this loop has a tuple.
+    for name, dtype, err, mode, size, blocks, dev, ino, nlink, mtime in entries:
+        if cancel_event.is_set():
+            break
         chunk_size += 1
-    finally:
-        scandir_iterator.close()
+        if dtype == DT_DIR:
+            child_job = DirectoryJob(
+                path=child_prefix + name,
+                depth=_depth1,
+                parent_path=job.path,
+                ancestors=child_ancestors,
+            )
+            child_count += 1
+            # Both `_placeholder` calls in this loop take a job only to read
+            # `path` and `depth` off it; a `_placeholder(name, path, depth)`
+            # would replace each of them, and the `DirectoryJob` above, with
+            # this one line.
+            chunk_children.append(_placeholder(child_job))
+        elif err:
+            if err in VANISHED_ERRNOS:
+                direct_vanished += 1
+                chunk_vanished += 1
+            else:
+                direct_inaccessible += 1
+                chunk_inaccessible += 1
+        elif _S_ISREG(mode):
+            allocated = None if blocks is None else max(0, blocks) * 512
+            child = LeafNode(
+                name, child_prefix + name, size, size, allocated, allocated,
+                None, None, 1, False, mtime, _depth1, False, None, False,
+                False, False, dev, ino, nlink,
+            )
+            chunk_children.append(child)
+            own_size += size
+            chunk_own_size += size
+            # sum_available inlined: two calls per entry, each building a
+            # tuple and running a generic loop, were 12% of the scanner
+            # profile at 200k entries.
+            if allocated is None:
+                own_allocated = None
+                chunk_own_allocated = None
+            else:
+                if own_allocated is not None:
+                    own_allocated += allocated
+                if chunk_own_allocated is not None:
+                    chunk_own_allocated += allocated
+        elif _S_ISDIR(mode):
+            # A filesystem that answers DT_UNKNOWN: the mode is the only
+            # thing that says this is a directory.
+            child_job = DirectoryJob(
+                path=child_prefix + name,
+                depth=_depth1,
+                parent_path=job.path,
+                ancestors=child_ancestors,
+            )
+            child_count += 1
+            chunk_children.append(_placeholder(child_job))
+        elif _S_ISLNK(mode):
+            allocated = None if blocks is None else max(0, blocks) * 512
+            child = LeafNode(
+                name, child_prefix + name, size, size, allocated, allocated,
+                None, None, 1, False, mtime, _depth1, True, None, False,
+                False, False, dev, ino, nlink,
+            )
+            chunk_children.append(child)
+            own_size += size
+            chunk_own_size += size
+            if allocated is None:
+                own_allocated = None
+                chunk_own_allocated = None
+            else:
+                if own_allocated is not None:
+                    own_allocated += allocated
+                if chunk_own_allocated is not None:
+                    chunk_own_allocated += allocated
+            if job.depth == 0 and top_level_classified < _TOP_LEVEL_CLASSIFY_CAP:
+                classify_symlink(child)
+                top_level_classified += 1
+        # Anything else -- a socket, a fifo, a device node -- is skipped and
+        # still counted towards the chunk, exactly as it was.
+        if chunk_size >= entry_chunk_size and not flush_chunk():
+            streaming_open = False
+            break
 
     # A directory that fits in one chunk hands its entries back in the
     # result instead of publishing them. On a home-shaped tree that is

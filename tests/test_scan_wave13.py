@@ -173,13 +173,16 @@ def test_giant_directory_cancellation_stops_at_chunk_boundary(
     for index in range(512):
         (tmp_path / f"f-{index:04d}").write_bytes(b"x")
 
-    original = scheduler_module.make_file_node
+    # The entry loop builds its leaves inline now -- one `LeafNode` per
+    # file, straight from the tuple the directory read returned -- so the
+    # per-entry millisecond goes on the constructor the loop actually calls.
+    original = scheduler_module.LeafNode
 
-    def slowed(entry, stat_result, depth, path):
+    def slowed(*fields):
         time.sleep(0.001)
-        return original(entry, stat_result, depth, path)
+        return original(*fields)
 
-    monkeypatch.setattr(scheduler_module, "make_file_node", slowed)
+    monkeypatch.setattr(scheduler_module, "LeafNode", slowed)
     first_visual = threading.Event()
     service = ScanService()
     run = service.create_run(

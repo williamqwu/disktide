@@ -28,6 +28,7 @@ from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import AccessError, ScanRequest, ScanStatus
 from disktide.scanner import scheduler as scheduler_module
 from disktide.scanner import walker as walker_module
+from disktide.scanner.accel import DT_DIR
 from disktide.scanner.scheduler import DirectoryJob, scan_directory_once
 from disktide.scanner.walker import scan_directory
 from disktide.services.scan import ScanService
@@ -78,6 +79,30 @@ class _StatRaises:
 
     def stat(self, *, follow_symlinks=True):
         raise self._exc
+
+
+def _failed_stat(entry, exc):
+    """The `scan_dir` tuple for an entry whose stat came back with an errno.
+
+    The scheduler reads a directory and stats its entries in one call now --
+    `disktide.scanner.accel.scan_dir`, C extension or pure-Python fallback --
+    so the race these tests describe is expressed where the scheduler sees
+    it: a listed entry whose stat fields are absent and whose errno says
+    why. That is the same tuple either backend produces for a name that was
+    gone by the time the stat reached it.
+    """
+    name, dtype = entry[0], entry[1]
+    return (name, dtype, exc.errno, None, None, None, None, None, None, None)
+
+
+def _stub_scan_dir(monkeypatch, wrap):
+    """Replace the scheduler's directory reader with `wrap` over the real one."""
+    real_scan_dir = scheduler_module.scan_dir
+
+    def scan_dir(fd, stat_dirs=False):
+        return wrap(real_scan_dir(fd, stat_dirs))
+
+    monkeypatch.setattr(scheduler_module, "scan_dir", scan_dir)
 
 
 def _stub_scandir(monkeypatch, module, wrap):
@@ -133,15 +158,13 @@ class TestVanishedEntries:
 
         def wrap(entries):
             return [
-                _StatRaises(entry, exc)
-                if entry.name.startswith("gone-") and not entry.is_dir(
-                    follow_symlinks=False
-                )
+                _failed_stat(entry, exc)
+                if entry[0].startswith("gone-") and entry[1] != DT_DIR
                 else entry
                 for entry in entries
             ]
 
-        _stub_scandir(monkeypatch, scheduler_module, wrap)
+        _stub_scan_dir(monkeypatch, wrap)
         errors = []
         run = _scan(tmp_path, consumers=(lambda event: (
             errors.append(event) if isinstance(event, AccessError) else None
@@ -169,15 +192,13 @@ class TestVanishedEntries:
 
         def wrap(entries):
             return [
-                _StatRaises(entry, denied)
-                if entry.name.startswith("gone-") and not entry.is_dir(
-                    follow_symlinks=False
-                )
+                _failed_stat(entry, denied)
+                if entry[0].startswith("gone-") and entry[1] != DT_DIR
                 else entry
                 for entry in entries
             ]
 
-        _stub_scandir(monkeypatch, scheduler_module, wrap)
+        _stub_scan_dir(monkeypatch, wrap)
         errors = []
         run = _scan(tmp_path, consumers=(lambda event: (
             errors.append(event) if isinstance(event, AccessError) else None
@@ -201,11 +222,11 @@ class TestVanishedEntries:
 
         def wrap(entries):
             return [
-                _StatRaises(entry, exc) if entry.name.endswith(".lnk") else entry
+                _failed_stat(entry, exc) if entry[0].endswith(".lnk") else entry
                 for entry in entries
             ]
 
-        _stub_scandir(monkeypatch, scheduler_module, wrap)
+        _stub_scan_dir(monkeypatch, wrap)
         run = _scan(tmp_path)
 
         assert run.root.vanished_count == 1
@@ -253,25 +274,19 @@ class TestVanishedEntries:
     ):
         _doomed_tree(tmp_path)
         removed = threading.Event()
-        real_scandir = os.scandir
 
-        class _Shim:
-            def __getattr__(self, name):
-                return getattr(os, name)
+        def wrap(entries):
+            # Remove the doomed directory once its parent has listed it, so
+            # the scheduler hands out a job for a directory that is already
+            # gone -- the case the placeholder node describes. A directory
+            # is never statted by the read, so nothing here is simulated:
+            # the child job opens a name the kernel no longer has.
+            if not removed.is_set():
+                shutil.rmtree(tmp_path / "gone-dir")
+                removed.set()
+            return entries
 
-            @staticmethod
-            def scandir(path):
-                with real_scandir(path) as entries:
-                    listed = list(entries)
-                # Remove the doomed directory once its parent has listed it,
-                # so the scheduler hands out a job for a directory that is
-                # already gone -- the case the placeholder node describes.
-                if not removed.is_set():
-                    shutil.rmtree(tmp_path / "gone-dir")
-                    removed.set()
-                return _Entries(listed)
-
-        monkeypatch.setattr(scheduler_module, "os", _Shim())
+        _stub_scan_dir(monkeypatch, wrap)
         errors = []
         run = _scan(tmp_path, consumers=(lambda event: (
             errors.append(event) if isinstance(event, AccessError) else None
@@ -339,6 +354,50 @@ class TestDeletionBetweenReaddirAndStat:
 
         monkeypatch.setattr(module, "os", _Shim())
 
+    def _deleting_reader(self, monkeypatch):
+        """The same removals, at the seam the scheduler reads through now.
+
+        A directory's readdir and its entries' stats happen inside one
+        `scan_dir` call, so a file's removal cannot be slipped between them
+        from this thread any more. The removal is still real -- the file is
+        unlinked, the subdirectory is `rmtree`d -- and the errno the stat
+        would have returned is stamped onto that entry's tuple afterwards.
+        The doomed *directories* need no stamp at all: a directory is never
+        statted by the read, so the child job opens a name that genuinely is
+        not there.
+        """
+        real_scan_dir = scheduler_module.scan_dir
+        opened: dict[int, str] = {}
+        real_open = os.open
+
+        def traced_open(path, *args, **kwargs):
+            handle = real_open(path, *args, **kwargs)
+            if isinstance(path, str):
+                opened[handle] = path
+            return handle
+
+        def scan_dir(fd, stat_dirs=False):
+            base = opened.get(fd, "")
+            out = []
+            for entry in real_scan_dir(fd, stat_dirs):
+                name = entry[0]
+                if not name.startswith("gone-"):
+                    out.append(entry)
+                    continue
+                target = os.path.join(base, name)
+                if entry[1] == DT_DIR:
+                    shutil.rmtree(target, ignore_errors=True)
+                    out.append(entry)
+                else:
+                    os.unlink(target)
+                    out.append(
+                        _failed_stat(entry, VANISHED_EXCEPTIONS["enoent"])
+                    )
+            return out
+
+        monkeypatch.setattr(scheduler_module.os, "open", traced_open)
+        monkeypatch.setattr(scheduler_module, "scan_dir", scan_dir)
+
     def test_scheduler_reports_a_changed_tree_as_complete(
         self, tmp_path, monkeypatch
     ):
@@ -352,7 +411,7 @@ class TestDeletionBetweenReaddirAndStat:
         work = tmp_path / "work"
         shutil.copytree(source, work, symlinks=True)
 
-        self._deleting_shim(monkeypatch, scheduler_module)
+        self._deleting_reader(monkeypatch)
         errors = []
         run = _scan(work, consumers=(lambda event: (
             errors.append(event) if isinstance(event, AccessError) else None
