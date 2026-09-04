@@ -9,11 +9,6 @@ import queue
 import threading
 import time
 from collections import deque
-from concurrent.futures import (
-    CancelledError,
-    Future,
-    ThreadPoolExecutor,
-)
 from dataclasses import dataclass
 from operator import attrgetter
 from typing import Callable, Mapping
@@ -44,6 +39,17 @@ _NAME_PATH_KEY = attrgetter("name", "path")
 # hundred nodes per publish and a few hundred publishes: enough that the sort
 # key should not be a Python frame per comparison.
 _DEPTH_PATH_KEY = attrgetter("depth", "path")
+
+# Results are applied in path order within each batch the scheduler picks up,
+# so a tree is built the same way whatever order the workers happen to
+# finish in.
+_RESULT_PATH_KEY = attrgetter("job.path")
+
+# How many workers start with the scan. Worker selection may ask for 64 on a
+# high-latency mount (see `sysinfo._compute_recommended_workers`), and most
+# trees do not have 64 directories to hand out before the first results come
+# back; the rest are started only when there is work queued for them.
+_INITIAL_WORKER_THREADS = 8
 
 # Two module-global lookups saved per call, and this one runs twice per
 # directory: once for the job's own node and once for each child placeholder.
@@ -946,25 +952,29 @@ class TreeScanScheduler:
         self._states[root_path] = root_state
 
         pending: deque[DirectoryJob] = deque((root_job,))
-        futures: dict[Future[DirectoryScanResult], DirectoryJob] = {}
         sources: deque[_DirectoryState] = deque()
         source_paths: set[str] = set()
         entry_chunks: queue.Queue[DirectoryEntryChunk] = queue.Queue(
             maxsize=self._entry_chunk_queue_capacity
         )
         root_device: int | None = None
-        wait_for_workers = True
         scheduler_activity = threading.Event()
-        # Futures announce themselves instead of being polled. Asking every
-        # in-flight future whether it is done takes that future's condition
-        # lock, once per future per loop iteration -- 346k lock acquisitions
-        # on an 88k-directory tree. `deque.append` and `popleft` are atomic
-        # under the GIL, so the callback can hand the future straight over.
-        finished: deque[Future[DirectoryScanResult]] = deque()
-
-        def on_future_done(future: Future[DirectoryScanResult]) -> None:
-            finished.append(future)
-            scheduler_activity.set()
+        # A directory task is a call and a result and nothing else: no
+        # cancellation state, no per-task condition variable, no callback
+        # list. A `Future` carries all three, and the round trip through
+        # `ThreadPoolExecutor` costs 15.6-20.8 us per task at one worker
+        # against 5.7 us for a `SimpleQueue` handoff and a deque -- 88,000
+        # times on a home-shaped tree, and 779k `lock.acquire` calls in the
+        # profile of a single-worker scan. Ordering, cancellation and the
+        # in-flight bound were always the scheduler's own.
+        #
+        # `deque.append` and `popleft` are atomic under the GIL, so a worker
+        # hands its result straight over and rings the one Event the
+        # scheduler waits on.
+        finished: deque[DirectoryScanResult] = deque()
+        jobs: queue.SimpleQueue[DirectoryJob | None] = queue.SimpleQueue()
+        threads: list[threading.Thread] = []
+        in_flight = 0
 
         def publish_checkpoint(checkpoint: DirectoryEntryChunk) -> bool:
             while not self._cancel_event.is_set():
@@ -976,19 +986,62 @@ class TreeScanScheduler:
                 return True
             return False
 
-        executor = ThreadPoolExecutor(
-            max_workers=self._workers,
-            thread_name_prefix="disktide-scan",
-        )
+        def run_worker() -> None:
+            cancel_event = self._cancel_event
+            while True:
+                job = jobs.get()
+                if job is None:
+                    return
+                if cancel_event.is_set():
+                    # Drop it. The scheduler has stopped reading results, so
+                    # scanning this directory would only build a node nobody
+                    # will look at, and draining the queue instead of
+                    # scanning it is what lets `scan` return promptly on a
+                    # tree that still has thousands of jobs queued.
+                    continue
+                try:
+                    result = scan_directory_once(
+                        job,
+                        policy=self._policy,
+                        cancel_event=cancel_event,
+                        # Read here rather than captured at submission: the
+                        # root's device id is written once, before the first
+                        # child job can exist, so this is the same value the
+                        # old `executor.submit` froze into the call -- and
+                        # never a staler one.
+                        root_device=root_device,
+                        excluded_mounts=self._excluded_mounts,
+                        canonical_paths=self._canonical_paths,
+                        checkpoint_callback=publish_checkpoint,
+                        entry_chunk_size=self._entry_chunk_size,
+                        directory_observer=self._directory_observer,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    # Broader than the `except Exception` around
+                    # `future.result()` that this replaces, and deliberately:
+                    # a worker that died without leaving a result behind
+                    # would leave the scheduler waiting for one forever. The
+                    # directory carries the failure instead.
+                    result = self._failed_result(job, exc)
+                finished.append(result)
+                scheduler_activity.set()
+
+        def start_workers(count: int) -> None:
+            while len(threads) < count:
+                thread = threading.Thread(
+                    target=run_worker,
+                    name=f"disktide-scan-{len(threads)}",
+                    daemon=True,
+                )
+                threads.append(thread)
+                thread.start()
+
         try:
-            while pending or futures or sources:
+            while pending or in_flight or sources:
                 scheduler_activity.clear()
                 if self._cancel_event.is_set():
                     pending.clear()
                     sources.clear()
-                    for future in futures:
-                        future.cancel()
-                    wait_for_workers = False
                     break
 
                 root_device = self._drain_entry_chunks(
@@ -996,7 +1049,7 @@ class TreeScanScheduler:
                     sources,
                     source_paths,
                     root_device=root_device,
-                    active_workers=len(futures),
+                    active_workers=in_flight,
                 )
 
                 while sources and len(pending) < self._queue_capacity:
@@ -1014,63 +1067,52 @@ class TreeScanScheduler:
                 while (
                     pending
                     and not self._cancel_event.is_set()
-                    and len(futures) < self._submission_limit
+                    and in_flight < self._submission_limit
                 ):
-                    job = pending.popleft()
-                    future = executor.submit(
-                        scan_directory_once,
-                        job,
-                        policy=self._policy,
-                        cancel_event=self._cancel_event,
-                        root_device=root_device,
-                        excluded_mounts=self._excluded_mounts,
-                        canonical_paths=self._canonical_paths,
-                        checkpoint_callback=publish_checkpoint,
-                        entry_chunk_size=self._entry_chunk_size,
-                        directory_observer=self._directory_observer,
-                    )
-                    futures[future] = job
-                    future.add_done_callback(on_future_done)
+                    jobs.put(pending.popleft())
+                    in_flight += 1
                     self._submitted_tasks += 1
-                    if len(futures) > self._max_in_flight:
-                        self._max_in_flight = len(futures)
+                    if in_flight > self._max_in_flight:
+                        self._max_in_flight = in_flight
+
+                if in_flight and len(threads) < self._workers:
+                    # Grown to fit the work, never past what was asked for.
+                    # Worker selection asks for 64 on a mount whose metadata
+                    # costs milliseconds (see `sysinfo`), and most trees
+                    # never have 64 directories outstanding at once; those
+                    # threads would be started, would block on an empty
+                    # queue, and would be joined again having done nothing.
+                    start_workers(
+                        min(
+                            self._workers,
+                            max(in_flight, _INITIAL_WORKER_THREADS),
+                        )
+                    )
 
                 if len(pending) > self._max_pending:
                     self._max_pending = len(pending)
-                if not futures:
+                if not in_flight:
                     continue
 
                 if not finished:
                     scheduler_activity.wait(timeout=0.05)
                     continue
-                completed = []
+                completed: list[DirectoryScanResult] = []
                 while finished:
-                    future = finished.popleft()
-                    # A future cancelled on the way out fires the callback
-                    # too, after this loop has already let go of it.
-                    if future in futures:
-                        completed.append(future)
+                    completed.append(finished.popleft())
                 if not completed:
                     continue
+                in_flight -= len(completed)
                 root_device = self._drain_entry_chunks(
                     entry_chunks,
                     sources,
                     source_paths,
                     root_device=root_device,
-                    active_workers=len(futures),
+                    active_workers=in_flight,
                 )
-                ordered = sorted(
-                    completed,
-                    key=lambda future: futures[future].path,
-                )
-                for future in ordered:
-                    job = futures.pop(future)
-                    try:
-                        result = future.result()
-                    except CancelledError:
-                        continue
-                    except Exception as exc:
-                        result = self._failed_result(job, exc)
+                completed.sort(key=_RESULT_PATH_KEY)
+                for result in completed:
+                    job = result.job
                     self._completed_tasks += 1
                     if job.depth == 0:
                         root_device = result.node.device_id
@@ -1081,16 +1123,22 @@ class TreeScanScheduler:
                     self._report_progress(
                         current_path=job.path,
                         queue_depth=self._outstanding_tasks,
-                        active_workers=len(futures),
+                        active_workers=in_flight,
                     )
                     self._publish_tree(force=job.depth == 0)
         except BaseException:
             self._cancel_event.set()
-            for future in futures:
-                future.cancel()
             raise
         finally:
-            executor.shutdown(wait=wait_for_workers, cancel_futures=True)
+            # One sentinel per started thread, and a thread stops at the
+            # first one it reads, so the count is exact. Nothing is left
+            # running past the end of a scan -- including a cancelled one,
+            # where the workers drop whatever is still queued rather than
+            # scanning it.
+            for _ in threads:
+                jobs.put(None)
+            for thread in threads:
+                thread.join()
 
         # One unconditional report at the end: everything above it is
         # rate-limited, and `errors`, `dirs_queued` and `top_dirs_done` reach

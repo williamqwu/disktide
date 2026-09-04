@@ -20,6 +20,7 @@ from disktide.domain.scan import (
     ScanRequest,
     ScanStatus,
 )
+from disktide.domain.policy import ScanPolicy
 from disktide.models.tree import FSNode
 from disktide.scanner import scheduler as scheduler_module
 from disktide.scanner.engine import ScanEngine
@@ -722,3 +723,99 @@ def test_scheduler_aggregates_match_the_walker_through_denied_subtrees(
     assert root_totals["denied_dir_subtree_count"] == 3
     assert root_totals["partial_dir_subtree_count"] == 3
     assert root_totals["inaccessible_count"] == 0
+
+
+def test_worker_threads_do_not_outlive_the_scan(tmp_path):
+    """Every scan leaves the process with the threads it started with.
+
+    The pool is the scheduler's own now: N threads, one queue, one sentinel
+    apiece on the way out. `ThreadPoolExecutor` kept its threads parked for
+    the next submission and, on a cancelled scan, was shut down without
+    waiting at all -- so a long scan cancelled from the UI left workers
+    running behind it.
+    """
+    for index in range(60):
+        directory = tmp_path / f"d-{index:02d}"
+        directory.mkdir()
+        for leaf in range(5):
+            (directory / f"f-{leaf}").write_text("x")
+
+    baseline = threading.active_count()
+    for workers in (1, 4):
+        engine = ScanEngine(workers=workers, scan_path=str(tmp_path))
+        engine.scan(str(tmp_path))
+        assert threading.active_count() == baseline
+        assert not [
+            thread
+            for thread in threading.enumerate()
+            if thread.name.startswith("disktide-scan-")
+        ]
+
+
+def test_cancelled_scan_also_leaves_no_worker_running(tmp_path):
+    for index in range(400):
+        directory = tmp_path / f"d-{index:03d}"
+        directory.mkdir()
+        (directory / "f").write_text("x")
+
+    baseline = threading.active_count()
+    engine = ScanEngine(workers=4, scan_path=str(tmp_path))
+    seen = 0
+
+    def cancel_after_a_few(_path: str) -> None:
+        nonlocal seen
+        seen += 1
+        if seen == 20:
+            engine.cancel()
+
+    engine = ScanEngine(
+        workers=4,
+        scan_path=str(tmp_path),
+        directory_observer=cancel_after_a_few,
+    )
+    root = engine.scan(str(tmp_path))
+
+    assert engine.cancelled
+    # The point of the drain: the scan stops well short of the tree rather
+    # than working through the 380 jobs already queued behind the cancel.
+    assert root.dir_count < 400
+    assert threading.active_count() == baseline
+    assert not [
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("disktide-scan-")
+    ]
+
+
+def test_worker_threads_are_only_started_when_there_is_work_for_them(tmp_path):
+    """A 64-worker selection on a three-directory tree starts eight threads.
+
+    Latency tiering asks for up to 64 workers on a mount whose metadata
+    costs milliseconds. Starting 64 threads to scan a handful of
+    directories would cost more in thread creation than the scan does.
+    """
+    for index in range(3):
+        (tmp_path / f"d-{index}").mkdir()
+
+    peak = 0
+
+    def sample(_path: str) -> None:
+        nonlocal peak
+        live = sum(
+            1
+            for thread in threading.enumerate()
+            if thread.name.startswith("disktide-scan-")
+        )
+        if live > peak:
+            peak = live
+
+    scheduler = scheduler_module.TreeScanScheduler(
+        workers=64,
+        policy=ScanPolicy(),
+        cancel_event=threading.Event(),
+        excluded_mounts={},
+        directory_observer=sample,
+    )
+    scheduler.scan(str(tmp_path))
+
+    assert 0 < peak <= 8
