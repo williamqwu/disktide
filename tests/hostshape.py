@@ -149,6 +149,25 @@ def _install_readdir(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(os, "scandir", scandir)
 
+    # The scheduler reads a directory through `scheduler.scan_dir`, which is
+    # a C extension wherever one was built -- and a `readdir` in C does not
+    # pass through `os.scandir` at all. Patching only the Python one left
+    # the shape modelling nothing on exactly the configuration a release
+    # wheel ships, so the same reordering is applied to the tuples too.
+    from disktide.scanner import scheduler
+    from disktide.scanner.accel import DT_DIR
+
+    entry_rng = random.Random(_seed())
+    real_scan_dir = scheduler.scan_dir
+
+    def scan_dir(fd, stat_dirs=False):
+        entries = real_scan_dir(fd, stat_dirs)
+        entry_rng.shuffle(entries)
+        entries.sort(key=lambda row: row[1] == DT_DIR)
+        return entries
+
+    monkeypatch.setattr(scheduler, "scan_dir", scan_dir)
+
 
 # --- storage medium -------------------------------------------------------
 

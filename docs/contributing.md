@@ -37,7 +37,7 @@ DISKTIDE_HOST_SHAPE=readdir uv run pytest -q tests/test_scheduler_cursor.py
 
 | Shape | Models | Example failure |
 |-------|--------|-----------------|
-| `readdir` | `os.scandir` returning filesystem order, not creation order | Chunked sort window falling back to filesystem order at `entry_chunk_size=1` |
+| `readdir` | a directory read returning filesystem order, not creation order — applied to `os.scandir` *and* to the tuples `scheduler.scan_dir` returns, so it reaches the C reader too | Chunked sort window falling back to filesystem order at `entry_chunk_size=1` |
 | `medium` | Mount whose rotational bit sysfs can't read → `unknown` medium | Unknown-medium badge holding a raw Rich style instead of an ink role |
 | `cores` | Two cores via `os.cpu_count()` and `os.sched_getaffinity()` | Worker-count selection (and, before the duty cycle, the `live_scan_render` auto-gate) |
 | `sleepless` | Every `time.sleep` collapsing to nothing | Diagnostic only, not in CI — trips tests that use sleep as an instrument |

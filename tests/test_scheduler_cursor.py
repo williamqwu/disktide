@@ -24,6 +24,7 @@ import os
 import pytest
 
 from disktide.scanner import scheduler as scheduler_module
+from disktide.scanner.accel import DT_DIR
 from disktide.scanner.engine import ScanEngine
 from tests.scheduler_invariants import (
     SchedulerInvariantViolation,
@@ -41,56 +42,30 @@ def _directories_first(monkeypatch):
     before its WAL segment files). Forcing the order keeps these tests from
     depending on how the CI filesystem happens to lay a directory out.
 
-    The reorder has to happen at the readdir rather than on each published
-    chunk. A chunk spans at most `entry_chunk_size` entries, so sorting inside
-    one only reaches across the whole directory while the chunk is at least as
-    large as it -- below that the delivered order falls back to the
-    filesystem's, which is what the chunk-size parametrization below varies.
+    The reorder has to happen at the directory read rather than on each
+    published chunk. A chunk spans at most `entry_chunk_size` entries, so
+    sorting inside one only reaches across the whole directory while the
+    chunk is at least as large as it -- below that the delivered order falls
+    back to the filesystem's, which is what the chunk-size parametrization
+    below varies.
     Sorting the source keeps `entry_chunk_size` deciding only where the chunk
     boundaries land.
     """
 
-    real_scandir = os.scandir
+    real_scan_dir = scheduler_module.scan_dir
 
-    class _OrderedEntries:
-        """`os.scandir`'s iterator contract over a materialised entry list."""
+    def scan_dir(fd, stat_dirs=False):
+        # Stable, so within each group the read order survives; and applied
+        # to the tuples the scheduler actually consumes rather than to
+        # `os.scandir`, which the C reader never calls. Wrapping whatever
+        # `scan_dir` is bound to at this moment also means the `readdir`
+        # host shape's reordering is overridden here rather than fought
+        # with -- these tests need one specific order, not an arbitrary one.
+        entries = real_scan_dir(fd, stat_dirs)
+        entries.sort(key=lambda row: row[1] != DT_DIR)
+        return entries
 
-        def __init__(self, entries):
-            self._entries = iter(entries)
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            return next(self._entries)
-
-        def close(self):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
-            return False
-
-    class _OrderedScandir:
-        """`os`, with only `scandir` replaced.
-
-        Shadowing the scheduler's `os` binding rather than assigning to
-        `os.scandir` keeps the override off every other thread in the process.
-        """
-
-        def __getattr__(self, name):
-            return getattr(os, name)
-
-        @staticmethod
-        def scandir(path):
-            with real_scandir(path) as entries:
-                listed = list(entries)
-            listed.sort(key=lambda entry: not entry.is_dir(follow_symlinks=False))
-            return _OrderedEntries(listed)
-
-    monkeypatch.setattr(scheduler_module, "os", _OrderedScandir())
+    monkeypatch.setattr(scheduler_module, "scan_dir", scan_dir)
 
 
 def _adversarial_directory(root, name="parent", *, subdirectories=2, files=2):

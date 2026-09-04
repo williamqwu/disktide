@@ -449,7 +449,11 @@ class TestPathsLongerThanPathMax:
         reason="descriptor accounting needs /proc",
     )
     def test_a_worker_holds_at_most_two_descriptors(self, tmp_path):
-        """One fd for the directory, one for the `scandir` dup it makes."""
+        """One fd for the directory, one for the dup the reader makes.
+
+        Both directory readers hand a `dup` to `fdopendir`, exactly as
+        `os.scandir(fd)` does, so the count is the same either way.
+        """
         for index in range(240):
             branch = tmp_path / f"d{index:03d}"
             branch.mkdir()
