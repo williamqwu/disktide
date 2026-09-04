@@ -369,3 +369,55 @@ def test_the_colour_block_is_in_the_human_report(tmp_path, monkeypatch):
     )
     assert "\nColour\n" in output
     assert "TEXTUAL_COLOR_SYSTEM:" in output
+
+
+def test_the_colour_block_ignores_a_colorterm_that_is_not_about_this_pane():
+    """The bug the layer order exists for, at the diagnostic end.
+
+    With COLORTERM=truecolor exported from the shell rc, everything the
+    process can see about itself claims 24-bit; the client attached to
+    this session is a 16-colour web shell. The block has to report the
+    client, and the suggestion has to be the tmux line rather than the
+    COLORTERM one, which would change nothing here.
+    """
+    report = _colour_report(
+        "auto",
+        environ={
+            "TERM": "tmux-256color",
+            "TMUX": "/tmp/tmux-1/default,1,0",
+            "COLORTERM": "truecolor",
+        },
+        runner=_tmux("xterm-16color\tbpaste,ccolour,focus,title"),
+    )
+    assert (report["depth"], report["source"]) == ("16", "tmux-client")
+    assert report["colorterm"] == "truecolor"
+    text = "\n".join(_render_colour_block(report))
+    assert "COLORTERM: truecolor" in text
+    assert 'set -as terminal-features ",xterm-16color:256,RGB"' in text
+    assert "export COLORTERM" not in text
+
+
+def test_the_colour_block_says_so_when_tmux_could_not_be_asked():
+    """No client list means TERM is describing a pty, and COLORTERM would
+    be describing somebody else's shell — so neither is worth acting on
+    and the suggestion says how to look."""
+    text = _colour_lines(
+        {"TERM": "tmux-256color", "TMUX": "x"},
+        runner=_tmux(""),
+    )
+    assert "tmux could not say which clients are attached" in text
+    assert "tmux list-clients" in text
+    assert "export COLORTERM" not in text
+
+
+def test_an_rgb_tmux_client_needs_no_advice_at_all():
+    """After the reorder there is no "RGB client but no COLORTERM" case
+    left to warn about: the client's own RGB feature resolves the session
+    to truecolor directly."""
+    report = _colour_report(
+        "auto",
+        environ={"TERM": "tmux-256color", "TMUX": "x"},
+        runner=_tmux("xterm-256color\t256,RGB,bpaste,focus"),
+    )
+    assert (report["depth"], report["source"]) == ("truecolor", "tmux-client")
+    assert report["suggestion"] is None

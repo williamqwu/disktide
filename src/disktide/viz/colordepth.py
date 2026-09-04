@@ -28,9 +28,10 @@ picture rather than leaving a user to guess:
   ``textual-env``  ``TEXTUAL_COLOR_SYSTEM``, if the user set it themselves.
                    Never overwritten: it is Textual's own knob and someone
                    who has reached for it has already decided.
-  ``colorterm``    ``COLORTERM=truecolor|24bit``, the de-facto RGB flag.
   ``tmux-client``  what the clients attached to *this* tmux session say
                    they can do, weakest first.
+  ``colorterm``    ``COLORTERM=truecolor|24bit``, the de-facto RGB flag,
+                   for the sessions the layer above could not answer.
   ``term``         ``TERM``, which is a promise about terminfo rather than
                    a measurement, and the only thing left in a web shell.
   ``default``      256, which is what shipped before any of this existed.
@@ -41,6 +42,22 @@ clients are the only place the truth is written down, and a session can
 have several.  The least capable of them governs, because a session
 attached from both a laptop and a web shell has to be legible in the web
 shell -- the laptop can read sixteen colours, the browser cannot read 256.
+
+Which is also why it sits *above* ``COLORTERM`` and not below it.
+``COLORTERM`` is a property of a process's environment, not of a pane:
+inside tmux it is whatever the shell that started the server exported, or
+whatever the user's rc sets, and it survives every detach and reattach.
+It therefore says nothing at all about the client currently looking at
+this pane -- and in the case this module was written for it says the
+opposite of the truth.  One server attached from a laptop
+(``xterm-256color``, RGB) and from an Open OnDemand web shell
+(``xterm-16color``) with ``COLORTERM=truecolor`` in the rc would answer
+truecolor in the browser, write 24-bit SGRs, and hand tmux exactly the
+quantisation the ANSI theme exists to avoid.  So ``COLORTERM`` is
+consulted outside tmux, and inside it only when tmux could not be asked:
+no server, a wedged one, a query that timed out, or a session with no
+clients attached.  The three explicit overrides stay above both, because
+someone who typed a depth in has already decided.
 
 Stdlib only and no Textual import, like ``cellgeom``: this has to run
 *before* ``textual.constants`` is imported, since that module reads
@@ -388,12 +405,9 @@ def resolve_color_depth(
                 f"{TEXTUAL_ENV_VAR}={raw_textual}",
             )
 
-        colorterm = (env.get("COLORTERM") or "").strip().lower()
-        if colorterm in ("truecolor", "24bit"):
-            return ColorDepth(
-                "truecolor", "colorterm", f"COLORTERM={colorterm}"
-            )
-
+        # Above COLORTERM on purpose -- see the module docstring. What a
+        # client can paint is a fact about the client; COLORTERM is a fact
+        # about an environment that outlives every attach.
         if env.get("TMUX"):
             clients = tmux_clients(runner)
             if clients:
@@ -406,6 +420,12 @@ def resolve_color_depth(
                         f"{weakest.describe()}"
                     )
                 return ColorDepth(weakest.depth, "tmux-client", detail)
+
+        colorterm = (env.get("COLORTERM") or "").strip().lower()
+        if colorterm in ("truecolor", "24bit"):
+            return ColorDepth(
+                "truecolor", "colorterm", f"COLORTERM={colorterm}"
+            )
 
         term = (env.get("TERM") or "").strip()
         if term and term.lower() != "dumb":

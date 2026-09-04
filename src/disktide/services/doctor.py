@@ -460,17 +460,26 @@ def _colour_report(
         "depth": depth.value,
         "source": depth.source,
         "detail": depth.detail,
-        "suggestion": _colour_suggestion(depth, clients),
+        "suggestion": _colour_suggestion(
+            depth, clients, in_tmux=bool(env.get("TMUX"))
+        ),
     }
 
 
-def _colour_suggestion(depth, clients) -> str | None:
+def _colour_suggestion(depth, clients, *, in_tmux: bool = False) -> str | None:
     """What to change, printed only where there is something to gain.
 
     Silent when the depth was chosen by hand -- a user who exported
     `DISKTIDE_COLOR_DEPTH` or set `[ui] color_depth` has already made this
     decision and does not need it re-litigated on every run -- and silent
     at truecolor, which is the ceiling.
+
+    Inside tmux the advice is never about `COLORTERM`. That variable is a
+    property of an environment rather than of a pane: it is whatever the
+    shell that started the server exported, it survives every detach, and
+    it says nothing about the client currently reading this session. The
+    resolver reads the client list first for exactly that reason, so the
+    only line that changes anything here is the `terminal-features` entry.
     """
     if depth.source in ("env", "config", "textual-env"):
         return None
@@ -493,18 +502,30 @@ def _colour_suggestion(depth, clients) -> str | None:
             "~/.tmux.conf, then detach and reattach (or tmux kill-server); "
             "or start tmux from a shell with TERM=xterm-256color; or tmux -2"
         )
+    if in_tmux:
+        # Under tmux but without a client list: no server reachable, a
+        # query that timed out, or a session nothing is attached to. TERM
+        # here describes the pty tmux handed us and cannot be trusted, and
+        # COLORTERM would only be describing some other shell.
+        return (
+            "tmux could not say which clients are attached, so this is "
+            "TERM's guess about a pty rather than anything about your "
+            "terminal. Check  tmux list-clients -F "
+            "'#{client_termname} #{client_termfeatures}'  and, for a "
+            "client missing 256 or RGB, add  set -as terminal-features "
+            '",<termname>:256,RGB"  to ~/.tmux.conf'
+        )
     if depth.value == "16":
         return (
-            "export COLORTERM=truecolor — xterm.js web shells (Open "
-            "OnDemand, JupyterLab) and every modern terminal accept RGB "
-            "whatever their TERM says — or set DISKTIDE_COLOR_DEPTH="
-            "truecolor / [ui] color_depth"
+            "export COLORTERM=truecolor in this shell — xterm.js web "
+            "shells (Open OnDemand, JupyterLab) and every modern terminal "
+            "accept RGB whatever their TERM says — or set "
+            "DISKTIDE_COLOR_DEPTH=truecolor / [ui] color_depth"
         )
     return (
         "the app is running at 256 colours because nothing claims RGB: "
-        "export COLORTERM=truecolor (in the shell rc, since ssh does not "
-        "forward it and tmux does not set it) or set "
-        "DISKTIDE_COLOR_DEPTH=truecolor"
+        "export COLORTERM=truecolor in this shell (ssh does not forward "
+        "it) or set DISKTIDE_COLOR_DEPTH=truecolor"
     )
 
 

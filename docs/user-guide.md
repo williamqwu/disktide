@@ -490,21 +490,37 @@ legible in the browser. At sixteen colors it renders with the ANSI 16 theme,
 which is designed for that depth rather than crushed onto it, and says so once
 in a toast.
 
+Inside tmux that answer also outranks `COLORTERM`. `COLORTERM` describes a
+process's environment, not a pane: under tmux it is whatever the shell that
+started the server exported, it survives every detach and reattach, and it
+says nothing about the client currently reading the session. Setting it in
+your rc and then opening the same session in a web shell would otherwise
+report 24-bit in the browser — which is exactly the case that produced the
+pink-and-purple screenshot.
+
 To override:
 
 - **Config** — `color_depth` under `[ui]`: `auto` (default), `truecolor`, `256`, `16`.
 - **Env** — `DISKTIDE_COLOR_DEPTH=truecolor`, for one session.
-- **The terminal itself** — `export COLORTERM=truecolor` in your shell rc.
-  Every xterm.js-based shell and every modern terminal accepts RGB whatever
-  its `TERM` says, and `COLORTERM` is not forwarded by ssh nor set by tmux,
-  so this is worth setting even in a native terminal.
-- **tmux** — tell it your client is better than its terminfo entry:
+
+Both of those outrank everything below, tmux included. To fix the detection
+itself rather than override it:
+
+- **Under tmux** — tell tmux your client is better than its terminfo entry.
+  This is the only line that matters in a multiplexed session:
 
   ```tmux
   set -as terminal-features ",xterm-16color:256,RGB"
   ```
 
-  then detach and reattach (or `tmux kill-server`).
+  then detach and reattach (or `tmux kill-server`). `tmux list-clients -F
+  '#{client_termname} #{client_termfeatures}'` shows what to name.
+
+- **Not under tmux** — `export COLORTERM=truecolor` in the shell the app runs
+  in. Every xterm.js-based shell and every modern terminal accepts RGB
+  whatever its `TERM` says, and `COLORTERM` is not forwarded by ssh, so this
+  is worth setting in a native terminal over ssh too. DiskTide reads it
+  outside tmux, and inside tmux only when it could not ask tmux at all.
 
 `disktide doctor` prints the whole diagnosis: `TERM`, `COLORTERM`,
 `TEXTUAL_COLOR_SYSTEM`, the tmux clients attached to your session with their

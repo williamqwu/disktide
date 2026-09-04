@@ -109,12 +109,8 @@ class TestTheLayerOrder:
         depth = _resolve({"TEXTUAL_COLOR_SYSTEM": "auto", "TERM": "xterm-256color"})
         assert depth.source == "term"
 
-    def test_colorterm_beats_tmux_and_term(self):
-        depth = _resolve(
-            {"COLORTERM": "24bit", "TMUX": "/tmp/tmux-0/default,1,0",
-             "TERM": "tmux-256color"},
-            runner=_runner("xterm-16color\tbpaste,focus"),
-        )
+    def test_colorterm_beats_term(self):
+        depth = _resolve({"COLORTERM": "24bit", "TERM": "xterm-16color"})
         assert (depth.value, depth.source) == ("truecolor", "colorterm")
 
     def test_nothing_at_all_is_still_256(self):
@@ -179,6 +175,73 @@ class TestTheTmuxLayer:
         assert depth.value == "16"
         assert "weakest of 2" in depth.detail
         assert "xterm-16color" in depth.detail
+
+    def test_the_attached_client_outranks_an_inherited_colorterm(self):
+        """COLORTERM is a fact about an environment, not about a pane.
+
+        Inside tmux it is whatever the shell that started the server
+        exported, or whatever the user's rc sets, and it survives every
+        detach and reattach -- so it says nothing about the client
+        currently looking at this pane. Here it says the opposite of the
+        truth, which is the whole reason this layer sits above it.
+        """
+        depth = _resolve(
+            {"TMUX": "/tmp/tmux-0/default,1,0", "COLORTERM": "truecolor",
+             "TERM": "tmux-256color"},
+            runner=_runner("xterm-16color\tbpaste,ccolour,focus,title"),
+        )
+        assert (depth.value, depth.source) == ("16", "tmux-client")
+
+    def test_the_laptop_and_the_web_shell_on_one_server_with_colorterm_set(self):
+        """The exact configuration the bug was reported from.
+
+        One server, attached from a laptop (`xterm-256color`, RGB-flagged
+        by the user's tmux.conf) and from an Open OnDemand web shell
+        (`xterm-16color`), with COLORTERM=truecolor in the shell rc. Read
+        COLORTERM first and the browser gets 24-bit SGRs for tmux to
+        quantise, which is the pink-and-purple screenshot with the ANSI
+        theme never engaging.
+        """
+        depth = _resolve(
+            {"TMUX": "x", "COLORTERM": "truecolor", "TERM": "tmux-256color"},
+            runner=_runner(
+                "xterm-256color\t256,RGB,bpaste\nxterm-16color\tbpaste,focus\n"
+            ),
+        )
+        assert (depth.value, depth.source) == ("16", "tmux-client")
+
+    def test_colorterm_still_answers_when_tmux_cannot_be_asked(self):
+        """The layer above only outranks it when it has an answer.
+
+        No server, a wedged one, a query that timed out, a session with no
+        clients: COLORTERM is the next best thing there is, and refusing to
+        read it would cost a real truecolor terminal its colours.
+        """
+        depth = _resolve(
+            {"TMUX": "x", "COLORTERM": "truecolor", "TERM": "tmux-256color"},
+            runner=_runner(None, session=None),
+        )
+        assert (depth.value, depth.source) == ("truecolor", "colorterm")
+
+    def test_an_explicit_depth_still_outranks_the_attached_client(self):
+        """The three overrides stay on top: somebody who typed a depth in
+        has already had this argument."""
+        for key, value in (
+            ("DISKTIDE_COLOR_DEPTH", "truecolor"),
+            ("TEXTUAL_COLOR_SYSTEM", "truecolor"),
+        ):
+            depth = _resolve(
+                {"TMUX": "x", "TERM": "tmux-256color", key: value},
+                runner=_runner("xterm-16color\tbpaste,focus"),
+            )
+            assert depth.value == "truecolor", key
+            assert depth.source != "tmux-client", key
+        depth = _resolve(
+            {"TMUX": "x", "TERM": "tmux-256color"},
+            config_depth="truecolor",
+            runner=_runner("xterm-16color\tbpaste,focus"),
+        )
+        assert (depth.value, depth.source) == ("truecolor", "config")
 
     def test_a_tmux_that_times_out_answers_no_clients(self, monkeypatch):
         """The real runner, not a fake one: the timeout is the whole point
