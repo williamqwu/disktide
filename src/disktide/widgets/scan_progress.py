@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from time import monotonic
+
 from textual.app import ComposeResult
 from textual.containers import Center, Middle
 from textual.reactive import reactive
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static, ProgressBar
 from rich.text import Text
@@ -39,6 +42,13 @@ class ScanProgressOverlay(Widget):
 
     is_scanning: reactive[bool] = reactive(False)
 
+    #: How often the path and the counters are redrawn while a scan runs.
+    #: Everything this widget shows is a string and three numbers; five
+    #: frames a second is more than a reader can follow and twenty is what
+    #: it used to do -- the scheduler throttles `ScanProgressUpdated` at
+    #: 0.05 s and this repainted on every one of them.
+    REPAINT_INTERVAL = 0.2
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._title = Static("Scanning...", id="scan-title")
@@ -56,6 +66,51 @@ class ScanProgressOverlay(Widget):
         self._bar = ProgressBar(
             total=None, show_eta=False, show_percentage=False, id="scan-bar",
         )
+        #: The newest progress that has not been drawn yet, or None when
+        #: what is on screen is current.
+        self._pending = None
+        self._repaint_timer: Timer | None = None
+        self._painted_at = 0.0
+        #: Redraws performed. Read by the test that pins the pacing; a
+        #: counter is the only way to see from outside how often three
+        #: `Static.update` calls were made.
+        self.repaints = 0
+
+    def on_mount(self) -> None:
+        """Arm the paced repaint, paused until a scan starts."""
+        self._repaint_timer = self.set_interval(
+            self.REPAINT_INTERVAL, self._flush_progress, pause=True
+        )
+        self._quiet_the_indeterminate_bar()
+
+    def _quiet_the_indeterminate_bar(self) -> None:
+        """Stop the bar refreshing fifteen times a second to draw nothing.
+
+        Textual's `Bar` arms `auto_refresh = 1/15` whenever its percentage is
+        None, because an indeterminate band is normally a moving one. This
+        app sets `animation_level = "none"` unless the user has asked
+        otherwise, and at that level `Bar.render_indeterminate` returns the
+        *same* full-width band on every frame -- so those fifteen refreshes a
+        second redrew an identical strip and bought a compositor pass each,
+        for the whole length of a scan.
+
+        Measured at 307x69 on the 88,000-directory fixture that was most of
+        the UI thread's 1.7 s across a 15.5 s scan with the live chart off
+        entirely. Every thread in this process shares one GIL, so it was not
+        1.7 s of idle capacity; it was 1.7 s the walk did not run.
+
+        Re-applied after each `ProgressBar.update`, which sets the percentage
+        again and so re-arms the timer.
+        """
+        try:
+            if self.app.animation_level != "none":
+                return
+            self._bar.query_one("Bar").auto_refresh = None
+        except Exception:
+            # Not mounted, no app, or a Textual that composes its progress
+            # bar differently. The overlay works either way; it just costs
+            # what it used to.
+            return
 
     def compose(self) -> ComposeResult:
         yield self._title
@@ -81,6 +136,11 @@ class ScanProgressOverlay(Widget):
         self._path_display.update("")
         self._stats.update("")
         self._bar.update(total=None)  # re-assert indeterminate
+        self._quiet_the_indeterminate_bar()
+        self._pending = None
+        self._painted_at = 0.0
+        if self._repaint_timer is not None:
+            self._repaint_timer.resume()
 
     def update_context(
         self,
@@ -111,8 +171,42 @@ class ScanProgressOverlay(Widget):
         )
 
     def update_progress(self, progress) -> None:
-        """Update the display with current scan progress."""
+        """Take the newest scan progress; the timer draws it.
+
+        This is called from `ScanProgressUpdated`, which the scheduler
+        throttles at 0.05 s -- up to 20 a second, each one dirtying three
+        widgets and so costing a compositor pass at the app's frame rate.
+        On a 307x69 terminal that was 1.7 s of main-thread CPU across a
+        15.5 s scan of an 88,000-directory tree, and because every thread
+        in the process shares one GIL, 1.7 s of UI is 1.7 s the walk did
+        not run: 11 % of the wall clock of a scan drawing no chart at all.
+        The comment this widget used to carry -- "cheap per event" -- was
+        true per call and wrong per scan.
+
+        So the newest progress is kept and drawn from one 5 Hz timer.
+        """
         self.is_scanning = True
+        self._pending = progress
+        if self._repaint_timer is None:
+            # Unmounted -- unit tests, and any headless use. There is no
+            # timer to draw it, so pace it here on the same interval rather
+            # than falling back to drawing every event.
+            if monotonic() - self._painted_at >= self.REPAINT_INTERVAL:
+                self._flush_progress()
+        elif self._painted_at == 0.0:
+            # First progress of this scan. Drawn straight away, or the
+            # overlay sits empty for two tenths of a second at exactly the
+            # moment a user is looking at it.
+            self._flush_progress()
+
+    def _flush_progress(self) -> None:
+        """Draw the newest progress, if there is one that has not been."""
+        progress = self._pending
+        if progress is None:
+            return
+        self._pending = None
+        self._painted_at = monotonic()
+        self.repaints += 1
 
         # Truncate path for display
         path = progress.current_path
@@ -151,6 +245,18 @@ class ScanProgressOverlay(Widget):
 
         self._stats.update(stats_text)
 
+    def _stop_repainting(self) -> None:
+        """Draw whatever is outstanding and stop the timer.
+
+        A scan that ends between two ticks would otherwise leave the last
+        path and counts it reported unshown, under a title that says the
+        scan is done -- and leave a 5 Hz timer running for nothing.
+        """
+        self._flush_progress()
+        self._painted_at = 0.0
+        if self._repaint_timer is not None:
+            self._repaint_timer.pause()
+
     def scan_complete(
         self,
         *,
@@ -158,6 +264,7 @@ class ScanProgressOverlay(Widget):
         partial: bool = False,
     ) -> None:
         """Mark scan as complete."""
+        self._stop_repainting()
         self.is_scanning = False
         selected = run_id or self._run_id
         label = "Scan partial" if partial else "Scan complete"
@@ -168,6 +275,7 @@ class ScanProgressOverlay(Widget):
 
     def scan_cancelled(self, *, run_id: str | None = None) -> None:
         """Mark a scan as cancelled."""
+        self._stop_repainting()
         self.is_scanning = False
         selected = run_id or self._run_id
         label = "Scan cancelled"
@@ -177,6 +285,7 @@ class ScanProgressOverlay(Widget):
 
     def scan_failed(self, *, run_id: str | None = None) -> None:
         """Mark a scan as failed."""
+        self._stop_repainting()
         self.is_scanning = False
         selected = run_id or self._run_id
         label = "Scan failed"

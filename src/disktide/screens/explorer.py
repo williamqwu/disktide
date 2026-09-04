@@ -653,17 +653,26 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
     #
     # What the loop reads is the whole thread, though, not the snapshot's
     # share of it, so the budget has to be the whole thread's too and
-    # cannot be as small. The progress overlay is not paced -- it is cheap
-    # per event, already throttled in the scheduler, and the one number a
-    # user watches -- and it costs ~10 % of the thread on its own, which
-    # it spends inside these windows. So at twelve the loop can almost
-    # never open: measured, that was three chart frames in a 32 s scan,
-    # seven and ten seconds apart, and not one second off the wall clock
-    # in return for them. Eight leaves the chart landing every one to two
-    # and a half seconds (thirteen frames in the same scan) and holds the
-    # whole thread to ~14 % of the wall clock; six, which draws twice as
-    # often, finishes in the same time. The scan is paying for the last
-    # few per cent either way.
+    # cannot be as small. That is why the progress overlay is paced too:
+    # it was called cheap per event -- one string and three numbers,
+    # already throttled at 0.05 s in the scheduler -- and per event it is,
+    # but 20 Hz of it dirtied three widgets each time and so bought a
+    # compositor pass each time. py-spy measured 1.7 s of this thread over
+    # a 15.5 s scan of the 88,000-directory fixture at 307x69 with the
+    # chart switched off entirely: 11 % of the wall clock of a scan that
+    # was drawing nothing. The overlay now keeps the newest report and
+    # redraws from one 5 Hz timer (`ScanProgressOverlay.REPAINT_INTERVAL`),
+    # so what the loop below is budgeting for is the chart and the tree
+    # panel rather than the overlay's share of every window.
+    #
+    # The duty number itself was chosen against the unpaced overlay: at
+    # twelve the loop could almost never open -- three chart frames in a
+    # 32 s scan, seven and ten seconds apart, and not one second off the
+    # wall clock in return for them. Eight leaves the chart landing every
+    # one to two and a half seconds (thirteen frames in the same scan) and
+    # holds the whole thread to ~14 % of the wall clock; six, which draws
+    # twice as often, finished in the same time. The scan is paying for
+    # the last few per cent either way.
     _LIVE_UI_DUTY = 8.0
     _LIVE_UI_MIN_GAP = 0.25
 

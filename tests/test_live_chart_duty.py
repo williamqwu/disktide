@@ -69,6 +69,21 @@ def _live_event(root: FSNode, view_root, changed=None, ack=None) -> NodeAggregat
     )
 
 
+class _FakeProgress:
+    """The handful of attributes `ScanProgressOverlay` reads off a report."""
+
+    def __init__(self, index: int) -> None:
+        self.current_path = f"/scan/target/{index:04d}"
+        self.dirs_scanned = index
+        self.files_scanned = index * 7
+        self.logical_bytes = index * 4096
+        self.errors = 0
+        self.dirs_queued = index + 1
+        self.queue_depth = 1
+        self.active_workers = 1
+        self.items_per_second = 1000.0
+
+
 class _FakeClock:
     """The two clocks the gate reads, both moved by hand.
 
@@ -474,8 +489,13 @@ def test_a_frame_is_acknowledged_when_it_is_drawn_not_when_it_arrives(
 
 
 def test_the_progress_overlay_still_sees_every_event(tmp_path, monkeypatch):
-    """Progress is throttled in the scheduler already, and it is the one
-    number a user watches; pacing it would only make it lag."""
+    """Every event still reaches the overlay; the widget paces the drawing.
+
+    The screen does not gate progress -- it is one string and three
+    numbers, and the widget needs the newest of them whether or not it is
+    about to draw. What used to be true and is not any more is that
+    delivering them was free: see the overlay's own pacing tests below.
+    """
     from disktide.domain.scan import ScanPhase, ScanProgressUpdated
 
     async def body(pilot, app, screen):
@@ -493,6 +513,62 @@ def test_the_progress_overlay_still_sees_every_event(tmp_path, monkeypatch):
                 )
             )
         assert len(applied) == 5
+
+    _drive(tmp_path, body)
+
+
+def test_the_overlay_draws_at_five_hertz_however_fast_events_arrive(
+    tmp_path,
+    monkeypatch,
+):
+    """The overlay's own pacing, measured in redraws.
+
+    The scheduler throttles `ScanProgressUpdated` at 0.05 s, so this widget
+    was asked to redraw up to 20 times a second for the whole of a scan --
+    three `Static.update` calls each, and so a compositor pass each, which
+    py-spy put at 1.7 s of main-thread CPU across a 15.5 s scan with no
+    chart drawing at all. One GIL: that is 11 % off the walk.
+    """
+    from disktide.widgets.scan_progress import ScanProgressOverlay
+
+    async def body(pilot, app, screen):
+        overlay = screen.query_one("#scan-progress", ScanProgressOverlay)
+        overlay.start(run_id="run", phase="scanning", policy="p")
+        overlay.repaints = 0
+
+        events = 40
+        for index in range(events):
+            overlay.update_progress(_FakeProgress(index))
+        # No `await`: everything above happened inside one tick, which is
+        # what the scheduler's 0.05 s throttle can deliver in two seconds.
+        allowed = 1  # the first event of a scan is never held back
+        assert overlay.repaints <= allowed, (
+            f"{overlay.repaints} redraws for {events} events"
+        )
+        assert overlay.repaints >= 1, "the overlay never drew anything"
+        assert overlay._pending is not None, "the newest event was dropped"
+
+    _drive(tmp_path, body)
+
+
+def test_the_overlay_flushes_what_is_pending_when_the_scan_ends(
+    tmp_path,
+    monkeypatch,
+):
+    """A scan ending between two ticks must not strand the last numbers."""
+    from disktide.widgets.scan_progress import ScanProgressOverlay
+
+    async def body(pilot, app, screen):
+        overlay = screen.query_one("#scan-progress", ScanProgressOverlay)
+        overlay.start(run_id="run", phase="scanning", policy="p")
+        overlay.update_progress(_FakeProgress(0))
+        overlay.update_progress(_FakeProgress(1))
+        assert overlay._pending is not None
+
+        overlay.scan_complete(run_id="run")
+
+        assert overlay._pending is None
+        assert overlay.is_scanning is False
 
     _drive(tmp_path, body)
 
