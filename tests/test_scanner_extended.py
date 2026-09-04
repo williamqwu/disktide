@@ -6,6 +6,7 @@ import threading
 
 import pytest
 from disktide.domain.policy import ScanPolicy
+from disktide.scanner import scheduler as scheduler_module
 from disktide.scanner.walker import scan_directory
 from disktide.scanner.engine import ScanEngine
 
@@ -356,6 +357,92 @@ class TestPathsLongerThanPathMax:
         assert result.node.error is not None
         assert "too long" in result.node.error.lower()
         assert not result.node.vanished
+
+    @staticmethod
+    def _link_at_the_bottom(root, levels: int, name: str = "abcdefgh"):
+        """Put a symlink and its target at the bottom of a `levels` chain.
+
+        Returns (link path, target path). Both are built through directory
+        descriptors, because past level 442 of eight-letter names neither can
+        be named to the kernel any more.
+        """
+        handle = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        parts = [str(root)]
+        try:
+            for _ in range(levels):
+                os.mkdir(name, dir_fd=handle)
+                parts.append(name)
+                nested = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=handle
+                )
+                os.close(handle)
+                handle = nested
+            with open(
+                os.open("target.txt", os.O_WRONLY | os.O_CREAT, 0o644,
+                        dir_fd=handle),
+                "wb",
+            ) as target:
+                target.write(b"z" * 128)
+            os.symlink("target.txt", "link.txt", dir_fd=handle)
+        finally:
+            os.close(handle)
+        base = "/".join(parts)
+        return f"{base}/link.txt", f"{base}/target.txt"
+
+    def test_a_symlink_past_path_max_is_classified_not_called_broken(
+        self,
+        tmp_path,
+    ):
+        """`classify_symlink` asks about the parent's fd, not the whole path.
+
+        `os.readlink(path)` and `os.stat(path)` both take a pathname argument
+        capped at PATH_MAX, so at 1,200 levels they raised ENAMETOOLONG and
+        the link was recorded as broken with no target -- a link that is
+        perfectly fine, in a tree the scan itself now walks to the bottom.
+        """
+        from disktide.models.tree import LeafNode
+        from disktide.scanner.walker import classify_symlink
+
+        link_path, _ = self._link_at_the_bottom(tmp_path, 1200)
+        assert len(link_path) > 4096, "the fixture has to outgrow PATH_MAX"
+
+        node = LeafNode(
+            name="link.txt",
+            path=link_path,
+            depth=1201,
+            is_symlink=True,
+        )
+        classify_symlink(node)
+
+        assert node.link_classified is True
+        assert node.link_target == "target.txt"
+        assert node.link_broken is False
+        assert node.link_is_dir is False
+
+    def test_a_broken_symlink_past_path_max_is_still_broken(self, tmp_path):
+        """The fix must not turn every deep link into a working one."""
+        from disktide.models.tree import LeafNode
+        from disktide.scanner.walker import classify_symlink
+
+        link_path, target_path = self._link_at_the_bottom(tmp_path, 1200)
+        parent_fd = scheduler_module.open_scan_directory(
+            os.path.dirname(target_path), follow_symlink=False
+        )
+        try:
+            os.unlink("target.txt", dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+
+        node = LeafNode(
+            name="link.txt",
+            path=link_path,
+            depth=1201,
+            is_symlink=True,
+        )
+        classify_symlink(node)
+
+        assert node.link_target == "target.txt", "readlink does not need it"
+        assert node.link_broken is True
 
     @pytest.mark.skipif(
         not os.path.isdir("/proc/self/fd"),

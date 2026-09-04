@@ -104,6 +104,17 @@ def make_file_node(
     )
 
 
+#: Past this many characters of path, `readlink(path)` and `stat(path)` stop
+#: being able to ask the question at all: a syscall's pathname argument is
+#: capped at PATH_MAX, 4,096 bytes on Linux. The scan itself walks deeper
+#: than that -- `scheduler.open_scan_directory` opens the path in chunks --
+#: so a link at the bottom of a 1,200-level tree was reported *broken* on an
+#: ENAMETOOLONG from the question rather than from the answer. Same margin as
+#: `scheduler._PATH_CHUNK_BYTES`, for the separators the walk rebuilds and
+#: for platforms with a smaller cap.
+_LONG_PATH_CHARS = 4000
+
+
 def classify_symlink(node: LeafNode) -> None:
     """Fill in the deferred symlink target fields: link_target,
     link_is_dir, link_broken. Two syscalls on first call (readlink +
@@ -114,9 +125,23 @@ def classify_symlink(node: LeafNode) -> None:
     symlink rows the user actually looks at get their target info just
     in time, without making the whole scan pay for symlinks the user
     never visits.
+
+    Past `_LONG_PATH_CHARS` the parent is opened first and both calls are
+    made relative to that descriptor, which costs one extra `open` -- so the
+    short path, which is every symlink anyone has ever clicked on, keeps the
+    two-syscall form it had.
     """
     if not node.is_symlink or node.link_classified:
         return
+    if len(node.path) >= _LONG_PATH_CHARS:
+        _classify_relative_to_parent(node)
+    else:
+        _classify_by_path(node)
+    node.link_classified = True
+
+
+def _classify_by_path(node: LeafNode) -> None:
+    """The one-syscall-each form: the link named by its whole path."""
     try:
         node.link_target = os.readlink(node.path)
     except OSError:
@@ -127,7 +152,44 @@ def classify_symlink(node: LeafNode) -> None:
     except OSError:
         # Target unresolvable for any reason: missing, ELOOP, EACCES, ...
         node.link_broken = True
-    node.link_classified = True
+
+
+def _classify_relative_to_parent(node: LeafNode) -> None:
+    """The same two questions, asked about one name under a directory fd.
+
+    `stat` still *follows* the link, and a link's target is resolved from the
+    directory the link lives in, so an fd on that directory answers exactly
+    what the whole-path form answered -- it just never has to name it.
+
+    A parent that cannot be opened leaves the whole-path form to run and to
+    record whatever it fails with, which is what the caller saw before.
+    """
+    # Local: `scheduler` imports this module, and this branch runs once per
+    # symlink the user opens at 4,000-plus characters of path.
+    from disktide.scanner.scheduler import open_scan_directory
+
+    parent = os.path.dirname(node.path)
+    name = os.path.basename(node.path)
+    if not parent or not name:
+        _classify_by_path(node)
+        return
+    try:
+        directory_fd = open_scan_directory(parent, follow_symlink=False)
+    except OSError:
+        _classify_by_path(node)
+        return
+    try:
+        try:
+            node.link_target = os.readlink(name, dir_fd=directory_fd)
+        except OSError:
+            pass
+        try:
+            target = os.stat(name, dir_fd=directory_fd)
+            node.link_is_dir = stat.S_ISDIR(target.st_mode)
+        except OSError:
+            node.link_broken = True
+    finally:
+        os.close(directory_fd)
 
 
 def scan_directory(
