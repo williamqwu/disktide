@@ -11,6 +11,7 @@ from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate, ScanWorkerSelection
 from disktide.models.tree import FSNode
 from disktide.scanner.accounting import finalize_unique_allocated
+from disktide.scanner.gcpause import collector_paused
 from disktide.scanner.policy import discover_pseudo_mounts, paths_stay_canonical
 from disktide.scanner.progress import ProgressThrottle, ScanProgress
 from disktide.scanner.scheduler import (
@@ -102,6 +103,18 @@ class ScanEngine:
     def scan(self, path: str) -> FSNode:
         """Scan a directory tree while preserving ``ScanEngine().scan()``."""
 
+        with collector_paused():
+            return self._scan(path)
+
+    def _scan(self, path: str) -> FSNode:
+        # Paused here as well as in `ScanService._execute_active`, and the
+        # counter in `gcpause` makes the nesting free. The service covers a
+        # replacement collector and its own tail; this covers everything that
+        # reaches the engine without a service -- `tool/bench_scan.py --mode
+        # raw`, `tool/dump_tree.py`, `tool/diag_scan.py`, and any embedder
+        # still on the long-stable `ScanEngine().scan(path)` entry point.
+        # Nothing built below this line is cyclic, so a collection inside it
+        # can only walk the tree and find nothing.
         path = os.path.abspath(path)
         if not os.path.isdir(path):
             raise ValueError(f"Not a directory: {path}")

@@ -42,6 +42,7 @@ from disktide.domain.scan import (
     utc_now,
 )
 from disktide.models.tree import FSNode
+from disktide.scanner.gcpause import collector_paused
 from disktide.scanner.progress import ScanProgress
 from disktide.scanner.sysinfo import select_scan_workers
 
@@ -529,7 +530,19 @@ class ScanService:
                 self._finish_cancelled(run, emitter, reason)
                 return run
 
-            root = collector.scan()
+            with collector_paused():
+                # The walk and its tail, and nothing else. Every object the
+                # scanner builds is acyclic, so a full collection inside a
+                # scan walks a million nodes to find nothing -- 22 % of a raw
+                # scan of the 88,000-directory fixture and 30 % of a live one.
+                # `collector.scan()` includes the post-walk clone and the
+                # hardlink accounting, which allocate as heavily as the walk.
+                #
+                # `ScanEngine.scan` pauses too, and the counter in `gcpause`
+                # makes that free; this block is what covers a replacement
+                # collector installed through `scanner_factory`, which need
+                # not go near the engine.
+                root = collector.scan()
             run.root = root
             self._capture_collector_stats(run, collector)
             if collector.cancelled:
@@ -579,7 +592,6 @@ class ScanService:
                 self._capture_collector_stats(run, collector)
             with self._lock:
                 self._active.pop(run.run_id, None)
-
     def cancel(self, run_id: str, reason: str = "cancel requested") -> bool:
         with self._resource_condition:
             if run_id not in self._known_run_ids and run_id not in self._active:
