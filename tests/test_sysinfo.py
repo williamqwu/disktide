@@ -591,3 +591,252 @@ class TestAllocationAwareWorkers:
         )
         assert workers == 4
         assert "host load reduced parallelism" in reason
+
+
+# --- control groups -------------------------------------------------------
+#
+# A container hands out a fraction of a host, and neither interface that
+# describes a machine knows it: `sched_getaffinity` sees a cpuset but not a
+# CPU quota, and /proc/meminfo is host-wide however small the memory limit.
+# Nothing about that is testable in place, so these build a control-group
+# tree in tmp_path and point the adapter at it.
+
+
+def _write_cgroup(root, relative: str, **files: str):
+    directory = root
+    for part in relative.split("/"):
+        if part:
+            directory = directory / part
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, value in files.items():
+        (directory / name.replace("__", ".")).write_text(value + "\n")
+    return directory
+
+
+def _fake_host(tmp_path, procfs_line: str):
+    """A procfs and a cgroup root the adapter can be pointed at."""
+    procfs = tmp_path / "proc"
+    (procfs / "self").mkdir(parents=True)
+    (procfs / "self" / "cgroup").write_text(procfs_line + "\n")
+    (procfs / "meminfo").write_text(
+        "MemTotal:       264241152 kB\nMemAvailable:   201326592 kB\n"
+    )
+    cgroup = tmp_path / "cgroup"
+    cgroup.mkdir()
+    return procfs, cgroup
+
+
+def _adapter(procfs, cgroup):
+    from disktide.collectors.platform.linux import LinuxPlatformAdapter
+
+    return LinuxPlatformAdapter(
+        cgroup_root=str(cgroup), procfs_root=str(procfs)
+    )
+
+
+class TestCgroupLimits:
+    def test_v2_quota_is_read_as_whole_cpus(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(cgroup, "", cpu__max="max 100000")
+        _write_cgroup(cgroup, "user.slice", cpu__max="max 100000")
+        _write_cgroup(cgroup, "user.slice/job", cpu__max="250000 100000")
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.version == "v2"
+        assert limits.cpu_quota == 2.5
+
+    def test_v2_takes_the_tightest_limit_on_the_chain(self, tmp_path):
+        """A parent group's quota binds a child that never set one."""
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(cgroup, "user.slice", cpu__max="100000 100000")
+        _write_cgroup(cgroup, "user.slice/job", cpu__max="400000 100000")
+
+        assert _adapter(procfs, cgroup).cgroup_limits().cpu_quota == 1.0
+
+    def test_v2_unlimited_reads_as_no_quota(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(
+            cgroup, "user.slice/job", cpu__max="max 100000", memory__max="max"
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.version == "v2"
+        assert limits.cpu_quota is None
+        assert limits.memory_limit_bytes is None
+
+    def test_v2_memory_prefers_the_lower_of_max_and_high(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(
+            cgroup,
+            "user.slice/job",
+            memory__max="1073741824",
+            memory__high="536870912",
+            memory__current="134217728",
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.memory_limit_bytes == 536870912
+        assert limits.memory_current_bytes == 134217728
+
+    def test_v1_quota_and_memory(self, tmp_path):
+        procfs, cgroup = _fake_host(
+            tmp_path, "4:cpu,cpuacct:/job\n5:memory:/job"
+        )
+        _write_cgroup(
+            cgroup,
+            "cpu,cpuacct/job",
+            cpu__cfs_quota_us="150000",
+            cpu__cfs_period_us="100000",
+        )
+        _write_cgroup(
+            cgroup,
+            "memory/job",
+            memory__limit_in_bytes="268435456",
+            memory__usage_in_bytes="67108864",
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.version == "v1"
+        assert limits.cpu_quota == 1.5
+        assert limits.memory_limit_bytes == 268435456
+        assert limits.memory_current_bytes == 67108864
+
+    def test_v1_unlimited_sentinels_are_ignored(self, tmp_path):
+        procfs, cgroup = _fake_host(
+            tmp_path, "4:cpu,cpuacct:/job\n5:memory:/job"
+        )
+        _write_cgroup(
+            cgroup,
+            "cpu,cpuacct/job",
+            cpu__cfs_quota_us="-1",
+            cpu__cfs_period_us="100000",
+        )
+        _write_cgroup(
+            cgroup,
+            "memory/job",
+            memory__limit_in_bytes="9223372036854771712",
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.cpu_quota is None
+        assert limits.memory_limit_bytes is None
+
+    def test_missing_files_report_no_limit(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(cgroup, "user.slice/job", cpu__max="max 100000")
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.cpu_quota is None
+        assert limits.memory_limit_bytes is None
+
+    def test_no_cgroup_file_at_all(self, tmp_path):
+        cgroup = tmp_path / "cgroup"
+        cgroup.mkdir()
+        limits = _adapter(tmp_path / "nowhere", cgroup).cgroup_limits()
+
+        assert limits.version is None
+        assert limits.cpu_quota is None
+
+    def test_unparsable_content_reports_no_limit(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(
+            cgroup,
+            "user.slice/job",
+            cpu__max="banana pancakes",
+            memory__max="not-a-number",
+            memory__high="",
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.cpu_quota is None
+        assert limits.memory_limit_bytes is None
+
+    def test_memory_probe_clamps_a_hostwide_meminfo_to_the_limit(
+        self, tmp_path
+    ):
+        """256 GB of host, 512 MB of container: the container's number wins."""
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(
+            cgroup,
+            "user.slice/job",
+            memory__max=str(512 * 1024 * 1024),
+            memory__current=str(100 * 1024 * 1024),
+        )
+
+        result = _adapter(procfs, cgroup).memory_info()
+
+        assert result.value.total_mb == 512
+        assert result.value.available_mb == 412
+        assert result.value.limit_mb == 512
+        assert "cgroup v2 limit of 512 MB" in result.reason
+
+    def test_memory_probe_without_a_limit_is_unchanged(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(cgroup, "user.slice/job", memory__max="max")
+
+        result = _adapter(procfs, cgroup).memory_info()
+
+        assert result.value.total_mb == 264241152 // 1024
+        assert result.value.available_mb == 201326592 // 1024
+        assert result.value.limit_mb is None
+
+
+class TestCpuCountUnderAQuota:
+    @staticmethod
+    def _with_quota(quota):
+        return patch(
+            "disktide.scanner.sysinfo.detect_cpu_quota", return_value=quota
+        )
+
+    def test_quota_narrows_the_available_count(self):
+        with patch("os.cpu_count", return_value=64), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(64))
+        ), self._with_quota(1.0):
+            total, available = detect_cpu_count()
+        assert (total, available) == (64, 1)
+
+    def test_a_fractional_quota_rounds_up(self):
+        """Half a core still runs a thread; it just runs it slower."""
+        with patch("os.cpu_count", return_value=64), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(64))
+        ), self._with_quota(2.5):
+            _total, available = detect_cpu_count()
+        assert available == 3
+
+    def test_a_quota_wider_than_the_cpuset_binds_nothing(self):
+        with patch("os.cpu_count", return_value=64), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(8))
+        ), self._with_quota(32.0):
+            total, available = detect_cpu_count()
+        assert (total, available) == (64, 8)
+
+    def test_a_binding_quota_makes_the_host_allocated(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "os.cpu_count", return_value=64
+        ), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(64))
+        ), self._with_quota(2.0):
+            allocation = detect_host_allocation()
+        assert allocation.available_cpus == 2
+        assert allocation.confined is True
+        assert allocation.kind == "allocated"
+
+    def test_no_quota_leaves_the_verdict_to_the_cpuset(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "os.cpu_count", return_value=16
+        ), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(16))
+        ), self._with_quota(None):
+            with patch(
+                "disktide.scanner.sysinfo.count_other_users", return_value=0
+            ):
+                allocation = detect_host_allocation()
+        assert allocation.confined is False
+        assert allocation.kind == "dedicated"

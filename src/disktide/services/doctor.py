@@ -24,7 +24,7 @@ from disktide.extensions.capabilities import (
     CapabilityStatus,
 )
 from disktide.paths import cache_root, config_file, data_root, state_log_file
-from disktide.scanner.sysinfo import detect_cpu_count
+from disktide.scanner.sysinfo import detect_cpu_count, detect_cpu_quota
 from disktide.storage.database import Database
 from disktide.storage.migrations import CURRENT_VERSION, get_version
 
@@ -82,6 +82,7 @@ def build_doctor_report(
     platform_adapter = adapter or get_platform_adapter()
     capabilities = platform_adapter.capabilities("/")
     cpu_total, cpu_available = detect_cpu_count()
+    cpu_quota = _safe_cpu_quota()
     memory_probe = _safe_memory_probe(platform_adapter)
 
     application_paths = _application_paths(show_paths)
@@ -163,10 +164,12 @@ def build_doctor_report(
         "reason": memory_probe.reason,
         "total_mb": None,
         "available_mb": None,
+        "cgroup_limit_mb": None,
     }
     if memory_probe.value is not None:
         memory["total_mb"] = memory_probe.value.total_mb
         memory["available_mb"] = memory_probe.value.available_mb
+        memory["cgroup_limit_mb"] = memory_probe.value.limit_mb
 
     return DoctorReport(
         application={
@@ -185,6 +188,7 @@ def build_doctor_report(
             "adapter": platform_adapter.name,
             "cpu_total": cpu_total,
             "cpu_available": cpu_available,
+            "cgroup_cpu_quota": cpu_quota,
             "memory": memory,
         },
         terminal=_terminal_report(),
@@ -236,7 +240,9 @@ def render_doctor_report(report: DoctorReport) -> str:
         (
             f"  CPUs: {platform_info['cpu_available']} available / "
             f"{platform_info['cpu_total']} total"
+            f" ({_cpu_quota_text(platform_info.get('cgroup_cpu_quota'))})"
         ),
+        _memory_line(platform_info.get("memory")),
         "",
     ]
     lines.extend(_render_terminal_block(payload["terminal"]))
@@ -656,6 +662,39 @@ def _database_report(
                 database.close()
             except Exception:
                 pass
+
+
+def _cpu_quota_text(quota: object) -> str:
+    """What the control group allows, in the units `--cpus` uses."""
+    if not isinstance(quota, (int, float)):
+        return "cgroup cpu quota: none"
+    return f"cgroup cpu quota: {float(quota):.1f} CPUs"
+
+
+def _memory_line(memory: object) -> str:
+    """One line of memory, naming the cgroup limit when one applies.
+
+    /proc/meminfo is host-wide inside a container, so without the limit this
+    line would tell a 512 MB process about a 256 GB machine.
+    """
+    if not isinstance(memory, dict):
+        return "  Memory: unavailable"
+    total = memory.get("total_mb")
+    available = memory.get("available_mb")
+    if not isinstance(total, int) or not isinstance(available, int):
+        return f"  Memory: unavailable ({memory.get('reason', 'no reason given')})"
+    line = f"  Memory: {available} MB available of {total} MB"
+    limit = memory.get("cgroup_limit_mb")
+    if isinstance(limit, int):
+        line = f"{line} (cgroup limit: {limit} MB)"
+    return line
+
+
+def _safe_cpu_quota() -> float | None:
+    try:
+        return detect_cpu_quota()
+    except Exception:
+        return None
 
 
 def _safe_memory_probe(adapter: PlatformAdapter):

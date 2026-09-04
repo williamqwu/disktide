@@ -8,6 +8,7 @@ from pathlib import Path
 
 from disktide.collectors.platform.models import (
     BlockDevice,
+    CgroupLimits,
     MemoryInfo,
     MountRecord,
     ProbeResult,
@@ -44,6 +45,14 @@ class PlatformAdapter:
         return ProbeResult.unavailable(
             f"memory detection is not implemented by the {self.name} adapter"
         )
+
+    def cgroup_limits(self) -> CgroupLimits:
+        """What the process's control group allows. Nothing, by default.
+
+        Control groups are a Linux interface; every other platform answers
+        "no limit", which is what the callers assume when they see it.
+        """
+        return CgroupLimits()
 
     def storage_medium(self, path: str) -> ProbeResult[bool | None]:
         return ProbeResult.unavailable(

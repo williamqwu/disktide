@@ -31,8 +31,22 @@ instead of raising into the scanner or UI.
 | `/proc/meminfo` | Available memory | 0 MB (no low-memory override applied) |
 | `/proc/mounts` | Filesystem type detection | `"unknown"`, conservative local fallback |
 | `/sys/block/*/queue/rotational` | HDD vs SSD detection | `None`, metadata sample decides or falls back to serial |
-| `os.sched_getaffinity(0)` | cgroup-aware CPU count | Falls back to `os.cpu_count()` |
+| `os.sched_getaffinity(0)` | CPU count after a cpuset | Falls back to `os.cpu_count()` |
+| `/proc/self/cgroup` + `cpu.max` / `cpu.cfs_quota_us` | CPU count after a *quota* | No quota; the cpuset alone decides |
+| `memory.max` / `memory.limit_in_bytes` | Memory available after a container limit | Host-wide `/proc/meminfo` alone |
 | `os.getloadavg()` | System load | `(0, 0, 0)` (no load-based reduction) |
+
+The two control-group rows exist because neither interface above them can see a
+container's limits. `sched_getaffinity` reports a cpuset, but `docker run
+--cpus=1` sets a *quota* and leaves every core visible, so on a 64-core host
+disktide believed it had 64 CPUs. `/proc/meminfo` is host-wide inside a
+container, so under `--memory=512m` on a 256 GB host it believed ~200 GB were
+free and the "under 512 MB, scan serially" guard never fired. Both hierarchies
+are read, from the process's own group up to the root, and the tightest limit on
+that chain is the one that binds -- a batch scheduler usually sets the limit on
+the job, not on the task. A quota that binds makes the host `allocated`, so
+host-wide load stops throttling the scan. `disktide doctor` prints both under
+Platform.
 
 On macOS, `/proc` and `/sys` do not exist. Scanning still works, while mount,
 block-device, and medium detection report unavailable through `disktide doctor`

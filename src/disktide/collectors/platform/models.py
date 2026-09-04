@@ -42,6 +42,34 @@ class MountRecord:
 class MemoryInfo:
     total_mb: int
     available_mb: int
+    #: The cgroup memory limit this process runs under, when one applies.
+    #: `total_mb` and `available_mb` are already clamped to it; this is here
+    #: so a report can say *why* a 256 GB host offers 512 MB.
+    limit_mb: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CgroupLimits:
+    """What this process's control group allows, in the units people use.
+
+    Containers and batch schedulers hand out fractions of a host, and the
+    interfaces that describe a machine do not know about them:
+    ``sched_getaffinity`` sees a cpuset but not a CPU *quota*, and
+    ``/proc/meminfo`` is host-wide however small the memory limit is. Inside
+    ``docker run --cpus=1`` on a 64-core host, disktide used to believe it
+    had 64 CPUs; under ``--memory=512m`` on a 256 GB host it believed it had
+    ~200 GB free and the "under 512 MB, scan serially" guard never fired.
+
+    Every field is None when nothing binds -- an unlimited group, an
+    unreadable one, or a kernel interface that is not there.
+    """
+
+    #: Whole CPUs, as quota/period. 2.5 means "two and a half cores".
+    cpu_quota: float | None = None
+    memory_limit_bytes: int | None = None
+    memory_current_bytes: int | None = None
+    #: "v2", "v1", or None when no control group was found.
+    version: str | None = None
 
 
 class DeviceStatus(Enum):

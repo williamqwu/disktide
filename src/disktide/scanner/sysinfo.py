@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from time import perf_counter
@@ -60,8 +61,8 @@ class HostAllocation:
     ``kind`` drives scan parallelism policy:
 
     * ``allocated`` -- a batch job or cgroup carved out a subset of the host for
-      us. That subset is ours; host-wide load reflects other jobs we are
-      isolated from and must not throttle us.
+      us, either as a cpuset or as a CPU quota. That subset is ours; host-wide
+      load reflects other jobs we are isolated from and must not throttle us.
     * ``shared`` -- no allocation, and other people have processes here. This is
       the cluster login node case: stay modest whatever the storage suggests.
     * ``dedicated`` -- no allocation and nobody else is present, so the machine
@@ -110,8 +111,16 @@ def detect_host_allocation(*, count_users: bool = True) -> HostAllocation:
     reads 0 on an allocated slice rather than claiming the machine is empty.
     """
     total, available = detect_cpu_count()
+    quota = detect_cpu_quota()
     batch_job = any(os.environ.get(name) for name in _BATCH_JOB_ENV_VARS)
-    confined = available < total
+    # A quota that binds is an allocation as surely as a cpuset is: the
+    # scheduler will not let this process take more than it, so host-wide
+    # load counts jobs we are isolated from. It binds when it is no wider
+    # than the CPUs we were left with -- `detect_cpu_count` has already
+    # narrowed those to it.
+    confined = available < total or (
+        quota is not None and math.ceil(quota) <= available
+    )
     if batch_job or confined:
         # Our claim is already settled by the allocation; who else is on the
         # box cannot change it, so skip walking /proc to find out.
@@ -281,17 +290,49 @@ def facet_labels(
     return badges
 
 
-def detect_cpu_count() -> tuple[int, int]:
-    """Return (total_cpus, available_cpus).
+def _cpu_allocation() -> tuple[int, int, float | None]:
+    """``(total, available, binding quota)`` for this process.
 
-    available_cpus respects cgroup/taskset via os.sched_getaffinity.
+    ``sched_getaffinity`` sees a cpuset and nothing else. A CPU *quota* --
+    what ``docker run --cpus=1`` and a Kubernetes CPU limit actually set --
+    leaves every core visible and throttles the process instead, so inside
+    a one-CPU container on a 64-core host this used to answer 64. The
+    quota is reported in whole CPUs, rounded up because half a core still
+    runs a thread, and only when it is tighter than the affinity mask: a
+    quota wider than the CPUs we can see binds nothing.
     """
     total = os.cpu_count() or 4
     try:
         available = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         available = total
+    quota = detect_cpu_quota()
+    if quota is None:
+        return (total, available, None)
+    allowed = max(1, math.ceil(quota))
+    if allowed >= available:
+        return (total, available, None)
+    return (total, allowed, quota)
+
+
+def detect_cpu_count() -> tuple[int, int]:
+    """Return (total_cpus, available_cpus).
+
+    available_cpus respects a cpuset via os.sched_getaffinity and a cgroup
+    CPU quota via the platform adapter.
+    """
+    total, available, _quota = _cpu_allocation()
     return (total, available)
+
+
+def detect_cpu_quota() -> float | None:
+    """Whole CPUs this process's cgroup allows, or None when none does.
+
+    Reported whether or not it binds -- `disktide doctor` says what the
+    cgroup asks for, and the caller decides what that means next to the
+    affinity mask.
+    """
+    return get_platform_adapter().cgroup_limits().cpu_quota
 
 
 def detect_load_average() -> tuple[float, float, float]:

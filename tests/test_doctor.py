@@ -200,3 +200,59 @@ def test_cli_doctor_human_output_has_no_traceback(tmp_path):
     assert result.exit_code == 0, result.output
     assert "Application" in result.output
     assert "Traceback" not in result.output
+
+
+def test_doctor_platform_block_reports_cgroup_cpu_and_memory(
+    tmp_path, monkeypatch
+):
+    """A container's limits are the ones the user is actually running under.
+
+    Without them the block describes the host: 64 CPUs inside
+    `--cpus=1`, and a quarter of a terabyte of RAM inside `--memory=512m`.
+    """
+    _set_xdg(monkeypatch, tmp_path)
+
+    class _Bounded(PortablePlatformAdapter):
+        def memory_info(self):
+            from disktide.collectors.platform.models import (
+                MemoryInfo,
+                ProbeResult,
+            )
+
+            return ProbeResult.available(
+                MemoryInfo(512, 412, 512),
+                "memory bounded by a cgroup v2 limit of 512 MB",
+            )
+
+    monkeypatch.setattr(
+        "disktide.services.doctor.detect_cpu_count", lambda: (64, 1)
+    )
+    monkeypatch.setattr(
+        "disktide.services.doctor.detect_cpu_quota", lambda: 1.0
+    )
+    report = build_doctor_report(adapter=_Bounded("Linux"))
+    output = render_doctor_report(report)
+
+    assert "CPUs: 1 available / 64 total (cgroup cpu quota: 1.0 CPUs)" in output
+    assert "Memory: 412 MB available of 512 MB (cgroup limit: 512 MB)" in output
+    platform_payload = report.to_dict()["platform"]
+    assert platform_payload["cgroup_cpu_quota"] == 1.0
+    assert platform_payload["memory"]["cgroup_limit_mb"] == 512
+
+
+def test_doctor_platform_block_says_so_when_no_cgroup_limit_applies(
+    tmp_path, monkeypatch
+):
+    _set_xdg(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "disktide.services.doctor.detect_cpu_quota", lambda: None
+    )
+    report = build_doctor_report(adapter=PortablePlatformAdapter("Darwin"))
+    output = render_doctor_report(report)
+
+    assert "(cgroup cpu quota: none)" in output
+    assert "cgroup limit:" not in output
+    assert report.to_dict()["platform"]["cgroup_cpu_quota"] is None
+    assert (
+        report.to_dict()["platform"]["memory"]["cgroup_limit_mb"] is None
+    )
