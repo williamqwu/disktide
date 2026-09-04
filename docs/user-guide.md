@@ -181,7 +181,7 @@ Press `?` in the app for a live, screen-specific version of this table.
 | `q` | Global | Quit |
 | `r` | Explorer, Cleanup, Monitor, FS Overview | Rescan / refresh |
 | Esc | Modals, Monitor detail | Back / close |
-| `F1` / `F2` / `F3` | Explorer | Sunburst / Treemap / Details |
+| `F1` / `F2` / `F3` | Explorer | Sunburst / Treemap / Details (browsers claim F1/F3 — Tab to the chart tabs, then `←`/`→`, or use Ctrl+P) |
 | `u` / `i` | Explorer | Up / drill into directory |
 | `s` | Explorer | Cycle sort order |
 | `d` | Explorer | Toggle Current / Diff |
@@ -396,6 +396,7 @@ default_viz = "sunburst"                 # treemap, sunburst, details
 # ring_shape = "disc"                    # default tiles
 # mouse = false                          # default true
 # cell_aspect = 2.43                     # omit to auto-detect
+# color_depth = "truecolor"              # auto (default) | truecolor | 256 | 16
 # safe_rendering = true                  # ASCII-only for web shells
 # live_scan_render = "auto"              # auto | on | off
 # hostname_aware_paths = false           # default true
@@ -430,7 +431,9 @@ terminals (kitty, Alacritty, GNOME Terminal, iTerm2, WezTerm, etc.).
 
 Terminals that report no pixel size — xterm.js web shells, VS Code, Windows
 Terminal, mosh, screen — fall back to 2.0, which makes circles slightly oval.
-Set the value manually:
+A web shell always lands here and there is nothing to fix in it: node-pty
+fills in no pixel winsize, and xterm.js does not answer `CSI 14 t` either, so
+every automatic layer comes up empty. Set the value manually:
 
 - **Settings** (`,`) → Cell aspect — type a number or blank for auto-detect.
 - **Config** — `cell_aspect` under `[ui]`.
@@ -440,7 +443,7 @@ Set the value manually:
 
 ## Color Themes
 
-Five themes, switched in Settings (`,`) or via `color_theme` in config. A
+Six themes, switched in Settings (`,`) or via `color_theme` in config. A
 live swatch previews the choice before you leave the screen.
 
 | Theme | Look |
@@ -450,9 +453,63 @@ live swatch previews the choice before you leave the screen.
 | Colorblind-safe | Okabe-Ito hues, separable in grayscale; diff uses orange/blue instead of red/green |
 | Cyberpunk | Near-black indigo, neon accents |
 | Mono | Black and gray only, categories as a gray ladder |
+| ANSI 16 | The terminal's own sixteen colors, named rather than chosen |
 
-Each theme retints the entire window — chrome, tree, and charts. All category
-colors are validated for color-vision separation and contrast.
+The first five retint the entire window — chrome, tree, and charts — and all
+of their category colors are validated for color-vision separation and
+contrast. ANSI 16 is different in kind: it names colors instead of specifying
+them, so what you see is whatever your terminal's own palette says. Pick it
+if you keep a carefully tuned 16-color scheme and want DiskTide to use it;
+DiskTide also selects it for itself in a terminal that only has sixteen.
+
+## Web shells and colour depth
+
+DiskTide draws in 24-bit color and the terminal decides what happens to it.
+Three common environments answer differently, and two of them start the app
+at sixteen colors:
+
+| Environment | `TERM` | What DiskTide does |
+|-------------|--------|--------------------|
+| Open OnDemand shell | `xterm-16color` | 16 colors → ANSI 16 theme |
+| JupyterLab terminal | `xterm-color` | 16 colors → ANSI 16 theme |
+| VS Code terminal | `xterm-256color` + `COLORTERM=truecolor` | 24-bit |
+| ssh + tmux, local terminal | `tmux-256color` | 256, or 24-bit if the tmux client reports `RGB` |
+
+Both web shells are xterm.js, which can in fact do 256 colors and RGB — it is
+the `TERM` their pty is spawned with that says otherwise. Inside tmux the
+reading is worse than conservative, it is stale: `TERM` describes the pty tmux
+handed you, not the client on the other end, so an app that trusts it writes
+256-color codes that tmux then quantises through a fixed table before the
+browser sees them. On the default palette that takes 39 distinct colors down
+to 13, which is why `archive`, `ephemeral` and the directory rings all came
+out the same pink.
+
+So DiskTide asks tmux which clients are attached and takes the least capable
+one, because a session you read from a laptop and a browser at once has to be
+legible in the browser. At sixteen colors it renders with the ANSI 16 theme,
+which is designed for that depth rather than crushed onto it, and says so once
+in a toast.
+
+To override:
+
+- **Config** — `color_depth` under `[ui]`: `auto` (default), `truecolor`, `256`, `16`.
+- **Env** — `DISKTIDE_COLOR_DEPTH=truecolor`, for one session.
+- **The terminal itself** — `export COLORTERM=truecolor` in your shell rc.
+  Every xterm.js-based shell and every modern terminal accepts RGB whatever
+  its `TERM` says, and `COLORTERM` is not forwarded by ssh nor set by tmux,
+  so this is worth setting even in a native terminal.
+- **tmux** — tell it your client is better than its terminfo entry:
+
+  ```tmux
+  set -as terminal-features ",xterm-16color:256,RGB"
+  ```
+
+  then detach and reattach (or `tmux kill-server`).
+
+`disktide doctor` prints the whole diagnosis: `TERM`, `COLORTERM`,
+`TEXTUAL_COLOR_SYSTEM`, the tmux clients attached to your session with their
+feature lists, the depth that was resolved and which of those decided it, and
+the one line to change when there is color left on the table.
 
 ## File-Type Categories
 

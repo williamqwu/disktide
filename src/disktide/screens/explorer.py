@@ -1484,6 +1484,15 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
 
         Uses Textual's OSC 52 clipboard write, so it also works over SSH
         and in web-based shells where there is no local clipboard tool.
+
+        The toast is not a confirmation, it is the fallback. OSC 52 is
+        swallowed silently in two places a user is quite likely to be at
+        once: a tmux client whose terminfo has no `Ms` (`xterm-16color`,
+        which is what Open OnDemand hands out) and an xterm.js terminal
+        built without the clipboard addon. There is no reply to read, so
+        nothing can tell whether it landed — printing the path where it
+        can be selected with the mouse is what makes the key useful
+        anyway, and it costs a reader in a working terminal nothing.
         """
         tree = self.query_one("#size-tree", SizeTree)
         node = tree.cursor_node
@@ -1491,7 +1500,11 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             return
         path = node.data.path
         self.app.copy_to_clipboard(path)
-        self.app.notify(path, title="Copied path", timeout=4)
+        self.app.notify(
+            path,
+            title="Copied path (select to copy by hand)",
+            timeout=8,
+        )
 
     def action_setup_monitor(self) -> None:
         """Create a persistent monitor for the highlighted directory."""

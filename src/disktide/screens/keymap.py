@@ -331,4 +331,29 @@ class KeymapScreen(ModalScreen[None]):
         # One line at the dialog's 68 columns: the map is a reference card,
         # and a three-line footnote under it reads as content. `esc closes`
         # is not here because it rides in the border.
-        return f"^p finds any command · preset: {name} · remap in config.toml [keys]"
+        lines = [
+            f"^p finds any command · preset: {name} · remap in config.toml [keys]"
+        ]
+        if self._has_function_keys():
+            lines.append(
+                "F-keys: browsers claim F1/F3/F5 — use ^p, or tab to the "
+                "chart tabs and ←/→"
+            )
+        return "\n".join(lines)
+
+    def _has_function_keys(self) -> bool:
+        """Whether this screen puts anything on an F-key.
+
+        Asked of the bindings rather than hard-coded to the Explorer, so
+        the note appears exactly where there is something it applies to
+        and disappears if the last F-key ever moves. A web shell is a
+        browser tab first: Chrome takes F1 for help, F3 for find and F5
+        for reload, and none of the three reach the terminal.
+        """
+        under = self._under()
+        if under is None:
+            return False
+        return any(
+            key.startswith("f") and key[1:].isdigit()
+            for key in under.active_bindings
+        )
