@@ -10,7 +10,10 @@ from disktide.domain.metrics import MetricId
 from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate, ScanWorkerSelection
 from disktide.models.tree import FSNode
-from disktide.scanner.accounting import finalize_unique_allocated
+from disktide.scanner.accounting import (
+    finalize_unique_allocated,
+    mirror_allocated_as_unique,
+)
 from disktide.scanner.gcpause import (
     FREEZE_MIN_ENTRIES,
     collector_paused,
@@ -197,7 +200,14 @@ class ScanEngine:
             else scheduled.root
         )
         root.scan_policy = self._policy
-        finalize_unique_allocated(root)
+        # The deciding walk only when there is something to decide. It runs
+        # after the walk, on the tail every caller waits on, and on a tree
+        # with no shared inode -- which is nearly every tree -- every answer
+        # it produces is already on the node under another name.
+        if scheduled.hardlinked_leaves:
+            finalize_unique_allocated(root)
+        else:
+            mirror_allocated_as_unique(root)
 
         if not self.cancelled:
             self._progress.update(

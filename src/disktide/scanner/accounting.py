@@ -76,3 +76,43 @@ def finalize_unique_allocated(root: FSNode) -> None:
                         total += value
         node.own_unique_allocated_size = own
         node.unique_allocated_size = total
+
+
+def mirror_allocated_as_unique(root: FSNode) -> None:
+    """Fill in unique allocated sizes for a tree with no hardlinked leaf.
+
+    `finalize_unique_allocated` exists to decide which of several paths to
+    one inode owns its bytes. With no inode shared there is nothing to
+    decide: every leaf owns exactly its own allocated bytes, so a
+    directory's own unique total is the `own_allocated_size` the walk
+    already summed and its inclusive one is `allocated_size` -- including
+    the None that propagates when a platform has no `st_blocks`, which
+    both sides derive from the same missing value.
+
+    So the answer is a copy, not a computation, and the second pass over
+    every directory's children goes away with it. The scheduler says
+    whether any hardlinked leaf was applied (`ScheduledTree.hardlinked_leaves`);
+    only when it says yes does the deciding walk have to run.
+
+    Leaves are handled from inside their parent's loop rather than pushed
+    on the stack: they are 892k of the 980k nodes on a home-shaped tree,
+    and an append and a pop each is the bulk of what a walk of one costs.
+    """
+
+    if not root.is_dir:
+        allocated = root.own_allocated_size
+        root.own_unique_allocated_size = allocated
+        root.unique_allocated_size = allocated
+        return
+    stack: list[FSNode] = [root]
+    while stack:
+        node = stack.pop()
+        node.own_unique_allocated_size = node.own_allocated_size
+        node.unique_allocated_size = node.allocated_size
+        for child in node.children:
+            if child.is_dir:
+                stack.append(child)
+                continue
+            allocated = child.own_allocated_size
+            child.own_unique_allocated_size = allocated
+            child.unique_allocated_size = allocated

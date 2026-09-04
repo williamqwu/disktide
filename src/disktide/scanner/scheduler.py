@@ -200,6 +200,11 @@ class DirectoryScanResult:
     direct_inaccessible: int
     streamed: bool = False
     direct_vanished: int = 0
+    #: Whether any direct entry of this directory is a hardlinked leaf.
+    #: Only meaningful on an unstreamed result, where the worker's own
+    #: `_recalculate_directory` saw the whole child list; a streamed
+    #: directory is asked the same question by `_apply_entry_chunk`.
+    hardlinked: bool = False
 
 
 @dataclass(slots=True)
@@ -259,6 +264,11 @@ class ScheduledTree:
     root: FSNode
     stats: SchedulerStats
     published_snapshots: int
+    #: Whether the scan applied a single leaf with `link_count > 1`. False
+    #: means no inode is shared, which means `unique_allocated_size` is
+    #: `allocated_size` everywhere and the post-scan hardlink walk has
+    #: nothing to decide -- see `accounting.mirror_allocated_as_unique`.
+    hardlinked_leaves: bool = False
 
 
 @dataclass(slots=True)
@@ -325,15 +335,24 @@ def _recalculate_directory(
     node: FSNode,
     direct_inaccessible: int,
     direct_vanished: int = 0,
-) -> None:
+) -> bool:
     """Refresh inclusive aggregates from direct entries and current children.
 
     One pass over the child list. It used to be nine -- a filtered list
     comprehension, six generator sums, a `sum_available` over two freshly
     built lists, and a final loop -- and it runs once per directory per
     result, which is 88k times on a home-shaped tree.
+
+    Returns whether any direct entry is a hardlinked leaf, which is the
+    only thing the post-scan `finalize_unique_allocated` walk has any work
+    to do about. The question is answered here because this is already the
+    one loop that touches every child of every directory, and it is
+    answered on the thread that scanned the directory rather than on the
+    scheduler thread the whole scan queues behind. A directory's own
+    `st_nlink` is 2 or more on every Unix filesystem, so only leaves count.
     """
 
+    hardlinked = False
     size = node.own_size
     allocated = node.own_allocated_size
     file_count = 0
@@ -349,6 +368,8 @@ def _recalculate_directory(
     for child in node.children:
         file_count += child.file_count
         if not child.is_dir:
+            if child.link_count > 1:
+                hardlinked = True
             continue
         size += child.size
         if allocated is not None:
@@ -390,6 +411,7 @@ def _recalculate_directory(
     node.excluded_subtree_count = excluded
     node.depth_limited_subtree_count = depth_limited
     node.invalidate_sort()
+    return hardlinked
 
 
 def _child_contribution(node: FSNode) -> _ChildContribution:
@@ -808,7 +830,7 @@ def _scan_open_directory(
     node.own_allocated_size = own_allocated
     if checkpoint_callback is None:
         node.children.sort(key=_NAME_PATH_KEY)
-    _recalculate_directory(node, direct_inaccessible, direct_vanished)
+    hardlinked = _recalculate_directory(node, direct_inaccessible, direct_vanished)
     return DirectoryScanResult(
         job=job,
         node=node,
@@ -817,6 +839,7 @@ def _scan_open_directory(
         direct_inaccessible=direct_inaccessible,
         streamed=checkpoint_callback is not None and not single_chunk,
         direct_vanished=direct_vanished,
+        hardlinked=hardlinked,
     )
 
 
@@ -996,6 +1019,7 @@ class TreeScanScheduler:
         self._current_path = ""
         self._entry_chunks_processed = 0
         self._max_entry_chunk_queue = 0
+        self._hardlinked_leaves = False
 
     def scan(self, path: str) -> ScheduledTree:
         root_path = os.path.abspath(path)
@@ -1223,7 +1247,12 @@ class TreeScanScheduler:
             entry_chunks_processed=self._entry_chunks_processed,
             max_entry_chunk_queue=self._max_entry_chunk_queue,
         )
-        return ScheduledTree(root, stats, self._published_snapshots)
+        return ScheduledTree(
+            root,
+            stats,
+            self._published_snapshots,
+            self._hardlinked_leaves,
+        )
 
     def _apply_result(
         self,
@@ -1251,9 +1280,10 @@ class TreeScanScheduler:
         previous = _child_contribution(state.node)
         children = state.node.children
         result.node.children = children
-        _recalculate_directory(
+        if _recalculate_directory(
             result.node, result.direct_inaccessible, result.direct_vanished
-        )
+        ):
+            self._hardlinked_leaves = True
         state.node = result.node
         state.generation = self._generation
         state.direct_inaccessible = result.direct_inaccessible
@@ -1362,6 +1392,9 @@ class TreeScanScheduler:
             1 if node.error is not None else 0
         )
 
+        if result.hardlinked:
+            self._hardlinked_leaves = True
+
         self._propagate(state, previous)
         self._record_changed(state)
         if state.remaining_children == 0:
@@ -1449,6 +1482,11 @@ class TreeScanScheduler:
         for child in chunk.children:
             if not child.is_dir:
                 chunk_file_count += child.file_count
+                if child.link_count > 1:
+                    # Asked here as well as in `_recalculate_directory`
+                    # because a cancelled scan can finalise a tree whose
+                    # streamed directories never reached `_apply_result`.
+                    self._hardlinked_leaves = True
         node.file_count += chunk_file_count
         node.dir_count += chunk.child_count
         node.inaccessible_count += chunk.direct_inaccessible_delta
