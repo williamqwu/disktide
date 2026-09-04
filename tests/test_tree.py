@@ -2,9 +2,10 @@
 
 import copy
 import dataclasses
+import sys
 
 import pytest
-from disktide.models.tree import FSNode
+from disktide.models.tree import FSNode, LeafNode
 
 
 def make_tree():
@@ -100,13 +101,13 @@ class TestFSNode:
         assert node.size_percent(0) == 0.0
 
 
-# `scanner.walker.make_file_node` and `make_symlink_node` construct an FSNode
-# positionally for these 28 fields -- 0.83 us against 1.12 us for the keyword
-# form, once per file, on the hottest path in the scanner. Positional
-# construction makes declaration order part of the contract: a field inserted
-# or reordered anywhere above `link_count` would silently write a size into
-# the wrong slot, so it fails here instead.
-FSNODE_POSITIONAL_PREFIX = [
+# `scanner.walker.make_file_node` and `make_symlink_node` construct a
+# `LeafNode` positionally for these 20 fields -- 0.83 us against 1.12 us for
+# the keyword form, once per file, on the hottest path in the scanner.
+# Positional construction makes declaration order part of the contract: a
+# field inserted or reordered anywhere above `link_count` would silently
+# write a size into the wrong slot, so it fails here instead.
+LEAFNODE_POSITIONAL_PREFIX = [
     "name",
     "path",
     "size",
@@ -116,42 +117,52 @@ FSNODE_POSITIONAL_PREFIX = [
     "unique_allocated_size",
     "own_unique_allocated_size",
     "file_count",
-    "dir_count",
     "is_dir",
     "mtime",
     "depth",
-    "children",
-    "error",
-    "inaccessible_count",
-    "inaccessible_subtree_count",
-    "denied_dir_subtree_count",
-    "partial_dir_subtree_count",
     "is_symlink",
     "link_target",
     "link_is_dir",
     "link_broken",
     "link_classified",
-    "is_loop",
     "device_id",
     "inode",
     "link_count",
 ]
 
+# `LeafNode.__copy__` calls the generated `__init__` positionally with every
+# field, so the whole declaration order is a contract, not just the prefix.
+LEAFNODE_FIELD_ORDER = LEAFNODE_POSITIONAL_PREFIX + ["hardlink_owner_path"]
 
-def test_fsnode_positional_prefix():
-    names = [field.name for field in dataclasses.fields(FSNode)][:28]
-    assert names == FSNODE_POSITIONAL_PREFIX, (
-        "make_file_node / make_symlink_node build an FSNode positionally for "
+
+def test_leafnode_positional_prefix():
+    names = [field.name for field in dataclasses.fields(LeafNode)][:20]
+    assert names == LEAFNODE_POSITIONAL_PREFIX, (
+        "make_file_node / make_symlink_node build a LeafNode positionally for "
         "these fields; append new fields at the end of the dataclass instead."
     )
 
 
-# `FSNode.__copy__` calls the generated `__init__` positionally with every
-# field, which is 3x faster than the generic slots-dataclass copy the
-# scheduler was paying per directory. That makes the *whole* declaration
-# order a contract, not just the 28-field prefix above.
-FSNODE_FIELD_ORDER = FSNODE_POSITIONAL_PREFIX + [
-    "hardlink_owner_path",
+def test_leafnode_field_order():
+    names = [field.name for field in dataclasses.fields(LeafNode)]
+    assert names == LEAFNODE_FIELD_ORDER, (
+        "LeafNode.__copy__ passes every field positionally; update it (and "
+        "this list) when the dataclass changes."
+    )
+
+
+# `FSNode` inherits those twenty-one and declares the twenty a directory
+# needs after them, which is the order `scheduler._placeholder` and
+# `FSNode.__copy__` build positionally.
+FSNODE_DIRECTORY_FIELDS = [
+    "children",
+    "dir_count",
+    "error",
+    "inaccessible_count",
+    "inaccessible_subtree_count",
+    "denied_dir_subtree_count",
+    "partial_dir_subtree_count",
+    "is_loop",
     "excluded",
     "exclusion_reason",
     "filesystem_boundary",
@@ -166,13 +177,110 @@ FSNODE_FIELD_ORDER = FSNODE_POSITIONAL_PREFIX + [
     "_sorted_cache",
 ]
 
+FSNODE_FIELD_ORDER = LEAFNODE_FIELD_ORDER + FSNODE_DIRECTORY_FIELDS
+
 
 def test_fsnode_field_order():
     names = [field.name for field in dataclasses.fields(FSNode)]
     assert names == FSNODE_FIELD_ORDER, (
-        "FSNode.__copy__ passes every field positionally; update it (and this "
-        "list) when the dataclass changes."
+        "FSNode.__copy__ and scheduler._placeholder pass every field "
+        "positionally; update them (and this list) when the dataclass changes."
     )
+
+
+class TestLeafAndDirectoryShapes:
+    """A file pays for a file's fields, and nothing else.
+
+    Twenty of the forty-one names are meaningful only on a directory, and
+    files outnumber directories nine to one on a home-shaped tree. Reads of
+    those twenty still work on a leaf -- they are class attributes carrying
+    the defaults `FSNode` used to hold -- and writes raise, so a directory
+    field set on a leaf fails where it is written instead of vanishing from
+    every aggregate above it.
+    """
+
+    def test_a_directory_is_still_an_fsnode_and_a_leafnode(self):
+        directory = FSNode(name="d", path="/d", is_dir=True)
+        assert isinstance(directory, FSNode)
+        assert isinstance(directory, LeafNode)
+
+    def test_a_leaf_is_not_an_fsnode(self):
+        assert not isinstance(LeafNode(name="f", path="/f"), FSNode)
+
+    def test_a_leaf_is_smaller_than_a_directory(self):
+        leaf = LeafNode(name="f", path="/f")
+        directory = FSNode(name="d", path="/d", is_dir=True)
+        assert sys.getsizeof(leaf) < sys.getsizeof(directory)
+        assert len(dataclasses.fields(LeafNode)) == 21
+        assert len(dataclasses.fields(FSNode)) == 41
+
+    @pytest.mark.parametrize(
+        "name, expected",
+        [
+            ("children", ()),
+            ("dir_count", 0),
+            ("error", None),
+            ("inaccessible_count", 0),
+            ("inaccessible_subtree_count", 0),
+            ("denied_dir_subtree_count", 0),
+            ("partial_dir_subtree_count", 0),
+            ("is_loop", False),
+            ("excluded", False),
+            ("exclusion_reason", None),
+            ("filesystem_boundary", False),
+            ("filesystem_type", None),
+            ("depth_limited", False),
+            ("excluded_subtree_count", 0),
+            ("depth_limited_subtree_count", 0),
+            ("scan_policy", None),
+            ("vanished", False),
+            ("vanished_count", 0),
+            ("vanished_subtree_count", 0),
+            ("_sorted_cache", None),
+        ],
+    )
+    def test_every_directory_field_still_reads_on_a_leaf(self, name, expected):
+        assert getattr(LeafNode(name="f", path="/f"), name) == expected
+
+    @pytest.mark.parametrize(
+        "name", ["children", "dir_count", "error", "vanished", "_sorted_cache"]
+    )
+    def test_writing_a_directory_field_on_a_leaf_raises(self, name):
+        leaf = LeafNode(name="f", path="/f")
+        with pytest.raises(AttributeError):
+            setattr(leaf, name, 1)
+
+    def test_a_leaf_sorts_and_invalidates_without_a_cache(self):
+        leaf = LeafNode(name="f", path="/f")
+        assert leaf.sorted_children == []
+        leaf.invalidate_sort()
+        assert leaf.sorted_children == []
+
+    def test_a_leaf_copies_to_a_leaf_and_a_directory_to_a_directory(self):
+        leaf = LeafNode(name="f", path="/f", size=7)
+        directory = FSNode(name="d", path="/d", is_dir=True, dir_count=2)
+        assert type(leaf.shallow_copy()) is LeafNode
+        assert leaf.shallow_copy().size == 7
+        assert type(directory.shallow_copy()) is FSNode
+        assert directory.shallow_copy().dir_count == 2
+
+    def test_the_keyword_contract_on_fsnode_is_unchanged(self):
+        """Every caller outside the scanner builds directories by keyword."""
+        node = FSNode(
+            name="d",
+            path="/d",
+            is_dir=True,
+            dir_count=3,
+            error=None,
+            inaccessible_count=1,
+            inaccessible_subtree_count=2,
+            denied_dir_subtree_count=1,
+            partial_dir_subtree_count=1,
+            excluded_subtree_count=1,
+            depth_limited_subtree_count=1,
+        )
+        assert node.dir_count == 3
+        assert node.inaccessible_subtree_count == 2
 
 
 def _populated_node() -> FSNode:

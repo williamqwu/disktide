@@ -66,7 +66,7 @@ from disktide.domain.snapshot import (
 
 log = logging.getLogger(__name__)
 
-from disktide.models.tree import FSNode
+from disktide.models.tree import FSNode, LeafNode
 from disktide.paths import database_file
 from disktide.storage.migrations import (
     CURRENT_VERSION,
@@ -1079,15 +1079,30 @@ class Database:
                 error,
                 is_dir,
             ) = vals
-            nodes_by_pid[path_id] = FSNode(
-                name=name, path=path_str, size=size, own_size=own_size,
-                allocated_size=allocated_size,
-                own_allocated_size=own_allocated_size,
-                unique_allocated_size=unique_allocated_size,
-                own_unique_allocated_size=own_unique_allocated_size,
-                file_count=file_count, dir_count=dir_count,
-                is_dir=is_dir, mtime=mtime, depth=depth, error=error,
-            )
+            # `is_dir` comes off the row, so the shape does too: a file
+            # rebuilt as an `FSNode` would carry twenty directory slots it
+            # can never use, and a snapshot of a home directory is nine
+            # files to every directory.
+            if is_dir:
+                nodes_by_pid[path_id] = FSNode(
+                    name=name, path=path_str, size=size, own_size=own_size,
+                    allocated_size=allocated_size,
+                    own_allocated_size=own_allocated_size,
+                    unique_allocated_size=unique_allocated_size,
+                    own_unique_allocated_size=own_unique_allocated_size,
+                    file_count=file_count, dir_count=dir_count,
+                    is_dir=is_dir, mtime=mtime, depth=depth, error=error,
+                )
+            else:
+                nodes_by_pid[path_id] = LeafNode(
+                    name=name, path=path_str, size=size, own_size=own_size,
+                    allocated_size=allocated_size,
+                    own_allocated_size=own_allocated_size,
+                    unique_allocated_size=unique_allocated_size,
+                    own_unique_allocated_size=own_unique_allocated_size,
+                    file_count=file_count,
+                    is_dir=is_dir, mtime=mtime, depth=depth,
+                )
 
         # Reconstruct parent-child relationships
         root = None
@@ -1100,7 +1115,10 @@ class Database:
                     root = node
 
         for node in nodes_by_pid.values():
-            node.children.sort(key=lambda child: (child.name, child.path))
+            # Only a directory has a child list to order; a leaf's `children`
+            # is the shared empty tuple every leaf reads.
+            if node.is_dir:
+                node.children.sort(key=lambda child: (child.name, child.path))
 
         return root
 
@@ -1601,22 +1619,42 @@ class Database:
             measurement = values[series_index] if len(values) > series_index else None
             if measurement is None:
                 continue
-            nodes[path_id] = FSNode(
-                name=name,
-                path=path,
-                size=measurement.logical_bytes,
-                own_size=measurement.own_logical_bytes,
-                allocated_size=measurement.allocated_bytes,
-                own_allocated_size=measurement.own_allocated_bytes,
-                unique_allocated_size=measurement.unique_allocated_bytes,
-                own_unique_allocated_size=measurement.own_unique_allocated_bytes,
-                file_count=measurement.file_count,
-                dir_count=measurement.dir_count,
-                is_dir=measurement.is_dir,
-                mtime=measurement.mtime,
-                depth=depth,
-                error=measurement.error,
-            )
+            if measurement.is_dir:
+                nodes[path_id] = FSNode(
+                    name=name,
+                    path=path,
+                    size=measurement.logical_bytes,
+                    own_size=measurement.own_logical_bytes,
+                    allocated_size=measurement.allocated_bytes,
+                    own_allocated_size=measurement.own_allocated_bytes,
+                    unique_allocated_size=measurement.unique_allocated_bytes,
+                    own_unique_allocated_size=(
+                        measurement.own_unique_allocated_bytes
+                    ),
+                    file_count=measurement.file_count,
+                    dir_count=measurement.dir_count,
+                    is_dir=True,
+                    mtime=measurement.mtime,
+                    depth=depth,
+                    error=measurement.error,
+                )
+            else:
+                nodes[path_id] = LeafNode(
+                    name=name,
+                    path=path,
+                    size=measurement.logical_bytes,
+                    own_size=measurement.own_logical_bytes,
+                    allocated_size=measurement.allocated_bytes,
+                    own_allocated_size=measurement.own_allocated_bytes,
+                    unique_allocated_size=measurement.unique_allocated_bytes,
+                    own_unique_allocated_size=(
+                        measurement.own_unique_allocated_bytes
+                    ),
+                    file_count=measurement.file_count,
+                    is_dir=False,
+                    mtime=measurement.mtime,
+                    depth=depth,
+                )
 
         root = None
         for path_id, node in nodes.items():

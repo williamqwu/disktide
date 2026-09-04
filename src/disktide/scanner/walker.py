@@ -8,7 +8,7 @@ import threading
 from typing import Callable, Mapping
 
 from disktide.domain.metrics import sum_available
-from disktide.models.tree import FSNode
+from disktide.models.tree import FSNode, LeafNode
 from disktide.scanner.policy import lookup_excluded_mount
 
 
@@ -27,8 +27,8 @@ def vanished(exc: OSError) -> bool:
     return exc.errno in VANISHED_ERRNOS
 
 
-def make_symlink_node(entry: os.DirEntry, depth: int, path: str) -> FSNode:
-    """Build an FSNode for a symlink directory entry.
+def make_symlink_node(entry: os.DirEntry, depth: int, path: str) -> LeafNode:
+    """Build a `LeafNode` for a symlink directory entry.
 
     `path` is passed in rather than read off `entry.path` because the
     scheduler iterates a directory *fd*, and an fd-relative `DirEntry`
@@ -56,10 +56,10 @@ def make_symlink_node(entry: os.DirEntry, depth: int, path: str) -> FSNode:
     blocks = getattr(st, "st_blocks", None)
     allocated = None if blocks is None else max(0, blocks) * 512
     size = st.st_size
-    return FSNode(
+    return LeafNode(
         entry.name, path, size, size, allocated, allocated, None, None,
-        1, 0, False, st.st_mtime, depth, [], None, 0, 0, 0, 0, True,
-        None, False, False, False, False, st.st_dev, st.st_ino, st.st_nlink,
+        1, False, st.st_mtime, depth, True, None, False, False, False,
+        st.st_dev, st.st_ino, st.st_nlink,
     )
 
 
@@ -68,7 +68,7 @@ def make_file_node(
     stat_result,
     depth: int,
     path: str,
-) -> FSNode:
+) -> LeafNode:
     """Build a regular-file node from the single stat already paid for.
 
     This runs once per file -- 200k times on the benchmark tree, 592k on a
@@ -79,10 +79,13 @@ def make_file_node(
     try/except for arithmetic that is two operations on a value
     `os.stat_result` always carries as an int.
 
-    The positional arguments are the first 28 fields of `FSNode`, in
-    declaration order; `tests/test_tree.py::test_fsnode_positional_prefix`
+    The positional arguments are the first 20 fields of `LeafNode`, in
+    declaration order; `tests/test_tree.py::test_leafnode_field_order`
     pins that order so a field inserted above `link_count` fails there
-    rather than silently writing sizes into the wrong slots.
+    rather than silently writing sizes into the wrong slots. A file is a
+    `LeafNode` and not an `FSNode`: the twenty directory-only names are
+    still readable on it and cost it no slot, which is 200 bytes a node
+    against 352.
 
     `path` is a parameter and not `entry.path` for the same reason as in
     `make_symlink_node`: the scheduler scans a directory fd, where an entry
@@ -94,15 +97,14 @@ def make_file_node(
     blocks = getattr(stat_result, "st_blocks", None)
     allocated = None if blocks is None else max(0, blocks) * 512
     size = stat_result.st_size
-    return FSNode(
+    return LeafNode(
         entry.name, path, size, size, allocated, allocated, None, None,
-        1, 0, False, stat_result.st_mtime, depth, [], None, 0, 0, 0, 0, False,
-        None, False, False, False, False, stat_result.st_dev, stat_result.st_ino,
-        stat_result.st_nlink,
+        1, False, stat_result.st_mtime, depth, False, None, False, False,
+        False, stat_result.st_dev, stat_result.st_ino, stat_result.st_nlink,
     )
 
 
-def classify_symlink(node: FSNode) -> None:
+def classify_symlink(node: LeafNode) -> None:
     """Fill in the deferred symlink target fields: link_target,
     link_is_dir, link_broken. Two syscalls on first call (readlink +
     stat-follow), zero on subsequent calls.

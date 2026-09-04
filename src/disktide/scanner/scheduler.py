@@ -17,7 +17,7 @@ from disktide.domain.live_view import LiveViewNode, build_live_view
 from disktide.domain.metrics import MetricId
 from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate
-from disktide.models.tree import FSNode
+from disktide.models.tree import FSNode, LeafNode
 from disktide.scanner.policy import lookup_excluded_mount
 from disktide.scanner.walker import (
     classify_symlink,
@@ -274,11 +274,14 @@ class _ChildContribution:
 
 def _placeholder(job: DirectoryJob) -> FSNode:
     # Positional, like `walker.make_file_node` and for the same reason: two
-    # of these per directory, 176k on a home-shaped tree.
+    # of these per directory, 176k on a home-shaped tree. The order is
+    # `LeafNode`'s twenty-one fields and then `FSNode`'s own, which is what
+    # dataclass inheritance gives and what `test_fsnode_field_order` pins;
+    # everything past `children` takes its declared default.
     return FSNode(
         _basename(job.path) or job.path, job.path, 0, 0, 0, 0, None, None,
-        0, 0, True, 0.0, job.depth, [], None, 0, 0, 0, 0, False,
-        None, False, False, False, False, None, None, 1,
+        0, True, 0.0, job.depth, False, None, False, False, False,
+        None, None, 1, None, [],
     )
 
 
@@ -781,7 +784,7 @@ def _scan_open_directory(
     )
 
 
-def clone_tree(root: FSNode, *, share_leaves: bool = False) -> FSNode:
+def clone_tree(root: LeafNode, *, share_leaves: bool = False) -> LeafNode:
     """Clone a tree iteratively so final accounting cannot mutate snapshots.
 
     `share_leaves` keeps the original file nodes in place and copies only
@@ -794,6 +797,11 @@ def clone_tree(root: FSNode, *, share_leaves: bool = False) -> FSNode:
     snapshot too. Callers that hand the clone out for independent editing
     (the provisional store) must keep the full copy.
     """
+
+    if not isinstance(root, FSNode):
+        # A leaf has nothing under it and no aggregate for a snapshot to
+        # protect, so the copy is the whole job.
+        return root.shallow_copy()
 
     clones: dict[int, FSNode] = {}
     if share_leaves:
@@ -837,8 +845,12 @@ def clone_tree(root: FSNode, *, share_leaves: bool = False) -> FSNode:
             stack.extend((child, False) for child in reversed(node.children))
             continue
         cloned = copy.copy(node)
-        cloned.children = [clones[id(child)] for child in node.children]
-        cloned._sorted_cache = None
+        if isinstance(node, FSNode):
+            # Only a directory owns a child list and a sort cache; a leaf's
+            # copy is already complete, and assigning either on one would
+            # raise -- which is the guard working, not a bug to route around.
+            cloned.children = [clones[id(child)] for child in node.children]
+            cloned._sorted_cache = None
         clones[id(node)] = cloned
     return clones[id(root)]
 
