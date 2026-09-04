@@ -759,7 +759,7 @@ def test_cancelled_scan_also_leaves_no_worker_running(tmp_path):
         (directory / "f").write_text("x")
 
     baseline = threading.active_count()
-    engine = ScanEngine(workers=4, scan_path=str(tmp_path))
+    workers = 4
     seen = 0
 
     def cancel_after_a_few(_path: str) -> None:
@@ -769,16 +769,33 @@ def test_cancelled_scan_also_leaves_no_worker_running(tmp_path):
             engine.cancel()
 
     engine = ScanEngine(
-        workers=4,
+        workers=workers,
         scan_path=str(tmp_path),
         directory_observer=cancel_after_a_few,
     )
-    root = engine.scan(str(tmp_path))
+    engine.scan(str(tmp_path))
 
     assert engine.cancelled
     # The point of the drain: the scan stops well short of the tree rather
     # than working through the 380 jobs already queued behind the cancel.
-    assert root.dir_count < 400
+    #
+    # `seen` is the quantity to assert on, because the observer fires from
+    # inside `scan_directory_once`, past its cancel check -- so it counts
+    # directories *scanned*.  `root.dir_count` cannot stand in for it:
+    # `_apply_entry_chunk` adds a chunk's `child_count` the moment a readdir
+    # chunk lands, so it counts directories *known*, placeholders included,
+    # and the root's own two chunks (256 + 144) carry it to 400 before any
+    # child has been scanned at all.  Asserting on it made the test a race
+    # between four child workers and the root's readdir, which a two-core
+    # runner always loses.
+    #
+    # The bound: the 20th observer call cancels from inside a worker, and
+    # each of the other `workers - 1` may already be inside a directory of
+    # its own, so `seen <= 20 + workers`.  Everything still queued is
+    # dropped -- a worker tests the event before scanning, and
+    # `scan_directory_once` tests it again on entry and returns before
+    # reaching the observer.  Doubling `workers` is the margin.
+    assert seen < 20 + 2 * workers
     assert threading.active_count() == baseline
     assert not [
         thread
