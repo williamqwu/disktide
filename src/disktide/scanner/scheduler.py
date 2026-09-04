@@ -41,8 +41,11 @@ _NAME_PATH_KEY = attrgetter("name", "path")
 # `SizeTree.apply_live_update` -- builds a path->node dict from the tuple and
 # sorts the handful of rows it has actually materialised. Sorting a few
 # thousand nodes on the scheduler thread to have every one of them thrown
-# away was 24 % of that thread's self time in a live scan, and every
-# millisecond of it is a millisecond the walk does not run (one GIL).
+# away was 6 % of that thread's inclusive time in a py-spy of a live scan of
+# the 88,000-directory fixture (an earlier profile of the same revision put
+# it at 24 %; the sort is O(n log n) in a frame size that grows with the
+# publish interval, so both are true of different runs). Either way it is
+# time the walk does not get, because they share one GIL.
 # The tuple now ships in `_changed_nodes` insertion order, which is
 # `_record_changed`'s: a settled directory first, then its ancestors up to
 # the first one already recorded this generation.

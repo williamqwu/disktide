@@ -188,6 +188,8 @@ directory is one non-recursive task:
   settles.
 - Live roots use generation-based copy-on-write: once published, later
   mutations clone only modified paths, so old frames remain safe to read.
+  Those clones are why a frame nobody reads is not free, and why frames are
+  paced by the consumer (below).
 
 The main Textual event loop stays on the main thread. Long-running scans
 use `@work(thread=True)`. The screen consumes typed events and marshals
@@ -730,8 +732,25 @@ and state glyphs.
 Tree, Sunburst, and Treemap update throughout a scan:
 
 - `TreeScanScheduler` publishes directory checkpoints at most once per
-  0.25s. Each update carries the COW root, changed nodes, and a bounded
-  immutable `LiveViewNode` model.
+  0.25s **and never faster than the consumer applies them**. Each update
+  carries the COW root, changed nodes, a bounded immutable `LiveViewNode`
+  model, and an `ack`.
+- **Frames are paced by the consumer, not by a clock.** Every publish bumps
+  the generation, and the next write into any directory chain then clones
+  that chain's spine so the frame that went out stays immutable — so a frame
+  nobody looks at is paid for twice, once to build and once in the clones it
+  forces on the walk behind it. A consumer calls `ScanTreeUpdate.ack` when it
+  has *applied* a frame; until then the scheduler skips non-forced publishes,
+  keeping `changed_nodes` and `stable_paths` so the next frame carries the
+  union rather than losing the difference. Forced publishes (depth-0
+  completions, entry-chunk checkpoints) and the one frame of credit each
+  leaves behind are never held back, so a scan that finishes inside one
+  window still shows something before it shows everything. A consumer that
+  never acks — the events-only service path, a headless bench, a future web
+  UI — is fed on a cap of eight callback intervals, counted in intervals so
+  that `tree_callback_interval=0.0` still means "every frame". On the
+  88,000-directory fixture at one worker this halves the frames built, 53 to
+  29; `ExplorerScreen` acks from `_apply_live_ui`, behind the duty gate.
 - `SizeTree.apply_live_update()` updates materialized nodes in place; cursor
   and expanded state survive. The final tree reloads after deterministic
   accounting completes.
@@ -762,11 +781,17 @@ that were tried first are in the comment above the constant, with the
 numbers that ruled them out.
 
 One gate covers the tree panel, the chart and the compositor pass they
-queue. It does not cover the progress overlay, which is cheap per event,
-already throttled in the scheduler, and the one number a user watches;
-that costs ~10% of the thread on its own, which is why the budget for
-*everything* the thread does cannot be as small as a budget for a
-snapshot alone. A skipped frame arms one `set_timer` for what is still
+queue. The progress overlay is not inside it — it is one string and three
+numbers and the newest of them is wanted whether or not anything is about
+to be drawn — but it is paced on its own, because "cheap per event" was
+true per call and wrong per scan. `ScanProgressUpdated` arrives at up to
+20 Hz, each one dirtied three widgets, and Textual's indeterminate `Bar`
+armed `auto_refresh = 1/15` to animate a band that `animation_level =
+"none"` renders identically every frame. Together they were 1.15 s of
+UI-thread CPU over a 15.2 s scan of the 88k fixture at 307x69 with the
+chart off entirely. `ScanProgressOverlay` now keeps the newest report and
+redraws at 5 Hz, and clears the bar's timer: 0.42 s. A skipped frame arms
+one `set_timer` for what is still
 owed and is replaced by the next, so a scan that goes quiet still lands
 its last picture; the timer goes back through the gate rather than past
 it. Completion always paints. `tool/bench_scan.py --mode live --paint
@@ -778,8 +803,12 @@ Only the newest frame's `changed_nodes` is applied, not the union of the
 skipped ones: `TreeScanScheduler._record_changed` walks a settled
 directory's whole ancestor chain, so every row the tree has materialised
 is in every publish that touches anything below it. Accumulating instead
-put 45,000 nodes into one `apply_live_update`, which sorts them all
-before discarding everything it cannot show.
+put 45,000 nodes into one `apply_live_update`, which sorted them all
+before discarding everything it could not show. `changed_nodes` now ships
+in record order — nothing consumed the (depth, path) order the scheduler
+used to build — and `SizeTree.apply_live_update` filters to the rows it
+has actually materialised before it sorts, which is dozens rather than
+thousands.
 
 What is left is the rest of the live pipeline, not the UI. The 307x69 A/B
 is ~21.7 s off against 29-38 s on, and pinning the gate shut so the

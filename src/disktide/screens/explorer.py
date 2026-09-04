@@ -653,17 +653,19 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
     #
     # What the loop reads is the whole thread, though, not the snapshot's
     # share of it, so the budget has to be the whole thread's too and
-    # cannot be as small. That is why the progress overlay is paced too:
-    # it was called cheap per event -- one string and three numbers,
+    # cannot be as small. That is why the progress overlay is paced too.
+    # It was called cheap per event -- one string and three numbers,
     # already throttled at 0.05 s in the scheduler -- and per event it is,
-    # but 20 Hz of it dirtied three widgets each time and so bought a
-    # compositor pass each time. py-spy measured 1.7 s of this thread over
-    # a 15.5 s scan of the 88,000-directory fixture at 307x69 with the
-    # chart switched off entirely: 11 % of the wall clock of a scan that
-    # was drawing nothing. The overlay now keeps the newest report and
-    # redraws from one 5 Hz timer (`ScanProgressOverlay.REPAINT_INTERVAL`),
-    # so what the loop below is budgeting for is the chart and the tree
-    # panel rather than the overlay's share of every window.
+    # but 20 Hz of it dirtied three widgets each time and bought a
+    # compositor pass each time; and underneath it Textual's indeterminate
+    # `Bar` was refreshing itself fifteen times a second to redraw a band
+    # that `animation_level = "none"` renders identically every frame.
+    # Together, on the 88,000-directory fixture at 307x69 with the chart
+    # switched off entirely, they were 1.15 s of this thread's 15.2 s of
+    # wall clock. `ScanProgressOverlay` now keeps the newest report, redraws
+    # at 5 Hz and clears the bar's timer: 0.42 s. So what the loop below is
+    # budgeting for is the chart and the tree panel, rather than those two
+    # taking their share of every window before it opens.
     #
     # The duty number itself was chosen against the unpaced overlay: at
     # twelve the loop could almost never open -- three chart frames in a

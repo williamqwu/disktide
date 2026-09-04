@@ -176,12 +176,13 @@ class ScanProgressOverlay(Widget):
         This is called from `ScanProgressUpdated`, which the scheduler
         throttles at 0.05 s -- up to 20 a second, each one dirtying three
         widgets and so costing a compositor pass at the app's frame rate.
-        On a 307x69 terminal that was 1.7 s of main-thread CPU across a
-        15.5 s scan of an 88,000-directory tree, and because every thread
-        in the process shares one GIL, 1.7 s of UI is 1.7 s the walk did
-        not run: 11 % of the wall clock of a scan drawing no chart at all.
-        The comment this widget used to carry -- "cheap per event" -- was
-        true per call and wrong per scan.
+        That, together with the bar timer `_quiet_the_indeterminate_bar`
+        deals with, was 1.15 s of UI-thread CPU across a 15.2 s scan of the
+        88,000-directory fixture at 307x69 with the live chart off
+        entirely, and because every thread in this process shares one GIL,
+        that is 1.15 s the walk did not run. The comment this widget used
+        to carry -- "cheap per event" -- was true per call and wrong per
+        scan. Paced and with the bar quiet, the pair come to 0.42 s.
 
         So the newest progress is kept and drawn from one 5 Hz timer.
         """
