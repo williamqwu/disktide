@@ -6,10 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 
+from pathlib import Path
+
 from dependency_budget import (
     distribution_files,
     installed_distributions,
     installed_size,
+    is_own_accelerator,
 )
 
 
@@ -32,6 +35,12 @@ def main() -> int:
         "installed_bytes": size_bytes,
         "max_bytes": max_bytes,
         "native_extensions": [str(path) for path in native],
+        # disktide's own optional scanner extension: present in a platform
+        # wheel, absent from a pure one, and not counted against the budget
+        # either way -- the scanner falls back to Python without it.
+        "scanner_accelerator": sorted(
+            str(path) for path in files if is_own_accelerator(Path(path))
+        ),
         "distributions": [
             {
                 "name": item.metadata.get("Name") or "unknown",
@@ -57,6 +66,11 @@ def main() -> int:
         )
         print(f"installed size: {size_mib:.2f} MiB / {args.max_mib:.2f} MiB")
         print(f"native extensions: {len(native)}")
+        accelerator = payload["scanner_accelerator"]
+        print(
+            "scanner accelerator: "
+            + (Path(accelerator[0]).name if accelerator else "absent (pure install)")
+        )
         for item in payload["distributions"]:
             print(f"  {item['name']}=={item['version']}")
         print("dependency budget: PASS" if passed else "dependency budget: FAIL")

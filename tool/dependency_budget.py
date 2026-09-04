@@ -15,6 +15,14 @@ from pathlib import Path
 _REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 _NATIVE_SUFFIXES = {".so", ".pyd", ".dylib"}
 
+#: disktide's own optional scanner accelerator, which a platform wheel
+#: carries and a pure wheel does not. The budget exists to keep *dependencies*
+#: pure -- a dependency that grows a C extension is a dependency that stops
+#: installing everywhere -- and this one file is neither a dependency nor a
+#: requirement: `disktide/scanner/_scanfast_py.py` runs when it is absent.
+_OWN_ACCELERATOR = ("disktide", "scanner")
+_OWN_ACCELERATOR_STEM = "_scanfast"
+
 
 def normalize_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
@@ -54,10 +62,25 @@ def installed_distributions() -> list[Distribution]:
     return [found[name] for name in sorted(found)]
 
 
+def is_own_accelerator(path: Path) -> bool:
+    """Whether an installed path is disktide's own optional extension."""
+    parts = path.parts
+    return (
+        len(parts) >= 3
+        and path.suffix.lower() in _NATIVE_SUFFIXES
+        and parts[-3:-1] == _OWN_ACCELERATOR
+        and parts[-1].split(".", 1)[0] == _OWN_ACCELERATOR_STEM
+    )
+
+
 def distribution_files(
     distributions: list[Distribution],
 ) -> tuple[set[Path], list[Path]]:
-    """Return unique installed files and native-extension members."""
+    """Return unique installed files and third-party native-extension members.
+
+    disktide's own accelerator is counted in the installed size, like every
+    other file, and left out of the native list: see `_OWN_ACCELERATOR`.
+    """
     files: set[Path] = set()
     native: list[Path] = []
     for item in distributions:
@@ -69,7 +92,9 @@ def distribution_files(
             except OSError:
                 continue
             files.add(path)
-            if path.suffix.lower() in _NATIVE_SUFFIXES:
+            if path.suffix.lower() in _NATIVE_SUFFIXES and not is_own_accelerator(
+                Path(str(relative))
+            ):
                 native.append(path)
     return files, native
 

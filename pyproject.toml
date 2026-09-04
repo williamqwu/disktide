@@ -52,6 +52,31 @@ fsmonitor-cli = "disktide.__main__:cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/disktide", "src/fs_monitor"]
+# The optional scanner extension is compiled into the build directory by the
+# hook below and force-included from there. A `.so` sitting under src/ is a
+# developer's in-place build, and sweeping it into a wheel produced a
+# py3-none-any that secretly carried an x86_64 binary. The C source
+# itself belongs in the sdist, not next to the object it produced.
+exclude = ["*.so", "*.pyd", "*.dylib", "*.c"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+# The sdist has to be able to rebuild the extension, so it carries the C
+# source and the hook; an install from it with no compiler falls back to
+# `disktide/scanner/_scanfast_py.py` and works everywhere.
+include = [
+    "src",
+    "tool",
+    "tests",
+    "docs",
+    "assets",
+    "hatch_build.py",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+]
 
 [dependency-groups]
 dev = [

@@ -17,6 +17,12 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 
+#: The one native extension disktide is allowed to ship. Optional: a wheel
+#: built where no compiler was found carries none, imports
+#: `disktide/scanner/_scanfast_py.py` instead, and is just as valid.
+_ACCELERATOR = "disktide/scanner/_scanfast"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist", default="dist")
@@ -25,11 +31,18 @@ def main() -> int:
     dist_dir = Path(args.dist)
     project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
     version = project["version"]
-    wheel = _single(dist_dir.glob(f"disktide-{version}-*.whl"), "wheel")
+    # A release builds one wheel per platform and interpreter, so this takes
+    # however many it finds -- but never none, and every one of them has to
+    # pass. A local `uv build` produces exactly one.
+    wheels = sorted(dist_dir.glob(f"disktide-{version}-*.whl"))
+    if not wheels:
+        raise SystemExit("expected at least one wheel, found none")
     sdist = _single(dist_dir.glob(f"disktide-{version}.tar.gz"), "sdist")
-    _verify_wheel(wheel, version)
+    shapes = []
+    for wheel in wheels:
+        shapes.append(f"{wheel.name} [{_verify_wheel(wheel, version)}]")
     _verify_sdist(sdist, version)
-    print(f"distribution verification: PASS ({wheel.name}, {sdist.name})")
+    print(f"distribution verification: PASS ({', '.join(shapes)}, {sdist.name})")
     return 0
 
 
@@ -40,7 +53,8 @@ def _single(paths, label: str) -> Path:
     return matches[0]
 
 
-def _verify_wheel(path: Path, version: str) -> None:
+def _verify_wheel(path: Path, version: str) -> str:
+    """Check one wheel; return "native" or "pure" for the summary line."""
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         required = {
@@ -77,6 +91,8 @@ def _verify_wheel(path: Path, version: str) -> None:
             "disktide/repositories/monitors.py",
             "disktide/repositories/snapshots.py",
             "disktide/repositories/sqlite.py",
+            "disktide/scanner/accel.py",
+            "disktide/scanner/_scanfast_py.py",
             "disktide/scanner/scheduler.py",
             "disktide/screens/cleanup.py",
             "disktide/screens/keymap.py",
@@ -117,12 +133,37 @@ def _verify_wheel(path: Path, version: str) -> None:
                 "wheel contains retired monitor implementations: "
                 f"{duplicate_implementations}"
             )
+        # Two wheel shapes are legal and the difference is one optional
+        # accelerator: a `cp3xx` wheel carrying `disktide/scanner/_scanfast`
+        # built for that interpreter, or a `py3-none-any` wheel carrying no
+        # compiled code at all. Anything *else* compiled is a dependency
+        # that has quietly stopped being pure, which is what this check has
+        # always been here to catch.
         native = sorted(
             name for name in names
             if name.endswith((".so", ".pyd", ".dylib"))
         )
-        if native:
-            raise SystemExit(f"wheel contains native extensions: {native}")
+        unexpected = [
+            name for name in native if not name.startswith(_ACCELERATOR)
+        ]
+        if unexpected:
+            raise SystemExit(f"wheel contains native extensions: {unexpected}")
+        wheel_metadata = BytesParser().parsebytes(
+            archive.read(f"disktide-{version}.dist-info/WHEEL")
+        )
+        pure = wheel_metadata["Root-Is-Purelib"] == "true"
+        if native and pure:
+            raise SystemExit(
+                f"wheel carries {native} but claims Root-Is-Purelib: true"
+            )
+        if not native and not pure:
+            raise SystemExit(
+                "wheel has no accelerator but is tagged as platform specific"
+            )
+        if len(native) > 1:
+            raise SystemExit(f"wheel carries more than one accelerator: {native}")
+        if native and "disktide/scanner/_scanfast_py.py" not in names:
+            raise SystemExit("accelerated wheel is missing the Python fallback")
         metadata = BytesParser().parsebytes(
             archive.read(f"disktide-{version}.dist-info/METADATA")
         )
@@ -150,6 +191,7 @@ def _verify_wheel(path: Path, version: str) -> None:
         ):
             if executable not in entry_points:
                 raise SystemExit(f"wheel entry point missing: {executable}")
+        return "native" if native else "pure"
 
 
 def _verify_sdist(path: Path, version: str) -> None:
@@ -192,6 +234,10 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "src/disktide/repositories/monitors.py",
         prefix + "src/disktide/repositories/snapshots.py",
         prefix + "src/disktide/repositories/sqlite.py",
+        prefix + "hatch_build.py",
+        prefix + "src/disktide/scanner/accel.py",
+        prefix + "src/disktide/scanner/_scanfast.c",
+        prefix + "src/disktide/scanner/_scanfast_py.py",
         prefix + "src/disktide/scanner/scheduler.py",
         prefix + "src/disktide/screens/cleanup.py",
         prefix + "src/disktide/screens/keymap.py",
