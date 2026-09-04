@@ -58,7 +58,8 @@ boundaries. In brief:
 - `src/disktide/` — all source code
 - `tests/` — flat test suite
 - `assets/` — TCSS stylesheets
-- `tool/` — dev utilities (`gen_activity`, `bench_scan`, `diag_scan`)
+- `tool/` — dev utilities (`gen_activity`, `bench_scan`, `diag_scan`,
+  and the scan-benchmark harness: `make_homelike`, `tui_time`, `spy_agg`)
 - `docs/` — documentation
 
 ## Key Conventions
@@ -231,6 +232,75 @@ default_action = "safe"
 | `tool/gen_activity` | Generate filesystem activity for testing watch/monitor. `--max-files`, `--max-size` caps. |
 | `tool/bench_scan` | Scan timing. `--mode raw` (compatibility baseline), `events` (service delivery), `live` (view-model delivery). `--workers N`. |
 | `tool/diag_scan` | Diagnostic scan: 1s heartbeat, 5s stall detector, per-directory hotspot table. `--profile` for `cProfile`. Designed for NFS/remote slowness where the TUI progress bar pulses but you can't see what's slow. |
+| `tool/make_homelike` | Build the benchmark fixture: 88,000 dirs / 888,100 files, deterministic for a seed. |
+| `tool/tui_time` | Time one scan in the *real* TUI, under a private tmux server, with per-thread CPU. |
+| `tool/spy_agg` | Aggregate a `py-spy record --format raw --threads` profile per thread. |
+
+### Benchmarking a scan
+
+`bench_scan` does not paint, and the difference is not a rounding error: a
+home directory it walked in 37 s took ~420 s in the explorer before the live
+UI was paced. Every thread in the process shares one GIL, so a second of
+drawing is a second the walk does not run. Measure headless first because it
+is cheap and repeatable; confirm in `tui_time` because that is the program.
+
+Build the fixture once:
+
+```bash
+python tool/make_homelike.py /local/scratch/homelike     # 88,000 dirs, 11.5 s on xfs
+```
+
+Then A/B against a *frozen* copy of the revision you are comparing to, so
+neither side moves under you:
+
+```bash
+git worktree add /tmp/base <base-rev>
+cp -r /tmp/base/src /tmp/frozen-src && cp -r /tmp/base/tool /tmp/frozen-tool
+
+for rep in 1 2 3; do
+  PYTHONPATH=/tmp/frozen-src /usr/bin/time -f 'base %e %U %S %M' \
+      python /tmp/frozen-tool/bench_scan.py $FIX --workers 1 --mode live
+  PYTHONPATH=$PWD/src       /usr/bin/time -f 'mine %e %U %S %M' \
+      python tool/bench_scan.py       $FIX --workers 1 --mode live
+done
+```
+
+The rules that make those numbers mean anything:
+
+- **Frozen copy on `PYTHONPATH`, both sides.** An editable install points at a
+  checkout that changes when you switch branches.
+- **Interleave A and B**, one rep each, rather than running three of one and
+  then three of the other. Host load on a shared login node drifts over
+  minutes; interleaving turns that into noise instead of a result.
+- **Three reps, report the median.** Treat anything inside ±10 % as noise.
+- **`sleep 120` between runs on NFS.** The attribute cache holds for
+  `acdirmax`, 60 s by default, so back-to-back runs measure a warmer server
+  than the first one did.
+- **Report `%U`/`%S`, not only `%e`.** Under a GIL, wall clock is roughly the
+  sum of the threads' CPU, and CPU is far less sensitive to host load.
+- Watch RSS too (`%M`): live mode holds a published frame and the
+  copy-on-write clones behind it.
+
+For the real thing, `tui_time` starts `python -m disktide` under its own tmux
+server (`tmux -L`, never yours) with XDG_{CONFIG,DATA,CACHE,STATE}_HOME
+redirected into a scratch directory -- the explorer saves config on some key
+presses and a benchmark must not move yours:
+
+```bash
+python tool/tui_time.py $FIX --workers 1 --live off --size 307x69 \
+    --label base --src /tmp/frozen-src --xdg /tmp/xdg
+```
+
+Read `threads_walking`, not `threads`: it is per-thread CPU *spent on the
+walk*, with the interpreter's boot and the welcome screen's first render
+subtracted off the front and the completion render off the back. CPython 3.12
+does not name OS threads, so every key is `python#<tid>`; sort by CPU and they
+read as walk workers, then the scheduler (which runs inside Textual's
+`asyncio_0` worker thread), then `main`, the UI thread.
+
+`--pyspy FILE` records a profile over the scan; aggregate it per thread with
+`tool/spy_agg.py --grep <function>`. Sample counts only compare at the same
+`--rate`.
 
 ## Running the TUI in Dev Mode
 
