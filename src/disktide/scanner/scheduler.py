@@ -300,6 +300,14 @@ class _ChildContribution:
     vanished_subtree_count: int
 
 
+# What `_child_contribution` returns for a directory that has had nothing
+# applied to it yet -- the shape `_placeholder` builds, before any entry
+# chunk or result reaches it. `_apply_whole_directory` hands it to
+# `_propagate` instead of building the same twelve zeroes per directory.
+# Shared rather than copied because `_propagate` only ever reads it.
+_ZERO_CONTRIBUTION = _ChildContribution(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
 def _placeholder(job: DirectoryJob) -> FSNode:
     # Positional, like `walker.make_file_node` and for the same reason: two
     # of these per directory, 176k on a home-shaped tree. The order is
@@ -1222,6 +1230,8 @@ class TreeScanScheduler:
         result: DirectoryScanResult,
     ) -> _DirectoryState:
         state = self._states[result.job.path]
+        if not result.streamed and not state.node.children:
+            return self._apply_whole_directory(result, state)
         if not result.streamed and result.node.children:
             self._apply_entry_chunk(
                 DirectoryEntryChunk(
@@ -1257,6 +1267,100 @@ class TreeScanScheduler:
         if result.job.depth > 0:
             self._dirs_scanned += 1
         self._errors += int(result.node.error is not None)
+
+        self._propagate(state, previous)
+        self._record_changed(state)
+        if state.remaining_children == 0:
+            self._mark_settled(state)
+        return state
+
+    def _apply_whole_directory(
+        self,
+        result: DirectoryScanResult,
+        state: _DirectoryState,
+    ) -> _DirectoryState:
+        """Apply a directory that came back whole, in one pass.
+
+        Almost every directory on a home-shaped tree fits inside one entry
+        chunk -- 88,000 of them at about seven entries each, against a
+        256-entry chunk -- so it never streams and its children, `own_size`
+        and aggregates all arrive together. `_apply_result` still put that
+        through both halves of the streaming protocol: an entry chunk built
+        out of the result, applied to the placeholder, propagated up every
+        ancestor; then the result node itself, recalculated over the same
+        children, propagated a second time with deltas that are now all
+        zero, and recorded a second time. Two passes to install one
+        directory was 31 us per directory on the scheduler thread, which
+        under a shared GIL is time the walk does not get.
+
+        This is the same arithmetic, once. Four things drop out of it:
+
+        - `_recalculate_directory` does not run again. The worker already
+          ran it over exactly these children, and nothing has changed them
+          since, so the answer is the one already on the node. The
+          `_apply_result` invariant in `tests/scheduler_invariants.py`
+          checks that on every applied result.
+        - `_copy_directory_metadata` does not run. It copied twelve fields
+          from the result node onto the placeholder, and the placeholder is
+          then thrown away: the result node *is* the node being installed.
+        - The children are the worker's list, not an `extend` of the
+          placeholder's, which is empty (this path only runs when it is --
+          nothing else can have written into it, because a directory that
+          published a chunk comes back `streamed`).
+        - One `_propagate` and one `_record_changed` instead of two of each.
+
+        The bookkeeping `_apply_entry_chunk` does that is *not* an aggregate
+        is kept, in the order it happened: the queue-depth watermark is
+        still taken with this directory's children counted in and its own
+        task not yet counted out.
+        """
+
+        self._ensure_mutable(state)
+        # The placeholder is untouched -- no chunk was applied to it, and
+        # `_ensure_mutable` copies rather than edits -- so its contribution
+        # is the one `_placeholder` built: zero everywhere, allocated
+        # included. `_propagate` only reads it.
+        previous = _ZERO_CONTRIBUTION
+        node = result.node
+        child_count = result.child_count
+
+        state.node = node
+        state.generation = self._generation
+        state.direct_inaccessible = result.direct_inaccessible
+        state.direct_vanished = result.direct_vanished
+        state.child_ancestors = result.child_ancestors
+        state.remaining_children = child_count
+        state.discovered_children = child_count
+        state.discovered_entries = len(node.children)
+        state.scanned = True
+
+        outstanding = self._outstanding_tasks + child_count
+        if outstanding > self._max_queue_depth:
+            self._max_queue_depth = outstanding
+        outstanding -= 1
+        self._outstanding_tasks = outstanding if outstanding > 0 else 0
+
+        if child_count:
+            if result.job.depth == 0:
+                self._top_dir_total += child_count
+            self._dirs_queued += child_count
+            for child in reversed(node.children):
+                if child.is_dir:
+                    self._last_queued_path = child.path
+                    break
+        if result.job.depth > 0:
+            self._dirs_scanned += 1
+
+        # `file_count` off the node rather than a second loop over the
+        # children: a subdirectory is still a placeholder here and counts
+        # zero, so the worker's own sum over every child is the same number
+        # `_apply_entry_chunk` built by summing the leaves.
+        self._files_scanned += node.file_count
+        self._logical_bytes += node.own_size
+        # Vanished entries are deliberately absent, as in `_apply_entry_chunk`.
+        self._errors += result.direct_inaccessible + (
+            1 if node.error is not None else 0
+        )
 
         self._propagate(state, previous)
         self._record_changed(state)

@@ -37,6 +37,55 @@ _WRAPPED = (
     "_next_child_job",
 )
 
+#: Everything `_recalculate_directory` writes, and so everything I7 has to
+#: agree about.
+_RECALCULATED = (
+    "size",
+    "allocated_size",
+    "file_count",
+    "dir_count",
+    "inaccessible_count",
+    "inaccessible_subtree_count",
+    "vanished_count",
+    "vanished_subtree_count",
+    "denied_dir_subtree_count",
+    "partial_dir_subtree_count",
+    "excluded_subtree_count",
+    "depth_limited_subtree_count",
+)
+
+
+def _check_applied_aggregates(state) -> None:
+    """I7: an applied directory's aggregates are its children's, exactly.
+
+    `_apply_whole_directory` installs the node the worker built without
+    recalculating it, on the grounds that the worker already summed these
+    same children and nothing has touched them since. That is the one thing
+    the fast path assumes and nothing else checks: every other invariant is
+    about structure, and a directory carrying a stale total still points at
+    all the right children. So the sum is redone here, from the node's
+    current child list, and has to come back with the same twelve numbers.
+
+    It holds for the streaming path too -- that one calls
+    `_recalculate_directory` itself -- so it is checked on every result
+    rather than only on the fast one.
+    """
+
+    node = state.node
+    if not node.is_dir:
+        return
+    mirror = node.shallow_copy()
+    recalculate = scheduler_module._recalculate_directory
+    recalculate(mirror, state.direct_inaccessible, state.direct_vanished)
+    for name in _RECALCULATED:
+        applied = getattr(node, name)
+        expected = getattr(mirror, name)
+        if applied != expected:
+            raise SchedulerInvariantViolation(
+                f"[_apply_result] {node.path} carries {name}={applied!r} "
+                f"where its children sum to {expected!r}"
+            )
+
 
 def _check(scheduler, where: str) -> None:
     states = scheduler._states
@@ -111,6 +160,8 @@ def install(monkeypatch) -> None:
             def wrapper(self, *args, **kwargs):
                 result = original(self, *args, **kwargs)
                 _check(self, name)
+                if name == "_apply_result":
+                    _check_applied_aggregates(result)
                 return result
 
             return wrapper
