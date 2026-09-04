@@ -238,8 +238,12 @@ disktide doctor            # human-readable
 disktide doctor --json     # versioned JSON, suitable for issue reports
 ```
 
-Reports version, Python/Textual versions, terminal geometry, database status,
-platform capabilities, watch backend, and scan policy.
+Reports version, Python/Textual versions, terminal geometry, colour depth,
+database status, platform capabilities, watch backend, and scan policy.
+
+The Colour block prints `TERM`, `COLORTERM`, `TEXTUAL_COLOR_SYSTEM`, the tmux
+clients attached to your session, and the depth that was resolved from them —
+plus, when there is colour left on the table, the one line to change.
 
 ### scan
 

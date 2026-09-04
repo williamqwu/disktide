@@ -13,6 +13,8 @@ from disktide.collectors.events.base import EventBackendInfo
 from disktide.extensions.capabilities import CapabilityStatus
 from disktide.services.doctor import (
     DOCTOR_SCHEMA_VERSION,
+    _colour_report,
+    _render_colour_block,
     build_doctor_report,
     render_doctor_report,
 )
@@ -41,6 +43,7 @@ def test_doctor_json_has_versioned_schema_and_expected_sections(tmp_path, monkey
         "application",
         "platform",
         "terminal",
+        "colour",
         "paths",
         "config",
         "database",
@@ -110,7 +113,7 @@ def test_doctor_reports_watch_backend_version_and_configured_mode(
     payload = report.to_dict()
     watch = payload["optional_extras"]["watch"]
 
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 6
     assert payload["config"]["monitor_event_mode"] == "auto"
     assert watch["available"] is True
     assert watch["version"] == "2.0.1"
@@ -256,3 +259,113 @@ def test_doctor_platform_block_says_so_when_no_cgroup_limit_applies(
     assert (
         report.to_dict()["platform"]["memory"]["cgroup_limit_mb"] is None
     )
+
+
+# ---------------------------------------------------------------------------
+# The Colour block
+#
+# Four environments, because "why are my colours wrong" has four different
+# answers and printing the same one at all of them is what makes a
+# diagnostic useless. The three variables Rich reads are useless on their
+# own inside tmux -- they describe the pty, not the client -- so the tmux
+# clients are injected the way tmux reports them.
+# ---------------------------------------------------------------------------
+
+
+def _tmux(clients: str):
+    def run(args):
+        if args[:2] == ["display", "-p"]:
+            return "0"
+        return clients
+
+    return run
+
+
+def _colour_lines(environ, *, runner=None, config_depth="auto") -> str:
+    return "\n".join(
+        _render_colour_block(
+            _colour_report(config_depth, environ=environ, runner=runner)
+        )
+    )
+
+
+def test_the_colour_block_names_the_16_colour_tmux_client_in_a_web_shell():
+    """The Open OnDemand case: TERM says 256 and the client says 16.
+
+    Everything Rich can see claims 256 colours; the only place the truth
+    is written down is the client list, so the block has to print it and
+    the suggestion has to name the terminfo entry tmux is quantising for.
+    """
+    report = _colour_report(
+        "auto",
+        environ={"TERM": "tmux-256color", "TMUX": "/tmp/tmux-1/default,1,0"},
+        runner=_tmux("xterm-16color\tbpaste,ccolour,clipboard,cstyle,focus,title"),
+    )
+    assert report["depth"] == "16"
+    assert report["source"] == "tmux-client"
+    assert report["tmux_clients"] == [
+        {
+            "termname": "xterm-16color",
+            "features": [
+                "bpaste", "ccolour", "clipboard", "cstyle", "focus", "title",
+            ],
+        }
+    ]
+    text = "\n".join(_render_colour_block(report))
+    assert "TERM: tmux-256color" in text
+    assert "COLORTERM: unset" in text
+    assert "tmux clients: xterm-16color: bpaste,ccolour," in text
+    assert "Depth: 16 (tmux-client" in text
+    assert 'set -as terminal-features ",xterm-16color:256,RGB"' in text
+
+
+def test_the_colour_block_explains_jupyters_xterm_color():
+    """JupyterLab's terminal, which is xterm.js and can do RGB, announces
+    `xterm-color` -- a terminfo name Rich reads as sixteen colours because
+    the suffix is not in its table."""
+    text = _colour_lines({"TERM": "xterm-color"})
+    assert "Depth: 16 (term:" in text
+    assert "COLORTERM=truecolor" in text
+    assert "JupyterLab" in text
+
+
+def test_the_colour_block_offers_rgb_to_a_local_256_colour_tmux():
+    """The developer's own terminal: a 256-colour client with no RGB
+    feature, which is a real 24-bit terminal one tmux line away."""
+    text = _colour_lines(
+        {"TERM": "tmux-256color", "TMUX": "x"},
+        runner=_tmux("xterm-256color\t256,bpaste,focus"),
+    )
+    assert "Depth: 256 (tmux-client" in text
+    assert 'set -as terminal-features ",xterm-256color:RGB"' in text
+    assert "256,RGB" not in text
+
+
+def test_the_colour_block_has_nothing_to_suggest_at_truecolor():
+    """VS Code's terminal, and every native one: there is no colour left
+    on the table, so the block says what is happening and stops."""
+    report = _colour_report(
+        "auto",
+        environ={"TERM": "xterm-256color", "COLORTERM": "truecolor"},
+    )
+    assert (report["depth"], report["source"]) == ("truecolor", "colorterm")
+    assert report["suggestion"] is None
+    assert "Suggestion" not in "\n".join(_render_colour_block(report))
+
+
+def test_a_depth_chosen_by_hand_is_not_second_guessed():
+    """Someone who set the key has already had this argument."""
+    report = _colour_report(
+        "16", environ={"TERM": "xterm-256color", "COLORTERM": "truecolor"}
+    )
+    assert (report["depth"], report["source"]) == ("16", "config")
+    assert report["suggestion"] is None
+
+
+def test_the_colour_block_is_in_the_human_report(tmp_path, monkeypatch):
+    _set_xdg(monkeypatch, tmp_path)
+    output = render_doctor_report(
+        build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+    )
+    assert "\nColour\n" in output
+    assert "TEXTUAL_COLOR_SYSTEM:" in output

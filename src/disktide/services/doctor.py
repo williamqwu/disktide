@@ -29,7 +29,7 @@ from disktide.storage.database import Database
 from disktide.storage.migrations import CURRENT_VERSION, get_version
 
 
-DOCTOR_SCHEMA_VERSION = 5
+DOCTOR_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +39,7 @@ class DoctorReport:
     application: dict[str, object]
     platform: dict[str, object]
     terminal: dict[str, object]
+    colour: dict[str, object]
     paths: dict[str, object]
     config: dict[str, object]
     database: dict[str, object]
@@ -56,6 +57,7 @@ class DoctorReport:
             "application": self.application,
             "platform": self.platform,
             "terminal": self.terminal,
+            "colour": self.colour,
             "paths": self.paths,
             "config": self.config,
             "database": self.database,
@@ -192,6 +194,7 @@ def build_doctor_report(
             "memory": memory,
         },
         terminal=_terminal_report(),
+        colour=_colour_report(config.ui.color_depth),
         paths=application_paths,
         config={
             "status": config_status,
@@ -246,6 +249,8 @@ def render_doctor_report(report: DoctorReport) -> str:
         "",
     ]
     lines.extend(_render_terminal_block(payload["terminal"]))
+    lines.append("")
+    lines.extend(_render_colour_block(payload["colour"]))
     lines.extend([
         "",
         "Application paths",
@@ -406,6 +411,143 @@ def _terminal_report() -> dict[str, object]:
             ),
         },
     }
+
+
+def _colour_report(
+    config_depth: object = "auto",
+    *,
+    environ: dict[str, str] | None = None,
+    runner=None,
+) -> dict[str, object]:
+    """Why the chart is the colour it is, and what to change to fix it.
+
+    The whole diagnosis is here rather than split across the Terminal
+    block because it is one question with several possible answers, and
+    the wrong one is invisible: an app writing 256-colour SGRs into a
+    16-colour tmux client looks exactly like an app that chose those
+    colours. So the three variables Rich reads, the clients tmux is
+    actually feeding, and the layer that decided are all printed side by
+    side; the reader can then see which of them is the one that is wrong.
+
+    `environ` and `runner` are injected so the four environments this has
+    to describe -- OnDemand, Jupyter, a local 256-colour tmux, a truecolor
+    terminal -- can each be a test rather than a screenshot.
+    """
+    from disktide.viz import colordepth
+
+    env = os.environ if environ is None else environ
+    depth = colordepth.resolve_color_depth(
+        config_depth=config_depth, environ=env, runner=runner
+    )
+    clients = (
+        colordepth.tmux_clients(runner) if env.get("TMUX") else ()
+    )
+    return {
+        "term": env.get("TERM"),
+        "colorterm": env.get("COLORTERM"),
+        "textual_color_system": env.get(colordepth.TEXTUAL_ENV_VAR),
+        "multiplexer": (
+            "tmux" if env.get("TMUX")
+            else ("screen" if env.get("STY") else None)
+        ),
+        "config_color_depth": (
+            config_depth if isinstance(config_depth, str) else None
+        ),
+        "tmux_clients": [
+            {"termname": client.termname, "features": list(client.features)}
+            for client in clients
+        ],
+        "depth": depth.value,
+        "source": depth.source,
+        "detail": depth.detail,
+        "suggestion": _colour_suggestion(depth, clients),
+    }
+
+
+def _colour_suggestion(depth, clients) -> str | None:
+    """What to change, printed only where there is something to gain.
+
+    Silent when the depth was chosen by hand -- a user who exported
+    `DISKTIDE_COLOR_DEPTH` or set `[ui] color_depth` has already made this
+    decision and does not need it re-litigated on every run -- and silent
+    at truecolor, which is the ceiling.
+    """
+    if depth.source in ("env", "config", "textual-env"):
+        return None
+    if depth.value == "truecolor":
+        return None
+    if depth.source == "tmux-client" and clients:
+        weakest = max(
+            clients,
+            key=lambda client: ("truecolor", "256", "16").index(client.depth),
+        )
+        name = weakest.termname or "xterm"
+        if depth.value == "16":
+            lacks, missing = "256-colour or RGB", "256,RGB"
+        else:
+            lacks, missing = "RGB", "RGB"
+        return (
+            f"the attached tmux client {name} reports no {lacks} support, "
+            "so tmux quantises everything this app writes. Add  "
+            f'set -as terminal-features ",{name}:{missing}"  to '
+            "~/.tmux.conf, then detach and reattach (or tmux kill-server); "
+            "or start tmux from a shell with TERM=xterm-256color; or tmux -2"
+        )
+    if depth.value == "16":
+        return (
+            "export COLORTERM=truecolor — xterm.js web shells (Open "
+            "OnDemand, JupyterLab) and every modern terminal accept RGB "
+            "whatever their TERM says — or set DISKTIDE_COLOR_DEPTH="
+            "truecolor / [ui] color_depth"
+        )
+    return (
+        "the app is running at 256 colours because nothing claims RGB: "
+        "export COLORTERM=truecolor (in the shell rc, since ssh does not "
+        "forward it and tmux does not set it) or set "
+        "DISKTIDE_COLOR_DEPTH=truecolor"
+    )
+
+
+def _render_colour_block(colour: object) -> list[str]:
+    """Render the Colour block: what the terminal can paint, and who said so.
+
+    One line per kind of evidence, in the order a reader has to take them:
+    what the environment claims, what tmux is actually feeding, then the
+    answer and its provenance. The suggestion comes last and only when
+    there is colour left on the table.
+    """
+    if not isinstance(colour, dict):
+        return []
+
+    def _shown(value: object) -> str:
+        return "unset" if not value else str(value)
+
+    identity = [
+        f"TERM: {_shown(colour.get('term'))}",
+        f"COLORTERM: {_shown(colour.get('colorterm'))}",
+        f"TEXTUAL_COLOR_SYSTEM: {_shown(colour.get('textual_color_system'))}",
+    ]
+    if colour.get("multiplexer"):
+        identity.append(f"multiplexer: {colour['multiplexer']}")
+    lines = ["Colour", "  " + " · ".join(identity)]
+
+    clients = colour.get("tmux_clients")
+    if isinstance(clients, list) and clients:
+        for index, client in enumerate(clients):
+            features = ",".join(client.get("features") or []) or "none"
+            label = "  tmux clients: " if index == 0 else "                "
+            lines.append(f"{label}{client.get('termname') or 'unknown'}: {features}")
+    elif colour.get("multiplexer") == "tmux":
+        lines.append("  tmux clients: none attached (tmux could not be asked)")
+
+    detail = colour.get("detail")
+    depth_line = f"  Depth: {colour.get('depth')} ({colour.get('source')}"
+    depth_line += f": {detail})" if detail else ")"
+    lines.append(depth_line)
+    suggestion = colour.get("suggestion")
+    if suggestion:
+        lines.append(f"  Suggestion: {suggestion}")
+    return lines
 
 
 def _cleanup_safety_report(
