@@ -478,3 +478,140 @@ def test_treemap_recomputes_in_count_mode_after_toggle(tmp_path):
             assert treemap._layout.rects
 
     asyncio.run(go())
+
+
+# --- worker ceiling: Settings clamps, the explorer says why ----------------
+
+
+async def _await_screen(pilot, app, screen_class, tries: int = 60):
+    for _ in range(tries):
+        await pilot.pause(delay=0.05)
+        if isinstance(app.screen, screen_class):
+            await pilot.pause()
+            return app.screen
+    raise AssertionError(
+        f"never reached {screen_class.__name__}; still on "
+        f"{app.screen.__class__.__name__}"
+    )
+
+
+def test_settings_clamps_a_worker_count_above_the_host_ceiling(tmp_path):
+    """Typing 100000 leaves 100000 nowhere: not on screen, not in config."""
+    from textual.widgets import Input, Label
+
+    from disktide.screens.settings import SettingsScreen
+    from disktide.scanner.sysinfo import worker_ceiling
+
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        config = load_config()
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=config
+        )
+        async with app.run_test(size=(120, 50)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("comma")
+            settings = await _await_screen(pilot, app, SettingsScreen)
+            ceiling = worker_ceiling(settings._system_info.available_cpus)
+
+            hint = settings.query_one("#workers-hint", Label)
+            assert f"max {ceiling} on this host" in hint.render().plain
+
+            box = settings.query_one("#workers-input", Input)
+            box.value = str(ceiling * 1000)
+            await pilot.pause()
+
+            assert box.value == str(ceiling), "the field kept the raw number"
+            assert config.scan.workers == ceiling
+            assert f"clamped to {ceiling}" in settings.query_one(
+                "#workers-hint", Label
+            ).render().plain
+
+            # Under the ceiling is taken exactly, and the hint goes back.
+            box.value = "3"
+            await pilot.pause()
+            assert config.scan.workers == 3
+            assert "clamped" not in settings.query_one(
+                "#workers-hint", Label
+            ).render().plain
+
+    asyncio.run(go())
+
+
+def test_settings_names_the_host_this_process_is_on(tmp_path):
+    from textual.widgets import Static
+
+    from disktide.screens.settings import SettingsScreen
+
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(120, 50)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("comma")
+            settings = await _await_screen(pilot, app, SettingsScreen)
+            line = settings.query_one("#sysinfo-host", Static).render().plain
+            assert line.startswith("  Host: ")
+            assert any(
+                word in line
+                for word in ("allocated slice", "shared login node", "dedicated")
+            )
+
+    asyncio.run(go())
+
+
+def test_explorer_raises_a_notification_per_worker_warning(tmp_path):
+    """The TUI has no stderr, so a `Warning:` line becomes a toast."""
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            explorer = await wait_for_explorer(pilot, app)
+            explorer = app.screen
+            recorded = []
+            explorer.app.notify = lambda message, **kw: recorded.append(
+                (message, kw.get("severity"))
+            )
+            started = _worker_warning_event(tmp_path)
+            explorer._dispatch_scan_event(started)
+            await pilot.pause()
+
+            assert recorded == [
+                ("first caution.", "warning"),
+                ("second caution.", "warning"),
+            ]
+
+    asyncio.run(go())
+
+
+def _worker_warning_event(tmp_path):
+    from disktide.domain.policy import ScanPolicy
+    from disktide.domain.scan import (
+        ScanPhase,
+        ScanRequest,
+        ScanStarted,
+        ScanWorkerSelection,
+    )
+
+    return ScanStarted(
+        run_id="0" * 16,
+        sequence=1,
+        phase=ScanPhase.SCANNING,
+        request=ScanRequest(path=str(tmp_path)),
+        policy=ScanPolicy(),
+        platform_adapter="linux",
+        worker_selection=ScanWorkerSelection(
+            requested_workers=100_000,
+            effective_workers=64,
+            mode="explicit",
+            reason="clamped",
+            warnings=("first caution.", "second caution."),
+        ),
+    )

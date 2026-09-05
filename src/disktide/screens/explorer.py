@@ -569,6 +569,12 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
                 phase=event.phase.value,
                 policy=worker_context,
             )
+            if event.worker_selection is not None:
+                # The CLI prints these as `Warning:` lines; the TUI has no
+                # stderr to print to, so each becomes a notification the
+                # user has to have seen before the scan gets far.
+                for warning in event.worker_selection.warnings:
+                    self.app.notify(warning, severity="warning", timeout=8)
         elif isinstance(event, ScanPhaseChanged):
             overlay.update_context(run_id=event.run_id, phase=event.phase.value)
         elif isinstance(event, ScanProgressUpdated):

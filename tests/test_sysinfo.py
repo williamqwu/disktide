@@ -23,6 +23,8 @@ from disktide.scanner.sysinfo import (
     unescape_mount_path,
     _compute_recommended_workers,
     _find_block_device,
+    select_scan_workers,
+    worker_ceiling,
     _MEDIUM_BADGE,
 )
 from disktide.viz.colors import (
@@ -995,3 +997,270 @@ class TestLatencyWorkerTiers:
         )
         assert workers == 1
         assert "low memory" in reason
+
+
+def _system_info(**overrides) -> SystemInfo:
+    """A `SystemInfo` for the explicit-worker path, host details to taste."""
+    fields = dict(
+        cpu_count=16,
+        available_cpus=16,
+        load_average=(1.0, 1.0, 1.0),
+        memory_total_mb=32768,
+        memory_available_mb=16384,
+        fs_type="xfs",
+        is_network_fs=False,
+        is_rotational=False,
+        storage_medium="flash",
+        sample_entries=0,
+        sample_elapsed_seconds=0.0,
+        sample_errors=0,
+        sample_outcome="not-run",
+        recommended_workers=1,
+        recommendation_reason="1 (low-latency local metadata)",
+        allocation=_allocation("dedicated", total=16, available=16),
+    )
+    fields.update(overrides)
+    return SystemInfo(**fields)
+
+
+def _select(requested, monkeypatch, **overrides):
+    info = _system_info(**overrides)
+    monkeypatch.setattr(
+        "disktide.scanner.sysinfo.detect_system_info", lambda *a, **k: info
+    )
+    return select_scan_workers("/tmp", requested)
+
+
+class TestWorkerCeiling:
+    """`-w` is an instruction, but not an unbounded one."""
+
+    def test_the_floor_is_the_widest_measured_auto_tier(self):
+        """A 2-core box must still be able to ask for the 5 ms/entry tier."""
+        assert worker_ceiling(1) == 64
+        assert worker_ceiling(2) == 64
+        assert worker_ceiling(16) == 64
+
+    def test_above_the_floor_it_is_four_per_visible_cpu(self):
+        """Not one per CPU: a worker asleep in a stat holds no core."""
+        assert worker_ceiling(32) == 128
+        assert worker_ceiling(104) == 416
+
+    def test_zero_or_negative_cpus_still_give_the_floor(self):
+        assert worker_ceiling(0) == 64
+        assert worker_ceiling(-1) == 64
+
+    def test_a_request_within_the_ceiling_is_used_exactly(self, monkeypatch):
+        selection = _select(32, monkeypatch)
+        assert selection.effective_workers == 32
+        assert selection.mode == "explicit"
+        assert "explicit override selected 32" in selection.reason
+
+    def test_a_request_above_the_ceiling_is_clamped_not_refused(self, monkeypatch):
+        selection = _select(100_000, monkeypatch)
+        assert selection.effective_workers == 64
+        assert selection.requested_workers == 100_000
+        assert selection.mode == "explicit"
+        assert "exceeds the ceiling of 64" in selection.reason
+        assert any("ceiling of 64" in w for w in selection.warnings)
+
+    def test_an_absurd_request_reaches_no_thread_pool(self, monkeypatch):
+        """The reported case: `-w 10**21` was echoed back verbatim."""
+        selection = _select(10**21, monkeypatch)
+        assert selection.effective_workers == 64
+
+    def test_a_big_node_can_still_be_told_to_use_more(self, monkeypatch):
+        selection = _select(
+            256,
+            monkeypatch,
+            cpu_count=104,
+            available_cpus=104,
+            allocation=_allocation("allocated", total=104, available=104),
+        )
+        assert selection.effective_workers == 256
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_non_positive_still_raises(self, bad):
+        with pytest.raises(ValueError):
+            select_scan_workers("/tmp", bad)
+
+    def test_auto_carries_no_warnings(self, monkeypatch):
+        selection = _select(None, monkeypatch)
+        assert selection.mode == "auto"
+        assert selection.warnings == ()
+
+
+class TestExplicitWorkerWarnings:
+    """What the host looks like from here, said once per scan."""
+
+    def test_shared_host_names_the_other_users_and_the_auto_answer(
+        self, monkeypatch
+    ):
+        selection = _select(
+            8,
+            monkeypatch,
+            allocation=_allocation("shared", total=16, available=16, others=3),
+        )
+        warning = next(w for w in selection.warnings if "shared host" in w)
+        assert "8 workers on a shared host with 3 other active user(s)" in warning
+        assert "would use 2" in warning
+
+    def test_a_shared_host_stays_quiet_at_or_below_its_cap(self, monkeypatch):
+        selection = _select(
+            2,
+            monkeypatch,
+            allocation=_allocation("shared", total=16, available=16, others=3),
+        )
+        assert not any("shared host" in w for w in selection.warnings)
+
+    def test_a_busy_host_says_what_auto_would_have_picked(self, monkeypatch):
+        selection = _select(
+            32,
+            monkeypatch,
+            load_average=(14.0, 13.0, 12.0),
+            recommended_workers=4,
+            fs_type="nfs4",
+            is_network_fs=True,
+            allocation=_allocation("dedicated", total=16, available=16),
+        )
+        warning = next(w for w in selection.warnings if "already high" in w)
+        assert "host load 14.00 on 16 CPUs" in warning
+        assert "auto would pick 4" in warning
+
+    def test_a_quiet_host_says_nothing_about_load(self, monkeypatch):
+        selection = _select(
+            32,
+            monkeypatch,
+            load_average=(1.0, 1.0, 1.0),
+            recommended_workers=4,
+            fs_type="nfs4",
+            is_network_fs=True,
+        )
+        assert not any("already high" in w for w in selection.warnings)
+
+    def test_load_is_measured_against_the_whole_host_not_the_slice(
+        self, monkeypatch
+    ):
+        """A busy 128-core node is not busy for a 10-core allocation."""
+        selection = _select(
+            32,
+            monkeypatch,
+            available_cpus=10,
+            cpu_count=128,
+            load_average=(32.0, 30.0, 28.0),
+            recommended_workers=8,
+            fs_type="nfs4",
+            is_network_fs=True,
+            allocation=_allocation("allocated", total=128, available=10),
+        )
+        assert not any("already high" in w for w in selection.warnings)
+
+    def test_an_allocated_slice_never_warns_about_host_wide_load(
+        self, monkeypatch
+    ):
+        """The auto policy's rule, applied to the warning as well.
+
+        `os.getloadavg()` is host-wide and cgroups do not virtualize it, so
+        on a slice the load counts jobs this process is isolated from --
+        which is why `_compute_recommended_workers` skips its load guard
+        there. Warning about it would be the same mistake with a nicer
+        wording: on a compute node at load 96 whose 16 cores are ours,
+        `-w 16` is exactly right.
+        """
+        kwargs = dict(
+            available_cpus=16,
+            cpu_count=16,
+            load_average=(96.0, 90.0, 88.0),
+            recommended_workers=8,
+            fs_type="nfs4",
+            is_network_fs=True,
+        )
+        allocated = _select(
+            16,
+            monkeypatch,
+            allocation=_allocation("allocated", total=16, available=16),
+            **kwargs,
+        )
+        assert not any("already high" in w for w in allocated.warnings)
+
+        # The identical host with no allocation still says it is busy.
+        dedicated = _select(
+            16,
+            monkeypatch,
+            allocation=_allocation("dedicated", total=16, available=16),
+            **kwargs,
+        )
+        assert any("already high" in w for w in dedicated.warnings)
+
+    def test_more_workers_than_cpus_on_a_local_mount_is_pointless(
+        self, monkeypatch
+    ):
+        selection = _select(32, monkeypatch, available_cpus=4, cpu_count=4)
+        warning = next(w for w in selection.warnings if "local scans gain" in w)
+        assert "32 workers on 4 CPU(s)" in warning
+
+    def test_a_latency_bound_mount_gets_no_cpu_count_warning(self, monkeypatch):
+        """Threads asleep in a network stat overlap; that is the whole point."""
+        selection = _select(
+            32,
+            monkeypatch,
+            available_cpus=4,
+            cpu_count=4,
+            fs_type="nfs4",
+            is_network_fs=True,
+        )
+        assert not any("local scans gain" in w for w in selection.warnings)
+
+    def test_a_fuse_mount_counts_as_latency_bound_too(self, monkeypatch):
+        selection = _select(
+            32,
+            monkeypatch,
+            available_cpus=4,
+            cpu_count=4,
+            fs_type="fuse.sshfs",
+            is_network_fs=False,
+        )
+        assert not any("local scans gain" in w for w in selection.warnings)
+
+    def test_a_reasonable_request_warns_about_nothing(self, monkeypatch):
+        assert _select(4, monkeypatch, available_cpus=16).warnings == ()
+
+
+class TestWorkerCeilingThroughTheCli:
+    """The reported reproducer, end to end."""
+
+    def test_absurd_worker_count_is_clamped_and_warned_about(self, tmp_path):
+        from click.testing import CliRunner
+        from disktide.__main__ import cli
+        import json
+
+        (tmp_path / "a.txt").write_text("hi")
+        result = CliRunner().invoke(
+            cli, ["scan", "--json", "-w", "999999999999999999999", str(tmp_path)]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        ceiling = worker_ceiling(
+            detect_host_allocation(count_users=False).available_cpus
+        )
+        assert payload["workers"]["requested"] == 999999999999999999999
+        assert payload["workers"]["effective"] == ceiling
+        assert payload["workers"]["warnings"]
+        # stderr, so the JSON on stdout stays machine-readable.
+        assert "Warning: " in result.stderr
+        assert "Warning" not in result.stdout
+
+    def test_a_worker_count_within_the_ceiling_is_quiet(self, tmp_path):
+        from click.testing import CliRunner
+        from disktide.__main__ import cli
+        import json
+
+        (tmp_path / "a.txt").write_text("hi")
+        result = CliRunner().invoke(
+            cli, ["scan", "--json", "-w", "1", str(tmp_path)]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["workers"]["effective"] == 1
+        assert payload["workers"]["warnings"] == []

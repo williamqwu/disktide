@@ -455,12 +455,33 @@ sample:
 |-----------|---------|
 | Low-latency local or RAM-backed storage | 1 |
 | Rotational local storage | ≤ 2 |
-| Network or measured high-latency storage | ≤ 4 |
-| High host load | reduced |
+| Network or FUSE mount, unsampled | 8 (measured network base) |
+| Latency-bound mount, ≥ 0.5 / ≥ 1 / ≥ 3 ms per entry | 16 / 32 / 64 |
+| Measured high-latency *local* storage | ≤ 4 |
+| Shared host with no allocation and other users present | ≤ 2 |
+| Host load > 0.75 × CPUs (not on an allocated slice) | halved |
 | < 512 MB available memory | 1 |
 | Probe error | 1 (conservative fallback) |
 
-An explicit `workers` value skips all detection.
+An explicit `workers` value skips detection but not the ceiling.
+`worker_ceiling(available_cpus)` is `max(64, 4 × available_cpus)`: four
+workers per visible CPU because a worker is asleep in a `stat` for most of
+its life, and a floor at 64 so the widest measured latency tier stays
+reachable on a two-core box. A request above it is *clamped*, never refused
+--- `effective_workers` becomes the ceiling, `mode` stays `explicit`, and the
+reason says so. `-w 0` and negative values still raise `ValueError` and exit
+2.
+
+Clamping and three other host facts arrive as `ScanWorkerSelection.warnings`,
+a tuple of one-sentence strings: an explicit count above the ceiling, more
+than `_SHARED_HOST_WORKER_CAP` workers on a shared host, a request above the
+recommendation while host load is already over 0.75 × CPUs (skipped on an
+allocated slice for the same reason the auto policy skips its load guard
+there), and more workers than CPUs on a mount that is not latency-bound. They are advisory --- the
+request is honoured up to the ceiling either way. `disktide scan` prints them
+as `Warning:` lines on stderr (in `--json` mode too, so the payload stays
+clean) and carries them in `workers.warnings`; the explorer raises one
+notification each from its `ScanStarted` handler.
 
 ### Progress Reporting
 

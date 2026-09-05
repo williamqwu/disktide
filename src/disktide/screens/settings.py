@@ -237,6 +237,9 @@ class SettingsScreen(Screen):
         self._repository = repository
         self._scan_path = scan_path
         self._system_info = None
+        #: The value the workers box was just clamped to, waiting for
+        #: its own `Input.Changed` to come back. See `on_input_changed`.
+        self._workers_echo: str | None = None
         self._entry_epoch = render_epoch()
         self._rule_catalog = get_rule_catalog(
             disabled_packs=self._config.cleanup.disabled_rule_packs,
@@ -251,6 +254,7 @@ class SettingsScreen(Screen):
 
             yield Static("System Information", classes="section-title")
             yield Static("  Detecting...", id="sysinfo-cpus", classes="sysinfo-value")
+            yield Static("", id="sysinfo-host", classes="sysinfo-value")
             yield Static("", id="sysinfo-memory", classes="sysinfo-value")
             yield Static("", id="sysinfo-load", classes="sysinfo-value")
             yield Static("", id="sysinfo-storage", classes="sysinfo-value")
@@ -605,11 +609,53 @@ class SettingsScreen(Screen):
         self.query_one("#sysinfo-recommendation", Static).update(
             f"  Recommended workers: {info.recommendation_reason}"
         )
+        self.query_one("#sysinfo-host", Static).update(
+            f"  Host: {self._describe_allocation(info)}"
+        )
 
         # Update hint next to workers input
-        self.query_one("#workers-hint", Label).update(
-            f"(recommended: {info.recommended_workers})"
-        )
+        self._render_workers_hint()
+
+    @staticmethod
+    def _describe_allocation(info) -> str:
+        """Why the recommendation is what it is, in one phrase.
+
+        The recommendation reason names the cap; this names the claim the
+        cap comes from, which is the part a user can act on -- "shared login
+        node" is a reason to leave the number alone, "allocated slice" is a
+        reason to raise it.
+        """
+        allocation = info.allocation
+        if allocation is None:
+            return f"{info.available_cpus} CPUs"
+        if allocation.kind == "allocated":
+            return f"allocated slice, {allocation.available_cpus} CPUs"
+        if allocation.kind == "shared":
+            others = allocation.other_users
+            return (
+                "shared login node, "
+                f"{others} other user{'' if others == 1 else 's'}"
+            )
+        return f"dedicated, {allocation.available_cpus} CPUs"
+
+    def _worker_ceiling(self) -> int | None:
+        """The most workers this host will accept, or None before detection."""
+        if self._system_info is None:
+            return None
+        from disktide.scanner.sysinfo import worker_ceiling
+
+        return worker_ceiling(self._system_info.available_cpus)
+
+    def _render_workers_hint(self, *, clamped: bool = False) -> None:
+        """Say what auto would pick and what the host will not exceed."""
+        info = self._system_info
+        if info is None:
+            return
+        ceiling = self._worker_ceiling()
+        hint = f"(recommended: {info.recommended_workers} · max {ceiling} on this host)"
+        if clamped:
+            hint = f"(clamped to {ceiling}; max {ceiling} on this host)"
+        self.query_one("#workers-hint", Label).update(hint)
 
     def _detect_db_size(self) -> None:
         """Show database file size."""
@@ -823,15 +869,36 @@ class SettingsScreen(Screen):
     def on_input_changed(self, event: Input.Changed) -> None:
         value = event.value.strip()
         if event.input.id == "workers-input":
+            if value == self._workers_echo:
+                # Our own clamp arriving back as a message. `Input.value` is
+                # a reactive, so the rewrite below posts a second `Changed`
+                # after this handler has returned; taking it at face value
+                # would replace the "clamped" hint with the ordinary one on
+                # the very keystroke that earned it.
+                self._workers_echo = None
+                return
+            self._workers_echo = None
             if value == "":
                 self._config.scan.workers = None
+                self._render_workers_hint()
             else:
                 try:
                     parsed = int(value)
-                    if parsed > 0:
-                        self._config.scan.workers = parsed
                 except ValueError:
                     pass  # Silently ignore non-numeric input
+                else:
+                    if parsed > 0:
+                        ceiling = self._worker_ceiling()
+                        clamped = ceiling is not None and parsed > ceiling
+                        if clamped:
+                            parsed = ceiling
+                            # Rewrite the field so what is on screen is what
+                            # a rescan will use; a number the host will not
+                            # honour should not sit there looking accepted.
+                            self._workers_echo = str(parsed)
+                            event.input.value = self._workers_echo
+                        self._config.scan.workers = parsed
+                        self._render_workers_hint(clamped=clamped)
         elif event.input.id == "cell-aspect-input":
             if value == "":
                 # Blank is how a user gets back to automatic detection,

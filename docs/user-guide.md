@@ -432,9 +432,62 @@ default_viz = "sunburst"                 # treemap, sunburst, details
 # "cleanup.review_plan" = "p"           # override individual keys
 ```
 
-All fields are optional. When `workers` is omitted, the scanner picks a
-count based on filesystem type and storage medium (1 for local SSD, up to 4
-for network mounts). Explicit values are used exactly.
+All fields are optional. When `workers` is omitted, the scanner measures the
+path and picks a count: 1 on warm local storage, 2 on a rotational disk, 8 on
+a network or FUSE mount, and 16 / 32 / 64 as a sampled mount turns out to
+cost 0.5 / 1 / 3 ms per entry. Two things pull that back down: a shared host
+that gave this process no CPU allocation (a cluster login node) caps it at 2,
+and a 1-minute load above three-quarters of the host's CPUs halves whatever
+is left.
+
+An explicit `workers` value skips the measurement but not the host's
+ceiling, which is `max(64, 4 × available CPUs)` --- four per CPU because a
+scan worker spends most of its life asleep in a `stat`, and never below 64 so
+the fastest tier is reachable on a small machine. A larger request is clamped
+to the ceiling and a warning says so; it is not an error. `disktide scan`
+prints warnings as `Warning:` lines on stderr, `--json` also carries them in
+`workers.warnings`, and the TUI shows one notification each. `-w 0` or a
+negative value is a usage error (exit 2).
+
+### Faster scans with more cores
+
+```bash
+disktide -w 32 /mnt/share          # one run
+```
+
+```toml
+[scan]
+workers = 32                        # every run
+```
+
+or Settings (`,`) → Workers, then `r` in the explorer to rescan with it. The
+hint beside the box gives both numbers that matter: what the auto policy
+would pick here, and the host's ceiling.
+
+More workers help when a scan is *waiting* rather than working. Measured
+with `tool/bench_scan.py`, raw mode, native reader, on a 16-CPU node
+(2026-09-05; wall seconds):
+
+| Tree | 1w | 4w | 8w | 16w | 32w | 64w |
+|------|----|----|----|-----|-----|-----|
+| Local xfs, 88k dirs / 888k files, warm | 7.9 | 8.6 | 8.3 | 8.7 | 8.2 | — |
+| NFSv4 home, client cache expired | — | — | 16.5 | 14.2 | 13.1 | 12.5 |
+| The same NFSv4 tree, client cache warm | — | 9.8 | 9.7 | 10.7 | 10.1 | 9.7 |
+
+On a latency-bound mount, 16 workers takes most of the gain — about 15% over
+the auto default of 8 — and 32 to 64 buys another ~10% while system CPU
+climbs from 12.7 s to 21 s for it. On warm local disk, or on that same
+network tree with the client attribute cache still warm, the count makes no
+difference at all: wall clock equals user + sys, so the scan is bound by the
+interpreter rather than by the storage, and every count lands inside the
+noise of every other. The pure-Python fallback is the one place where more
+workers actively hurt — 20.5–23.8 s at 8 and 16 workers on the local tree,
+against 7.9 s at one.
+
+Two things that look like worker questions and are not: the first-ever touch
+of a cold network tree (131 s at 8 workers here) is the server warming up,
+and a shared login node caps at 2 because the cost lands on other people, not
+because more would be slower. disktide warns when you override the second.
 
 ### Ring shape
 

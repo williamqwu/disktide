@@ -79,6 +79,17 @@ _SLOW_LOCAL_WORKER_CAP = 4
 # currently inside a job, and a wide metadata walk is felt by all of them.
 _SHARED_HOST_WORKER_CAP = 2
 
+# How many workers one visible CPU is allowed to carry when the user names a
+# count explicitly. A scan worker spends most of its life asleep in a stat, so
+# it does not need a core to itself -- 4x is deliberately generous, because the
+# ceiling exists to stop `-w 10**21` from reaching a thread pool, not to
+# second-guess someone who knows their mount.
+_WORKERS_PER_CPU_CEILING = 4
+
+# Load at or above this fraction of the host's CPUs is "already busy". Shared
+# with the auto policy, which halves itself at the same line.
+_BUSY_LOAD_RATIO = 0.75
+
 
 @dataclass(frozen=True, slots=True)
 class HostAllocation:
@@ -495,7 +506,7 @@ def _compute_recommended_workers(
             allocation.total_cpus if allocation is not None else available_cpus
         )
         load_ratio = load_1min / max(load_scope, 1)
-        if load_ratio > 0.75 and base > 1:
+        if load_ratio > _BUSY_LOAD_RATIO and base > 1:
             base = max(1, base // 2)
             reasons.append("host load reduced parallelism")
 
@@ -598,6 +609,78 @@ def detect_system_info(path: str = "/", *, sample: bool = True) -> SystemInfo:
     )
 
 
+def worker_ceiling(available_cpus: int) -> int:
+    """The most workers an explicit ``-w`` may take on a host this size.
+
+    Not ``available_cpus``: a scan worker is asleep in a ``stat`` for most of
+    its life, so on a latency-bound mount the measured knee sits far above the
+    core count -- 64 workers at 5 ms/entry on a 2-core box. Hence a generous
+    ``4 x`` multiplier, and a floor at the widest measured auto tier so every
+    tier stays reachable no matter how small the machine is. What it exists to
+    stop is `-w 100000`, which used to be handed to a thread pool verbatim.
+    """
+    return max(_MAX_LATENCY_WORKERS, _WORKERS_PER_CPU_CEILING * max(1, available_cpus))
+
+
+def _explicit_worker_warnings(
+    requested: int,
+    effective: int,
+    ceiling: int,
+    info: SystemInfo,
+) -> tuple[str, ...]:
+    """One-sentence cautions about a worker count the user asked for.
+
+    None of these refuse the request -- an explicit count is an instruction and
+    the user may know something the sampler cannot -- they say what the host
+    looks like from here so a scan that hurts is a scan that was warned about.
+    """
+    warnings: list[str] = []
+    if effective < requested:
+        warnings.append(
+            f"requested {requested} workers exceeds the ceiling of {ceiling} "
+            f"for {info.available_cpus} available CPU(s); using {effective}."
+        )
+    allocation = info.allocation
+    if (
+        allocation is not None
+        and allocation.kind == "shared"
+        and requested > _SHARED_HOST_WORKER_CAP
+    ):
+        warnings.append(
+            f"{requested} workers on a shared host with "
+            f"{allocation.other_users} other active user(s) and no CPU "
+            f"allocation; the auto policy would use {_SHARED_HOST_WORKER_CAP}. "
+            "Other users will feel a wide metadata walk."
+        )
+    total_cpus = (
+        allocation.total_cpus if allocation is not None else info.cpu_count
+    )
+    load_1min = info.load_average[0]
+    # Same rule as the auto policy: `os.getloadavg()` is host-wide and no
+    # cgroup virtualizes it, so on an allocated slice the numerator counts
+    # jobs we are isolated from. A busy 128-core compute node whose 16 cores
+    # are ours would otherwise warn about `-w 16`.
+    load_applies = allocation is None or allocation.kind != "allocated"
+    if (
+        load_applies
+        and load_1min / max(total_cpus, 1) > _BUSY_LOAD_RATIO
+        and requested > info.recommended_workers
+    ):
+        warnings.append(
+            f"host load {load_1min:.2f} on {total_cpus} CPUs is already high; "
+            f"{requested} workers will compete for it (auto would pick "
+            f"{info.recommended_workers})."
+        )
+    if requested > info.available_cpus and not is_latency_bound(
+        info.fs_type, info.is_network_fs
+    ):
+        warnings.append(
+            f"{requested} workers on {info.available_cpus} CPU(s) for a local "
+            "filesystem; local scans gain nothing past the CPU count."
+        )
+    return tuple(warnings)
+
+
 def select_scan_workers(
     path: str,
     requested_workers: int | None,
@@ -607,17 +690,30 @@ def select_scan_workers(
         raise ValueError("workers must be greater than zero")
     info = detect_system_info(path, sample=requested_workers is None)
     if requested_workers is not None:
+        ceiling = worker_ceiling(info.available_cpus)
+        effective = min(requested_workers, ceiling)
+        if effective < requested_workers:
+            reason = (
+                f"requested {requested_workers} exceeds the ceiling of "
+                f"{ceiling} for {info.available_cpus} available CPU(s); "
+                f"using {ceiling}"
+            )
+        else:
+            reason = f"explicit override selected {effective} worker(s)"
         return ScanWorkerSelection(
             requested_workers=requested_workers,
-            effective_workers=requested_workers,
+            effective_workers=effective,
             mode="explicit",
-            reason=f"explicit override selected {requested_workers} worker(s)",
+            reason=reason,
             filesystem_type=info.fs_type,
             storage_medium=info.storage_medium,
             is_network_fs=info.is_network_fs,
             available_cpus=info.available_cpus,
             load_1min=info.load_average[0],
             sample_outcome="bypassed-explicit-override",
+            warnings=_explicit_worker_warnings(
+                requested_workers, effective, ceiling, info
+            ),
         )
     average = (
         info.sample_elapsed_seconds / info.sample_entries

@@ -400,6 +400,11 @@ def scan(
                         f"effective={selection.effective_workers}"
                     )
                     self._status(f"  Worker reason: {selection.reason}")
+                    # Not routed through `_status`: a caution about the
+                    # worker count the user chose is worth printing even
+                    # under `--quiet`, and stderr keeps `--json` clean.
+                    for warning in selection.warnings:
+                        click.echo(f"Warning: {warning}", err=True)
                 if event.resource_slot is not None:
                     self._status(f"  Resource slot: {event.resource_slot}")
             elif isinstance(event, ScanProgressUpdated):
@@ -504,6 +509,7 @@ def scan(
                     "effective": run.worker_selection.effective_workers,
                     "mode": run.worker_selection.mode,
                     "reason": run.worker_selection.reason,
+                    "warnings": list(run.worker_selection.warnings),
                 }
             ),
             # Direct child directories only. That is the "where did the

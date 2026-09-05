@@ -85,6 +85,10 @@ class ScanWorkerSelection:
     sample_average_seconds: float = 0.0
     sample_errors: int = 0
     sample_outcome: str = "not-run"
+    #: One-sentence cautions about an explicit worker count -- printed as
+    #: `Warning:` lines by the CLI and raised as notifications in the TUI.
+    #: Advisory only: the request is honoured up to the host's ceiling.
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
