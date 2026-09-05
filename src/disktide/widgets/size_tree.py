@@ -481,14 +481,27 @@ class SizeTree(Tree[FSNode]):
         indicator: tuple[str, str] | None = None
         if node.error:
             indicator = (f" {denied_glyph()}", ink("error_strong"))
+        elif node.is_dir and node.inaccessible_subtree_count > 0:
+            # The count is the subtree aggregate (this directory's own
+            # unreadable entries plus every descendant's, a denied subtree
+            # counting 1 -- see scheduler._recalculate_directory), because a
+            # row that showed only its direct count said nothing about the
+            # dozens hidden below it and read as broken. Colour carries the
+            # distinction the number no longer does: strong when some of it
+            # is right here, dim when it is all further down.
+            indicator = (
+                f" {partial_glyph()} {node.inaccessible_subtree_count} hidden",
+                ink("warning_strong")
+                if node.inaccessible_count > 0
+                else ink("warning_dim"),
+            )
         elif node.inaccessible_count > 0:
+            # Files, and directories whose subtree aggregate has not been
+            # recalculated yet, still fall back to the direct count.
             indicator = (
                 f" {partial_glyph()} {node.inaccessible_count} hidden",
                 ink("warning_strong"),
             )
-        elif node.is_dir and node.inaccessible_subtree_count > 0:
-            # Some descendant somewhere below has hidden state — dim hint
-            indicator = (f" {partial_glyph()}", ink("warning_dim"))
 
         # Proportional bar for directories (share of the scan root total).
         # A vanished directory has nothing to show a share of, and a 0.0%

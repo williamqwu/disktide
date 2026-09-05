@@ -170,11 +170,16 @@ class InfoPanel(Widget):
                 # OSError from scandir, not only PermissionError.
                 table.add_row("Access", Text(f"{denied_glyph()} Unreadable", style=ink("error_strong")))
             elif node.inaccessible_count > 0:
+                # The tree row for this directory reads "N hidden" with the
+                # subtree aggregate; spell the split out here so the two
+                # numbers a reader sees in the two panes agree.
                 table.add_row(
                     "Access",
                     Text(
-                        f"{partial_glyph()} Partial — {node.inaccessible_count} direct "
-                        f"{'entry' if node.inaccessible_count == 1 else 'entries'} unreadable",
+                        f"{partial_glyph()} Partial — {node.inaccessible_count} "
+                        "unreadable in this directory · "
+                        f"{max(node.inaccessible_subtree_count, node.inaccessible_count)}"
+                        " hidden at or below",
                         style=ink("warning_strong"),
                     ),
                 )
@@ -182,7 +187,9 @@ class InfoPanel(Widget):
                 table.add_row(
                     "Access",
                     Text(
-                        f"{partial_glyph()} {node.inaccessible_subtree_count} hidden below (no direct issue)",
+                        f"{partial_glyph()} Partial — none unreadable in this "
+                        f"directory · {node.inaccessible_subtree_count} hidden "
+                        "at or below",
                         style=ink("warning_dim"),
                     ),
                 )

@@ -88,6 +88,16 @@ Tree rows add a delta and a sparkline. `[`/`]` step through adjacent pairs.
 toward folder sizes. `i` on a symlinked directory resolves and rescans from
 the real location.
 
+**Unreadable entries** — a directory the scan could not open at all is marked
+with a red `◐`. Any other directory is marked `◐ N hidden`, where N counts
+everything unreadable *at or below* that row — its own entries plus every
+descendant's, a denied subdirectory counting as one — so the root's number is
+the whole story and not just its own top level. The badge is bright when some
+of those entries are directly in that directory and dim when they are all
+further down; either way its sizes are lower bounds, shown as `≥`. Details
+(`F3`) splits the number ("3 unreadable in this directory · 43 hidden at or
+below").
+
 **Progress** — during a scan the progress panel shows phase, worker count,
 path counts, rate, and the current path.
 
