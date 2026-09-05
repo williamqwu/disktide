@@ -487,3 +487,100 @@ def test_archflags_for_this_machine_do_not_skip_the_check(monkeypatch):
     assert module._cross_architecture(["-arch", host, "-arch", "sparc64"]) == (
         "sparc64"
     )
+
+
+# --- tool/make_homelike.py: the benchmark fixture builder -------------------
+
+
+MAKE_HOMELIKE = TOOL_DIR / "make_homelike.py"
+
+
+def _make_homelike(args, home=None):
+    env = dict(os.environ)
+    if home is not None:
+        env["HOME"] = str(home)
+    return subprocess.run(
+        [sys.executable, str(MAKE_HOMELIKE), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+
+
+def test_make_homelike_help_prints_usage_and_exits_zero(tmp_path):
+    """It had no argument parsing at all: `root = sys.argv[1]`.
+
+    So `--help` was a *target*, and the script built 88,000 directories and
+    888,100 files into a directory called `--help` -- on a quota'd network
+    home, in the working tree, until the account ran out of inodes.
+    """
+    result = _make_homelike(["--help"], home=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "usage: make_homelike.py" in result.stdout
+    assert "--allow-home" in result.stdout
+    # Nothing was built, least of all a directory named after the flag.
+    assert list(tmp_path.iterdir()) == []
+    assert not (Path.cwd() / "--help").exists()
+
+
+def test_make_homelike_without_a_target_exits_two(tmp_path):
+    result = _make_homelike([], home=tmp_path)
+
+    assert result.returncode == 2
+    assert "the following arguments are required: target" in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_make_homelike_refuses_a_target_under_home(tmp_path):
+    """The guard that would have prevented the incident above."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "fixture"
+
+    result = _make_homelike([str(target)], home=home)
+
+    assert result.returncode == 2
+    assert "is under" in result.stderr
+    assert "--allow-home" in result.stderr
+    assert not target.exists()
+    assert list(home.iterdir()) == []
+
+
+def test_make_homelike_builds_when_asked_properly(tmp_path):
+    """And it still builds a tree, deterministically, off $HOME."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "scratch" / "fixture"
+
+    result = _make_homelike(
+        [str(target), "--dirs", "40", "--seed", "7"], home=home
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "40 dirs" in result.stdout
+    assert target.is_dir()
+    built = sum(1 for _ in target.rglob("*") if _.is_dir()) + 1
+    assert built == 40
+
+    again = tmp_path / "scratch" / "again"
+    assert _make_homelike(
+        [str(again), "--dirs", "40", "--seed", "7"], home=home
+    ).returncode == 0
+    assert sorted(p.relative_to(target).as_posix() for p in target.rglob("*")) == (
+        sorted(p.relative_to(again).as_posix() for p in again.rglob("*"))
+    )
+
+
+def test_make_homelike_allows_home_when_told_to(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "fixture"
+
+    result = _make_homelike(
+        [str(target), "--dirs", "5", "--allow-home"], home=home
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert target.is_dir()

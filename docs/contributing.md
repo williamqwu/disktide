@@ -325,7 +325,12 @@ Build the fixture once:
 
 ```bash
 python tool/make_homelike.py /local/scratch/homelike     # 88,000 dirs, 11.5 s on xfs
+python tool/make_homelike.py /local/scratch/small --dirs 5000 --seed 7
 ```
+
+It refuses a target under `$HOME` unless you pass `--allow-home`: it writes
+close to a million entries, and a network home is usually quota'd by inode as
+well as by size.
 
 Then A/B against a *frozen* copy of the revision you are comparing to, so
 neither side moves under you:
