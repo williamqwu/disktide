@@ -515,6 +515,31 @@ def _database_path(conn: sqlite3.Connection) -> Path | None:
     return Path(row[2])
 
 
+def _holds_user_data(conn: sqlite3.Connection) -> bool:
+    """Whether this file already has something a migration could destroy.
+
+    `sqlite_master` rather than the version stamp, because the stamp is the
+    one thing that may be missing. `get_version` answers 0 for *every* way of
+    failing to read `schema_version` -- the table dropped, the file half
+    written, a schema this build has never seen -- and 0 is also what a file
+    created a microsecond ago says. Keying the backup on `current_version > 0`
+    therefore skipped it in exactly the case where it is worth most: a v1 or
+    v2 database whose stamp is unreadable replays the whole chain, and
+    migration 3 drops `nodes` and deletes every snapshot and alert event.
+    Measured before this changed: `snapshots 1 -> 0, backup=None,
+    version_now=10`, and nothing to restore from.
+
+    An empty file has an empty `sqlite_master`, so a brand-new database still
+    takes no backup and nothing pays for one it does not need.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' "
+        "LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
 def _create_backup(
     conn: sqlite3.Connection,
     *,
@@ -524,10 +549,10 @@ def _create_backup(
     database_path = _database_path(conn)
     if (
         database_path is None
-        or current_version <= 0
         or current_version >= target_version
         or not database_path.exists()
         or database_path.stat().st_size == 0
+        or not _holds_user_data(conn)
     ):
         return None
     backup_path = migration_backup_path(database_path, target_version)

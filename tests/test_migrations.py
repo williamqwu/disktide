@@ -283,3 +283,82 @@ class TestMigrations:
             )
         }
         assert {"cleanup_plans", "cleanup_actions", "cleanup_audit"} <= tables
+
+
+class TestBackupBeforeADestructiveMigration:
+    """A database with data in it is copied first, stamp or no stamp.
+
+    Migration 3 drops `nodes` and deletes every snapshot and alert event, so
+    a v1 or v2 database reaching it loses everything it holds. That is the
+    upgrade working as designed; what was not designed is that it happened
+    with no backup, because `_create_backup` decided "brand-new file" from
+    `get_version` reading 0 -- and `get_version` reads 0 for a missing or
+    unreadable `schema_version` table as well as for an empty file. The one
+    case where the version cannot be trusted is the one case where the
+    backup matters.
+    """
+
+    @staticmethod
+    def _database(tmp_path, version: int) -> tuple[Path, sqlite3.Connection]:
+        path = tmp_path / f"v{version}.db"
+        connection = sqlite3.connect(str(path))
+        migrate(connection, target_version=version)
+        connection.execute(
+            "INSERT INTO snapshots "
+            "(root_path, timestamp, total_size, file_count, dir_count) "
+            "VALUES ('/home/someone', '2020-01-01T00:00:00', 123, 4, 5)"
+        )
+        connection.commit()
+        return path, connection
+
+    @pytest.mark.parametrize("version", [1, 2])
+    def test_an_unstamped_old_database_is_copied_before_it_is_emptied(
+        self, tmp_path, version
+    ):
+        path, connection = self._database(tmp_path, version)
+        try:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM snapshots"
+            ).fetchone()[0] == 1
+            # The one thing that makes the version unreadable.
+            connection.execute("DROP TABLE schema_version")
+            connection.commit()
+            assert get_version(connection) == 0
+
+            backup = migrate(connection)
+
+            # The migration did what it does, and the version moved on, so
+            # nothing will ever replay it.
+            assert get_version(connection) == CURRENT_VERSION
+            assert connection.execute(
+                "SELECT COUNT(*) FROM snapshots"
+            ).fetchone()[0] == 0
+        finally:
+            connection.close()
+
+        assert backup is not None
+        assert backup == migration_backup_path(path, CURRENT_VERSION)
+        assert backup.exists()
+        # ...and it is a database, with the row that was about to be lost.
+        recovered = sqlite3.connect(str(backup))
+        try:
+            rows = recovered.execute(
+                "SELECT root_path, total_size FROM snapshots"
+            ).fetchall()
+        finally:
+            recovered.close()
+        assert rows == [("/home/someone", 123)]
+
+    def test_a_brand_new_database_is_not_copied(self, tmp_path):
+        path = tmp_path / "fresh.db"
+        connection = sqlite3.connect(str(path))
+        try:
+            assert get_version(connection) == 0
+
+            assert migrate(connection) is None
+
+            assert get_version(connection) == CURRENT_VERSION
+        finally:
+            connection.close()
+        assert not migration_backup_path(path, CURRENT_VERSION).exists()
+        assert list(tmp_path.glob("*.bak")) == []
