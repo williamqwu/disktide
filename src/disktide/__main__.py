@@ -11,6 +11,7 @@ from pathlib import Path
 import click
 
 from disktide import __version__
+from disktide.textsafe import display_text
 
 
 def _stdio_is_interactive() -> bool:
@@ -26,6 +27,30 @@ def _stdio_is_interactive() -> bool:
         except (AttributeError, ValueError, OSError):
             return False
     return True
+
+
+def _soften_stdio_encoding_errors() -> None:
+    """Stop an undecodable filename from being able to kill the process.
+
+    Names arrive from the OS as `str` carrying one lone surrogate per
+    undecodable byte (see `disktide.textsafe`), and a strict UTF-8 stream
+    refuses to encode those: one such directory in a scan root used to end
+    the text report in `UnicodeEncodeError` with the exit code of a failed
+    scan. Individual call sites render names through `textsafe.display_text`,
+    which is what makes them readable; this is the backstop that keeps any
+    site nobody thought of from being fatal.
+
+    Guarded twice over: a stream may be None (fd closed at startup) and it
+    may be an object without `reconfigure` (pytest's capture wrappers, a
+    caller who replaced `sys.stdout` with something of their own).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (ValueError, OSError):
+            pass
 
 
 @click.group(invoke_without_command=True)
@@ -63,6 +88,7 @@ def cli(
     Launch TUI:  disktide
     Subcommands: scan, watch, cleanup, compare, monitor, alerts, doctor
     """
+    _soften_stdio_encoding_errors()
     ctx.ensure_object(dict)
     ctx.obj["max_depth"] = max_depth
     ctx.obj["workers"] = workers
@@ -368,8 +394,11 @@ def scan(
             self.progress_written = False
 
         def _status(self, message: str) -> None:
+            # Through `display_text` because the narration quotes the scan
+            # root back at the caller, and a root whose name is not valid
+            # UTF-8 must not be able to end the run before it starts.
             if not self.quiet:
-                click.echo(message, err=True)
+                click.echo(display_text(message), err=True)
 
         def _finish_progress_line(self) -> None:
             if self.progress_written:
@@ -433,8 +462,10 @@ def scan(
             elif isinstance(event, ScanFailed):
                 self._finish_progress_line()
                 click.echo(
-                    f"Scan {event.run_id[:8]} failed: "
-                    f"{event.error_type}: {event.message}",
+                    display_text(
+                        f"Scan {event.run_id[:8]} failed: "
+                        f"{event.error_type}: {event.message}"
+                    ),
                     err=True,
                 )
             elif isinstance(event, ScanCompleted):
@@ -597,7 +628,7 @@ def scan(
         bar = "#" * filled + "-" * (50 - filled)
         click.echo(
             f"  {bar} {pct:5.1f}% {metric_text(child, metric):>12s}  "
-            f"{child.name}/"
+            f"{display_text(child.name)}/"
         )
 
     if snapshot:
