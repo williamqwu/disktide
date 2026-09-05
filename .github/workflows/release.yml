@@ -20,6 +20,10 @@ jobs:
   wheels:
     name: Wheels ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Sized for the slowest leg: five interpreters x manylinux + musllinux
+    # on aarch64, every one of them under binfmt emulation. The default is
+    # six hours, which is a long time to spend finding out a tag is stuck.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
