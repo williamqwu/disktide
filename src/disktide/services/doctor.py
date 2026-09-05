@@ -1167,8 +1167,14 @@ def _redact_text(value: str, show_paths: bool) -> str:
     redacted = value
     for root in replacements:
         redacted = redacted.replace(root, "<redacted>")
+    # Two guards, both learned from `<redacted><redacted> SchemaTooNewError`.
+    # The first: whatever follows a root that has *already* been replaced is
+    # the part worth keeping (`<redacted>/disktide/data.db` says which file),
+    # and running the sweep over it redacted it a second time. The second:
+    # `[^\s,;]+` ran to the next space, so the colon separating a path from
+    # the message that follows it was swallowed along with the path.
     return re.sub(
-        r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|/)[^\s,;]+",
+        r"(?<!<redacted>)(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|/)[^\s,;:]+",
         "<redacted>",
         redacted,
     )

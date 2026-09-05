@@ -625,3 +625,52 @@ def test_the_open_path_still_refuses_a_file_that_is_not_a_database(tmp_path):
         assert path.read_bytes() == original
     finally:
         database.close()
+# --- redaction that keeps the sentence readable ----------------------------
+
+
+def test_redaction_does_not_redact_what_it_has_already_redacted(
+    tmp_path, monkeypatch
+):
+    """`<redacted><redacted> SchemaTooNewError` said nothing useful.
+
+    The XDG replacement runs first and leaves `<redacted>/disktide/data.db:`;
+    the catch-all sweep then matched that remainder from its leading slash
+    and ran to the next space, taking the colon with it. What is left after
+    a replaced root is the part worth keeping -- it names the file -- and the
+    colon is what separates it from the message.
+    """
+    from disktide.services.doctor import _redact_text
+
+    values = _set_xdg(monkeypatch, tmp_path)
+    text = (
+        f"cannot migrate or write {values['XDG_DATA_HOME']}/disktide/data.db: "
+        "SchemaTooNewError: database schema version 99"
+    )
+
+    redacted = _redact_text(text, False)
+
+    assert redacted == (
+        "cannot migrate or write <redacted>/disktide/data.db: "
+        "SchemaTooNewError: database schema version 99"
+    )
+    assert "<redacted><redacted>" not in redacted
+
+
+def test_redaction_still_hides_an_unrelated_absolute_path(tmp_path, monkeypatch):
+    from disktide.services.doctor import _redact_text
+
+    _set_xdg(monkeypatch, tmp_path)
+
+    redacted = _redact_text("failed at /srv/private/thing.db", False)
+
+    assert "/srv/private" not in redacted
+    assert "<redacted>" in redacted
+
+
+def test_show_paths_still_shows_them(tmp_path, monkeypatch):
+    from disktide.services.doctor import _redact_text
+
+    values = _set_xdg(monkeypatch, tmp_path)
+    text = f"{values['XDG_DATA_HOME']}/disktide/data.db: broken"
+
+    assert _redact_text(text, True) == text
