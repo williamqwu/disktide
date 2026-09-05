@@ -470,11 +470,19 @@ def scan_directory_once(
     if entry_chunk_size <= 0:
         raise ValueError("entry_chunk_size must be greater than zero")
 
+    # The placeholder's zeroes are kept. They used to be overwritten with
+    # `None` here, which is how one unreadable directory anywhere under a
+    # scan root turned the *root's* Allocated and Unique into "Unavailable":
+    # nothing on a denied path ever wrote a number back over them, and
+    # `_propagate` carries a None to the top by construction. `None` now
+    # means one thing -- the platform has no `st_blocks` -- and every way of
+    # not reading a directory writes a number below.
     node = _placeholder(job)
-    node.allocated_size = None
-    node.own_allocated_size = None
 
     if cancel_event.is_set():
+        # Zero, because a cancelled scan reports no totals at all: `scan()`
+        # stops before the tree is finished and the caller is told it was
+        # cancelled.
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
     # The open replaces the `os.stat(job.path)` that used to start this
@@ -624,6 +632,10 @@ def _scan_open_directory(
     if stat_result is not None:
         identity = (stat_result.st_dev, stat_result.st_ino)
         if identity in job.ancestors:
+            # Zero, and the placeholder already says so: this is the same
+            # inode as one of its own ancestors -- a bind mount or a
+            # container rootfs reappearing inside itself -- and that
+            # ancestor has already contributed these blocks once.
             node.is_loop = True
             return DirectoryScanResult(job, node, frozenset(), 0, 0)
         child_ancestors = job.ancestors | {identity}
@@ -639,6 +651,13 @@ def _scan_open_directory(
             node.error = f"Permission denied: {job.path}"
         else:
             node.error = str(open_error)
+        # We could not list it; we could still stat it from its parent, and
+        # its own blocks are as measured as any other directory's. What is
+        # missing is the subtree, and `error` plus
+        # `inaccessible_subtree_count` are what report that -- the same
+        # hedge Logical has always carried, instead of erasing the number.
+        node.allocated_size = dir_allocated
+        node.own_allocated_size = dir_allocated
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
     # The whole directory, and the lstat of every non-directory entry in
@@ -652,6 +671,8 @@ def _scan_open_directory(
         entries = scan_dir(dir_fd)
     except PermissionError:
         node.error = f"Permission denied: {job.path}"
+        node.allocated_size = dir_allocated
+        node.own_allocated_size = dir_allocated
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
     except OSError as exc:
         if job.parent_path is not None and vanished(exc):
@@ -660,6 +681,8 @@ def _scan_open_directory(
             node.own_allocated_size = 0
             return DirectoryScanResult(job, node, frozenset(), 0, 0)
         node.error = str(exc)
+        node.allocated_size = dir_allocated
+        node.own_allocated_size = dir_allocated
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
     # An fd-relative `DirEntry` carries a name and nothing else, so the
@@ -1701,7 +1724,13 @@ class TreeScanScheduler:
 
         if allocated is None:
             # Unavailable propagates all the way to the root: an ancestor of
-            # a node with no allocated size cannot have one either.
+            # a node with no allocated size cannot have one either. That now
+            # happens for one reason only -- a platform with no `st_blocks`,
+            # where every node in the tree is None together. A directory we
+            # were not allowed to read, could not stat, stopped at a depth
+            # limit, excluded, or that vanished under the scan carries a
+            # number and is reported as a coverage gap instead, so no single
+            # unreadable directory can blank the root's totals.
             delta_allocated: int | None = None
         elif previous.allocated_size is None:
             # A value arriving where there was none adds nothing: the old
@@ -1984,8 +2013,10 @@ class TreeScanScheduler:
 
     @staticmethod
     def _failed_result(job: DirectoryJob, exc: Exception) -> DirectoryScanResult:
+        # Zero allocated bytes, not "Unavailable": the worker raised before
+        # anything was measured, which is a gap in coverage -- `error` and
+        # the inaccessible counters carry it -- and not a platform that
+        # cannot answer the question.
         node = _placeholder(job)
-        node.allocated_size = None
-        node.own_allocated_size = None
         node.error = f"{type(exc).__name__}: {exc}"
         return DirectoryScanResult(job, node, frozenset(), 0, 0)

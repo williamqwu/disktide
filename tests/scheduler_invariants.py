@@ -87,6 +87,38 @@ def _check_applied_aggregates(state) -> None:
             )
 
 
+def _check_allocated_availability(state) -> None:
+    """I8: `None` allocated bytes come from the platform, never from a gap.
+
+    "Unavailable" means exactly one thing -- this platform has no
+    `st_blocks`, so nothing in the tree has a number. Every other way of not
+    reading a directory (denied, unstat-able, depth-limited, excluded,
+    vanished, cancelled) contributes a number and reports itself through the
+    coverage counters instead, because `_propagate` carries a `None` from
+    any one node all the way to the scan root: one `chmod 000` directory
+    used to blank the whole scan's Allocated and Unique.
+
+    So a directory that has been applied and carries `None` has to have at
+    least one entry that carries `None` too. An applied directory with none
+    of those is the regression this exists to catch.
+    """
+
+    node = state.node
+    if not node.is_dir or node.allocated_size is not None:
+        return
+    for child in node.children:
+        value = (
+            child.allocated_size if child.is_dir else child.own_allocated_size
+        )
+        if value is None:
+            return
+    raise SchedulerInvariantViolation(
+        f"[_apply_result] {node.path} reports allocated_size=None where all "
+        f"{len(node.children)} of its entries carry a number -- a coverage "
+        "gap has been reported as an unavailable metric"
+    )
+
+
 def _check(scheduler, where: str) -> None:
     states = scheduler._states
     for path, state in list(states.items()):
@@ -162,6 +194,7 @@ def install(monkeypatch) -> None:
                 _check(self, name)
                 if name == "_apply_result":
                     _check_applied_aggregates(result)
+                    _check_allocated_availability(result)
                 return result
 
             return wrapper

@@ -509,6 +509,14 @@ the error in `FSNode.error` and the scan continues with partial results. A
 entry carrying that errno, so everything read before it is kept and the
 failure is counted once.
 
+Coverage gaps are counted, never subtracted from the metric's *kind*. A
+denied directory contributes its own blocks and nothing under it; a
+depth-limited one the same; vanished, excluded and self-ancestor directories
+contribute zero. `allocated_size` and `unique_allocated_size` are `None` only
+where the platform has no `st_blocks`, so one unreadable directory cannot
+blank the scan root's totals — the invariant is checked on every applied
+result (`scheduler_invariants` I8).
+
 ### Symlink Handling
 
 Symlinks are never recursed into — stored as leaf nodes sized by the link

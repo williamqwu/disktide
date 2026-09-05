@@ -75,7 +75,10 @@ hardlinks `du -s` matches Unique, not Allocated: `du` deduplicates by inode
 too.
 
 Platforms without `st_blocks` show Allocated/Unique as "Unavailable," never
-zero.
+zero — and that is the only thing "Unavailable" means. A directory you are
+not allowed to read still contributes its own blocks and is reported on the
+`Coverage:` line instead, so one unreadable folder cannot blank the totals
+for the whole scan.
 
 **Diff mode** — when at least two compatible snapshots exist, `d` switches to
 Diff view. Color and glyphs show growth, shrink, new, and removed paths.

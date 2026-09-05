@@ -230,6 +230,8 @@ def scan_directory(
     )
 
     if cancel_event is not None and cancel_event.is_set():
+        node.allocated_size = 0
+        node.own_allocated_size = 0
         return node
 
     try:
@@ -245,6 +247,8 @@ def scan_directory(
             # Only below the root: a scan root that does not exist is a bad
             # argument, and callers rely on `error` to say so.
             node.vanished = True
+            node.allocated_size = 0
+            node.own_allocated_size = 0
             return node
         st = None
 
@@ -297,20 +301,34 @@ def scan_directory(
     if st is not None:
         here = (st.st_dev, st.st_ino)
         if here in ancestors:
+            # Zero: the ancestor with this same inode has already been
+            # charged these blocks once.
             node.is_loop = True
+            node.allocated_size = 0
+            node.own_allocated_size = 0
             return node
         ancestors = ancestors | {here}
 
+    # A directory we could not read still contributes its own blocks, and
+    # says what is missing through `error` and the inaccessible counters --
+    # never by turning its ancestors' totals into "Unavailable", which is
+    # reserved for a platform with no `st_blocks` at all.
     try:
         scandir_it = os.scandir(path)
     except PermissionError:
         node.error = f"Permission denied: {path}"
+        node.allocated_size = dir_allocated
+        node.own_allocated_size = dir_allocated
         return node
     except OSError as e:
         if depth > 0 and vanished(e):
             node.vanished = True
+            node.allocated_size = 0
+            node.own_allocated_size = 0
             return node
         node.error = str(e)
+        node.allocated_size = dir_allocated
+        node.own_allocated_size = dir_allocated
         return node
 
     own_size = 0

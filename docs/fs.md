@@ -129,6 +129,10 @@ A `PermissionError` on the directory itself (`os.scandir()` fails) records the e
 
 Errors are stored in `FSNode.error` and displayed in the TUI details panel.
 
+**A coverage gap never turns a metric into "Unavailable".** A directory that could not be read still contributes its *own* blocks -- it was stat'ed from its parent even when it could not be opened -- and nothing from inside it. So does a directory stopped by `--max-depth`. A directory that vanished under the scan, one excluded as a pseudo mount or across a filesystem boundary, and one that is its own ancestor contribute zero; the last of those has already been counted under the ancestor that shares its inode. What is missing is reported by `inaccessible_count` / `inaccessible_subtree_count`, `depth_limited_subtree_count`, `excluded_subtree_count` and `vanished_subtree_count` -- the "Coverage: partial" line -- exactly as it always has been for Logical.
+
+`None` ("Unavailable") in `allocated_size` / `unique_allocated_size` therefore means one thing and only one: this platform does not provide `st_blocks` at all, so no node in the tree has a number. The two shapes of unreadable therefore agree: a `chmod 000` directory (the open fails) and a `chmod 444` one (the listing succeeds, every `fstatat` under it fails) are both one inaccessible subtree and both report a number. `tests/scheduler_invariants.py` I8 fails any applied directory that reports `None` while all of its entries carry a number.
+
 **Changed during the scan is not the same as unreadable.** An `OSError` whose
 `errno` is `ENOENT`, `ESTALE` or `ENOTDIR` means the entry was listed by its
 parent's `readdir` and was gone by the time the `stat` reached it -- the tree

@@ -217,6 +217,103 @@ def test_unique_is_allocated_less_the_duplicated_bytes(tmp_path):
     )
 
 
+def _unreadable_tree(tmp_path, mode: int):
+    """`ok/` with a file in it, and `blocked/` that cannot be read.
+
+    Mode 0o000 refuses the open; mode 0o444 lets the listing through and
+    refuses every `fstatat` under it. Both are "this subtree is not
+    readable", both count one inaccessible subtree, and before this they
+    reported different *kinds* of answer for Allocated.
+    """
+    readable = tmp_path / "ok"
+    readable.mkdir()
+    (readable / "f.bin").write_bytes(b"x" * 1000)
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "secret.bin").write_bytes(b"x" * 5000)
+    os.chmod(blocked, mode)
+    return readable, blocked
+
+
+@pytest.mark.parametrize("mode", [0o000, 0o444])
+def test_an_unreadable_subtree_never_blanks_the_allocated_total(tmp_path, mode):
+    """One denied directory used to make the whole scan's Allocated None.
+
+    `scan_directory_once` started every node at `allocated_size = None` and
+    a denied directory returned before anything wrote a number back, so
+    `_propagate` carried the None to the scan root: a single `chmod 000`
+    directory anywhere under a home turned Allocated and Unique into
+    "Unavailable" for the entire tree, while `logical_bytes` stayed a hard
+    number hedged only by the coverage line. `None` now means one thing --
+    no `st_blocks` on this platform.
+    """
+    if os.getuid() == 0:
+        pytest.skip("root reads a directory whatever its mode says")
+    readable, blocked = _unreadable_tree(tmp_path, mode)
+    try:
+        root = ScanEngine(workers=1).scan(str(tmp_path))
+    finally:
+        os.chmod(blocked, 0o755)
+
+    if root.own_allocated_size is None:
+        pytest.skip("platform does not expose st_blocks")
+    # Every readable byte, plus the blocks of all three directories -- the
+    # denied one included, because it was stat'ed even though it was not
+    # read. Nothing from inside it.
+    assert root.allocated_size == (
+        _allocated_like_du(readable)
+        + _directory_blocks(tmp_path)
+        + _directory_blocks(blocked)
+    )
+    assert root.unique_allocated_size == root.allocated_size
+    assert root.inaccessible_subtree_count == 1
+    assert root.size == 1000
+
+
+def test_the_two_shapes_of_unreadable_report_the_same_kind_of_answer(tmp_path):
+    """`chmod 000` and `chmod 444` differ in nothing a total can see."""
+    if os.getuid() == 0:
+        pytest.skip("root reads a directory whatever its mode says")
+    shapes = {}
+    for mode in (0o000, 0o444):
+        root_path = tmp_path / f"m-{mode:03o}"
+        root_path.mkdir()
+        _, blocked = _unreadable_tree(root_path, mode)
+        try:
+            root = ScanEngine(workers=1).scan(str(root_path))
+        finally:
+            os.chmod(blocked, 0o755)
+        shapes[mode] = (
+            type(root.allocated_size),
+            type(root.unique_allocated_size),
+            root.allocated_size,
+            root.unique_allocated_size,
+            root.inaccessible_subtree_count,
+            root.size,
+        )
+    assert shapes[0o000] == shapes[0o444]
+
+
+def test_a_coverage_gap_contributes_its_own_blocks_and_nothing_else(tmp_path):
+    """Depth-limited, like denied: the directory is real, its contents are out."""
+    child = tmp_path / "child"
+    grandchild = child / "grandchild"
+    grandchild.mkdir(parents=True)
+    (grandchild / "deep.bin").write_bytes(b"x" * 9000)
+
+    root = ScanEngine(workers=1, max_depth=1).scan(str(tmp_path))
+    if root.allocated_size is None:
+        pytest.skip("platform does not expose st_blocks")
+    child_node = root.find(str(child))
+    assert child_node is not None
+    assert child_node.depth_limited is True
+    assert child_node.allocated_size == _directory_blocks(child)
+    assert root.allocated_size == (
+        _directory_blocks(tmp_path) + _directory_blocks(child)
+    )
+    assert root.depth_limited_subtree_count == 1
+
+
 def test_one_filesystem_marks_boundary_without_descending(tmp_path):
     mounted = tmp_path / "mounted"
     mounted.mkdir()
