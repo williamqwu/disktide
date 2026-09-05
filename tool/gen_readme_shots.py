@@ -698,8 +698,11 @@ def main() -> None:
         tmux("send-keys", "-t", "cap", "Enter")
         # The file-type legend only lands once the scan has finished and the
         # sunburst has drawn its last ring; "ephemeral" additionally proves
-        # the seeded tree, not a bare export, is what was measured.
-        wait_for("Sunburst [F1]", "Nav [U]p", ".gitignore",
+        # the seeded tree, not a bare export, is what was measured. The
+        # footer marker is `ui Nav`, the grouped form the key map redesign
+        # left behind -- it was `Nav [U]p` when this script was written and
+        # nothing noticed, because a stale needle here reads as a timeout.
+        wait_for("Sunburst [F1]", "ui Nav", ".gitignore",
                  "ephemeral ", "code ")
         capture(captures / "sunburst.ans")
 

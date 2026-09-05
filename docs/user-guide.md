@@ -583,25 +583,49 @@ the one line to change when there is color left on the table.
 
 ### Glyphs in a browser terminal
 
-The other half of a web shell is the font. xterm.js draws from the browser's
-monospace face and falls back to a proportional one for anything that face does
-not carry — at *that* font's width, not at one cell. The glyphs it misses are
-the eighth blocks (`▁▂▃▅▆▇`, `▏▎▍▋▊▉`, `▔▕`) and the quadrants (`▖▗▘▝▛▜▙▟`),
-none of which are in WGL4, the set Courier New and Consolas cover. A border row
-drawn from them comes out 1.2–1.8× wider than the box it belongs to, and the
-widget's right edge lands in a different column on every row.
+The other half of a web shell is the font. xterm.js defaults to `courier-new,
+courier, monospace`, and Courier New fails the block elements (`▀▄█▌▐░▒▓
+▁▂▃▅▆▇ ▏▎▍▋▊▉ ▔▕ ▖▗▘▝▛▜▙▟`) in two different ways that end the same place.
 
-DiskTide draws its chrome from WGL4 only — the box-drawing characters, and the
-block elements that stop at halves (`▀ ▄ █ ▌ ▐ ░ ▒ ▓`) — so there is no setting
-for this and nothing to turn on. Panel borders, input and button outlines, the
-tree guides, the sunburst and treemap fills and the scrollbars are all inside
-that set. `tool/capture_glyphs.py` re-checks it against real panes, and
-`tests/test_web_glyphs.py` gates it in CI.
+The eighth blocks and the quadrants it does not have at all, so the browser
+falls back to a proportional face and draws them at *that* font's width. A
+border row built from them comes out 1.2–1.8× wider than the box it belongs
+to: a 72-cell input drew its `▔` row 129 cells wide and its `▁` row 86.
 
-`ui.safe_rendering` is a different switch and still the one you want for a
-terminal whose font is *narrower* than its cells rather than missing glyphs: it
-drops the proportional bar in the tree to ASCII (`.:-=+*#`) and simplifies the
-charts.
+The eight it does have — the halves, the full block, the shades — it draws
+with ink that is not fitted to a terminal cell. Measured on an explorer at
+307×71: every `░` about 1.1 cells wide and 1.4 rows tall, so one row's bar
+bled over the size text above and below it, and `▀`/`▄` *narrower* than the
+cell, leaving a comb of background-coloured slits along every horizontal edge
+of the chart.
+
+So DiskTide draws no block element anywhere. **Every fill is a background
+colour on spaces** — the tree's proportional bar, the FS Overview's usage and
+capacity bars, the scan progress bar, the theme swatches in Settings, the
+sunburst and the treemap — and anything that needs a *ramp* rather than a fill
+is ASCII: the mini trend sparkline is `.:-=+*#`, and the `disktide scan`
+summary bar on stdout is `#` and `-`. Box drawing (`─│├└┼━╔═╗`), the tree's
+`▶`/`▼`, the legend's `■`, and `●○` were measured at one cell and stay.
+
+Two consequences worth knowing:
+
+- **Use the `tiles` ring shape in a browser** — it is the default. Every edge
+  it draws lands on a cell edge, so every cell of the chart is one flat colour.
+  `disc` and `fill` are round, and a round edge has to be anti-aliased with
+  `▀`/`▄`, which is exactly what the browser cannot fit. Press `g` to cycle
+  shapes, or set `ring_shape` under `[ui]`.
+- **You can also give the shell a better font.** Open OnDemand exposes no font
+  setting, but JupyterLab and VS Code do (`terminal.integrated.fontFamily`),
+  and any face with real box-drawing coverage — DejaVu Sans Mono, Cascadia
+  Mono, Menlo — renders everything at one cell.
+
+`tool/capture_glyphs.py` re-checks this against real panes at 307×71 and
+120×32, and `tests/test_web_glyphs.py` gates it in CI.
+
+`ui.safe_rendering` is a different switch, and after all of the above it is
+only for a terminal whose font stops at ASCII or that cannot be trusted with
+background colours at all: it draws the tree's bar with `#`, the theme
+swatches with `##`, and the access markers as `[!]`/`[~]`.
 
 ## File-Type Categories
 

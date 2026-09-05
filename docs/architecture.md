@@ -13,7 +13,7 @@ src/disktide/
   __main__.py            CLI entry point (Click)
   app.py                 Textual App, screen management
   config.py              TOML config load/save, dataclasses
-  glyphs.py              Unicode/ASCII glyph selection + the WGL4 policy
+  glyphs.py              Unicode/ASCII glyph selection + the block-element policy
   metrics.py             Size vs. file-count view metric helpers
   rendering.py           Process-wide safe-rendering state and render epoch
 
@@ -1071,32 +1071,62 @@ distinguishability.
 
 ### Web-Shell Glyph Set
 
-A browser terminal (xterm.js: Open OnDemand, JupyterLab) draws from the
-browser's monospace face and falls back to a proportional one for glyphs that
-face lacks — at the fallback's advance, not at one cell. The line is WGL4: the
-box-drawing block and the block elements that stop at halves (`▀ ▄ █ ▌ ▐ ░ ▒
-▓`) are in it; the eighth blocks and the quadrants are not, and a border row
-built from those comes out 1.2–1.8× too wide.
+A browser terminal (xterm.js: Open OnDemand, JupyterLab) defaults to
+`courier-new, courier, monospace`, and Courier New decides this policy. It has
+no glyph for the eighth blocks or the quadrants, so the browser falls back to a
+proportional face and draws them at *that* font's advance — a border row built
+from those comes out 1.2–1.8× too wide. It *does* carry the eight block
+elements WGL4 defines (`▀ ▄ █ ▌ ▐ ░ ▒ ▓`), and 04ee56b concluded from that they
+were safe; they are not. Its ink for them is not fitted to a terminal cell:
+measured on an explorer capture at 307×71, `░` is ~1.1 cells wide and ~1.4 rows
+tall (one row's bar bleeding over the size text of its neighbours) and `▀`/`▄`
+are narrower than the cell (a comb of slits along every horizontal edge, and
+the rows carrying a long run of them shifted by up to 0.6 cell).
 
-`disktide/glyphs.py` is the single source: `UNSAFE_GLYPHS` (the rest of
+So the rule is about block elements as a class:
+
+> Nothing DiskTide draws itself may be a block element (U+2580–U+259F). A fill
+> is a background colour on spaces. A ramp that needs height is ASCII.
+
+Box drawing (U+2500–U+257F) including the heavy forms, `▶▼■●○◐`, the arrows and
+text were verified glyph by glyph on the same capture and stay.
+
+`disktide/glyphs.py` is the single source: `UNSAFE_GLYPHS` (the whole of
 U+2580–U+259F), `WEB_SAFE_GLYPHS` (the reviewed allowlist), `SAFE_BORDER_STYLES`
-/ `UNSAFE_BORDER_STYLES` (a partition of Textual's `BORDER_CHARS`), and the two
-replacement `ScrollBarRender` bar lists. It imports nothing, including Textual.
+/ `UNSAFE_BORDER_STYLES` (a partition of Textual's `BORDER_CHARS`; `thick` and
+`block` are on the unsafe side now, and `double` is the heaviest box left), the
+replacement `ScrollBarRender` bar lists and the replacement `ToggleButton`
+sides. It imports nothing, including Textual.
 
-Two places consume it. `DiskTideApp.CSS` restates every Textual border that
+Three places consume it. `DiskTideApp.CSS` restates every Textual border that
 would resolve to an unsafe style — `tall` on Input/Button/ToggleButton/Switch/
 Select, `hkey` on Collapsible and the command palette, `vkey` on the footer and
-the key panels, `outer` on toasts — at the same geometry in `solid`, `blank`
-and `thick`; app-level CSS outranks every `DEFAULT_CSS` rule including
-`!important` ones, so one rule per widget covers all of its states.
-`use_web_safe_scrollbars()` runs from `DiskTideApp.__init__`, before the first
-screen, because `render_bar` is a classmethod reading two class attributes.
+the key panels, `outer` on toasts — at the same geometry in `solid` and
+`blank`; app-level CSS outranks every `DEFAULT_CSS` rule including `!important`
+ones, so one rule per widget covers all of its states. The app's own panels and
+modals ask for `double` where they used to ask for `thick`.
+`use_web_safe_scrollbars()` and `use_web_safe_toggle_buttons()` run from
+`DiskTideApp.__init__`, before the first screen, because both replace class
+attributes read at render time. And every fill the app draws by hand is a
+background: `SizeTree._append_share` (with a `render_label` override that
+re-applies the bar's background *after* the cursor style, which would otherwise
+win), `fs_overview._usage_bar` and `_build_summary`, `settings.theme_preview`,
+and `scan_progress.FilledBar`, a `Bar` renderable whose three glyphs are spaces
+and whose styles are turned into backgrounds. The `bar_track` ink role is the
+themed colour behind a bar.
+
+The `tiles` ring shape belongs to the same story: its vertical quantum is a
+whole row (not the framebuffer's half-row), its centre snaps to a row boundary,
+and its subsamples are all taken at the cell centre, so `_render_cells` emits
+nothing but spaces for it. `disc` and `fill` keep the half-block pass because
+they are round.
 
 `tests/test_web_glyphs.py` gates it host-independently (resolved border styles
-across every screen, both colour modes, plus a rendered-thumb sweep);
-`tool/capture_glyphs.py` checks real panes under tmux at 307×71 and 120×32.
-`ui.safe_rendering` is a separate, orthogonal switch for the tree's
-proportional bar.
+across every screen, both colour modes, a rendered-thumb sweep, and the scan
+overlay's bar); `tool/capture_glyphs.py` checks real panes under tmux at 307×71
+and 120×32, walking every screen plus a running scan (`--slow-tree`).
+`ui.safe_rendering` is a separate, orthogonal switch: the mode for a terminal
+that has no background colours to spend either.
 
 ## Screen Architecture
 

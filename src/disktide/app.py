@@ -72,8 +72,9 @@ class DiskTideApp(App):
     # proportional font and draws them at that font's advance: on the
     # welcome screen in an Open OnDemand web shell a 72-cell Input drew its
     # `▔` row 129 cells wide and its `▁` row 86, tearing the widget apart.
-    # These rules redraw the same geometry from the WGL4 set (see
-    # `disktide.glyphs` for what that set is and why it is the line).
+    # These rules redraw the same geometry from the box-drawing block,
+    # which is what a border may be made of now that no block element is
+    # (see `disktide.glyphs` for the rule and the measurements behind it).
     #
     # They are here, and not in `assets/default.tcss`, because nothing
     # loads that file -- there is no `CSS_PATH` anywhere in `src/`, and all

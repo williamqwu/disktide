@@ -311,6 +311,7 @@ default_action = "safe"
 | `tool/soak_memory` | Scan one tree N times in one process and watch RSS. The memory half of `soak_scan`, which is a randomised *invariants* soak. |
 | `tool/dump_tree` | Every node of one scan as sorted text, for byte-identity diffs. `--backend native\|python` picks the directory reader; the first header line names it. |
 | `tool/check_doctor_backend` | Assert which scanner backend a `doctor --json` report names. Used by CI on each install shape. |
+| `tool/capture_glyphs` | Walk every screen in a private tmux server and report any non-ASCII glyph outside `disktide.glyphs`'s reviewed set. `--size 307x71 --size 120x32` by default; `--slow-tree N` makes the scan last long enough to photograph the progress overlay. |
 
 ### Benchmarking a scan
 

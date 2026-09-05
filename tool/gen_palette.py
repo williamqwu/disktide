@@ -400,6 +400,13 @@ def ink_rows() -> list[dict]:
     tables are hand-picked Rich style strings living with the schemes, not
     OKLCH ladders this file renders, and duplicating them here to keep the
     tool import-free would be one more table to drift.
+
+    `bar_track` is skipped. It lives in `INK_ROLES` because it is themed
+    and looked up the same way, but it is never a glyph: it is the
+    background behind the empty half of the tree's proportional bar, and
+    WCAG holds an area to 3:1 rather than the 4.5:1 it asks of text.
+    `tests/test_palette_gates.py` gates it on a rule of its own -- a step
+    you can see from the panel behind it and from the bar in front of it.
     """
     import sys
     from pathlib import Path
@@ -423,6 +430,7 @@ def ink_rows() -> list[dict]:
         measured = {
             role: (hexed, contrast(hexed, surface), oklch(hexed))
             for role in INK_ROLES
+            if role != "bar_track"
             for hexed in [ink_hex(scheme.inks[role])]
             if hexed is not None
         }
