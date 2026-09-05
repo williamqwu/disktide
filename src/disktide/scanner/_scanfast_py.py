@@ -30,6 +30,7 @@ that is neither a file, a directory nor a symlink:
 
 from __future__ import annotations
 
+import errno
 import os
 import stat as _stat
 
@@ -88,6 +89,17 @@ def scan_dir(fd: int, stat_dirs: bool = False) -> list[tuple]:
     same thing and how the scheduler used to see the OSError the `scandir`
     iterator raised: one bad entry, everything before it kept.
     """
+
+    if fd < 0:
+        # `os.scandir(-1)` is `AT_FDCWD`: it reads the *current working
+        # directory* and reports success. The extension dups the descriptor
+        # first, so it answers EBADF. Nothing reaches here with a negative
+        # descriptor today -- `scan_directory_once` keeps -1 as its
+        # "the open failed" sentinel and returns before the read -- but the
+        # two readers are meant to be the same function, and of the two
+        # answers to "read the directory on this invalid descriptor" only one
+        # of them is an answer.
+        raise OSError(errno.EBADF, os.strerror(errno.EBADF))
 
     out: list[tuple] = []
     iterator = os.scandir(fd)

@@ -768,3 +768,18 @@ def test_a_reader_that_runs_out_of_descriptors_is_a_denied_directory(
     assert root.inaccessible_count == 1
     # And the sibling is still there, with its file.
     assert root.find(str(tmp_path / "reachable" / "leaf.bin")) is not None
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_a_negative_descriptor_raises_rather_than_reading_the_cwd(backend):
+    """`-1` is `AT_FDCWD` to `os.scandir`, and a bad descriptor to `dup`.
+
+    `scan_directory_once` keeps `-1` as its "the open failed" sentinel and
+    returns before the read, so nothing gets here today. It is pinned because
+    the two readers are meant to be one function: the extension answered
+    EBADF and the fallback answered with a listing of whatever directory the
+    process happened to be sitting in.
+    """
+    with pytest.raises(OSError) as caught:
+        reader(backend)(-1)
+    assert caught.value.errno == errno.EBADF
