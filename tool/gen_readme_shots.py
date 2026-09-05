@@ -1,4 +1,4 @@
-"""Regenerate docs/images/sunburst.png and docs/images/monitor.png.
+"""Regenerate the README hero shots, sunburst.png and monitor.png.
 
 Both hero shots are photographs of the real TUI, not mock-ups: this script
 exports a clean copy of the repository, drives DiskTide inside a tmux PTY at
@@ -18,7 +18,12 @@ Everything lives in a throwaway XDG root and a staging directory that are
 removed on the way out; the developer's own database and config are never
 touched.
 
-    uv run --with pillow,rich python tool/gen_readme_shots.py
+    uv run --with pillow,rich python tool/gen_readme_shots.py [--out DIR]
+
+The images are not versioned in this repository. They live in the public
+assets repository (github.com/williamqwu/assets, `disktide/readme/`) that
+the README links to by absolute URL, so a fresh shot is a commit over there,
+not a diff here. `--out` defaults to that checkout cloned next to this one.
 
 Needs `tmux` on PATH and a DejaVu Sans Mono installation. The full-width
 plus in Monitor Center's delta legend is not in DejaVu, so a CJK fallback
@@ -27,6 +32,7 @@ is required for that one glyph -- see FALLBACK_FONTS.
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -41,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scratchguard  # noqa: E402 - needs tool/ on the path first
 
 REPO = Path(__file__).resolve().parent.parent
-IMAGES = REPO / "docs" / "images"
+DEFAULT_OUT = REPO.parent / "tool-assets" / "disktide" / "readme"
 
 # One geometry for both images: they sit side by side in the README, so a
 # difference in either axis would be visible as a size jump.
@@ -666,7 +672,26 @@ def rasterize(src: Path, dst: Path) -> tuple[int, int]:
 
 # --------------------------------------------------------------------------
 
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Regenerate the README hero shots from the real TUI.",
+    )
+    parser.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT,
+        help="directory the two PNGs are written to (default: %(default)s, "
+             "the assets checkout next to this repository)",
+    )
+    args = parser.parse_args(argv)
+    if not args.out.is_dir():
+        parser.error(
+            f"--out {args.out} is not a directory; clone "
+            "github.com/williamqwu/assets next to this repository, or pass --out"
+        )
+    return args
+
+
 def main() -> None:
+    images = parse_args().out
     if shutil.which("tmux") is None:
         raise SystemExit("tmux is required")
     scratchguard.claim(STAGE, entries=STAGE_ENTRIES, label="readme-stage")
@@ -721,8 +746,8 @@ def main() -> None:
         capture(captures / "monitor.ans")
 
         for name in ("sunburst", "monitor"):
-            size = rasterize(captures / f"{name}.ans", IMAGES / f"{name}.png")
-            print(f"  docs/images/{name}.png {size[0]}x{size[1]}")
+            size = rasterize(captures / f"{name}.ans", images / f"{name}.png")
+            print(f"  {images / name}.png {size[0]}x{size[1]}")
     finally:
         tmux("kill-server")
         shutil.rmtree(STAGE, ignore_errors=True)

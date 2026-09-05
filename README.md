@@ -20,9 +20,9 @@
 </p>
 
 <img alt="Explorer: the file tree of a disktide working checkout on the left, led by .venv/ at 47.7% of 8.1 MiB, its sunburst on the right in the default tiles shape, concentric rectangular rings cut by straight lines with the virtualenv a rust frame enclosing every inner ring, legend reading ephemeral 52%, code 30%, media 10%, docs 8%"
-     src="docs/images/sunburst.png" width="49%">
+     src="https://raw.githubusercontent.com/williamqwu/assets/main/disktide/readme/sunburst.png" width="49%">
 <img alt="Monitor Center: the Space-Time Trend of the disktide codebase growing from March to August 2026, 184 snapshots, one per commit"
-     src="docs/images/monitor.png" width="49%">
+     src="https://raw.githubusercontent.com/williamqwu/assets/main/disktide/readme/monitor.png" width="49%">
 
 <p>
   <a href="#installation"><b>Install</b></a> &nbsp;·&nbsp;
