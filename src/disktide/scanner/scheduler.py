@@ -567,6 +567,25 @@ def _scan_open_directory(
         node.inode = getattr(stat_result, "st_ino", None)
         node.link_count = getattr(stat_result, "st_nlink", 1)
 
+    # A directory's own blocks are storage the directory costs -- 4 KiB
+    # apiece on ext4 whatever they hold, and on xfs once the names outgrow
+    # the inode -- and `du` reports them. The stat that answers the three
+    # scope questions below already carries the number, so counting it costs
+    # no syscall.
+    #
+    # `None` means one thing: this platform has no `st_blocks` at all
+    # (Windows). A directory we could not stat is a *coverage* gap, not a
+    # platform without the field, and coverage gaps are counted by
+    # `inaccessible_count` rather than by erasing a total -- so it
+    # contributes zero and every ancestor keeps its number.
+    if stat_result is None:
+        dir_allocated: int | None = 0
+    else:
+        dir_blocks = getattr(stat_result, "st_blocks", None)
+        dir_allocated = (
+            None if dir_blocks is None else max(0, dir_blocks) * 512
+        )
+
     filesystem_type = lookup_excluded_mount(
         job.path, excluded_mounts, canonical_paths=canonical_paths
     )
@@ -592,9 +611,13 @@ def _scan_open_directory(
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
     if policy.max_depth is not None and job.depth >= policy.max_depth:
+        # The directory itself was reached and stat'ed; only its contents
+        # are out of scope. Its own blocks are as real as any other
+        # directory's, and `depth_limited_subtree_count` is what says the
+        # subtree under it is missing.
         node.depth_limited = True
-        node.allocated_size = 0
-        node.own_allocated_size = 0
+        node.allocated_size = dir_allocated
+        node.own_allocated_size = dir_allocated
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
     child_ancestors = job.ancestors
@@ -647,7 +670,13 @@ def _scan_open_directory(
     child_prefix = job.path if job.path.endswith("/") else job.path + "/"
 
     own_size = 0
-    own_allocated: int | None = 0
+    # The directory's own blocks are part of its own allocated bytes, and
+    # they are carried by the first chunk only: `flush_chunk` resets the
+    # chunk accumulator to zero, so a streamed directory adds them once
+    # however many chunks it takes. The result node carries the full sum
+    # and replaces whatever the chunks accumulated, so the two cannot both
+    # be counted -- `tests/scheduler_invariants.py` I7 fails if they are.
+    own_allocated: int | None = dir_allocated
     direct_inaccessible = 0
     direct_vanished = 0
     child_count = 0
@@ -655,7 +684,7 @@ def _scan_open_directory(
     chunk_children: list[FSNode] = []
     chunk_size = 0
     chunk_own_size = 0
-    chunk_own_allocated: int | None = 0
+    chunk_own_allocated: int | None = dir_allocated
     chunk_inaccessible = 0
     chunk_vanished = 0
     streaming_open = True

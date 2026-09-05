@@ -483,9 +483,15 @@ empty queue and no workers.
 
 ### Measurement and Scope Policy
 
-- **Logical**: `st_size` payload aggregate.
-- **Allocated**: `st_blocks × 512` per visible file/symlink path.
-- **Unique**: one deterministic lexical owner per `(st_dev, st_ino)`.
+- **Logical**: `st_size` payload aggregate over files and symlinks; a
+  directory's own `st_size` is not payload and is not added.
+- **Allocated**: `st_blocks × 512` per visible file, symlink *and directory*
+  path, including the node itself — the number `du` reports. A directory's
+  own blocks come from the `fstat` of the descriptor the scan opened it on.
+- **Unique**: one deterministic lexical owner per `(st_dev, st_ino)`. Only
+  leaves can share an inode, so directory blocks survive the dedup;
+  `accounting.finalize_unique_allocated` recovers them as
+  `own_allocated_size - sum(leaf.own_allocated_size)` rather than re-stat'ing.
 - Missing `st_blocks` → unavailable, never zero.
 - One-filesystem mode stops at device boundaries, keeping an `xdev` node.
 - Descendant pseudo mounts excluded by default; explicit pseudo root allowed.

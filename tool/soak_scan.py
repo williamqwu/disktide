@@ -146,23 +146,39 @@ def _reference(path, depth=0, max_depth=None):
     """Independent single-threaded walker: never follows symlinks.
 
     Mirrors the engine's depth policy: a directory at ``max_depth`` is still
-    counted by its parent but is not entered, so it contributes no bytes.
+    counted by its parent and still contributes its *own* blocks, but is not
+    entered, so nothing inside it is counted. Same for a directory that
+    cannot be listed.
+
+    ``allocated`` is `st_blocks * 512` of every file, symlink and directory,
+    this one included -- what `du` reports and what the engine now reports.
+    The directory half is returned separately as ``dir_allocated`` so the
+    unique reference can add it back after hardlink dedup: only leaves can
+    be a second path to one inode, so directory blocks are never deduped.
     """
     own = own_allocated = 0
     size = allocated = files = directories = denied = 0
+    sub_dir_allocated = 0
     leaves = []
+    try:
+        own_dir_allocated = os.lstat(path).st_blocks * 512
+    except OSError:
+        own_dir_allocated = 0
     if max_depth is not None and depth >= max_depth:
-        return dict(size=0, allocated=0, files=0, dirs=0, denied=0, leaves=[])
+        return dict(size=0, allocated=own_dir_allocated, files=0, dirs=0,
+                    denied=0, leaves=[], dir_allocated=own_dir_allocated)
     try:
         entries = list(os.scandir(path))
     except OSError:
-        return dict(size=0, allocated=0, files=0, dirs=0, denied=1, leaves=[])
+        return dict(size=0, allocated=own_dir_allocated, files=0, dirs=0,
+                    denied=1, leaves=[], dir_allocated=own_dir_allocated)
     for entry in entries:
         try:
             if entry.is_dir(follow_symlinks=False) and not entry.is_symlink():
                 sub = _reference(entry.path, depth + 1, max_depth)
                 size += sub["size"]
                 allocated += sub["allocated"]
+                sub_dir_allocated += sub["dir_allocated"]
                 files += sub["files"]
                 directories += 1 + sub["dirs"]
                 denied += sub["denied"]
@@ -178,8 +194,10 @@ def _reference(path, depth=0, max_depth=None):
                 )
         except OSError:
             denied += 1
-    return dict(size=size + own, allocated=allocated + own_allocated, files=files,
-                dirs=directories, denied=denied, leaves=leaves)
+    return dict(size=size + own,
+                allocated=allocated + own_allocated + own_dir_allocated,
+                files=files, dirs=directories, denied=denied, leaves=leaves,
+                dir_allocated=own_dir_allocated + sub_dir_allocated)
 
 
 def _reference_unique(leaves):
@@ -292,7 +310,8 @@ def _run_case(seed, *, quick, shapes, scratch):
                 ("dir_count", root.dir_count, reference["dirs"]),
                 ("allocated", root.allocated_size, reference["allocated"]),
                 ("unique", root.unique_allocated_size,
-                 _reference_unique(reference["leaves"])),
+                 _reference_unique(reference["leaves"])
+                 + reference["dir_allocated"]),
             ):
                 if got != want:
                     problems.append(f"{label}: engine={got} reference={want}")

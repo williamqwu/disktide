@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +23,31 @@ from disktide.scanner.accounting import finalize_unique_allocated
 from disktide.scanner.engine import ScanEngine
 from disktide.scanner.policy import MountEntry, discover_pseudo_mounts
 from disktide.scanner.walker import scan_directory
+
+
+def _directory_blocks(path) -> int:
+    """`st_blocks * 512` of one directory -- what `du` charges it."""
+    return os.stat(path).st_blocks * 512
+
+
+def _allocated_like_du(path) -> int:
+    """Every directory, file and symlink's blocks, summed as `du` sums them.
+
+    Deliberately a second implementation rather than a call into the
+    scanner: the point of the assertions below is that the scanner agrees
+    with the definition, and a definition it computes itself agrees with
+    everything. Hardlinks are counted once per *path* here, so this is the
+    Allocated rule; `du` dedupes them, which makes it the Unique rule on a
+    tree that has any.
+    """
+    total = os.lstat(path).st_blocks * 512
+    with os.scandir(path) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                total += _allocated_like_du(entry.path)
+            else:
+                total += entry.stat(follow_symlinks=False).st_blocks * 512
+    return total
 
 
 def test_storage_measurements_preserve_unavailable_values():
@@ -56,7 +83,10 @@ def test_sparse_file_separates_logical_and_allocated(tmp_path):
     if node.allocated_size is None:
         pytest.skip("platform does not expose st_blocks")
     assert node.allocated_size < node.size
-    assert root.allocated_size == node.allocated_size
+    # The root's own blocks are part of what it allocates, exactly as `du`
+    # counts them; on a filesystem that stores a small directory inline they
+    # are zero, which is why this used to pass without the term.
+    assert root.allocated_size == node.allocated_size + _directory_blocks(tmp_path)
 
 
 def test_hardlinks_are_deduplicated_deterministically(tmp_path):
@@ -73,8 +103,9 @@ def test_hardlinks_are_deduplicated_deterministically(tmp_path):
         if leaves[0].allocated_size is None:
             pytest.skip("platform does not expose st_blocks")
         per_entry = leaves[0].allocated_size
-        assert root.allocated_size == per_entry * 3
-        assert root.unique_allocated_size == per_entry
+        directory = _directory_blocks(tmp_path)
+        assert root.allocated_size == per_entry * 3 + directory
+        assert root.unique_allocated_size == per_entry + directory
         assert [node.hardlink_owner_path for node in leaves] == [str(first)] * 3
         assert sum(node.is_hardlink_duplicate for node in leaves) == 2
 
@@ -95,9 +126,95 @@ def test_same_inode_number_on_different_devices_is_not_deduplicated():
             link_count=2, file_count=1,
         ),
     ]
+    # A directory's own allocated bytes are its own blocks plus its direct
+    # leaves', and `finalize_unique_allocated` recovers the blocks by
+    # subtracting the leaves -- so the root has to carry the sum a scan
+    # would have given it. It read the leaves only before directory blocks
+    # were counted, and a root left at None then answered 8192 anyway.
+    root.own_allocated_size = 8192
+    root.allocated_size = 8192
     finalize_unique_allocated(root)
     assert root.unique_allocated_size == 8192
     assert all(not child.is_hardlink_duplicate for child in root.children)
+
+
+def test_directory_blocks_are_counted_in_allocated_and_unique(tmp_path):
+    """A tree of directories costs storage, and Allocated used to say zero.
+
+    `st_blocks` was read for every file and symlink and thrown away for
+    every directory, so a 300-directory tree with no files in it reported
+    `allocated: 0` against `du`'s 12,288 -- and on a real home the miss was
+    7.4 MB. The scan already `fstat`s each directory it opens; the number
+    was on the table.
+    """
+    nested = tmp_path / "a" / "b" / "c"
+    nested.mkdir(parents=True)
+    (nested / "leaf.bin").write_bytes(b"x" * 3000)
+    for index in range(64):
+        (tmp_path / f"wide-{index:02d}").mkdir()
+
+    root = ScanEngine(workers=1).scan(str(tmp_path))
+    if root.allocated_size is None:
+        pytest.skip("platform does not expose st_blocks")
+    expected = _allocated_like_du(tmp_path)
+    assert expected > 0
+    assert root.allocated_size == expected
+    # No hardlink anywhere, so Unique is the same number -- directories are
+    # never a second path to one inode.
+    assert root.unique_allocated_size == expected
+    # The root's own blocks are on the root, not folded into a child: it has
+    # no direct file, so its own allocated bytes are exactly its own blocks.
+    assert root.own_allocated_size == _directory_blocks(tmp_path)
+    assert root.size == 3000
+
+
+def test_allocated_matches_du_on_the_same_tree(tmp_path):
+    """The definition, checked against the program that defines it."""
+    du = shutil.which("du")
+    if du is None:
+        pytest.skip("du is not installed")
+    for index in range(40):
+        directory = tmp_path / f"d-{index:02d}" / "inner"
+        directory.mkdir(parents=True)
+        (directory / "f.bin").write_bytes(b"y" * (index * 97 + 1))
+    (tmp_path / "link").symlink_to("f.bin")
+
+    measured = subprocess.run(
+        [du, "-s", "--block-size=1", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    if measured.returncode != 0:
+        pytest.skip(f"du refused --block-size=1: {measured.stderr.strip()}")
+
+    root = ScanEngine(workers=1).scan(str(tmp_path))
+    if root.allocated_size is None:
+        pytest.skip("platform does not expose st_blocks")
+    assert root.allocated_size == int(measured.stdout.split()[0])
+
+
+def test_unique_is_allocated_less_the_duplicated_bytes(tmp_path):
+    """Hardlink dedup subtracts leaf bytes and leaves directory blocks alone."""
+    original = tmp_path / "sub" / "z-original.bin"
+    original.parent.mkdir()
+    original.write_bytes(b"x" * 8192)
+    os.link(original, tmp_path / "sub" / "a-link.bin")
+
+    root = ScanEngine(workers=1).scan(str(tmp_path))
+    if root.allocated_size is None:
+        pytest.skip("platform does not expose st_blocks")
+    duplicate = root.find(str(original))
+    assert duplicate is not None
+    assert root.allocated_size == _allocated_like_du(tmp_path)
+    assert root.unique_allocated_size == (
+        root.allocated_size - duplicate.own_allocated_size
+    )
+    # Directory blocks survive the dedup at every level, not just the root.
+    subdirectory = root.find(str(tmp_path / "sub"))
+    assert subdirectory is not None
+    assert subdirectory.own_unique_allocated_size == (
+        _directory_blocks(tmp_path / "sub") + duplicate.own_allocated_size
+    )
 
 
 def test_one_filesystem_marks_boundary_without_descending(tmp_path):

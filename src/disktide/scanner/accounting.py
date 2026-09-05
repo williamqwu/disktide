@@ -54,9 +54,17 @@ def finalize_unique_allocated(root: FSNode) -> None:
     # One bottom-up pass over directories only, with `sum_available`'s None
     # propagation written out inline: the list comprehensions it needed built
     # two throwaway lists per directory and walked the child list twice.
+    #
+    # A directory's own allocated bytes are its *own blocks* plus its direct
+    # leaves', and only the leaves can be hardlink duplicates -- a directory
+    # has no second path to itself. So the blocks are recovered by
+    # subtraction, `own_allocated_size - sum(leaf.own_allocated_size)`,
+    # rather than re-stat'ed: both sides are exact integers the walk already
+    # produced, and summing the leaves is a pass this loop makes anyway.
     for node in reversed(list(root.walk_dirs())):
         own: int | None = 0
         total: int | None = 0
+        leaf_allocated: int | None = 0
         for child in node.children:
             if child.is_dir:
                 value = child.unique_allocated_size
@@ -74,6 +82,24 @@ def finalize_unique_allocated(root: FSNode) -> None:
                         own += value
                     if total is not None:
                         total += value
+                allocated = child.own_allocated_size
+                if allocated is None:
+                    leaf_allocated = None
+                elif leaf_allocated is not None:
+                    leaf_allocated += allocated
+        node_allocated = node.own_allocated_size
+        if node_allocated is None or leaf_allocated is None:
+            # No `st_blocks` anywhere on this platform: the leaves are
+            # already None above, and the directory's own blocks are the
+            # same missing number.
+            own = None
+            total = None
+        else:
+            directory_blocks = node_allocated - leaf_allocated
+            if own is not None:
+                own += directory_blocks
+            if total is not None:
+                total += directory_blocks
         node.own_unique_allocated_size = own
         node.unique_allocated_size = total
 
@@ -85,9 +111,11 @@ def mirror_allocated_as_unique(root: FSNode) -> None:
     one inode owns its bytes. With no inode shared there is nothing to
     decide: every leaf owns exactly its own allocated bytes, so a
     directory's own unique total is the `own_allocated_size` the walk
-    already summed and its inclusive one is `allocated_size` -- including
-    the None that propagates when a platform has no `st_blocks`, which
-    both sides derive from the same missing value.
+    already summed -- its own blocks and its direct leaves' -- and its
+    inclusive one is `allocated_size`, including the None that propagates
+    when a platform has no `st_blocks`, which both sides derive from the
+    same missing value. A directory is never a hardlink duplicate of
+    anything, so its own blocks need no deduplication either way.
 
     So the answer is a copy, not a computation, and the second pass over
     every directory's children goes away with it. The scheduler says

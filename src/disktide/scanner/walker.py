@@ -248,6 +248,17 @@ def scan_directory(
             return node
         st = None
 
+    # The directory's own blocks, from the stat just taken. Read here rather
+    # than at the bottom because `st` is reused per entry inside the loop.
+    # None only where the platform has no `st_blocks`; a directory that could
+    # not be stat'ed contributes zero and is counted as inaccessible instead
+    # -- see `scheduler._scan_open_directory`, which this mirrors.
+    if st is None:
+        dir_allocated: int | None = 0
+    else:
+        dir_blocks = getattr(st, "st_blocks", None)
+        dir_allocated = None if dir_blocks is None else max(0, dir_blocks) * 512
+
     filesystem_type = lookup_excluded_mount(
         path, excluded_mounts or {}, canonical_paths=canonical_paths
     )
@@ -274,8 +285,8 @@ def scan_directory(
 
     if max_depth is not None and depth >= max_depth:
         node.depth_limited = True
-        node.allocated_size = 0
-        node.own_allocated_size = 0
+        node.allocated_size = dir_allocated
+        node.own_allocated_size = dir_allocated
         return node
 
     # Cycle guard: a bind mount (or container rootfs) can make a
@@ -303,7 +314,7 @@ def scan_directory(
         return node
 
     own_size = 0
-    own_allocated: int | None = 0
+    own_allocated: int | None = dir_allocated
     file_count = 0
     dir_count = 0
     inaccessible = 0

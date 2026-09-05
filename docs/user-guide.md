@@ -64,10 +64,15 @@ visualizations on the right:
 
 | Metric | Measures |
 |--------|----------|
-| Logical | `st_size` — apparent payload bytes (default) |
-| Allocated | `st_blocks × 512` — includes every hardlink path |
-| Unique | Allocated, but each hardlinked inode counted once |
+| Logical | `st_size` of files and symlinks — apparent payload bytes (default). A directory's own `st_size` is not counted. |
+| Allocated | `st_blocks × 512` of every file, symlink **and directory**, the scanned root included — what `du` reports. Every hardlink path counts. |
+| Unique | Allocated, but each hardlinked inode counted once. Directories are never duplicates, so their blocks always count. |
 | Files | Regular-file and symlink count |
+
+Directories cost storage — 4 KiB apiece on ext4, and on xfs once their names
+outgrow the inode — so Allocated and Unique include them. On a tree with
+hardlinks `du -s` matches Unique, not Allocated: `du` deduplicates by inode
+too.
 
 Platforms without `st_blocks` show Allocated/Unique as "Unavailable," never
 zero.

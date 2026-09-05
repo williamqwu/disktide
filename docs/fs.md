@@ -86,7 +86,7 @@ os.close(fd)                     # two descriptors in flight per worker, no more
   os.stat(node.path)             # symlinks only: classify target type
 ```
 
-**Metadata captured per entry:** logical payload (`st_size`), allocated payload (`st_blocks * 512` when available), device/inode identity (`st_dev`, `st_ino`), hard link count (`st_nlink`), modification time (`st_mtime`), and type. For symlinks the target path and target type are populated lazily (see Symlink Handling below).
+**Metadata captured per entry, directories included:** logical payload (`st_size`), allocated payload (`st_blocks * 512` when available -- a directory's own blocks come from the `fstat` of the descriptor it was opened on, so they cost no extra syscall), device/inode identity (`st_dev`, `st_ino`), hard link count (`st_nlink`), modification time (`st_mtime`), and type. For symlinks the target path and target type are populated lazily (see Symlink Handling below).
 
 **Metadata NOT captured:** permissions, ownership (uid/gid), extended attributes, ACLs, creation time, filesystem compression ratio, reflink sharing, or snapshot-exclusive physical blocks.
 
@@ -328,7 +328,17 @@ Logical uses `st_size`; Allocated uses `st_blocks * 512`. A 1 GB sparse file wit
 
 Logical and Allocated count each visible path independently. Unique groups entries by `(st_dev, st_ino)` and assigns the allocated bytes to the lexicographically first absolute path in the scan root; other links show zero Unique bytes and identify the owner. This is deterministic across worker counts. Equal inode numbers on different devices are not deduplicated.
 
-Directory metadata blocks are not included in the 0.2.0 metrics, so Allocated/Unique can differ slightly from `du`, which also accounts for directory blocks.
+### Directory Blocks
+
+A directory is a file too: it holds names, and the filesystem charges it blocks for them. On ext4 that is 4 KiB for any directory at all; on xfs a small directory's names live in the inode and cost nothing, and one that outgrows it takes 4 KiB and then more (a 300-entry directory measures 12,288 bytes).
+
+- **Logical** counts files and symlinks only. A directory's own `st_size` is *not* added: on ext4 it is 4,096 whatever the directory holds, and on xfs it is a byte count of the names themselves (24 for a directory holding two of them). Neither is payload anybody stored.
+- **Allocated** is `st_blocks * 512` of every file, symlink **and directory** in the subtree, the node itself included. This is what `du` reports, and a scan of a tree with no files in it is no longer zero.
+- **Unique** is the same after hardlink deduplication. A directory is never a hardlink duplicate -- no second path resolves to one directory inode -- so directory blocks pass through the dedup unchanged and appear once, under the directory that owns them.
+
+`du` deduplicates hardlinks by inode, so on a tree with hardlinks `du -s --block-size=1` matches **Unique**, and Allocated is larger by the duplicated bytes.
+
+A directory's *own* allocated bytes (`own_allocated_size`, the "Own allocated" row in the details panel) are its own blocks plus its direct files' and symlinks'. Sub-directories therefore no longer add up to their parent in the Allocated and Unique metrics -- the difference is the parent's own blocks -- exactly as they already did not in Logical, where the difference is the parent's direct files.
 
 ### Network Filesystems (NFS, CIFS, sshfs)
 

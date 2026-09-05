@@ -37,10 +37,19 @@ class LeafNode:
         size: Inclusive subtree size in bytes.
         own_size: The entry's bytes for files/symlinks; for directories,
             the sum of direct file and symlink bytes.
-        allocated_size: Inclusive allocated payload bytes. None when the
-            platform cannot provide st_blocks.
-        unique_allocated_size: Inclusive allocated payload bytes after
-            deterministic hardlink deduplication. None until global
+        allocated_size: Inclusive allocated bytes -- st_blocks * 512 of
+            every file, symlink and directory in the subtree, this node
+            included, which is what `du` reports. None when the platform
+            cannot provide st_blocks, and never for any other reason: a
+            subtree that could not be read is reported by the coverage
+            counters, not by erasing the number.
+        own_allocated_size: This node's own blocks; for a directory, its
+            own blocks plus its direct files' and symlinks'. A directory
+            costs storage for the names it holds, so this is non-zero for
+            a directory with no entries at all.
+        unique_allocated_size: Inclusive allocated bytes after deterministic
+            hardlink deduplication. Only leaves can share an inode, so a
+            directory's own blocks are never deduplicated. None until global
             accounting is complete or allocated size is unavailable.
         file_count: Number of files in subtree.
         is_dir: Whether this node is a directory.
@@ -193,7 +202,13 @@ class LeafNode:
 
     @property
     def own_measurements(self) -> StorageMeasurements:
-        """Return direct-entry measurements for this node."""
+        """Return direct-entry measurements for this node.
+
+        "Direct" in the sense the aggregates use: nothing from a child
+        directory's subtree. A directory's own allocated and unique bytes
+        include its *own* blocks alongside its direct files' and symlinks',
+        because the directory is an entry on disk too.
+        """
         return StorageMeasurements(
             logical_bytes=self.own_size,
             allocated_bytes=self.own_allocated_size,
