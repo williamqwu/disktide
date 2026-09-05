@@ -21,7 +21,11 @@ or environment variable that lifts it:
   home     -- the resolved path is under `$HOME`. Lifted by `--allow-home`.
   network  -- the filesystem under it is one of NETWORK_FSTYPES, decided by
               longest-prefix match against `/proc/mounts`. Lifted by
-              `--allow-network`. Skipped where `/proc/mounts` is absent.
+              `--allow-network`, and by `$DISKTIDE_SCRATCH` naming a root
+              the path is under: a site's scratch is a parallel filesystem
+              by design and is where large fixtures belong, so refusing the
+              one directory provided for the job only taught people to pass
+              the flag every time. Skipped where `/proc/mounts` is absent.
   headroom -- there is not room for the entries the caller says it will
               create. **No flag lifts this one**; being sure you want to
               write to your home does not create inodes.
@@ -35,7 +39,10 @@ asked as well -- and never fails closed, because CI runners do not have it.
 The default destination, when a caller passes no path, is
 `$DISKTIDE_SCRATCH` (or `tempfile.gettempdir()`) `/disktide-<user>/<label>`,
 and it goes through the same three checks as an explicit one: a `TMPDIR`
-under `~` is refused exactly like a target typed out by hand.
+under `~` is refused exactly like a target typed out by hand. Setting
+`$DISKTIDE_SCRATCH` buys exactly one thing -- the network refusal, and only
+for paths under that root. A scratch root under `$HOME` is still refused
+without `--allow-home`, and no amount of configuration creates inodes.
 
 Standard library only, and importable from a script in `tool/` because a
 script's own directory is `sys.path[0]`. Tests load it by file path.
@@ -169,10 +176,59 @@ def filesystem_type(path) -> tuple[str, str] | None:
 
 
 def is_network_path(path) -> tuple[str, str] | None:
-    """`(mount point, fstype)` when `path` sits on a network filesystem."""
+    """`(mount point, fstype)` when `path` sits on a network filesystem.
+
+    A statement about the filesystem, not a verdict: `network_refusal` is
+    the one that decides whether being here is a reason to stop.
+    """
     found = filesystem_type(path)
     if found is not None and found[1] in NETWORK_FSTYPES:
         return found
+    return None
+
+
+def _resolve(path) -> Path:
+    """`path` with `~` and symlinks resolved, or the closest thing to it."""
+    try:
+        return Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return Path(path)
+
+
+def trusted_root() -> Path | None:
+    """The resolved `$DISKTIDE_SCRATCH`, or None when it names nothing.
+
+    Resolved, because the comparison in `network_refusal` is against a
+    resolved target and `DISKTIDE_SCRATCH=~/../scratch` must mean the
+    directory, not the spelling.
+    """
+    named = os.environ.get(SCRATCH_ENV)
+    return _resolve(named) if named else None
+
+
+def network_refusal(path, rows: list[tuple[str, str, str]] | None = None):
+    """`(mount point, fstype)` when `path` is a network path to *refuse*.
+
+    None where `is_network_path` would also answer None -- and, on top of
+    that, wherever the path lies under `$DISKTIDE_SCRATCH`. Somebody set
+    that variable on purpose, at a directory chosen for exactly this: on an
+    HPC account the designated place for a large fixture is the site's
+    scratch (`/fs/scratch/...` here, gpfs, no inode quota), which is a
+    parallel filesystem and so matches NETWORK_FSTYPES. A guard that refuses
+    the one directory provided for the job does not protect anything; it
+    teaches people to type `--allow-network` on every call, which is the
+    flag that would also have let a million files onto the home.
+
+    Network only. The home refusal and the headroom check do not consult
+    this, and a scratch root under `$HOME` is refused like any other path.
+    """
+    resolved = _resolve(path)
+    root = trusted_root()
+    if root is not None and _within(resolved, root):
+        return None
+    row = mount_for(resolved, rows)
+    if row is not None and row[2] in NETWORK_FSTYPES:
+        return (row[1], row[2])
     return None
 
 
@@ -361,15 +417,16 @@ def claim(
         )
 
     rows = mount_rows()
-    network = mount_for(resolved, rows) if rows else None
-    if (network is not None and network[2] in NETWORK_FSTYPES
-            and not allow_network):
+    network = network_refusal(resolved, rows)
+    if network is not None and not allow_network:
         raise ScratchRefused(
-            f"{resolved} is on {network[1]}, a {network[2]} filesystem, and "
+            f"{resolved} is on {network[0]}, a {network[1]} filesystem, and "
             f"{source} would create up to {entries:,} entries there. Network "
             f"filesystems are slow to fill, slower to empty, and shared; "
-            f"point it at local disk (/tmp, or ${SCRATCH_ENV}), or pass "
-            f"--allow-network if you are sure."
+            f"point it at local disk (/tmp), or point ${SCRATCH_ENV} at it "
+            f"to trust it -- a site's scratch is parallel by design and is "
+            f"where fixtures belong -- or pass --allow-network if you are "
+            f"sure."
         )
 
     required = required_entries(entries)
@@ -463,8 +520,13 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--allow-home", action="store_true",
                         help="permit a path under $HOME")
-    parser.add_argument("--allow-network", action="store_true",
-                        help="permit a path on a network filesystem")
+    parser.add_argument(
+        "--allow-network", action="store_true",
+        help=(
+            f"permit a path on a network filesystem (a path under "
+            f"${SCRATCH_ENV} is trusted already)"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.entries < 0:
         parser.error("--entries must not be negative")

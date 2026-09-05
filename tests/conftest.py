@@ -57,10 +57,15 @@ def network_tmp_refusal(root) -> str | None:
     A *network* temp root is not fine -- the suite creates thousands of small
     files per run, and on the quota'd NFS home this project is developed on
     that is a measurable slice of an account's inode budget, spent silently.
+
+    `scratchguard.network_refusal`, not `is_network_path`, so the rule is
+    the guard's own one and not a second copy of it: a `TMPDIR` under
+    `$DISKTIDE_SCRATCH` is a temp root somebody chose on purpose, and a
+    site's scratch is a parallel filesystem by design.
     """
     if os.environ.get(ALLOW_NETWORK_TMP_ENV) == "1":
         return None
-    found = scratchguard.is_network_path(root)
+    found = scratchguard.network_refusal(root)
     if found is None:
         return None
     mount, fstype = found
@@ -69,8 +74,10 @@ def network_tmp_refusal(root) -> str | None:
         f"({fstype}) -- a network filesystem. This suite creates thousands "
         f"of small files per run and deletes them again; a network home is "
         f"usually quota'd by inode as well as by size. Fix it with "
-        f"`export TMPDIR=/tmp`, or pass `--basetemp=/tmp/pytest-disktide`. "
-        f"Set {ALLOW_NETWORK_TMP_ENV}=1 to run here anyway."
+        f"`export TMPDIR=/tmp`, or pass `--basetemp=/tmp/pytest-disktide`, "
+        f"or point `${scratchguard.SCRATCH_ENV}` at the scratch filesystem "
+        f"your site gave you for this. Set {ALLOW_NETWORK_TMP_ENV}=1 to run "
+        f"here anyway."
     )
 
 

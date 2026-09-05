@@ -215,6 +215,140 @@ def test_a_missing_proc_mounts_skips_the_network_check(guard, tmp_path, monkeypa
     assert guard.claim(tmp_path / "fixture", entries=10).is_dir()
 
 
+# --- a configured scratch root ---------------------------------------------
+
+
+def _gpfs_scratch(guard, tmp_path, monkeypatch) -> Path:
+    """A gpfs mount with a scratch root on it, the shape of `/fs/scratch`."""
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    monkeypatch.setattr(guard, "PROC_MOUNTS", _mounts(tmp_path, [
+        ("/dev/root", "/", "xfs"),
+        ("scratch", str(tmp_path / "fs"), "gpfs"),
+    ]))
+    return tmp_path / "fs" / "scratch" / "alice"
+
+
+def test_disktide_scratch_is_trusted_for_the_network_check(
+    guard, tmp_path, monkeypatch
+):
+    """`/fs/scratch` is gpfs, and is where large fixtures belong."""
+    scratch = _gpfs_scratch(guard, tmp_path, monkeypatch)
+    monkeypatch.setenv("DISKTIDE_SCRATCH", str(scratch))
+    target = scratch / "homelike"
+
+    assert guard.claim(target, entries=10) == target
+    assert target.is_dir()
+    # The report about the filesystem is unchanged; only the verdict is.
+    assert guard.is_network_path(target) == (str(tmp_path / "fs"), "gpfs")
+    assert guard.network_refusal(target) is None
+
+
+def test_the_same_target_is_refused_when_the_variable_is_unset(
+    guard, tmp_path, monkeypatch
+):
+    """Trust comes from the configuration, not from the fstype being gpfs."""
+    scratch = _gpfs_scratch(guard, tmp_path, monkeypatch)
+    target = scratch / "homelike"
+
+    assert guard.network_refusal(target) == (str(tmp_path / "fs"), "gpfs")
+    with pytest.raises(guard.ScratchRefused) as excinfo:
+        guard.claim(target, entries=10)
+
+    assert "gpfs" in excinfo.value.message
+    assert f"${guard.SCRATCH_ENV} at it to trust it" in excinfo.value.message
+    assert not target.exists()
+
+
+def test_a_sibling_outside_the_trusted_root_is_still_refused(
+    guard, tmp_path, monkeypatch
+):
+    """The trust is a subtree, not the mount the subtree happens to sit on."""
+    scratch = _gpfs_scratch(guard, tmp_path, monkeypatch)
+    monkeypatch.setenv("DISKTIDE_SCRATCH", str(scratch))
+    target = tmp_path / "fs" / "scratch" / "somebody-else" / "homelike"
+
+    with pytest.raises(guard.ScratchRefused) as excinfo:
+        guard.claim(target, entries=10)
+
+    assert "gpfs" in excinfo.value.message
+    assert not target.exists()
+
+
+def test_the_default_root_is_trusted_too(guard, tmp_path, monkeypatch):
+    """`target is None` lands under the variable, so it qualifies by itself."""
+    scratch = _gpfs_scratch(guard, tmp_path, monkeypatch)
+    monkeypatch.setenv("DISKTIDE_SCRATCH", str(scratch))
+
+    path = guard.scratch_dir("homelike-42", entries=10)
+
+    assert path.is_dir()
+    assert path.parent.parent == scratch
+
+
+def test_a_trusted_root_under_home_is_still_refused(
+    guard, tmp_path, monkeypatch
+):
+    """`DISKTIDE_SCRATCH=~/scratch` lifts the network check, and no more."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DISKTIDE_SCRATCH", str(home / "scratch"))
+    monkeypatch.setattr(guard, "PROC_MOUNTS", _mounts(tmp_path, [
+        ("192.0.2.12:/PRJ0042", str(tmp_path), "nfs4"),
+    ]))
+    target = home / "scratch" / "homelike"
+
+    with pytest.raises(guard.ScratchRefused) as excinfo:
+        guard.claim(target, entries=10)
+
+    assert "is under $HOME" in excinfo.value.message
+    assert "--allow-home" in excinfo.value.message
+    assert not target.exists()
+
+
+def test_a_trusted_root_does_not_lift_headroom(guard, tmp_path, monkeypatch):
+    """Naming a filesystem as yours does not create inodes on it."""
+    scratch = _gpfs_scratch(guard, tmp_path, monkeypatch)
+    monkeypatch.setenv("DISKTIDE_SCRATCH", str(scratch))
+    _pin_statvfs(monkeypatch, guard, tmp_path, favail=500)
+    target = scratch / "homelike"
+
+    with pytest.raises(guard.ScratchRefused) as excinfo:
+        guard.claim(target, entries=5_000)
+
+    message = excinfo.value.message
+    assert "statvfs" in message
+    assert "No flag lifts this" in message
+    assert not target.exists()
+
+
+def test_the_trusted_root_is_resolved_before_it_is_compared(
+    guard, tmp_path, monkeypatch
+):
+    """`~/...` and a relative path name a directory, not a spelling."""
+    scratch = _gpfs_scratch(guard, tmp_path, monkeypatch)
+    scratch.mkdir(parents=True)
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fs"))
+    monkeypatch.setenv("DISKTIDE_SCRATCH", "~/scratch/alice")
+    assert guard.trusted_root() == scratch
+
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    monkeypatch.chdir(scratch.parent)
+    monkeypatch.setenv("DISKTIDE_SCRATCH", "alice")
+    assert guard.trusted_root() == scratch
+
+    target = scratch / "homelike"
+    assert guard.claim(target, entries=10) == target
+
+
+def test_an_empty_variable_names_no_trusted_root(guard, monkeypatch):
+    """`DISKTIDE_SCRATCH=` is unset, not "trust the whole filesystem"."""
+    monkeypatch.setenv("DISKTIDE_SCRATCH", "")
+
+    assert guard.trusted_root() is None
+
+
 # --- headroom --------------------------------------------------------------
 
 
@@ -668,6 +802,27 @@ def test_conftest_allows_a_local_temp_root(tmp_path, monkeypatch):
     )
 
     assert conftest.network_tmp_refusal(tmp_path) is None
+
+
+def test_conftest_trusts_a_temp_root_under_disktide_scratch(
+    tmp_path, monkeypatch
+):
+    """`TMPDIR=/fs/scratch/...` is a choice, not the mistake the check hunts."""
+    from tests import conftest
+
+    monkeypatch.delenv(conftest.ALLOW_NETWORK_TMP_ENV, raising=False)
+    monkeypatch.setenv("DISKTIDE_SCRATCH", str(tmp_path / "scratch"))
+    monkeypatch.setattr(
+        conftest.scratchguard, "PROC_MOUNTS",
+        _mounts(tmp_path, [("scratch", str(tmp_path), "gpfs")]),
+    )
+
+    assert conftest.network_tmp_refusal(
+        tmp_path / "scratch" / "pytest-of-alice"
+    ) is None
+    # A temp root the variable does not cover is refused exactly as before.
+    outside = conftest.network_tmp_refusal(tmp_path / "pytest-of-alice")
+    assert outside is not None and "gpfs" in outside
 
 
 def test_conftest_honours_the_escape_hatch(tmp_path, monkeypatch):

@@ -341,10 +341,17 @@ Three refusals, each naming the path, the reason, and what lifts it:
 
 - **`$HOME`** -- lifted by `--allow-home`. A network home is usually quota'd
   by inode as well as by size, and this writes close to a million entries.
-- **network filesystems** -- lifted by `--allow-network`. The mount is found
-  by longest-prefix match against `/proc/mounts`, which matters: on an HPC
-  login node `/users` is `autofs` and the `nfs4` that counts is mounted under
-  it, so a first-match walk answers with the wrong filesystem.
+- **network filesystems** -- lifted by `--allow-network`, and by
+  `$DISKTIDE_SCRATCH`. The mount is found by longest-prefix match against
+  `/proc/mounts`, which matters: on an HPC login node `/users` is `autofs`
+  and the `nfs4` that counts is mounted under it, so a first-match walk
+  answers with the wrong filesystem. A path under `$DISKTIDE_SCRATCH` needs
+  no flag at all: the designated place for a large fixture on this cluster is
+  `/fs/scratch/...`, which is gpfs with no inode quota -- a parallel
+  filesystem, so it matches the fstype list, and refusing the one directory
+  the site provides for the job only taught people to type `--allow-network`
+  on every call. The trust is network-only: a `$DISKTIDE_SCRATCH` under `~`
+  is still refused without `--allow-home`, and headroom is still checked.
 - **inode headroom** -- **no flag lifts this one.** `os.statvfs` alone is not
   enough: on the quota'd NFS home this was written for it reports orders of magnitude more
   free inodes while `quota` reports far fewer left, so `quota -w -u -p` is asked
@@ -354,14 +361,16 @@ Three refusals, each naming the path, the reason, and what lifts it:
 With no target the tree goes to `$DISKTIDE_SCRATCH` (or `$TMPDIR`)
 `/disktide-<user>/<label>`, through the same three checks -- a `TMPDIR` under
 `~`, which is common on HPC accounts, is refused exactly like a path typed out
-by hand. Point `DISKTIDE_SCRATCH` at local disk once and every generator
-follows.
+by hand. Point `DISKTIDE_SCRATCH` at local disk -- or at your site's
+scratch -- once, and every generator follows.
 
 The test suite applies the network half of the same check to its own temp
 root: `tmp_path` follows `TMPDIR`, so a network `TMPDIR` would put every tree
 the suite builds on the quota'd filesystem. It exits 4 before collection with
 the fix in the message (`export TMPDIR=/tmp`), or runs anyway with
-`DISKTIDE_ALLOW_NETWORK_TMP=1`.
+`DISKTIDE_ALLOW_NETWORK_TMP=1`. It asks the guard the same question the
+generators do, so a `TMPDIR` under `$DISKTIDE_SCRATCH` is accepted for the
+same reason a fixture there is.
 
 Then A/B against a *frozen* copy of the revision you are comparing to, so
 neither side moves under you:
