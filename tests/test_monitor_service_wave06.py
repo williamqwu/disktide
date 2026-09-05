@@ -335,3 +335,115 @@ def test_read_only_v4_repository_shows_history_mode_without_management_crash(
         assert dashboard.monitors == ()
     finally:
         repository.close()
+
+
+def test_a_lease_is_not_taken_after_the_host_was_told_to_stop(
+    repository, tmp_path
+):
+    """`_acquire_session_lease` is the one writer of WAITING with no stop guard.
+
+    The monitor screen stops the host with `stop_session(wait=False)` -- it
+    cannot afford a ten-second join on the UI thread -- so `_release_all_leases`
+    runs beside a session thread that is still inside a loop iteration it
+    entered before the flag went up. A lease taken after that release is one
+    nothing releases afterwards, because the loop's own `finally` finds
+    `_held_leases` empty by then.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    service = MonitorService(repository, lease_seconds=60)
+    monitor = service.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    service._session_stop.set()
+
+    assert service._acquire_session_lease(monitor.id) is False
+
+    assert monitor.id not in service._held_leases
+    status = repository.get_monitor_status(monitor.id)
+    assert status.activity is MonitorActivityState.NO_HOST
+    assert status.host_id is None
+    assert status.lease_expires_at is None
+    # And the row went back too, rather than being left for the lease TTL:
+    # another host can take the monitor straight away.
+    now = datetime.now(timezone.utc)
+    assert repository.acquire_monitor_lease(
+        monitor.id,
+        host_id="somebody-else",
+        host_type="test",
+        now=now,
+        expires_at=now + timedelta(seconds=60),
+    )
+
+
+def test_stopping_without_waiting_leaves_no_host_behind(
+    repository, tmp_path, monkeypatch
+):
+    """The whole race, driven to the one interleaving that used to lose.
+
+    The session thread is suspended between taking a lease and writing the
+    WAITING that goes with it; the stop lands in that window. Before the guard
+    in `_acquire_session_lease` the monitor was left reading "waiting" against
+    a host id whose process had gone -- the state CI saw on a two-core runner
+    -- until the lease expired.
+
+    `_held_leases.clear()` here is what `_release_all_leases` does first, and
+    it is what makes the loop retake the lease on its next pass; the gate is an
+    `Event`, so nothing in this test is timed.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload.bin").write_bytes(b"x" * 8)
+    service = MonitorService(repository, lease_seconds=60)
+    monitor = service.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+
+    armed = threading.Event()
+    in_window = threading.Event()
+    resume = threading.Event()
+    real_save = repository.save_monitor_status
+
+    def gated_save(status):
+        if (
+            armed.is_set()
+            and status.activity is MonitorActivityState.WAITING
+            and threading.current_thread() is service._session_thread
+        ):
+            armed.clear()
+            in_window.set()
+            assert resume.wait(10), "the stop never arrived"
+        real_save(status)
+
+    monkeypatch.setattr(repository, "save_monitor_status", gated_save)
+    service.start_session(host_type="test")
+    try:
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if repository.get_monitor_status(monitor.id).last_success_at:
+                break
+            time.sleep(0.02)
+        assert repository.get_monitor_status(monitor.id).last_success_at
+
+        armed.set()
+        with service._condition:
+            service._held_leases.clear()
+            service._condition.notify_all()
+        assert in_window.wait(10), "the session thread never retook the lease"
+
+        service.stop_session(wait=False)
+        resume.set()
+        deadline = time.time() + 15
+        while service.session_running and time.time() < deadline:
+            time.sleep(0.02)
+        assert not service.session_running
+        # Read before the cleanup below, which takes the same release path.
+        status = repository.get_monitor_status(monitor.id)
+    finally:
+        resume.set()
+        service.stop_session(wait=True)
+
+    assert status.activity is MonitorActivityState.NO_HOST
+    assert status.host_id is None
+    assert status.host_type is None
+    assert status.lease_expires_at is None

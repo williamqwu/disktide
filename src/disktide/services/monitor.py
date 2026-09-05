@@ -2586,6 +2586,32 @@ class MonitorService:
         if status.next_due_at is None:
             status.next_due_at = now
         self._repository.save_monitor_status(status)
+        # Asked after the write rather than before it, because the write is
+        # what has to be undone. The monitor screen's stop button calls
+        # `stop_session(wait=False)` -- it cannot hold the UI thread for a
+        # ten-second join -- so `_release_all_leases` runs beside a session
+        # thread still inside a loop iteration it entered before the flag went
+        # up. When that release lands between the two statements above it
+        # clears `_held_leases` before this thread is in it and writes its
+        # no-host status before this one, so the WAITING above is the last
+        # word: the session loop's own `finally` then finds nothing left to
+        # release, and the monitor reads "waiting" against a host id whose
+        # process is gone until the lease expires. Every other writer of
+        # WAITING already asks this question; this one has to ask it late.
+        with self._condition:
+            lost = (
+                self._session_stop.is_set()
+                or monitor_id not in self._held_leases
+            )
+            if lost:
+                self._held_leases.discard(monitor_id)
+        if lost:
+            # Outside the lock, the way `_release_all_leases` releases outside
+            # it. This is also what puts the status back to no-host.
+            self._repository.release_monitor_lease(
+                monitor_id, host_id=self._host_id
+            )
+            return False
         return True
 
     def _acquire_one_shot_lease(self, monitor_id: int) -> bool:
