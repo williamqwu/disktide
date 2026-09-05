@@ -218,6 +218,42 @@ def test_tui_refuses_a_non_interactive_terminal_instead_of_hanging():
     assert "disktide scan PATH" in result.stderr
 
 
+# --- coverage the report has to admit to -----------------------------------
+
+
+def test_max_depth_zero_says_it_scanned_nothing(tmp_path):
+    """It used to be byte-identical to scanning an empty directory."""
+    (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "inner.bin").write_bytes(b"y" * 8192)
+
+    document = CliRunner().invoke(
+        cli, ["scan", str(tmp_path), "--json", "-d", "0"]
+    )
+    assert document.exit_code == 0, document.output
+    payload = json.loads(document.stdout)
+    assert payload["totals"]["logical_bytes"] == 0
+    assert payload["coverage"]["depth_limited_subtrees"] == 1
+
+    report = CliRunner().invoke(cli, ["scan", str(tmp_path), "-d", "0"])
+    assert report.exit_code == 0, report.output
+    assert "Scoped out: 0 policy-excluded, 1 depth-limited" in report.stdout
+
+
+def test_max_depth_one_is_unchanged(tmp_path):
+    """Only the root's own scoping was missing; descendants always counted."""
+    (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "inner.bin").write_bytes(b"y" * 8192)
+
+    result = CliRunner().invoke(cli, ["scan", str(tmp_path), "--json", "-d", "1"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["totals"]["logical_bytes"] == 4096
+    assert payload["coverage"]["depth_limited_subtrees"] == 1
+
+
 # --- launching the TUI on a path -------------------------------------------
 
 

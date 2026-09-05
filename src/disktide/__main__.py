@@ -719,6 +719,17 @@ def scan(
         ctx.exit(130 if run.status is ScanStatus.CANCELLED else 1)
 
     root = run.root
+    # The two subtree counters count *descendants*, so a root that is itself
+    # scoped out contributes nothing to either: `scan --max-depth 0` reported
+    # `depth_limited_subtrees: 0` beside all-zero totals and no "Scoped out"
+    # line at all -- byte-identical to scanning an empty directory, for a
+    # tree of any size. The scheduler does mark the root (`depth_limited` /
+    # `excluded` on the node itself); only the report was not reading it.
+    # `SnapshotRecord.from_run` has counted it this way all along.
+    excluded_subtrees = root.excluded_subtree_count + int(root.excluded)
+    depth_limited_subtrees = (
+        root.depth_limited_subtree_count + int(root.depth_limited)
+    )
     metric = run.request.metric.value
     status_label = "partial" if run.partial else "complete"
     duplicate_links = sum(1 for node in root.walk() if node.is_hardlink_duplicate)
@@ -751,8 +762,8 @@ def scan(
             },
             "coverage": {
                 "inaccessible_subtrees": root.inaccessible_subtree_count,
-                "excluded_subtrees": root.excluded_subtree_count,
-                "depth_limited_subtrees": root.depth_limited_subtree_count,
+                "excluded_subtrees": excluded_subtrees,
+                "depth_limited_subtrees": depth_limited_subtrees,
                 "hardlink_duplicates": duplicate_links,
                 "vanished_entries": root.vanished_subtree_count,
             },
@@ -827,10 +838,10 @@ def scan(
             f"  Changed during scan: {root.vanished_subtree_count:,} "
             "entries vanished"
         )
-    if root.excluded_subtree_count or root.depth_limited_subtree_count:
+    if excluded_subtrees or depth_limited_subtrees:
         click.echo(
-            f"  Scoped out: {root.excluded_subtree_count:,} policy-excluded, "
-            f"{root.depth_limited_subtree_count:,} depth-limited"
+            f"  Scoped out: {excluded_subtrees:,} policy-excluded, "
+            f"{depth_limited_subtrees:,} depth-limited"
         )
     if duplicate_links:
         click.echo(f"  Hardlinks deduplicated in Unique: {duplicate_links:,}")

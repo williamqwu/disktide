@@ -300,6 +300,11 @@ Run status goes to stderr and the report to stdout, so closing stderr
 (`disktide scan /path 2>&- > report.txt`) costs the narration and keeps the
 report.
 
+`--max-depth 0` scans nothing below the root and says so: totals are zero
+and the report counts the root itself as one depth-limited subtree
+(`Scoped out: 0 policy-excluded, 1 depth-limited`, `coverage.depth_limited_subtrees: 1`),
+so it is distinguishable from scanning an empty directory.
+
 A filename is bytes, and not every filename on a filesystem is valid UTF-8.
 The text report renders the undecodable ones as their raw bytes -- a
 directory named `b"\xff\xfe"` prints as `\xff\xfe/` -- rather than failing
