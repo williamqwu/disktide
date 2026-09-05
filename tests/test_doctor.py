@@ -674,3 +674,61 @@ def test_show_paths_still_shows_them(tmp_path, monkeypatch):
     text = f"{values['XDG_DATA_HOME']}/disktide/data.db: broken"
 
     assert _redact_text(text, True) == text
+
+
+# --- one database, opened once ---------------------------------------------
+
+
+def test_the_report_opens_the_database_once(tmp_path, monkeypatch):
+    """It used to open it twice, so a bad file complained twice."""
+    from disktide.storage.database import Database
+
+    _set_xdg(monkeypatch, tmp_path)
+    opened: list[str] = []
+
+    class CountingDatabase(Database):
+        def connect(self):
+            opened.append(self.path)
+            return super().connect()
+
+    build_doctor_report(
+        adapter=PortablePlatformAdapter("Linux"),
+        database_factory=CountingDatabase,
+    )
+
+    assert len(opened) == 1, opened
+
+
+def test_the_schema_line_says_when_the_number_is_the_memory_fallback(
+    tmp_path, monkeypatch
+):
+    """`Schema: 10 / 10` beside `[DEGRADED]` read as a contradiction.
+
+    The fallback database is created fresh in memory, so its schema is
+    always current and says nothing about the file that could not be opened.
+    """
+    _set_xdg(monkeypatch, tmp_path)
+    unwritable = tmp_path / "sensitive-data"
+    unwritable.mkdir(parents=True, exist_ok=True)
+    unwritable.chmod(0o555)
+    try:
+        report = build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+    finally:
+        unwritable.chmod(0o755)
+
+    database = report.to_dict()["database"]
+    assert database["status"] == "degraded"
+    assert database["schema_source"] == "in-memory fallback"
+    assert "Schema: 10 / 10 (in-memory fallback)" in render_doctor_report(report)
+    # And the integrity check must not say `ok` about the wrong database.
+    assert database["integrity"]["status"] != "ok"
+
+
+def test_a_healthy_database_does_not_carry_the_fallback_label(
+    tmp_path, monkeypatch
+):
+    _set_xdg(monkeypatch, tmp_path)
+    report = build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+
+    assert report.to_dict()["database"]["schema_source"] == "database"
+    assert "in-memory fallback" not in render_doctor_report(report)

@@ -278,6 +278,10 @@ Reports version, Python/Textual versions, terminal geometry, colour depth,
 database status, platform capabilities, watch backend, scan policy, and
 which scanner backend is live (see *Scanner backend* below).
 
+When the database cannot be opened, disktide falls back to an in-memory one
+so the explorer still works; the `Schema:` line then says `(in-memory
+fallback)`, because that number describes the fallback and not the file.
+
 The `Integrity` line is a `PRAGMA quick_check` over the whole database. It
 reads every page, so above 256 MiB it is reported as skipped and
 `--check-integrity` is what asks for it anyway. Nothing else runs it: opening

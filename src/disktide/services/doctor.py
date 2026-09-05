@@ -127,11 +127,29 @@ def build_doctor_report(
         config_status = "unavailable"
         config_reason = f"configuration could not be loaded: {type(exc).__name__}: {exc}"
 
-    database_report = _database_report(
-        database_factory,
-        show_paths=show_paths,
-        check_integrity=check_integrity,
-    )
+    # One connection for the whole report. Both the storage section and the
+    # cleanup-safety section need the database, and each used to open its
+    # own: against a file that cannot be opened, that ran the read-only
+    # recovery twice and logged "Could not open database ..." twice, which
+    # reads like two separate problems.
+    report_database, database_error = _open_report_database(database_factory)
+    try:
+        database_report = _database_report(
+            report_database,
+            database_error,
+            show_paths=show_paths,
+            check_integrity=check_integrity,
+        )
+        cleanup_safety = _cleanup_safety_report(
+            report_database,
+            show_paths=show_paths,
+        )
+    finally:
+        if report_database is not None:
+            try:
+                report_database.close()
+            except Exception:
+                pass
     catalog = get_rule_catalog(
         disabled_packs=config.cleanup.disabled_rule_packs,
         user_directory=config_path.parent / "cleanup-rules",
@@ -162,10 +180,6 @@ def build_doctor_report(
             for issue in catalog.issues
         ],
     }
-    cleanup_safety = _cleanup_safety_report(
-        database_factory,
-        show_paths=show_paths,
-    )
 
     metric_items = {
         "logical": capabilities.get(CapabilityId.LOGICAL_METRIC).to_dict(),
@@ -305,13 +319,7 @@ def render_doctor_report(report: DoctorReport) -> str:
         "",
         "Database",
         f"  [{str(database['status']).upper()}] {database['reason']}",
-        f"  Schema: {database['schema_version']} / "
-        f"{database['expected_schema_version']}"
-        + (
-            " (newer than this build)"
-            if database.get("schema_state") == SCHEMA_NEWER
-            else ""
-        ),
+        _schema_line(database),
         f"  Writable persistence: {database['writable']}",
         _integrity_line(database.get("integrity")),
     ])
@@ -622,17 +630,16 @@ def _render_colour_block(colour: object) -> list[str]:
 
 
 def _cleanup_safety_report(
-    database_factory: Callable[[], Database],
+    database: Database | None,
     *,
     show_paths: bool,
 ) -> dict[str, object]:
     capabilities = mutation_capabilities().to_dict()
     roots: set[Path] = set()
     issues: list[str] = []
-    database = None
     try:
-        database = database_factory()
-        database.connect()
+        if database is None:
+            raise RuntimeError("the database could not be opened")
         list_roots = getattr(database, "list_quarantine_roots", None)
         if callable(list_roots):
             roots.update(Path(item) for item in list_roots(limit=1000))
@@ -908,16 +915,28 @@ def _backup_report(database_path: Path, *, show_paths: bool) -> dict[str, object
     }
 
 
-def _database_report(
+def _open_report_database(
     database_factory: Callable[[], Database],
+) -> tuple[Database | None, Exception | None]:
+    """Open the database once, for every section of the report that wants it."""
+    try:
+        database = database_factory()
+        database.connect()
+    except Exception as exc:
+        return None, exc
+    return database, None
+
+
+def _database_report(
+    database: Database | None,
+    open_error: Exception | None = None,
     *,
     show_paths: bool,
     check_integrity: bool = False,
 ) -> dict[str, object]:
-    database: Database | None = None
     try:
-        database = database_factory()
-        database.connect()
+        if database is None:
+            raise open_error or RuntimeError("the database could not be opened")
         schema_version = get_version(database.conn)
         read_only = bool(getattr(database, "read_only", False))
         if read_only:
@@ -947,6 +966,16 @@ def _database_report(
             "schema_version": schema_version,
             "expected_schema_version": CURRENT_VERSION,
             "schema_state": _schema_state(schema_version),
+            # Which schema the number describes. The degraded, not-read-only
+            # state is the in-memory fallback, whose schema is always current
+            # and says nothing at all about the file on disk -- `Schema: 10 /
+            # 10` printed next to "database disk image is malformed" read as
+            # a contradiction.
+            "schema_source": (
+                "in-memory fallback"
+                if database.degraded and not read_only
+                else "database"
+            ),
             "writable": writable,
             "degraded": database.degraded,
             "read_only": read_only,
@@ -979,13 +1008,22 @@ def _database_report(
             "degraded": True,
             "read_only": False,
             "recovery_hint": None,
+            "schema_source": "unavailable",
         }
-    finally:
-        if database is not None:
-            try:
-                database.close()
-            except Exception:
-                pass
+
+
+def _schema_line(database: dict[str, object]) -> str:
+    """The schema numbers, and where they came from when that is not the file."""
+    line = (
+        f"  Schema: {database['schema_version']} / "
+        f"{database['expected_schema_version']}"
+    )
+    if database.get("schema_state") == SCHEMA_NEWER:
+        return f"{line} (newer than this build)"
+    source = database.get("schema_source")
+    if source not in (None, "database"):
+        return f"{line} ({source})"
+    return line
 
 
 def _integrity_line(integrity: object) -> str:
