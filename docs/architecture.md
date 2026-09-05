@@ -1113,7 +1113,10 @@ re-applies the bar's background *after* the cursor style, which would otherwise
 win), `fs_overview._usage_bar` and `_build_summary`, `settings.theme_preview`,
 and `scan_progress.FilledBar`, a `Bar` renderable whose three glyphs are spaces
 and whose styles are turned into backgrounds. The `bar_track` ink role is the
-themed colour behind a bar.
+themed colour behind a bar. `trend_chart._update_plot` passes `marker="dot"` to
+plotext, whose default is its high-density set (`▀▄▖▗▘▚▝▞`); `•` is on the
+allowlist for that one caller, and plotext's axes and frame are box drawing
+already.
 
 The `tiles` ring shape belongs to the same story: its vertical quantum is a
 whole row (not the framebuffer's half-row), its centre snaps to a row boundary,

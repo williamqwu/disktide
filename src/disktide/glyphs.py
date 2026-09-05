@@ -95,6 +95,8 @@ WEB_SAFE_GLYPHS: frozenset[str] = (
         "×"   # U+00D7 multiplication sign
         "–"   # U+2013 en dash
         "—"   # U+2014 em dash
+        "•"   # U+2022 bullet, the trend chart's plotted line: plotext's
+              # `dot` marker, spent instead of its default `▀▄▖▗▘▚▝▞`
         "…"   # U+2026 ellipsis, every truncated label
         "←↑→↓"  # U+2190-U+2193 arrows
         "≈"   # U+2248 almost equal to
@@ -147,8 +149,14 @@ UNSAFE_BORDER_STYLES: frozenset[str] = frozenset(
 )
 
 #: What is left, and what the app's own stylesheet may name.  `double` is
-#: the heaviest box a border can be drawn as now that `thick` is gone,
-#: which is what the app's modals and panels ask for instead.
+#: the heaviest box a border can be drawn as now that `thick` is gone, and
+#: it is safe for the same reason the rest of the box-drawing block is:
+#: CP437 carries the whole double-line set, so Courier New has every one of
+#: `╔═╗║╚╝` at one cell.  It is what the app's panels and modals ask for
+#: instead, which keeps the two weights `thick`-over-`solid` used to give
+#: them -- a heavy frame around a panel, a light one around the widgets
+#: inside it.  Drawing everything `solid` was tried and gives a modal, the
+#: screen behind it and an Input inside it the same mark.
 SAFE_BORDER_STYLES: frozenset[str] = frozenset(
     {"", "none", "hidden", "blank", "ascii", "solid", "double"}
 )

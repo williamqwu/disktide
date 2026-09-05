@@ -206,8 +206,15 @@ class TrendChart(Widget):
                     self._plot_value(point.value or 0, model.metric)
                     for point in segment
                 ]
+                # `dot` (U+2022), not plotext's default marker. The
+                # default is its high-density set -- `▀▄▖▗▘▚▝▞`, halves
+                # and quadrants -- which buys sub-cell vertical resolution
+                # and costs the whole chart in a browser terminal, whose
+                # default font has no glyph for a quadrant at all and
+                # draws the halves at the wrong ink box. One dot per cell
+                # is the resolution a line has here; see `disktide.glyphs`.
                 kwargs = {"label": label} if first else {}
-                plt.plot(x_values, y_values, **kwargs)
+                plt.plot(x_values, y_values, marker="dot", **kwargs)
                 first = False
 
             for point in series.points:

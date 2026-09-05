@@ -604,8 +604,10 @@ colour on spaces** — the tree's proportional bar, the FS Overview's usage and
 capacity bars, the scan progress bar, the theme swatches in Settings, the
 sunburst and the treemap — and anything that needs a *ramp* rather than a fill
 is ASCII: the mini trend sparkline is `.:-=+*#`, and the `disktide scan`
-summary bar on stdout is `#` and `-`. Box drawing (`─│├└┼━╔═╗`), the tree's
-`▶`/`▼`, the legend's `■`, and `●○` were measured at one cell and stay.
+summary bar on stdout is `#` and `-`. The Monitor's trend chart plots its line
+with `•` (one dot per cell) rather than plotext's default half-and-quadrant
+markers. Box drawing (`─│├└┼━╔═╗`), the tree's `▶`/`▼`, the legend's `■`, and
+`●○` were measured at one cell and stay.
 
 Two consequences worth knowing:
 
