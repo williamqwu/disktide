@@ -199,3 +199,33 @@ jobs:
           .venv/bin/python tool/check_doctor_backend.py python doctor-forced.json
       - name: Enforce core dependency budget
         run: .venv-smoke/bin/python tool/check_dependency_budget.py
+
+  # The release wheel matrix, reduced to one target, so a tag is not the first
+  # time `pypa/cibuildwheel` runs against this project. Same pinned action and
+  # same `CIBW_TEST_COMMAND` as `release.yml`, so a build hook that stopped
+  # producing the extension fails here instead of publishing a platform wheel
+  # with nothing platform-specific in it.
+  #
+  # What it does not cover: the aarch64 legs (QEMU), musllinux, macOS, and
+  # every interpreter but 3.13. Those are still first exercised by the tag.
+  #
+  # Not gated on `test`: it runs no pytest, so its colour says something the
+  # suite's does not.
+  wheels-smoke:
+    name: Release wheel build (cp313 manylinux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build one release wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074 # v4.2.0
+        env:
+          CIBW_BUILD: "cp313-manylinux_x86_64"
+          CIBW_ARCHS: "x86_64"
+          CIBW_BUILD_VERBOSITY: "1"
+          CIBW_TEST_COMMAND: >-
+            python -c "from disktide.scanner.accel import ACCEL_BACKEND;
+            assert ACCEL_BACKEND == 'native', ACCEL_BACKEND;
+            print('scanner backend:', ACCEL_BACKEND)"
+      - name: Show what came out
+        run: ls -l wheelhouse
