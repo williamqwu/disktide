@@ -372,11 +372,56 @@ every exit a scan has, and that each freeze hands the last one back. If a
 node ever grows a back-reference, that test fails before the leak reaches
 `watch`, which scans the same tree for days.
 
-Two things to know when measuring: `gc.get_objects()` does **not** report the
-permanent generation, so after a freeze it reads as an almost empty heap; and
-repeated scans in one process grow RSS by 1-2 MB an iteration through
-allocator fragmentation, which predates all of this and is smaller with the
-freeze than without it (`tool/soak_memory.py`).
+One thing to know when measuring: `gc.get_objects()` does **not** report the
+permanent generation, so after a freeze it reads as an almost empty heap.
+
+**Known issue: repeated raw scans in one process drift upward, and the gate
+that watches for it is noisy.** `tool/soak_memory.py --mode raw` on the
+88,000-directory fixture grew from 65.6 MB at iteration 3 to 103.3 MB at
+iteration 25 -- +57.5% against its own 5% budget, so it exits 1. The drift
+is pymalloc keeping nearly empty arenas, not scan data being retained.
+Three measurements on the same fixture (raw, one worker, 25 scans in one
+process) pin that down:
+
+- `sys._debugmallocstats()` after every scan. Bytes in allocated blocks --
+  the Python objects actually alive between scans -- stay at 5.4-5.5 MB
+  from the first scan to the last. Arenas currently allocated go from 34 at
+  scan 3 to 47-50 at scan 25, and RSS goes from 42 to 55-57 MB over the
+  same scans. An arena is 1 MiB; the RSS curve is the arena curve.
+- `tracemalloc` between scan 3 and scan 12: +0.03 MB in total, a few
+  hundred small blocks -- a rehashed `threading._active` table, the strings
+  the cgroup and mount probes read, a weak-set entry. A scan allocates and
+  frees about 550 arenas, and pymalloc returns an arena to the OS only when
+  every pool in it is empty, so each of those survivors pins the whole
+  arena it landed in. About one arena in two outlives its scan.
+- `PYTHONMALLOC=malloc`, so glibc serves every allocation instead of
+  pymalloc: 636-637 MB after every one of the 25 scans. glibc never hands
+  the freed tree back at all, and never drifts either.
+
+So the process accumulates near-empty 1 MiB arenas at roughly half a
+megabyte a scan, which is why the same build scored +4.9% over 14
+iterations and +57.5% over 25, and why the 5% gate read at the default 20
+iterations can pass and fail on the same build. It is why the earlier
+candidates all came up empty: the pure-Python fallback grows more (+84.8%)
+because it allocates more; `MALLOC_ARENA_MAX=2` changes nothing because
+pymalloc's arenas are not glibc's; a single worker still drifts (+40.5%)
+because the survivors are not per-thread. A 20,000-directory tree shows no
+drift at all over 12 scans (arenas 30-34 throughout), and `--mode live`,
+which is the mode the explorer takes, is within budget: 100.1 MB to
+102.2 MB over 12 iterations, +2.1%.
+
+The freeze is not the cause; it is what keeps the number small. With
+`FREEZE_MIN_ENTRIES` raised so `freeze_retained_tree()` never runs, RSS is
+flatter and four and a half times higher: iteration 3 at 332.0 MB to
+iteration 14 at 333.7 MB, against 71.7 MB to 75.2 MB with the freeze on.
+The `gc.get_freeze_count()` that grows by exactly one per scan is the soak
+tool's own per-iteration sample dict, not anything in the scanner.
+
+Read the raw-mode soak as a measurement, not as a gate. Closing it means
+making a walk leave nothing behind in its arenas: find the few kilobytes
+that survive a scan, starting with the platform probes in
+`collectors/platform/linux.py` that `select_scan_workers()` runs on every
+engine, and allocate or cache them outside the walk.
 
 ### Adaptive Worker Count
 
