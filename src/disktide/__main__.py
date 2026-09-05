@@ -64,25 +64,221 @@ def _soften_stdio_encoding_errors() -> None:
             pass
 
 
-@click.group(invoke_without_command=True)
-@click.option("--max-depth", "-d", type=int, default=None, help="Maximum scan depth")
-@click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
-@click.option(
-    "--one-file-system/--cross-filesystems",
-    default=None,
-    help="Stay on the scan root filesystem",
+_TUI_OPTIONS = (
+    click.option("--max-depth", "-d", type=int, default=None, help="Maximum scan depth"),
+    click.option("--workers", "-w", type=int, default=None, help="Number of scan threads"),
+    click.option(
+        "--one-file-system/--cross-filesystems",
+        default=None,
+        help="Stay on the scan root filesystem",
+    ),
+    click.option(
+        "--exclude-pseudo/--include-pseudo",
+        default=None,
+        help="Exclude pseudo-filesystem mountpoints below the scan root",
+    ),
+    click.option(
+        "--no-mouse",
+        is_flag=True,
+        default=False,
+        help="Launch the TUI without mouse support (this session only)",
+    ),
 )
-@click.option(
-    "--exclude-pseudo/--include-pseudo",
-    default=None,
-    help="Exclude pseudo-filesystem mountpoints below the scan root",
-)
-@click.option(
-    "--no-mouse",
-    is_flag=True,
-    default=False,
-    help="Launch the TUI without mouse support (this session only)",
-)
+
+
+def _tui_options(command):
+    """Apply the five launch options the group and `open` both take."""
+    for option in reversed(_TUI_OPTIONS):
+        command = option(command)
+    return command
+
+
+class _DiskTideGroup(click.Group):
+    """The top level, which takes a directory as well as a command name.
+
+    `disktide ~` is how both the architecture notes and the filesystem
+    chapter have always described opening the explorer somewhere, and it
+    answered `Error: No such command '/home/you'.` -- so the only way to
+    aim the TUI was to `cd` first and pick the current directory off the
+    welcome screen. A bare token that names a directory is now routed to the
+    hidden `open` subcommand.
+
+    Deliberately not `_DefaultCommandGroup`, which `cleanup` uses: that one
+    sends *every* unrecognised token to its default subcommand, which is
+    right for `cleanup /srv` and wrong here, because it would turn `disktide
+    sacn` into an attempt to explore a directory named `sacn` and report it
+    as a missing path. A word that is neither a command nor a directory is a
+    usage error naming both possibilities.
+
+    Options that take a value are stepped over rather than scanned, so
+    `disktide -w 2 /srv` routes on `/srv` and not on `2`; the group knows its
+    own parameters, which is what `cleanup`'s router (blind to the arity of
+    the subcommand it has not chosen yet) cannot do.
+    """
+
+    def parse_args(self, ctx, args):
+        return super().parse_args(ctx, self._route(ctx, list(args)))
+
+    def _value_taking_options(self, ctx) -> frozenset[str]:
+        names: set[str] = set()
+        for param in self.get_params(ctx):
+            if isinstance(param, click.Option) and not param.is_flag:
+                names.update(param.opts)
+                names.update(param.secondary_opts)
+        return frozenset(names)
+
+    def _route(self, ctx, args: list[str]) -> list[str]:
+        import os
+
+        takes_value = self._value_taking_options(ctx)
+        skip = False
+        for index, argument in enumerate(args):
+            if skip:
+                skip = False
+                continue
+            if argument == "--":
+                break
+            if argument in _HELP_FLAGS or argument == "--version":
+                return args
+            if argument.startswith("-"):
+                # `--max-depth 5`, not `--max-depth=5` and not `-d5`: only
+                # the detached form spends the next token.
+                skip = argument in takes_value
+                continue
+            if argument in self.commands:
+                return args
+            if os.path.isdir(os.path.expanduser(argument)):
+                return [*args[:index], "open", *args[index:]]
+            raise click.UsageError(
+                f"'{argument}' is neither a command nor a directory. "
+                "Commands: scan, watch, cleanup, compare, monitor, alerts, "
+                "doctor; or give a directory to open it in the explorer."
+            )
+        return args
+
+
+def _launch_tui(
+    ctx,
+    path: str | None,
+    *,
+    max_depth: int | None,
+    workers: int | None,
+    one_file_system: bool | None,
+    exclude_pseudo: bool | None,
+    no_mouse: bool,
+) -> None:
+    """Run the TUI: on PATH when there is one, on the welcome screen when not.
+
+    Never returns -- see the `os._exit` at the bottom.
+    """
+    if not _stdio_is_interactive():
+        # Textual would otherwise sit forever waiting on a keypress
+        # that a pipe or a redirect can never deliver, which reads as
+        # a hang in CI and in `disktide > file`.
+        raise click.ClickException(
+            "the TUI needs an interactive terminal, but stdin and stdout "
+            "are not both a TTY. Use a subcommand for non-interactive "
+            "runs, e.g. 'disktide scan PATH' (add --json for "
+            "machine-readable output)."
+        )
+
+    # First, before every other import in this function:
+    # `textual.constants` reads TEXTUAL_COLOR_SYSTEM once, at its own
+    # import, and `disktide.config` reaches Textual through
+    # `disktide.keys`. So even loading the config first would be too
+    # late — which is why the colour-depth resolver reads the one
+    # config key it needs by itself.
+    _pin_color_system()
+
+    from disktide.app import DiskTideApp
+    from disktide.config import load_config
+
+    config = load_config()
+    if max_depth is not None:
+        config.scan.max_depth = max_depth
+    if workers is not None:
+        config.scan.workers = workers
+    if one_file_system is not None:
+        config.scan.one_file_system = one_file_system
+    if exclude_pseudo is not None:
+        config.scan.exclude_pseudo_filesystems = exclude_pseudo
+
+    _probe_terminal_if_unmeasured(config)
+
+    scan_path = None if path is None else str(Path(path).expanduser().resolve())
+    if scan_path is not None:
+        _remember_last_visited(config, scan_path)
+
+    app = DiskTideApp(
+        scan_path=scan_path,
+        show_welcome=scan_path is None,
+        config=config,
+    )
+    try:
+        # --no-mouse is a session override, not a preference: it never
+        # writes back to the config the settings screen owns.
+        app.run(mouse=config.ui.mouse and not no_mouse)
+    finally:
+        # Quitting is silent: the TUI restores the terminal and the
+        # shell prompt is the only acknowledgement a user needs. Run
+        # the cleanup that matters (cancel scan + close SQLite), then
+        # hard-exit -- see `_force_teardown` for why we skip Python's
+        # natural shutdown sequence on the way out.
+        #
+        # In a `finally` because `app.run()` also *raises*: Textual
+        # re-raises whatever took the TUI down, and on that path
+        # nothing below here runs. The scan then survives the app that
+        # started it, and because Textual's thread workers live in the
+        # default executor -- which the interpreter joins on the way
+        # out -- the process sits at a dead terminal for as long as the
+        # walk had left to run (~50 s on a home directory) before the
+        # traceback is even printed. Cancelling turns that into the
+        # walker's usual ~10 ms bail.
+        _force_teardown(app)
+        # Both guarded: either fd may have been closed before the
+        # process started, which leaves the stream None.
+        for stream in (sys.stdout, sys.stderr):
+            if stream is not None:
+                stream.flush()
+    # Bypass Python's interpreter teardown: gc of the in-memory
+    # FSNode tree + atexit + module cleanup adds tens of seconds on
+    # a multi-million-file scan, all spent freeing memory the kernel
+    # is about to reclaim anyway. All cleanup that matters for
+    # correctness (cancel + DB close) has already run above, and
+    # both streams were flushed right before this block.
+    import os as _os
+    _os._exit(0)
+
+
+def _remember_last_visited(config, path: str) -> None:
+    """Record a command-line path the way the welcome screen records a chosen one.
+
+    Picking a directory on the welcome screen writes it to
+    `paths.last_visited_path`, which is what puts it back on the list the
+    next bare `disktide` shows. A path given on the command line skips that
+    screen entirely, so without this the one launch that names a directory
+    explicitly is the one that leaves no trace of it.
+
+    Here rather than in `DiskTideApp.on_mount`, which is the other place it
+    would fit: the app is constructed with a `scan_path` by callers that are
+    not a user choosing anything -- the test suite, `tool/gen_readme_shots.py`
+    -- and none of them should be rewriting the config file.
+    """
+    from disktide.config import get_effective_paths, save_config, set_effective_paths
+
+    paths = get_effective_paths(config)
+    if paths.last_visited_path == path:
+        return
+    paths.last_visited_path = path
+    set_effective_paths(config, paths)
+    try:
+        save_config(config)
+    except OSError:
+        pass
+
+
+@click.group(cls=_DiskTideGroup, invoke_without_command=True)
+@_tui_options
 @click.version_option(version=__version__)
 @click.pass_context
 def cli(
@@ -96,7 +292,7 @@ def cli(
     """Interactive terminal disk usage explorer.
 
     \b
-    Launch TUI:  disktide
+    Launch TUI:  disktide [PATH]
     Subcommands: scan, watch, cleanup, compare, monitor, alerts, doctor
     """
     _soften_stdio_encoding_errors()
@@ -108,75 +304,56 @@ def cli(
     ctx.obj["no_mouse"] = no_mouse
 
     if ctx.invoked_subcommand is None:
-        if not _stdio_is_interactive():
-            # Textual would otherwise sit forever waiting on a keypress
-            # that a pipe or a redirect can never deliver, which reads as
-            # a hang in CI and in `disktide > file`.
-            raise click.ClickException(
-                "the TUI needs an interactive terminal, but stdin and stdout "
-                "are not both a TTY. Use a subcommand for non-interactive "
-                "runs, e.g. 'disktide scan PATH' (add --json for "
-                "machine-readable output)."
-            )
+        _launch_tui(
+            ctx,
+            None,
+            max_depth=max_depth,
+            workers=workers,
+            one_file_system=one_file_system,
+            exclude_pseudo=exclude_pseudo,
+            no_mouse=no_mouse,
+        )
 
-        # First, before every other import in this function:
-        # `textual.constants` reads TEXTUAL_COLOR_SYSTEM once, at its own
-        # import, and `disktide.config` reaches Textual through
-        # `disktide.keys`. So even loading the config first would be too
-        # late — which is why the colour-depth resolver reads the one
-        # config key it needs by itself.
-        _pin_color_system()
 
-        from disktide.app import DiskTideApp
-        from disktide.config import load_config
+@cli.command("open", hidden=True)
+@click.argument(
+    "path",
+    required=False,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+)
+@_tui_options
+@click.pass_context
+def open_explorer(
+    ctx,
+    path: str | None,
+    max_depth: int | None,
+    workers: int | None,
+    one_file_system: bool | None,
+    exclude_pseudo: bool | None,
+    no_mouse: bool,
+):
+    """Open the interactive explorer on PATH.
 
-        config = load_config()
-        if max_depth is not None:
-            config.scan.max_depth = max_depth
-        if workers is not None:
-            config.scan.workers = workers
-        if one_file_system is not None:
-            config.scan.one_file_system = one_file_system
-        if exclude_pseudo is not None:
-            config.scan.exclude_pseudo_filesystems = exclude_pseudo
+    Hidden because nobody has to type it: `disktide PATH` is routed here by
+    `_DiskTideGroup`. It exists as a real subcommand so that the path is
+    validated, `--help` works, and the routing has somewhere to point.
+    """
+    group = ctx.obj or {}
 
-        _probe_terminal_if_unmeasured(config)
+    def chosen(name, value, *, default=None):
+        # A value written after the path wins over the same option written
+        # before it; `disktide -w 2 /srv -w 4` is unambiguous about which.
+        return group.get(name, default) if value is None else value
 
-        app = DiskTideApp(show_welcome=True, config=config)
-        try:
-            # --no-mouse is a session override, not a preference: it never
-            # writes back to the config the settings screen owns.
-            app.run(mouse=config.ui.mouse and not no_mouse)
-        finally:
-            # Quitting is silent: the TUI restores the terminal and the
-            # shell prompt is the only acknowledgement a user needs. Run
-            # the cleanup that matters (cancel scan + close SQLite), then
-            # hard-exit -- see `_force_teardown` for why we skip Python's
-            # natural shutdown sequence on the way out.
-            #
-            # In a `finally` because `app.run()` also *raises*: Textual
-            # re-raises whatever took the TUI down, and on that path
-            # nothing below here runs. The scan then survives the app that
-            # started it, and because Textual's thread workers live in the
-            # default executor -- which the interpreter joins on the way
-            # out -- the process sits at a dead terminal for as long as the
-            # walk had left to run (~50 s on a home directory) before the
-            # traceback is even printed. Cancelling turns that into the
-            # walker's usual ~10 ms bail.
-            _force_teardown(app)
-            # Both guarded: either fd may have been closed before the
-            # process started, which leaves the stream None.
-            for stream in (sys.stdout, sys.stderr):
-                if stream is not None:
-                    stream.flush()
-        # Bypass Python's interpreter teardown: gc of the in-memory
-        # FSNode tree + atexit + module cleanup adds tens of seconds on
-        # a multi-million-file scan, all spent freeing memory the kernel
-        # is about to reclaim anyway. All cleanup that matters for
-        # correctness (cancel + DB close) has already run above, and
-        # both streams were flushed right before this block.
-        import os as _os
-        _os._exit(0)
+    _launch_tui(
+        ctx,
+        path,
+        max_depth=chosen("max_depth", max_depth),
+        workers=chosen("workers", workers),
+        one_file_system=chosen("one_file_system", one_file_system),
+        exclude_pseudo=chosen("exclude_pseudo", exclude_pseudo),
+        no_mouse=no_mouse or bool(group.get("no_mouse")),
+    )
 
 
 def _pin_color_system() -> None:

@@ -218,6 +218,101 @@ def test_tui_refuses_a_non_interactive_terminal_instead_of_hanging():
     assert "disktide scan PATH" in result.stderr
 
 
+# --- launching the TUI on a path -------------------------------------------
+
+
+def test_a_directory_argument_routes_to_the_tui(tmp_path):
+    """`disktide PATH` is what the docs have always written.
+
+    Reaching the interactive-terminal refusal *is* the proof: nothing else
+    in the CLI raises it, so routing got as far as the launch.
+    """
+    result = CliRunner().invoke(cli, [str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "interactive terminal" in result.stderr
+
+
+def test_group_options_written_before_the_path_still_route(tmp_path):
+    """`-w 2` spends the next token; the router has to step over it."""
+    result = CliRunner().invoke(cli, ["-w", "2", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "interactive terminal" in result.stderr
+
+
+def test_a_word_that_is_neither_a_command_nor_a_directory_is_a_usage_error():
+    result = CliRunner().invoke(cli, ["sacn"])
+
+    assert result.exit_code == 2
+    assert "neither a command nor a directory" in result.stderr
+    assert "give a directory to open it in the explorer" in result.stderr
+
+
+def test_a_missing_path_is_a_usage_error():
+    result = CliRunner().invoke(cli, ["/nonexistent-zzz"])
+
+    assert result.exit_code == 2
+    assert "neither a command nor a directory" in result.stderr
+
+
+def test_a_regular_file_is_a_usage_error(tmp_path):
+    target = tmp_path / "not-a-directory.txt"
+    target.write_text("x")
+
+    result = CliRunner().invoke(cli, [str(target)])
+
+    assert result.exit_code == 2
+    assert "neither a command nor a directory" in result.stderr
+
+
+def test_a_subcommand_is_never_treated_as_a_path(tmp_path):
+    """A directory named like a command must still lose to the command."""
+    (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
+
+    result = CliRunner().invoke(cli, ["scan", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "Total (Logical)" in result.stdout
+
+
+def test_open_is_a_real_subcommand_with_its_own_help():
+    result = CliRunner().invoke(cli, ["open", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "PATH" in result.output
+
+
+def test_open_rejects_a_path_that_is_not_a_directory(tmp_path):
+    target = tmp_path / "not-a-directory.txt"
+    target.write_text("x")
+
+    result = CliRunner().invoke(cli, ["open", str(target)])
+
+    assert result.exit_code == 2
+
+
+def test_version_and_help_are_not_routed():
+    version = CliRunner().invoke(cli, ["--version"])
+    assert version.exit_code == 0, version.output
+
+    help_text = CliRunner().invoke(cli, ["--help"])
+    assert help_text.exit_code == 0, help_text.output
+    assert "Launch TUI:  disktide [PATH]" in help_text.output
+
+
+def test_a_command_line_path_is_remembered_like_a_chosen_one(tmp_path):
+    """The next bare `disktide` has to be able to offer it back."""
+    from disktide.__main__ import _remember_last_visited
+    from disktide.config import get_effective_paths, load_config
+
+    config = load_config()
+    _remember_last_visited(config, str(tmp_path))
+
+    assert get_effective_paths(config).last_visited_path == str(tmp_path)
+    assert get_effective_paths(load_config()).last_visited_path == str(tmp_path)
+
+
 # --- session overrides -----------------------------------------------------
 
 
@@ -267,7 +362,8 @@ def test_top_level_help_keeps_its_line_breaks():
 
     assert result.exit_code == 0, result.output
     lines = [line.strip() for line in result.output.splitlines()]
-    assert "Launch TUI:  disktide" in lines
+    # `[PATH]` since the group learned to open the explorer on a directory.
+    assert "Launch TUI:  disktide [PATH]" in lines
     assert any(line.startswith("Subcommands:") for line in lines)
 
 

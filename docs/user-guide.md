@@ -9,7 +9,8 @@ Install and launch:
 
 ```bash
 uv tool install disktide
-disktide
+disktide            # welcome screen
+disktide ~/projects # straight into the explorer on that path
 ```
 
 `uvx disktide`, `pipx install disktide`, and `pip install disktide` also work.
@@ -29,6 +30,12 @@ Type any path or press Up/Down to cycle through suggestions. Right arrow
 accepts ghost-text; Enter explores. Check "Save as default path" to remember
 it. Paths are stored per hostname by default (`hostname_aware_paths = false`
 to disable).
+
+Naming a directory on the command line (`disktide ~/projects`) skips the
+welcome screen and explores that path directly; it is recorded as the last
+visited path, so the next bare `disktide` offers it back. A first argument
+that is neither a subcommand nor a directory is a usage error (exit 2) that
+names both possibilities.
 
 ## TUI
 

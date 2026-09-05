@@ -89,7 +89,8 @@ disktide
 ## Quick start
 
 ```bash
-disktide                         # interactive TUI
+disktide                         # interactive TUI, welcome screen
+disktide ~/projects              # interactive TUI, straight into that path
 disktide scan ~/projects         # one-shot scan
 disktide monitor                 # list monitors
 disktide compare <monitor>       # growth report
