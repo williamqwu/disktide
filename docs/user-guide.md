@@ -99,7 +99,10 @@ further down; either way its sizes are lower bounds, shown as `≥`. Details
 below").
 
 **Progress** — during a scan the progress panel shows phase, worker count,
-path counts, rate, and the current path.
+path counts, rate, and the current path. After 20 seconds it adds a hint:
+the worker count it is running with, and that `,` (Settings) → Workers and
+then `r` will rescan with a different one. On a shared login node, or after a
+worker count was clamped, it says that too.
 
 ### Monitor (2)
 

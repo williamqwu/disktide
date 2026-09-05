@@ -485,6 +485,15 @@ notification each from its `ScanStarted` handler.
 
 ### Progress Reporting
 
+`ScanProgressOverlay` arms one `set_timer` per scan in `start()`
+(`HINT_AFTER_SECONDS`, 20 s). If the scan is still running when it fires, a
+`Static` composed hidden becomes a two- or three-line hint naming the worker
+count and the `,` → Workers → `r` route to changing it; a third line appears
+when `ScanWorkerSelection.warnings` reports a shared host or a clamp. It is
+one shot and never re-armed, so the overlay's only recurring timer remains
+the 5 Hz repaint pacing; `start()` and every terminal state
+(`_stop_repainting`) cancel it and take the block off screen.
+
 `ProgressThrottle` batches callbacks to 100ms intervals.
 `ScanProgressSnapshot` captures completed/queued directories, queue depth,
 active workers, files, bytes, current path, and elapsed time. Progress

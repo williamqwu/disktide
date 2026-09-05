@@ -14,6 +14,7 @@ from textual.widgets import Static, ProgressBar
 from rich.style import Style, StyleType
 from rich.text import Text
 import humanize
+from disktide.rendering import link_arrow
 from disktide.viz.colors import ink
 
 
@@ -122,15 +123,27 @@ class ScanProgressOverlay(Widget):
     #: 0.05 s and this repainted on every one of them.
     REPAINT_INTERVAL = 0.2
 
+    #: How long a scan has to run before the overlay volunteers that the
+    #: worker count is a setting. Long enough that a scan a user expected to
+    #: be quick has visibly not been, short enough to still be worth acting
+    #: on. One shot, armed in `start()`: a scan that finishes first never
+    #: shows it, and nothing here adds a periodic timer.
+    HINT_AFTER_SECONDS = 20.0
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._title = Static("Scanning...", id="scan-title")
         self._context_display = Static("", id="scan-context")
         self._path_display = Static("", id="scan-path")
         self._stats = Static("", id="scan-stats")
+        self._hint = Static("", id="scan-hint")
         self._run_id: str | None = None
         self._phase: str | None = None
         self._policy: str | None = None
+        self._workers: int | None = None
+        self._workers_mode: str | None = None
+        self._warnings: tuple[str, ...] = ()
+        self._hint_timer: Timer | None = None
         # Indeterminate (total=None): the bar signals activity, not
         # progress — with animations disabled it renders as a static
         # indeterminate band and the stats line carries the motion.
@@ -192,6 +205,10 @@ class ScanProgressOverlay(Widget):
         yield self._stats
         yield Static("")
         yield self._bar
+        # Composed empty and hidden; `_show_hint` is the only thing that
+        # ever displays it, and only for a scan that outlives the timer.
+        self._hint.display = False
+        yield self._hint
 
     def start(
         self,
@@ -199,12 +216,18 @@ class ScanProgressOverlay(Widget):
         run_id: str | None = None,
         phase: str | None = None,
         policy: str | None = None,
+        workers: int | None = None,
+        workers_mode: str | None = None,
+        warnings: tuple[str, ...] = (),
     ) -> None:
         """Reset state for a new scan."""
         self.is_scanning = True
         self._run_id = run_id
         self._phase = phase
         self._policy = policy
+        self._workers = workers
+        self._workers_mode = workers_mode
+        self._warnings = warnings
         self._render_context()
         self._path_display.update("")
         self._stats.update("")
@@ -214,6 +237,7 @@ class ScanProgressOverlay(Widget):
         self._painted_at = 0.0
         if self._repaint_timer is not None:
             self._repaint_timer.resume()
+        self._arm_hint()
 
     def update_context(
         self,
@@ -221,6 +245,9 @@ class ScanProgressOverlay(Widget):
         run_id: str | None = None,
         phase: str | None = None,
         policy: str | None = None,
+        workers: int | None = None,
+        workers_mode: str | None = None,
+        warnings: tuple[str, ...] | None = None,
     ) -> None:
         """Refresh run identity, phase, or policy without resetting stats."""
         if run_id is not None:
@@ -229,7 +256,86 @@ class ScanProgressOverlay(Widget):
             self._phase = phase
         if policy is not None:
             self._policy = policy
+        if workers is not None:
+            self._workers = workers
+        if workers_mode is not None:
+            self._workers_mode = workers_mode
+        if warnings is not None:
+            self._warnings = warnings
         self._render_context()
+
+    def _arm_hint(self) -> None:
+        """Re-arm the one-shot hint timer, cancelling any scan's leftover."""
+        self._clear_hint()
+        try:
+            self._hint_timer = self.set_timer(
+                self.HINT_AFTER_SECONDS, self._show_hint
+            )
+        except Exception:
+            # Unmounted -- unit tests and headless use have no event loop to
+            # hang a timer on. The overlay works; it just never hints.
+            self._hint_timer = None
+
+    def _clear_hint(self) -> None:
+        """Stop the timer and take the hint off screen. Idempotent."""
+        if self._hint_timer is not None:
+            self._hint_timer.stop()
+            self._hint_timer = None
+        self._hint.update("")
+        self._hint.display = False
+        # The live-scan layout docks this overlay at a fixed height that its
+        # own content fills; the class is what buys the hint its rows.
+        self.remove_class("has-hint")
+
+    def _show_hint(self) -> None:
+        """Say what a long scan can still be told to do differently.
+
+        Fired once, `HINT_AFTER_SECONDS` after `start()`. A scan that
+        finished first has already cleared the timer, so the guard is for
+        the race between the timer firing and the completion arriving.
+        """
+        self._hint_timer = None
+        if not self.is_scanning:
+            return
+        elapsed = int(self.HINT_AFTER_SECONDS)
+        workers = "unknown" if self._workers is None else str(self._workers)
+        if self._workers_mode:
+            workers += f" ({self._workers_mode})"
+        text = Text()
+        text.append(
+            f"  Still scanning after {elapsed} s · workers {workers}",
+            style=ink("warning"),
+        )
+        text.append(
+            f"\n  More cores free? Press , (Settings) {link_arrow()} Workers, "
+            "then r to rescan.",
+            style="dim",
+        )
+        note = self._host_note()
+        if note is not None:
+            text.append(f"\n  {note}", style="dim")
+        self._hint.update(text)
+        self._hint.display = True
+        self.add_class("has-hint")
+
+    def _host_note(self) -> str | None:
+        """The one host fact that changes the advice, from the warnings.
+
+        `ScanWorkerSelection.warnings` is prose by design -- it is printed
+        verbatim by the CLI -- so this matches the two phrases
+        `sysinfo._explicit_worker_warnings` builds, and a test drives a real
+        selection through here so the coupling cannot rot quietly.
+        """
+        for warning in self._warnings:
+            if "shared host" in warning:
+                return (
+                    "Shared login node: auto caps at 2; raise it only if "
+                    "the node is yours."
+                )
+        for warning in self._warnings:
+            if "exceeds the ceiling" in warning:
+                return "Your worker count was clamped to this host's ceiling."
+        return None
 
     def _render_context(self) -> None:
         title = "Scanning"
@@ -330,6 +436,7 @@ class ScanProgressOverlay(Widget):
         self._painted_at = 0.0
         if self._repaint_timer is not None:
             self._repaint_timer.pause()
+        self._clear_hint()
 
     def scan_complete(
         self,

@@ -615,3 +615,50 @@ def _worker_warning_event(tmp_path):
             warnings=("first caution.", "second caution."),
         ),
     )
+
+
+def test_a_workers_value_typed_in_settings_reaches_the_next_scan(tmp_path):
+    """`,` → Workers → `r` is the loop the scan hint tells users to run.
+
+    Settings and the explorer must be holding the *same* config object for
+    it to work, which is what this pins.
+    """
+    from textual.widgets import Input
+
+    from disktide.screens.settings import SettingsScreen
+
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        config = load_config()
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=config
+        )
+        async with app.run_test(size=(120, 50)) as pilot:
+            explorer = await wait_for_explorer(pilot, app)
+            explorer = app.screen
+
+            await pilot.press("comma")
+            settings = await _await_screen(pilot, app, SettingsScreen)
+            settings.query_one("#workers-input", Input).value = "3"
+            await pilot.pause()
+            await pilot.press("escape")
+            await _await_screen(pilot, app, type(explorer))
+
+            requests = []
+            create_run = explorer._scan_service.create_run
+
+            def record(request):
+                requests.append(request)
+                return create_run(request)
+
+            explorer._scan_service.create_run = record
+            explorer._start_scan(force=True)
+            for _ in range(200):
+                await pilot.pause(0.05)
+                if not explorer._scan_in_progress and requests:
+                    break
+
+            assert requests and requests[0].workers == 3
+
+    asyncio.run(go())

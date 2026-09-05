@@ -220,6 +220,13 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         height: 9;
         padding: 0 1;
     }
+    /* A live scan docks the overlay at a fixed nine rows, which its own
+       content exactly fills. The "still scanning" hint appears after 20 s
+       and would otherwise be clipped by that height, so the overlay adds
+       `has-hint` when it shows one and gives the block four more rows. */
+    #tree-panel.scanning.live-tree #scan-progress.has-hint {
+        height: 13;
+    }
     #tree-panel.scanning.live-tree #size-tree {
         display: block;
     }
@@ -558,16 +565,23 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
                 policy=event.reason,
             )
         elif isinstance(event, ScanStarted):
+            selection = event.worker_selection
             worker_context = event.policy.summary()
-            if event.worker_selection is not None:
+            if selection is not None:
                 worker_context += (
-                    f" · workers {event.worker_selection.effective_workers} "
-                    f"({event.worker_selection.mode})"
+                    f" · workers {selection.effective_workers} "
+                    f"({selection.mode})"
                 )
             overlay.update_context(
                 run_id=event.run_id,
                 phase=event.phase.value,
                 policy=worker_context,
+                # Explicitly as well as folded into the policy string: the
+                # "still scanning" hint needs the number and the mode as
+                # values, not as a substring of a sentence.
+                workers=None if selection is None else selection.effective_workers,
+                workers_mode=None if selection is None else selection.mode,
+                warnings=None if selection is None else selection.warnings,
             )
             if event.worker_selection is not None:
                 # The CLI prints these as `Warning:` lines; the TUI has no
