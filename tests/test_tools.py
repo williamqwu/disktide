@@ -21,9 +21,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -304,3 +307,183 @@ def test_dump_tree_writes_a_file_when_asked(tmp_path):
     written = out.read_text().splitlines()
     assert written[0].startswith("#backend=")
     assert written[1].startswith("#path\t")
+
+
+# --- hatch_build.py: the wheel-building hook --------------------------------
+#
+# It compiles the optional scanner extension and is deliberately forgiving --
+# no compiler, an unknown compiler, a compile that errors, each leaves a
+# pure-Python wheel behind and says so. The case it used to be forgiving
+# about by accident is a compiler that *succeeds* and produces something the
+# interpreter cannot load: that got a platform-tagged wheel with a dead `.so`
+# in it, and the only symptom was `disktide doctor` reporting the fallback.
+
+
+def _load_build_hook(monkeypatch):
+    """Import `hatch_build.py` with a stand-in for its hatchling base class.
+
+    `hatchling` is a *build* requirement: it is resolved into an isolated
+    build environment and is not installed in the development environment or
+    in CI's, so importing the hook the ordinary way fails everywhere the
+    suite runs. The base class contributes nothing the hook uses.
+    """
+    import importlib.util
+    import types
+
+    interface = types.ModuleType(
+        "hatchling.builders.hooks.plugin.interface"
+    )
+
+    class BuildHookInterface:  # noqa: D401 - a stand-in, not an interface
+        pass
+
+    interface.BuildHookInterface = BuildHookInterface
+    for name, module in (
+        ("hatchling", types.ModuleType("hatchling")),
+        ("hatchling.builders", types.ModuleType("hatchling.builders")),
+        ("hatchling.builders.hooks", types.ModuleType("hatchling.builders.hooks")),
+        (
+            "hatchling.builders.hooks.plugin",
+            types.ModuleType("hatchling.builders.hooks.plugin"),
+        ),
+        ("hatchling.builders.hooks.plugin.interface", interface),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    spec = importlib.util.spec_from_file_location(
+        "disktide_hatch_build_under_test", REPO_ROOT / "hatch_build.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _RecordingApp:
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+        self.info: list[str] = []
+
+    def display_warning(self, message: str) -> None:
+        self.warnings.append(message)
+
+    def display_info(self, message: str) -> None:
+        self.info.append(message)
+
+
+def _run_hook(monkeypatch, module, app):
+    hook = module.CustomBuildHook()
+    hook.target_name = "wheel"
+    hook.root = str(REPO_ROOT)
+    hook.app = app
+    build_data: dict = {"force_include": {}}
+    try:
+        hook.initialize("0.0.0", build_data)
+    finally:
+        hook.finalize("0.0.0", build_data, "")
+    return build_data
+
+
+def _fake_compiler(tmp_path, body: str) -> Path:
+    script = tmp_path / "fake-cc"
+    script.write_text("#!/bin/sh\n" + body)
+    script.chmod(0o755)
+    return script
+
+
+def test_a_compiler_that_produces_an_unloadable_object_falls_back(
+    tmp_path, monkeypatch
+):
+    """Exit 0 and garbage on the way out is the case that used to ship."""
+    compiler = _fake_compiler(
+        tmp_path,
+        # Consume the arguments, find -o, and write something that is not an
+        # ELF object where the real compiler would have written one.
+        'while [ $# -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then shift; printf "not an object" > "$1"; fi\n'
+        '  shift\n'
+        'done\n'
+        'exit 0\n',
+    )
+    monkeypatch.setenv("CC", str(compiler))
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+
+    build_data = _run_hook(monkeypatch, module, app)
+
+    assert "pure_python" not in build_data
+    assert build_data["force_include"] == {}
+    assert len(app.warnings) == 1
+    warning = app.warnings[0]
+    assert "does not import" in warning
+    assert "pure-Python wheel" in warning
+
+
+def test_a_working_compiler_still_produces_a_platform_wheel(
+    tmp_path, monkeypatch
+):
+    """The check must not cost the happy path its extension."""
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("no C compiler on PATH")
+    monkeypatch.setenv("CC", compiler)
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+
+    build_data = _run_hook(monkeypatch, module, app)
+
+    assert app.warnings == []
+    assert build_data["pure_python"] is False
+    assert build_data["infer_tag"] is True
+    assert len(build_data["force_include"]) == 1
+    assert next(iter(build_data["force_include"].values())).startswith(
+        "disktide/scanner/_scanfast"
+    )
+
+
+def test_a_cross_compiled_object_is_shipped_without_being_loaded(
+    tmp_path, monkeypatch
+):
+    """cibuildwheel's macOS legs build for an architecture this is not.
+
+    An arm64 object cannot be loaded on x86_64 however healthy it is, so the
+    check is skipped rather than failed -- and the warning says which check
+    was skipped, because that wheel's only proof is the release matrix's
+    `CIBW_TEST_COMMAND`, which runs on the target.
+    """
+    compiler = _fake_compiler(
+        tmp_path,
+        'while [ $# -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then shift; printf "not an object" > "$1"; fi\n'
+        '  shift\n'
+        'done\n'
+        'exit 0\n',
+    )
+    monkeypatch.setenv("CC", str(compiler))
+    monkeypatch.setenv("ARCHFLAGS", "-arch not-this-machine")
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+
+    build_data = _run_hook(monkeypatch, module, app)
+
+    assert build_data["pure_python"] is False
+    assert len(app.warnings) == 1
+    assert "not-this-machine" in app.warnings[0]
+    assert "not loaded here" in app.warnings[0]
+
+
+def test_archflags_for_this_machine_do_not_skip_the_check(monkeypatch):
+    module = _load_build_hook(monkeypatch)
+    import platform
+
+    host = platform.machine()
+    assert module._cross_architecture([]) is None
+    assert module._cross_architecture(["-arch", host]) is None
+    assert module._cross_architecture(["-arch", "sparc64"]) == "sparc64"
+    assert module._cross_architecture(["-arch", host, "-arch", "sparc64"]) == (
+        "sparc64"
+    )

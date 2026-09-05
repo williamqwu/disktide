@@ -22,6 +22,15 @@ Two things this hook is careful about, both learned the hard way:
    sysconfig's, then plain `cc`, `gcc`, `clang`: the first one on `PATH`
    wins.
 
+And one thing it checks before it commits to a platform wheel: that the
+object it just built actually loads. A compiler that *succeeds* and produces
+something the interpreter cannot import -- a wrong ABI, a stale `Python.h`,
+a `$CC` that is not really a C compiler for this interpreter -- used to
+produce a platform-tagged wheel with a dead `.so` in it, and the only symptom
+was `disktide doctor` quietly reporting the Python fallback. The release
+matrix's `CIBW_TEST_COMMAND` catches that for published wheels; nothing
+caught it for an sdist install or a local build.
+
 And one platform difference: a CPython extension on macOS is a *bundle*
 (`-bundle -undefined dynamic_lookup`), not a shared library. `-shared` there
 fails to link, because the Python symbols the module calls are resolved by
@@ -34,6 +43,7 @@ compiler invocation, and this project ships `hatchling` alone.
 from __future__ import annotations
 
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -73,6 +83,55 @@ def _resolve_compiler() -> list[str] | None:
         if argv and shutil.which(argv[0]) is not None:
             return argv
     return None
+
+
+def _cross_architecture(archflags: list[str]) -> str | None:
+    """The architecture `ARCHFLAGS` asks for, when it is not this machine's.
+
+    cibuildwheel cross-compiles on macOS by putting `-arch arm64` (or
+    x86_64) in `ARCHFLAGS`, and an object built for the other architecture
+    cannot be loaded here however healthy it is. Returns the foreign
+    architecture so the caller can say which check it skipped and why.
+    """
+    wanted = [
+        archflags[index + 1]
+        for index, flag in enumerate(archflags)
+        if flag == "-arch" and index + 1 < len(archflags)
+    ]
+    host = platform.machine()
+    foreign = [arch for arch in wanted if arch != host]
+    return foreign[0] if foreign else None
+
+
+def _import_failure(path: str) -> str | None:
+    """Why the freshly built object would not load, or None if it does.
+
+    In a subprocess, because an extension loaded into this interpreter
+    cannot be unloaded again and this hook has more work to do; and by file
+    location rather than by name, because `disktide` is not importable in a
+    build environment -- the package is not installed anywhere yet, and the
+    point is to test the object, not the package around it.
+    """
+    script = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('_scanfast', sys.argv[1])\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "module.scan_dir\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, path],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if result.returncode == 0:
+        return None
+    lines = (result.stderr or "").strip().splitlines()
+    return lines[-1] if lines else f"exit status {result.returncode}"
 
 
 class CustomBuildHook(BuildHookInterface):
@@ -143,6 +202,25 @@ class CustomBuildHook(BuildHookInterface):
                 "building a pure-Python wheel"
             )
             return
+
+        cross = _cross_architecture(archflags)
+        if cross is not None:
+            # Nothing here can load an arm64 object on x86_64, or the other
+            # way round. The release matrix's CIBW_TEST_COMMAND runs on the
+            # target, which is where that wheel gets checked.
+            self.app.display_warning(
+                f"scanfast: ARCHFLAGS builds for {cross} and this is "
+                f"{platform.machine()}, so the object was not loaded here"
+            )
+        else:
+            failure = _import_failure(output)
+            if failure is not None:
+                self.app.display_warning(
+                    f"scanfast: {compiler[0]} succeeded but the object it "
+                    f"produced does not import ({failure}); building a "
+                    "pure-Python wheel"
+                )
+                return
 
         build_data["pure_python"] = False
         build_data["infer_tag"] = True
