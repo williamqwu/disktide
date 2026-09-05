@@ -1,7 +1,7 @@
 """Filenames that are not valid text must not be able to end a command.
 
 A POSIX name is bytes; Python hands undecodable ones over as lone
-surrogates (`b"\xff"` -> `"\udcff"`), which a strict UTF-8 stdout refuses to
+surrogates (`b"\\xff"` -> `"\\udcff"`), which a strict UTF-8 stdout refuses to
 encode and `json.dumps` writes as an invalid document. Both are covered
 here, together with the two rendering helpers in `disktide.textsafe` and the
 stream-level backstop behind them.
@@ -33,7 +33,7 @@ def isolated_state(tmp_path_factory, monkeypatch):
 
 
 def _make_undecodable_directory(tmp_path) -> str:
-    """Create `tmp_path/b"\xff\xfe"` with a file in it, and name it back."""
+    """Create `tmp_path/b"\\xff\\xfe"` with a file in it, and name it back."""
     raw = os.path.join(os.fsencode(str(tmp_path)), b"\xff\xfe")
     os.mkdir(raw)
     with open(os.path.join(raw, b"payload.bin"), "wb") as handle:
