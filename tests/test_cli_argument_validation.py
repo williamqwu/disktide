@@ -227,3 +227,24 @@ def test_a_real_duration_still_parses():
     assert parse_duration(" 30m ") == 1800
     assert parse_duration("90") == 90
     assert parse_duration("6H") == 21600
+
+
+# --- rule packs ------------------------------------------------------------
+
+
+def test_cleanup_rules_validate_rejects_a_directory(tmp_path):
+    """It used to hand the raw OSError back as a failed run (exit 1)."""
+    result = CliRunner().invoke(cli, ["cleanup", "rules", "validate", str(tmp_path)])
+
+    assert result.exit_code == 2, result.output
+    assert "is a directory" in result.output
+    assert "Errno" not in result.output
+
+
+def test_cleanup_rules_validate_rejects_a_missing_file(tmp_path):
+    result = CliRunner().invoke(
+        cli, ["cleanup", "rules", "validate", str(tmp_path / "absent.toml")]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "does not exist" in result.output

@@ -2869,7 +2869,7 @@ def cleanup_rules_list(json_output: bool) -> None:
 
 
 @cleanup_rules.command("validate")
-@click.argument("path")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 def cleanup_rules_validate(path: str, json_output: bool) -> None:
     """Check that the rule pack at PATH loads and conforms to the schema."""

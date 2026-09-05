@@ -437,7 +437,8 @@ The first command scans and saves a plan but makes no filesystem changes.
 `--permanent` is irreversible and requires a typed confirmation.
 
 Built-in rule packs load from the package. User packs from
-`~/.config/disktide/cleanup-rules/*.toml`.
+`~/.config/disktide/cleanup-rules/*.toml`. `rules validate` takes one pack
+file; a missing path or a directory is a usage error (exit 2).
 
 ## Configuration
 
