@@ -20,7 +20,7 @@ its config on some key presses. The app writes its screen to stderr, so the
 pane is never redirected.
 
     python tool/capture_glyphs.py [--size 307x71] [--size 120x32] [--out DIR]
-                                  [--server NAME] [--keep]
+                                  [--server NAME] [--keep] [--slow-tree N]
 """
 
 from __future__ import annotations
@@ -58,22 +58,39 @@ TREE = {
     "src/__pycache__": [("app.cpython-313.pyc", 12_000)],
 }
 
-#: (label, keys to send before capturing, text that proves we got there).
-#: Applied in order, each on top of the state the previous one left, so a
-#: step that silently did nothing shows up as the next step's missing
-#: needle rather than as a duplicate capture nobody looks at.
-WALK: list[tuple[str, tuple[str, ...], str | None]] = [
-    ("welcome", (), "Enter explore"),
-    ("explorer", ("Enter",), "Quit"),
-    ("keymap", ("?",), "esc closes"),
-    ("settings", ("Escape", ","), "System Information"),
+#: (label, keys to send before capturing, text that proves we got there,
+#: seconds to settle after that). Applied in order, each on top of the
+#: state the previous one left, so a step that silently did nothing shows
+#: up as the next step's missing needle rather than as a duplicate capture
+#: nobody looks at.
+#:
+#: A zero settle means "capture the moment the needle appears", which is
+#: the only way to photograph something transient; it also drops the pause
+#: between key presses, because a scan started 0.6 s ago is over. The
+#: `scanning` step is the one that needs it, and `--slow-tree` is what
+#: gives it something to catch.
+WALK: list[tuple[str, tuple[str, ...], str | None, float]] = [
+    ("welcome", (), "Enter explore", 1.5),
+    ("scanning", ("Enter",), "Scanning", 0.0),
+    ("explorer", (), "Quit", 2.5),
+    # The cursor on a directory row: the proportional bar is a background
+    # colour now, and the selected row is where it has to survive a second
+    # background being painted over the whole label.
+    ("explorer-cursor", ("Down",), None, 1.0),
+    ("treemap", ("F2",), None, 2.0),
+    ("details", ("F3",), None, 2.0),
+    ("sunburst", ("F1",), None, 2.0),
+    ("keymap", ("?",), "esc closes", 1.5),
+    ("settings", ("Escape", ","), "System Information", 1.5),
     # Again with the focus walked down the form: at 120 columns the
     # selects and switches start below the fold, and a screen the tool
     # never scrolled to is a screen it never checked.
-    ("settings-fields", ("Down",) * 10, None),
-    ("cleanup", ("Escape", "4"), "Score only ranks opportunities"),
-    ("cleanup-modal", ("a", "p"), "Save Preview"),
-    ("palette", ("Escape", "Escape", "C-p"), "Search for commands"),
+    ("settings-fields", ("Down",) * 10, None, 1.5),
+    ("monitor", ("Escape", "2"), None, 2.5),
+    ("fs-overview", ("3",), None, 3.0),
+    ("cleanup", ("4",), "Score only ranks opportunities", 1.5),
+    ("cleanup-modal", ("a", "p"), "Save Preview", 1.5),
+    ("palette", ("Escape", "Escape", "C-p"), "Search for commands", 1.5),
 ]
 
 
@@ -87,13 +104,25 @@ def tmux(server: str, *args: str, check: bool = True) -> str:
     return result.stdout
 
 
-def make_tree(root: Path) -> Path:
+def make_tree(root: Path, slow: int = 0) -> Path:
     tree = root / "tree"
     for name, files in TREE.items():
         folder = tree / name
         folder.mkdir(parents=True, exist_ok=True)
         for filename, size in files:
             (folder / filename).write_bytes(b"x" * size)
+    if slow:
+        # Enough directories and files that the scan lasts longer than it
+        # takes to send a key and read a pane back, so the `scanning` step
+        # photographs the progress overlay rather than the finished tree.
+        # Empty files: the point is the number of `stat` calls, not bytes.
+        bulk = tree / "bulk"
+        per_dir = 200
+        for index in range((slow + per_dir - 1) // per_dir):
+            folder = bulk / f"d{index:04d}"
+            folder.mkdir(parents=True, exist_ok=True)
+            for number in range(per_dir):
+                (folder / f"f{number:04d}.dat").write_bytes(b"")
     return tree
 
 
@@ -188,13 +217,14 @@ def run_size(
     unsafe: list[str] = []
     unknown: list[str] = []
     foreign: list[str] = []
-    for label, keys, needle in WALK:
+    for label, keys, needle, settle in WALK:
         for key in keys:
             tmux(server, "send-keys", "-t", target, key)
-            time.sleep(0.6)
+            time.sleep(0.6 if settle else 0.05)
         if needle is not None:
             wait_for(server, target, needle, 60.0)
-        time.sleep(1.5)
+        if settle:
+            time.sleep(settle)
         pane = tmux(server, "capture-pane", "-p", "-t", target)
         (out / f"{label}_{width}x{height}.txt").write_text(pane)
         found = scan_pane(f"{label} {width}x{height}", pane)
@@ -220,6 +250,14 @@ def main() -> int:
     )
     parser.add_argument("--out", default=None, help="where to save the panes")
     parser.add_argument("--keep", action="store_true", help="keep the scratch tree")
+    parser.add_argument(
+        "--slow-tree", type=int, default=0, metavar="N",
+        help=(
+            "add N empty files under tree/bulk so the scan lasts long "
+            "enough for the `scanning` step to catch the progress overlay "
+            "(a few thousand is usually enough; 0 skips it)"
+        ),
+    )
     args = parser.parse_args()
 
     sizes = [parse_size(size) for size in (args.size or ["307x71", "120x32"])]
@@ -227,7 +265,7 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     scratch = Path(tempfile.mkdtemp(prefix="disktide-glyphs-"))
-    tree = make_tree(scratch)
+    tree = make_tree(scratch, slow=args.slow_tree)
     seed_config(scratch)
     tmux(args.server, "new-session", "-d", "-s", "base", "-x", "200", "-y", "50", "sh")
     tmux(args.server, "set-option", "-g", "window-size", "manual")
