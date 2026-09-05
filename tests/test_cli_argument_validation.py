@@ -172,8 +172,8 @@ def test_alerts_edit_applies_the_same_rules_for_the_rules_own_kind(
 # --- durations -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("since", ["0s", "0", "-1s"])
-def test_compare_since_zero_or_negative_is_a_usage_error(tmp_path, since):
+@pytest.mark.parametrize("since", ["0s", "0"])
+def test_compare_since_zero_is_a_usage_error(tmp_path, since):
     """`--since abc` was already 2; `--since 0s` was 1 for the same class."""
     result = CliRunner().invoke(
         cli, ["compare", "--since", since, str(tmp_path)]
@@ -184,8 +184,46 @@ def test_compare_since_zero_or_negative_is_a_usage_error(tmp_path, since):
     assert "greater than zero" in result.output
 
 
-def test_compare_since_garbage_is_still_a_usage_error(tmp_path):
-    result = CliRunner().invoke(cli, ["compare", "--since", "abc", str(tmp_path)])
+@pytest.mark.parametrize("since", ["abc", "1ns", "-1s", ""])
+def test_compare_since_that_is_not_a_duration_is_a_usage_error(tmp_path, since):
+    """A negative duration is not a duration; the parser says so first."""
+    result = CliRunner().invoke(cli, ["compare", "--since", since, str(tmp_path)])
 
     assert result.exit_code == 2, result.output
     assert "expected a duration such as 7d, 12h, or 30m" in result.output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["watch", "{path}", "--interval", "abc"],
+        ["watch", "{path}", "--interval", "1ns"],
+        ["watch", "{path}", "--max-time", "abc"],
+        ["monitor", "add", "{path}", "--interval", "zzz"],
+        ["monitor", "add", "{path}", "--interval", "-5m"],
+    ],
+)
+def test_a_duration_that_is_not_one_names_what_a_duration_looks_like(
+    tmp_path, argv
+):
+    """These used to leak `invalid literal for int() with base 10: 'abc'`.
+
+    `1ns` was worse: the fallthrough sliced the unit off first, so the
+    message complained about `'1n'`, a string nobody typed.
+    """
+    result = CliRunner().invoke(
+        cli, [part.format(path=str(tmp_path)) for part in argv]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "expected a duration such as 7d, 12h, or 30m" in result.output
+    assert "invalid literal" not in result.output
+
+
+def test_a_real_duration_still_parses():
+    from disktide.config import parse_duration
+
+    assert parse_duration("7d") == 604800
+    assert parse_duration(" 30m ") == 1800
+    assert parse_duration("90") == 90
+    assert parse_duration("6H") == 21600

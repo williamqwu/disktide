@@ -32,16 +32,32 @@ _SIZE_MULTIPLIERS = {
 }
 
 
+#: A count and an optional unit, and nothing else. Deliberately not signed:
+#: a negative duration is not a duration, and every caller rejected it a step
+#: later anyway.
+_DURATION_PATTERN = re.compile(r"\d+[smhd]?", re.IGNORECASE)
+
+
 def parse_duration(value: str) -> int:
     """Parse a duration string like '6h', '30m', '1d' into seconds.
 
     Also accepts plain integers (treated as seconds).
+
+    A value that is not one says so in those terms. It used to fall through
+    to `int()`, whose complaint is about an implementation detail and, for a
+    unit this does not know, about a string the user never typed: `watch
+    --interval abc` reported `invalid literal for int() with base 10: 'abc'`
+    and `--interval 1ns` reported the same for `'1n'`. `compare --since` was
+    the only caller that caught the exception and replaced the text, which is
+    why it alone had a usable message.
     """
-    value = value.strip()
-    unit = value[-1].lower()
+    text = value.strip() if isinstance(value, str) else value
+    if not isinstance(text, str) or _DURATION_PATTERN.fullmatch(text) is None:
+        raise ValueError("expected a duration such as 7d, 12h, or 30m")
+    unit = text[-1].lower()
     if unit in _DURATION_MULTIPLIERS:
-        return int(value[:-1]) * _DURATION_MULTIPLIERS[unit]
-    return int(value)
+        return int(text[:-1]) * _DURATION_MULTIPLIERS[unit]
+    return int(text)
 
 
 def format_duration(seconds: int) -> str:
