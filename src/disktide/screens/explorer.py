@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import traceback
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic, thread_time
@@ -266,6 +267,10 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         #: The tree the category rollup should read. An attribute rather
         #: than a worker argument; see `_build_category_index`.
         self._category_index_source: FSNode | None = None
+        #: One "a scan update could not be drawn" notification per run, so a
+        #: handler that fails on every progress frame does not bury the
+        #: screen under hundreds of them.
+        self._event_error_notified = False
         # True while a scan is in flight. Used to gate drill-into (which
         # would otherwise read stale aggregates off the live snapshot)
         # and to decide whether to forward tree snapshots to the viz.
@@ -409,6 +414,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             return
         self._active_run = run
         self._scan_in_progress = True
+        self._event_error_notified = False
         self._live_snapshot = None
         self._live_view_snapshot = None
         self._reset_live_ui_pacing()
@@ -469,10 +475,81 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             self.app.call_from_thread(self._on_scan_failed, exc, run.run_id)
 
     def _apply_scan_event(self, event: ScanEvent) -> None:
-        """Apply one service event on Textual's main thread."""
+        """Apply one service event on Textual's main thread.
+
+        Nothing raised below this line may reach the caller. `on_event` hands
+        every event over with `App.call_from_thread`, which returns
+        `future.result()` -- so an exception here is re-raised on the
+        emitter's dispatch thread, where `_RunEmitter._dispatch_loop`
+        *disables this consumer for the rest of the run*. That rule is right
+        for the service, which has several independent consumers and cannot
+        know which of them is essential; it is fatal here, because the
+        completion event is what clears `_scan_in_progress` and takes the
+        overlay down. One bad frame used to buy a screen stuck on "Scanning"
+        with rescan, go-up and go-into all refusing, for the rest of the
+        session, and the only record of it was `run.consumer_errors`, which
+        nothing reads.
+
+        So: the failure is logged with its traceback, the user is told once
+        per run, and the terminal events settle the screen from a `finally`
+        whether their widget work got through or not.
+        """
         active = self._active_run
         if active is None or event.run_id != active.run_id:
             return
+        terminal = isinstance(event, (ScanCompleted, ScanCancelled, ScanFailed))
+        try:
+            self._dispatch_scan_event(event)
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            self._report_scan_event_error(event, exc)
+        finally:
+            if terminal:
+                self._settle_terminal_scan_ui()
+
+    def _report_scan_event_error(
+        self, event: ScanEvent, exc: BaseException
+    ) -> None:
+        """Log a failed event handler, and tell the user once per run."""
+        self.log.error(
+            f"scan event {type(event).__name__} failed: "
+            f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        )
+        if self._event_error_notified:
+            return
+        self._event_error_notified = True
+        self.notify(
+            f"A scan update could not be drawn ({type(exc).__name__}); "
+            "the scan itself is unaffected.",
+            severity="error",
+            timeout=8,
+        )
+
+    def _settle_terminal_scan_ui(self) -> None:
+        """What a finished scan owes the screen, whatever else went wrong.
+
+        Idempotent, and every widget touch is guarded: this runs from a
+        `finally` precisely for the case where a widget is missing or
+        raising. The handlers do all of this themselves on the happy path;
+        this is what stops a screen wedging when they do not get that far.
+        """
+        self._scan_in_progress = False
+        self._live_snapshot = None
+        self._live_view_snapshot = None
+        self._reset_live_ui_pacing()
+        try:
+            self.query_one("#scan-progress", ScanProgressOverlay).is_scanning = False
+        except Exception:  # noqa: BLE001 - the overlay may be gone
+            pass
+        try:
+            tree_panel = self.query_one("#tree-panel")
+            tree_panel.remove_class("scanning")
+            tree_panel.remove_class("live-tree")
+        except Exception:  # noqa: BLE001 - the panel may be gone
+            pass
+        self._release_retiring_run()
+
+    def _dispatch_scan_event(self, event: ScanEvent) -> None:
+        """Draw one service event. May raise; the caller expects that."""
         overlay = self.query_one("#scan-progress", ScanProgressOverlay)
         if isinstance(event, ScanQueued):
             overlay.update_context(
@@ -631,11 +708,6 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # Update only the active viz tab
         self._update_active_viz(root)
         self._update_status()
-        # The tree this replaced is now unreferenced everywhere this screen
-        # can reach; drop the run's copy of it too and its refcount goes to
-        # zero here, rather than waiting for a collection that would have to
-        # walk a million nodes to find it.
-        self._release_retiring_run()
 
     # One gate covers everything a live snapshot costs the UI thread: the
     # tree panel's relabelling, the chart, and the compositor pass those
@@ -1042,7 +1114,6 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             severity="warning",
             timeout=4,
         )
-        self._release_retiring_run()
 
     def _on_scan_failed(
         self,
@@ -1057,6 +1128,10 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         Does not touch `_root` / `_current` / the size-tree: there is no
         tree to render, and clobbering the previous scan's data would
         wipe state the user might still want to see.
+
+        The `finally` is here as well as in `_apply_scan_event` because two
+        callers reach this directly and not through an event: `_start_scan`
+        when `create_run` refuses, and `_run_scan` when `execute` raises.
         """
         if (
             run_id is not None
@@ -1064,6 +1139,17 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             and run_id != self._active_run.run_id
         ):
             return
+        try:
+            self._render_scan_failed(exc, run_id)
+        finally:
+            self._settle_terminal_scan_ui()
+
+    def _render_scan_failed(
+        self,
+        exc: BaseException,
+        run_id: str | None = None,
+    ) -> None:
+        """Put the screen back after a failed scan. May raise."""
         self._scan_in_progress = False
         self._live_snapshot = None
         self._live_view_snapshot = None
@@ -1089,7 +1175,6 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             severity="error",
             timeout=8,
         )
-        self._release_retiring_run()
 
     def _update_active_viz(
         self,
