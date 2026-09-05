@@ -9,11 +9,14 @@ exposes.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 from click.testing import CliRunner
 
-from disktide.__main__ import cli
+from disktide.__main__ import _stream_isatty, cli
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +84,56 @@ def test_scan_report_starts_at_the_first_line(tmp_path):
     result = CliRunner().invoke(cli, ["scan", str(tmp_path)])
 
     assert result.stdout.startswith("Scan ")
+
+
+def _run_with_stderr_closed(argv: list[str]) -> subprocess.CompletedProcess:
+    """Run the CLI in a child whose fd 2 is genuinely closed.
+
+    `stderr=DEVNULL` is not this case: it hands the child an open fd 2.
+    Only a closed one makes Python set `sys.stderr = None`, which is the
+    state that used to raise. `preexec_fn` runs in the forked child after
+    the standard fds are wired up and before `exec`, and the child has no
+    threads of its own yet, so closing there is safe.
+    """
+    process = subprocess.Popen(
+        [sys.executable, "-m", "disktide", *argv],
+        stdout=subprocess.PIPE,
+        stderr=None,
+        close_fds=True,
+        preexec_fn=lambda: os.close(2),  # noqa: PLW1509 - see docstring
+    )
+    stdout, _ = process.communicate(timeout=120)
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, None)
+
+
+def test_stream_isatty_answers_for_a_stream_that_is_gone():
+    """A closed fd leaves `sys.stderr` as None, which cannot be asked."""
+    assert _stream_isatty(None) is False
+
+
+def test_scan_still_reports_with_stderr_closed(tmp_path):
+    """`disktide scan PATH 2>&-` costs the narration, not the result.
+
+    With fd 2 closed the reporter's `sys.stderr.isatty()` raised
+    `AttributeError`, so the command exited 1 having written nothing at all
+    to stdout -- the scan had succeeded and the report was simply lost.
+    """
+    (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
+
+    completed = _run_with_stderr_closed(["scan", str(tmp_path)])
+
+    assert completed.returncode == 0, completed.stdout
+    assert b"Total (Logical)" in completed.stdout
+
+
+def test_scan_json_still_reports_with_stderr_closed(tmp_path):
+    """--json was already fine here; it has to stay that way."""
+    (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
+
+    completed = _run_with_stderr_closed(["scan", str(tmp_path), "--json"])
+
+    assert completed.returncode == 0, completed.stdout
+    assert json.loads(completed.stdout)["status"] == "completed"
 
 
 # --- machine-readable output ----------------------------------------------

@@ -14,19 +14,30 @@ from disktide import __version__
 from disktide.textsafe import display_text
 
 
+def _stream_isatty(stream) -> bool:
+    """Whether one stdio stream is a terminal, for a stream that may be gone.
+
+    `disktide scan PATH 2>&-` starts the process with fd 2 closed, and Python
+    sets `sys.stderr` to None rather than to something that can answer
+    questions about itself. A bare `sys.stderr.isatty()` raises
+    `AttributeError` there -- which is what took the whole command down
+    before a single byte of the report reached stdout. Not-a-terminal is the
+    right answer for a stream that cannot say, and it is also the right
+    answer for the closed one: no live redraw, no narration, report only.
+    """
+    try:
+        return stream is not None and bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def _stdio_is_interactive() -> bool:
     """Whether both halves of the terminal the TUI needs are actually there.
 
     A closed or replaced stream can raise instead of answering, so a
     failed check counts as not-a-terminal.
     """
-    for stream in (sys.stdin, sys.stdout):
-        try:
-            if stream is None or not stream.isatty():
-                return False
-        except (AttributeError, ValueError, OSError):
-            return False
-    return True
+    return _stream_isatty(sys.stdin) and _stream_isatty(sys.stdout)
 
 
 def _soften_stdio_encoding_errors() -> None:
@@ -153,8 +164,11 @@ def cli(
             # traceback is even printed. Cancelling turns that into the
             # walker's usual ~10 ms bail.
             _force_teardown(app)
-            sys.stdout.flush()
-            sys.stderr.flush()
+            # Both guarded: either fd may have been closed before the
+            # process started, which leaves the stream None.
+            for stream in (sys.stdout, sys.stderr):
+                if stream is not None:
+                    stream.flush()
         # Bypass Python's interpreter teardown: gc of the in-memory
         # FSNode tree + atexit + module cleanup adds tens of seconds on
         # a multi-million-file scan, all spent freeing memory the kernel
@@ -390,7 +404,7 @@ def scan(
             # a file every refresh would survive as another \r-separated
             # copy, so it is emitted only when stderr is a terminal that
             # can overwrite the line.
-            self.live = not quiet and sys.stderr.isatty()
+            self.live = not quiet and _stream_isatty(sys.stderr)
             self.progress_written = False
 
         def _status(self, message: str) -> None:

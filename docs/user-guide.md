@@ -289,6 +289,10 @@ disktide scan /path --json
 prints all three byte totals. Exit codes: `0` success/partial, `1` failure,
 `2` invalid input, `130` cancelled.
 
+Run status goes to stderr and the report to stdout, so closing stderr
+(`disktide scan /path 2>&- > report.txt`) costs the narration and keeps the
+report.
+
 A filename is bytes, and not every filename on a filesystem is valid UTF-8.
 The text report renders the undecodable ones as their raw bytes -- a
 directory named `b"\xff\xfe"` prints as `\xff\xfe/` -- rather than failing
