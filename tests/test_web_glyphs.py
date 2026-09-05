@@ -312,3 +312,78 @@ def test_the_gate_would_notice_a_stock_widget_slipping_through(tmp_path):
             assert isinstance(app.screen, ExplorerScreen)
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("ansi", [False, True], ids=["rgb", "ansi"])
+def test_the_scan_overlay_draws_its_bar_as_a_fill(tmp_path, monkeypatch, ansi):
+    """Textual's `Bar` renders `━`, with `╺`/`╸` for its two half-cell ends.
+
+    All three are in the box-drawing block, so the allowlist alone would
+    pass them -- and `━` really is fine, it is what the tab underline has
+    always drawn with. The half-heavy ends are not: they are a partial
+    cell, which is the shape of thing a browser terminal draws at the
+    wrong width, on a row whose length changes as the bar advances. So the
+    check is not "no forbidden glyph" but "no glyph at all": the bar is
+    spaces under a background, and the progress is the boundary between
+    two of them.
+
+    Swept across the bar's three states, because `Bar.render` takes a
+    different branch for each: indeterminate (what a scan actually shows),
+    part-way, and complete.
+    """
+    from textual.widgets._progress_bar import Bar
+
+    from disktide.widgets.scan_progress import ScanProgressOverlay
+
+    if ansi:
+        monkeypatch.setenv("NO_COLOR", "1")
+    else:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=AppConfig()
+        )
+        async with app.run_test(size=(120, 32)) as pilot:
+            await wait_for_explorer(pilot, app)
+            assert bool(app.ansi_color) is ansi
+            overlay = ScanProgressOverlay()
+            await app.screen.mount(overlay)
+            overlay.start(run_id="r", phase="walk", policy="default")
+            await pilot.pause()
+            progress_bar = overlay.query_one("#scan-bar")
+            bar = progress_bar.query_one(Bar)
+            for total, done in ((None, 0), (100, 30), (100, 100)):
+                progress_bar.update(total=total, progress=done)
+                await pilot.pause()
+                await pilot.pause()
+                strip = bar.render_line(0)
+                assert not unsafe_glyphs_in(strip.text)
+                assert set(strip.text) == {" "}, (
+                    f"{total}/{done}: the bar drew {sorted(set(strip.text))}"
+                )
+                fills = {
+                    segment.style.bgcolor
+                    for segment in strip
+                    if segment.style is not None
+                    and segment.style.bgcolor is not None
+                    and not segment.style.bgcolor.is_default
+                }
+                assert fills, f"{total}/{done}: the bar is not painted at all"
+                if total is not None and 0 < done < total:
+                    assert len(fills) == 2, (
+                        f"{done}%: a part-way bar needs a done colour and a "
+                        f"track colour, got {sorted(str(c) for c in fills)}"
+                    )
+            # And the whole overlay stays inside the reviewed set.
+            for y in range(overlay.size.height):
+                text = overlay.render_line(y).text
+                assert not unsafe_glyphs_in(text), sorted(unsafe_glyphs_in(text))
+                unknown = {
+                    char
+                    for char in text
+                    if char not in WEB_SAFE_GLYPHS and not char.isspace()
+                }
+                assert not unknown, sorted(unknown)
+
+    asyncio.run(go())

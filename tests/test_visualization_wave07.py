@@ -424,6 +424,28 @@ def test_diff_and_path_history_caches_prevent_repeat_queries(repository):
     assert counted.measurement_series_calls == 1
 
 
+def test_the_sparkline_is_ascii_in_both_rendering_modes():
+    """It used to be `▁▂▃▄▅▆▇█` outside safe mode.
+
+    Those are the eighth blocks -- the glyphs that tore the welcome screen
+    apart in an Open OnDemand shell, drawn at a proportional font's
+    advance because the browser's monospace face has no glyph for them.
+    The sparkline goes into a tree row, ahead of the size and the bar, so
+    one cell drawn 1.4 wide takes the rest of the row with it.
+    """
+    values = [1, 5, 2, 9, 4, 7, 3]
+    rendered = sparkline(values)
+    assert len(rendered) == len(values)
+    assert all(ord(character) < 128 for character in rendered), rendered
+    # And it still says something: the tallest sample is not the shortest.
+    assert rendered[3] != rendered[0]
+    set_safe_rendering(True)
+    try:
+        assert sparkline(values) == rendered
+    finally:
+        set_safe_rendering(False)
+
+
 def test_safe_rendering_preserves_semantics_without_unicode():
     set_safe_rendering(True)
     try:

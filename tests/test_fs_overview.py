@@ -3,6 +3,8 @@
 import os
 from unittest.mock import patch
 
+from rich.style import Style
+
 from disktide.screens.fs_overview import (
     FSEntry,
     _usage_bar,
@@ -45,19 +47,45 @@ class TestUsagePct:
 
 
 class TestUsageBar:
+    """The bar is spaces under two background colours, not `█` and `░`.
+
+    A browser terminal has no cell-fitted glyph for either block element,
+    so what used to be countable characters is now a split between two
+    background spans -- which is what these read instead.
+    """
+
+    @staticmethod
+    def _split(bar) -> list[tuple[int, str]]:
+        """(cells, background colour) for each run of coloured spaces."""
+        runs = []
+        for span in bar.spans:
+            style = Style.parse(span.style) if isinstance(span.style, str) else span.style
+            if style.bgcolor is None:
+                continue
+            assert set(bar.plain[span.start:span.end]) == {" "}, bar.plain
+            runs.append((span.end - span.start, str(style.bgcolor.name)))
+        return runs
+
     def test_normal(self):
         bar = _usage_bar(50.0, width=10)
-        assert "█████░░░░░" in bar.plain
+        filled, track = self._split(bar)
+        assert filled[0] == track[0] == 5
+        assert filled[1] != track[1]
+        assert bar.plain.endswith("  50.0%")
 
     def test_over_100_is_clamped(self):
         # An over-quota pct must not overflow the bar width or crash.
         bar = _usage_bar(150.0, width=10)
-        assert bar.plain.count("█") == 10
-        assert bar.plain.count("░") == 0
+        assert self._split(bar) == [(10, "red")]
 
     def test_zero(self):
         bar = _usage_bar(0.0, width=10)
-        assert bar.plain.count("░") == 10
+        assert self._split(bar) == [(10, "bright_black")]
+
+    def test_no_cell_of_it_is_a_block_element(self):
+        for pct in (0.0, 12.5, 50.0, 71.0, 95.0, 150.0):
+            plain = _usage_bar(pct, width=12).plain
+            assert not any(0x2580 <= ord(c) < 0x25A0 for c in plain), plain
 
 
 class TestDedup:

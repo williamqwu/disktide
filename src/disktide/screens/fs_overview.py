@@ -32,7 +32,7 @@ from disktide.scanner.blockdev import idle_summary
 from disktide.scanner.benchmark import benchmark_mount, BenchmarkResult
 from disktide.scanner.policy import PSEUDO_FS_TYPES
 from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
-from disktide.viz.colors import ink
+from disktide.viz.colors import FILL_ROLES, ink, ink_fill
 from disktide.widgets.confirm_modal import ConfirmModal
 
 
@@ -107,6 +107,23 @@ class FSEntry:
         return ink(storage_class(
             self.fs_type, self.is_network_fs, self.is_rotational
         )[1])
+
+    @property
+    def speed_fill(self) -> str:
+        """The same tier as a *background*, for the proportional bar.
+
+        The bar is spaces under a colour rather than a run of `█`, because
+        a browser terminal draws that glyph narrower than the cell and
+        taller than the row. `muted` is the one role that cannot make the
+        trip: every theme spells it bare `dim`, which modulates a colour
+        rather than being one. An unknown tier takes the bar's own track
+        colour instead, which is the neutral this palette already keeps
+        for a fill that means nothing in particular.
+        """
+        role = storage_class(
+            self.fs_type, self.is_network_fs, self.is_rotational
+        )[1]
+        return ink_fill("bar_track" if role not in FILL_ROLES else role)
 
     @property
     def badges(self) -> Text:
@@ -320,14 +337,23 @@ def _load_fs_entries(
 
 
 def _usage_bar(pct: float, width: int = 12) -> Text:
+    """A `width`-cell bar, drawn as background colour on spaces.
+
+    `█`/`░` said the same thing in fewer bytes and said it wrong in a
+    browser terminal: Courier New's ink for both is narrower than the cell
+    and taller than the row, so a column of these bars bled into the rows
+    above and below it. Nothing DiskTide fills is a block element now.
+    """
     # Clamp: an over-quota pct (>100, shown with a '*' by the quota tool) would
     # otherwise produce a bar longer than `width` and a negative empty count.
     filled = max(0, min(width, int(pct / 100 * width)))
-    bar = "█" * filled + "░" * (width - filled)
-    style = ink("error" if pct >= 90 else "warning" if pct >= 70 else "bar")
+    role = "error" if pct >= 90 else "warning" if pct >= 70 else "bar"
     t = Text()
-    t.append(bar, style=style)
-    t.append(f"  {pct:.1f}%")
+    if filled:
+        t.append(" " * filled, style=ink_fill(role))
+    if width > filled:
+        t.append(" " * (width - filled), style=ink_fill("bar_track"))
+    t.append(f"  {pct:.1f}%", style=ink(role))
     return t
 
 
@@ -399,11 +425,12 @@ def _build_summary(entries: list[FSEntry]) -> Text:
     t.append(f"Total: {humanize.naturalsize(total_space, binary=True)}  |  ")
     t.append(f"Used: {humanize.naturalsize(total_used, binary=True)} ({used_pct:.0f}%)\n  ")
 
-    # Proportional bar — each FS contributes width proportional to its total size
+    # Proportional bar — each FS contributes width proportional to its total
+    # size, painted as a background so no cell of it is a block element.
     bar_width = 50
     for e in unique:
         w = max(1, int(e.total_bytes / total_space * bar_width)) if total_space > 0 else 1
-        t.append("█" * w, style=e.speed_style)
+        t.append(" " * w, style=e.speed_fill)
 
     t.append("\n  ")
     for e in unique:

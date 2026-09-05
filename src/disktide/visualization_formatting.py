@@ -68,7 +68,13 @@ def sparkline(values: tuple[int | None, ...] | list[int | None]) -> str:
         return ""
     low = min(valid)
     high = max(valid)
-    glyphs = ".:-=+*#" if is_safe_rendering() else "▁▂▃▄▅▆▇█"
+    # ASCII in every mode. The ramp that says "height" is `▁▂▃▄▅▆▇█`, the
+    # eighth blocks -- the exact glyphs a browser terminal has no
+    # monospace face for and draws at a proportional font's advance. A
+    # sparkline sits inside a tree row, so one drawn 1.4 cells wide would
+    # push the whole tail of that row sideways. Seven ASCII steps of
+    # increasing weight say the same thing at one cell each.
+    glyphs = ".:-=+*#"
     span = high - low
     # "?" is for a hole in the middle of a series. Points outside the
     # first and last real values are not holes — the path simply did not

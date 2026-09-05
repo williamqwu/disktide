@@ -95,20 +95,28 @@ def theme_preview(name: str) -> Text:
     """Swatches drawn from *name*'s own tables, not the active scheme.
 
     Reads as the chart does: the three shallowest directory neutrals (which
-    is most of a chart's area) then the six category swatches, over the
-    theme's own panel colour. `mono` has to step visibly here too — its six
-    categories are a gray ladder rather than one flat gray — and `ansi`
-    names its colours instead of spelling them, so the lookup is one call
-    (`scheme_swatches`) that answers for all three shapes rather than a
-    branch repeated here.
+    is most of a chart's area) then the six category swatches, painted as
+    background colours over the theme's own panel colour. `mono` has to
+    step visibly here too — its six categories are a gray ladder rather
+    than one flat gray — and `ansi` names its colours instead of spelling
+    them, so the lookup is one call (`scheme_swatches`) that answers for
+    all three shapes rather than a branch repeated here.
     """
     scheme = SCHEMES[sanitize_theme(name)]
-    glyph = "##" if is_safe_rendering() else "██"
+    safe = is_safe_rendering()
     background = scheme.border_bg
     neutrals, legend = scheme_swatches(scheme)
 
     def swatch(color: str) -> tuple[str, Style]:
-        return glyph, Style(color=color, bgcolor=background)
+        # Two spaces over the colour rather than `██` in it. A swatch is a
+        # fill, and `█` is a block element: a browser terminal draws it
+        # narrower than the cell and taller than the row, which turned a
+        # 20-cell preview row into a ragged one. Safe mode keeps `##`,
+        # because that is the mode for a terminal that cannot be trusted
+        # with a background colour either.
+        if safe:
+            return "##", Style(color=color, bgcolor=background)
+        return "  ", Style(bgcolor=color)
 
     # Exactly 20 cells wide, which is what the row has left at an
     # 80-column terminal.

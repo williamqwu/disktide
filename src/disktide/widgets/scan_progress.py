@@ -7,12 +7,54 @@ from time import monotonic
 from textual.app import ComposeResult
 from textual.containers import Center, Middle
 from textual.reactive import reactive
+from textual.renderables.bar import Bar as BarRenderable
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static, ProgressBar
+from rich.style import Style, StyleType
 from rich.text import Text
 import humanize
 from disktide.viz.colors import ink
+
+
+def _as_background(style: StyleType) -> Style:
+    """Turn a foreground colour into a background one."""
+    resolved = Style.parse(style) if isinstance(style, str) else style
+    if resolved.color is None:
+        return resolved
+    return Style(bgcolor=resolved.color)
+
+
+class FilledBar(BarRenderable):
+    """Textual's progress bar, drawn as background colour on spaces.
+
+    The stock `Bar` renders `━` for a whole cell and `╺`/`╸` for the two
+    half-cell ends. `━` is box drawing and comes out at one cell in a
+    browser terminal; the two half-heavy ends do not, and none of the
+    three is in the set `disktide.glyphs` allows. So the three class
+    attributes become spaces and the two styles the widget hands down --
+    which arrive as *foreground* colours, since that is what a glyph bar
+    needs -- are turned into backgrounds here.
+
+    Subclassed rather than patched onto `Bar` itself, because the same
+    renderable draws the tab underline, where `━` is right and always was.
+    """
+
+    HALF_BAR_LEFT: str = " "
+    BAR: str = " "
+    HALF_BAR_RIGHT: str = " "
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.highlight_style = _as_background(self.highlight_style)
+        self.background_style = _as_background(self.background_style)
+
+
+class FilledProgressBar(ProgressBar):
+    """A `ProgressBar` whose bar is a fill rather than a rule."""
+
+    BAR_RENDERABLE = FilledBar
+
 
 class ScanProgressOverlay(Widget):
     """Overlay widget showing scan progress."""
@@ -37,6 +79,37 @@ class ScanProgressOverlay(Widget):
     }
     ScanProgressOverlay Bar {
         width: 1fr;
+    }
+    /* `FilledBar` paints the component class's *foreground* as the done
+       part and its *background* as the track, so the track needs a colour
+       of its own: Textual's stock `$surface` is the overlay's own
+       background and would leave the bar's extent invisible. The
+       indeterminate state is $primary rather than the stock $error --
+       a heavy rule in red reads as a hairline, a filled band in red reads
+       as a failure, and a scan is neither. */
+    ScanProgressOverlay Bar > .bar--bar {
+        color: $primary;
+        background: $surface-lighten-2;
+    }
+    ScanProgressOverlay Bar > .bar--complete {
+        color: $success;
+        background: $surface-lighten-2;
+    }
+    ScanProgressOverlay Bar > .bar--indeterminate {
+        color: $primary;
+        background: $surface-lighten-2;
+    }
+    ScanProgressOverlay Bar:ansi > .bar--bar {
+        color: ansi_blue;
+        background: ansi_bright_black;
+    }
+    ScanProgressOverlay Bar:ansi > .bar--complete {
+        color: ansi_green;
+        background: ansi_bright_black;
+    }
+    ScanProgressOverlay Bar:ansi > .bar--indeterminate {
+        color: ansi_blue;
+        background: ansi_bright_black;
     }
     """
 
@@ -63,7 +136,7 @@ class ScanProgressOverlay(Widget):
         # indeterminate band and the stats line carries the motion.
         # We have no honest progress fraction without a pre-count pass,
         # so a fake percentage that parks at 97% does more harm than good.
-        self._bar = ProgressBar(
+        self._bar = FilledProgressBar(
             total=None, show_eta=False, show_percentage=False, id="scan-bar",
         )
         #: The newest progress that has not been drawn yet, or None when

@@ -578,7 +578,11 @@ def scan(
             else 0.0
         )
         filled = min(50, int(pct / 2))
-        bar = "█" * filled + "░" * (50 - filled)
+        # ASCII, not `█`/`░`: this goes to stdout, which is a pipe or a
+        # file as often as it is a terminal, and a background colour is
+        # not available there. The block elements are also what a browser
+        # terminal draws at the wrong size, so nothing is lost twice over.
+        bar = "#" * filled + "-" * (50 - filled)
         click.echo(
             f"  {bar} {pct:5.1f}% {metric_text(child, metric):>12s}  "
             f"{child.name}/"
