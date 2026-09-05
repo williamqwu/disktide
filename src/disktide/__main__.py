@@ -11,7 +11,7 @@ from pathlib import Path
 import click
 
 from disktide import __version__
-from disktide.textsafe import display_text
+from disktide.textsafe import display_text, json_text
 
 
 def _stream_isatty(stream) -> bool:
@@ -62,6 +62,40 @@ def _soften_stdio_encoding_errors() -> None:
             stream.reconfigure(errors="backslashreplace")
         except (ValueError, OSError):
             pass
+
+
+def _json_safe(document):
+    """Return `document` with every string in it safe to encode.
+
+    Names arrive from the OS carrying one lone surrogate per undecodable
+    byte (see `disktide.textsafe`), and `json.dumps` writes those straight
+    through: the document parses, `jq` renders U+FFFD, and it is still
+    invalid per RFC 8259 section 7 -- a Python consumer doing
+    `json.dumps(doc, ensure_ascii=False).encode()` or printing the loaded
+    object raises `UnicodeEncodeError: surrogates not allowed`. One pass
+    over the document before it is serialised is cheaper than teaching every
+    payload builder about it, and it cannot miss one.
+
+    Keys as well as values: a path is a dict key in more than one of these
+    documents.
+    """
+    if isinstance(document, str):
+        return json_text(document)
+    if isinstance(document, dict):
+        return {
+            json_text(key) if isinstance(key, str) else key: _json_safe(value)
+            for key, value in document.items()
+        }
+    if isinstance(document, (list, tuple)):
+        return [_json_safe(item) for item in document]
+    return document
+
+
+def _json_dumps(document, **kwargs) -> str:
+    """`json.dumps`, over a document every consumer can encode back."""
+    import json
+
+    return json.dumps(_json_safe(document), **kwargs)
 
 
 _TUI_OPTIONS = (
@@ -475,7 +509,7 @@ def doctor(json_output: bool, show_paths: bool) -> None:
 
     report = build_doctor_report(show_paths=show_paths)
     if json_output:
-        click.echo(report.to_json())
+        click.echo(_json_dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
         click.echo(render_doctor_report(report))
 
@@ -522,7 +556,6 @@ def scan(
     Run status goes to stderr; stdout carries the report alone, so
     `disktide scan PATH > report.txt` captures the result and nothing else.
     """
-    import json as json_module
     from disktide.domain.metrics import MetricId
     from disktide.domain.policy import ScanPolicy
     from disktide.domain.scan import (
@@ -669,7 +702,7 @@ def scan(
         # outcome; the exit code carries the same verdict either way.
         if json_output:
             click.echo(
-                json_module.dumps(
+                _json_dumps(
                     {
                         "schema_version": 1,
                         "run_id": run.run_id,
@@ -752,7 +785,7 @@ def scan(
         }
         if snapshot:
             payload["snapshot"] = _save_scan_snapshot(run)
-        click.echo(json_module.dumps(payload, sort_keys=True))
+        click.echo(_json_dumps(payload, sort_keys=True))
         if snapshot and not payload["snapshot"]["saved"]:
             # `--snapshot` asked for a write that did not happen. The scan
             # itself is in the payload and is still good, so the numbers go
@@ -1023,7 +1056,6 @@ def monitor_group() -> None:
 @click.option("--json", "json_output", is_flag=True, help="Emit JSON")
 def monitor_list(include_archived: bool, json_output: bool) -> None:
     """List monitor definitions and runtime state."""
-    import json
 
     from disktide.config import format_duration
 
@@ -1055,7 +1087,7 @@ def monitor_list(include_archived: bool, json_output: bool) -> None:
                     for item in dashboard.monitors
                 ],
             }
-            click.echo(json.dumps(payload, sort_keys=True))
+            click.echo(_json_dumps(payload, sort_keys=True))
             return
         if not dashboard.monitors:
             click.echo("No monitor definitions. Use: disktide monitor add PATH")
@@ -1360,7 +1392,6 @@ def monitor_reconcile(identifier: str) -> None:
 @click.option("--json", "json_output", is_flag=True)
 def monitor_status(identifier: str | None, json_output: bool) -> None:
     """Show detailed status for one or all monitors."""
-    import json
 
     import humanize
 
@@ -1379,7 +1410,7 @@ def monitor_status(identifier: str | None, json_output: bool) -> None:
             items = [item for item in items if item.definition.id == monitor.id]
         if json_output:
             click.echo(
-                json.dumps(
+                _json_dumps(
                     [
                         {
                             "id": item.definition.id,
@@ -1657,7 +1688,6 @@ def alerts_list(
     monitor_id: int | None, show_events: bool, json_output: bool
 ) -> None:
     """List alert rules or recent events."""
-    import json
 
     _, repository, service = _monitor_service()
     try:
@@ -1665,7 +1695,7 @@ def alerts_list(
             events = service.list_alert_events(monitor_id)
             if json_output:
                 click.echo(
-                    json.dumps(
+                    _json_dumps(
                         [
                             {
                                 "id": event.id,
@@ -1702,7 +1732,7 @@ def alerts_list(
         rules = service.list_alert_rules(monitor_id)
         if json_output:
             click.echo(
-                json.dumps(
+                _json_dumps(
                     [
                         {
                             "id": rule.id,
@@ -1964,7 +1994,6 @@ def alerts_check(monitor_id: int | None, json_output: bool) -> None:
     Exit 0 means no trigger, 2 means an active trigger, and 3 means only
     suppressed/low-confidence triggers.
     """
-    import json
 
     _, repository, service = _monitor_service()
     try:
@@ -1981,7 +2010,7 @@ def alerts_check(monitor_id: int | None, json_output: bool) -> None:
             events.extend(service.check_alerts(monitor.id))
         if json_output:
             click.echo(
-                json.dumps(
+                _json_dumps(
                     [
                         {
                             "rule_id": event.rule_id,
@@ -2313,7 +2342,6 @@ def cleanup_plan(
     Without --apply or --permanent this only previews; nothing on disk
     is touched.
     """
-    import json
 
     import humanize
 
@@ -2379,7 +2407,7 @@ def cleanup_plan(
             if not targets:
                 if json_output:
                     click.echo(
-                        json.dumps(
+                        _json_dumps(
                             {
                                 "schema_version": 1,
                                 "scan_root": scan_root,
@@ -2412,7 +2440,7 @@ def cleanup_plan(
             )
 
         if json_output and not apply_safe and not permanent:
-            click.echo(json.dumps(cleanup_plan_to_dict(plan)))
+            click.echo(_json_dumps(cleanup_plan_to_dict(plan)))
             return
         if not json_output:
             _render_cleanup_plan(plan, humanize)
@@ -2444,7 +2472,7 @@ def cleanup_plan(
             )
         result = service.execute(plan, action=action_kind, confirmation=confirm)
         if json_output:
-            click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
+            click.echo(_json_dumps(cleanup_plan_to_dict(result.plan)))
             return
         click.echo(
             f"Plan {result.plan.id}: {result.plan.status.value}; "
@@ -2481,7 +2509,6 @@ def cleanup_plan(
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 def cleanup_history(history_group: str | None, json_output: bool) -> None:
     """List recorded cleanup plans, or grouped savings with --by."""
-    import json
 
     import humanize
 
@@ -2493,7 +2520,7 @@ def cleanup_history(history_group: str | None, json_output: bool) -> None:
             summaries = service.savings_history(group_by=history_group)
             if json_output:
                 click.echo(
-                    json.dumps([item.to_dict() for item in summaries], sort_keys=True)
+                    _json_dumps([item.to_dict() for item in summaries], sort_keys=True)
                 )
             elif not summaries:
                 click.echo("No cleanup savings history recorded.")
@@ -2512,7 +2539,7 @@ def cleanup_history(history_group: str | None, json_output: bool) -> None:
 
         plans = service.history(limit=100)
         if json_output:
-            click.echo(json.dumps([cleanup_plan_to_dict(item) for item in plans]))
+            click.echo(_json_dumps([cleanup_plan_to_dict(item) for item in plans]))
         elif not plans:
             click.echo("No cleanup plans recorded.")
         else:
@@ -2531,7 +2558,6 @@ def cleanup_history(history_group: str | None, json_output: bool) -> None:
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 def cleanup_undo(plan_or_action_id: str, json_output: bool) -> None:
     """Restore quarantined content from a plan or a single action."""
-    import json
 
     from disktide.domain.cleanup import CleanupExecutionStatus, cleanup_plan_to_dict
 
@@ -2539,7 +2565,7 @@ def cleanup_undo(plan_or_action_id: str, json_output: bool) -> None:
     with _cleanup_session(config, rule_directory) as (_, service):
         result = service.undo(plan_or_action_id)
         if json_output:
-            click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
+            click.echo(_json_dumps(cleanup_plan_to_dict(result.plan)))
             return
         restored = sum(
             action.execution_status is CleanupExecutionStatus.UNDONE
@@ -2562,7 +2588,6 @@ def cleanup_purge(
     plan_or_action_id: str, confirm: str | None, json_output: bool
 ) -> None:
     """Permanently remove quarantined content. This cannot be undone."""
-    import json
 
     import humanize
 
@@ -2590,7 +2615,7 @@ def cleanup_purge(
             )
         result = service.purge(plan_or_action_id, confirmation=confirm)
         if json_output:
-            click.echo(json.dumps(cleanup_plan_to_dict(result.plan)))
+            click.echo(_json_dumps(cleanup_plan_to_dict(result.plan)))
         else:
             click.echo(
                 f"Purge {result.plan.id}: {result.plan.purged_count} purged; "
@@ -2608,7 +2633,6 @@ def cleanup_rules() -> None:
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 def cleanup_rules_list(json_output: bool) -> None:
     """List rule packs and any packs isolated by a load error."""
-    import json
 
     _, _, catalog = _cleanup_catalog()
     payload = {
@@ -2637,7 +2661,7 @@ def cleanup_rules_list(json_output: bool) -> None:
         ],
     }
     if json_output:
-        click.echo(json.dumps(payload, sort_keys=True))
+        click.echo(_json_dumps(payload, sort_keys=True))
         return
     for pack in catalog.packs:
         state = "enabled" if pack.enabled else "disabled"
@@ -2654,7 +2678,6 @@ def cleanup_rules_list(json_output: bool) -> None:
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 def cleanup_rules_validate(path: str, json_output: bool) -> None:
     """Check that the rule pack at PATH loads and conforms to the schema."""
-    import json
 
     from disktide.extensions.cleanup_rules import (
         RulePackValidationError,
@@ -2674,7 +2697,7 @@ def cleanup_rules_validate(path: str, json_output: bool) -> None:
         "rule_count": len(pack.rules),
     }
     if json_output:
-        click.echo(json.dumps(payload, sort_keys=True))
+        click.echo(_json_dumps(payload, sort_keys=True))
     else:
         click.echo(
             f"VALID {pack.name} v{pack.version} · schema "
@@ -2725,7 +2748,6 @@ def cleanup_quarantine() -> None:
 
 def _run_quarantine_audit(root: str, *, rebuild: bool, json_output: bool) -> None:
     """Audit a quarantine root, optionally rebuilding its ledger first."""
-    import json
 
     import humanize
 
@@ -2741,7 +2763,7 @@ def _run_quarantine_audit(root: str, *, rebuild: bool, json_output: bool) -> Non
     except CleanupExecutionError as exc:
         raise click.ClickException(str(exc)) from exc
     if json_output:
-        click.echo(json.dumps(status.to_dict(), sort_keys=True))
+        click.echo(_json_dumps(status.to_dict(), sort_keys=True))
         return
     verdict = "MATCH" if status.ledger_matches else "MISMATCH"
     click.echo(f"Quarantine ledger {verdict}: {status.root}")

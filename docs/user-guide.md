@@ -303,7 +303,10 @@ report.
 A filename is bytes, and not every filename on a filesystem is valid UTF-8.
 The text report renders the undecodable ones as their raw bytes -- a
 directory named `b"\xff\xfe"` prints as `\xff\xfe/` -- rather than failing
-to encode them.
+to encode them. `--json` cannot do that and stay valid JSON, so every
+undecodable byte is emitted as U+FFFD (`\ufffd`) instead; the document that
+comes out is one any consumer can re-encode. Use the text report when you
+need to know which bytes are actually on disk.
 
 ### compare
 

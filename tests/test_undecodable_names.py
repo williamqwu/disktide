@@ -10,6 +10,7 @@ stream-level backstop behind them.
 from __future__ import annotations
 
 import io
+import json
 import os
 
 import pytest
@@ -119,3 +120,36 @@ def test_softening_tolerates_a_closed_or_foreign_stream(monkeypatch):
     monkeypatch.setattr("sys.stdout", Foreign())
 
     _soften_stdio_encoding_errors()
+
+
+# --- the JSON documents ----------------------------------------------------
+
+
+def test_scan_json_is_a_document_a_consumer_can_re_encode(tmp_path):
+    """Lone surrogates parse but are invalid per RFC 8259 section 7."""
+    _make_undecodable_directory(tmp_path)
+
+    result = CliRunner().invoke(cli, ["scan", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert [child["name"] for child in payload["children"]] == ["��"]
+    # The gesture that used to raise UnicodeEncodeError.
+    json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    assert "\\udcff" not in result.stdout
+
+
+def test_json_sanitising_reaches_keys_and_nesting():
+    from disktide.__main__ import _json_safe
+
+    document = {"\udcff": [{"name": "\udcfe"}, ("\udcff",)]}
+
+    assert _json_safe(document) == {"�": [{"name": "�"}, ["�"]]}
+
+
+def test_doctor_json_still_parses():
+    """`doctor --json` serialises through the same pass now."""
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert isinstance(json.loads(result.stdout), dict)
