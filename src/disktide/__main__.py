@@ -1113,7 +1113,10 @@ def monitor_list(include_archived: bool, json_output: bool) -> None:
 
 
 @monitor_group.command("add")
-@click.argument("path", type=click.Path(path_type=Path))
+@click.argument(
+    "path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
 @click.option("--label", default="", help="Display label")
 @click.option("--interval", default=None, help="Start-to-start cadence (e.g. 6h)")
 @click.option(
@@ -1200,7 +1203,12 @@ def monitor_add(
 @monitor_group.command("edit")
 @click.argument("identifier")
 @click.option("--label", default=None)
-@click.option("--path", "new_path", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--path",
+    "new_path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+)
 @click.option("--interval", default=None)
 @click.option(
     "--metric",
@@ -2042,7 +2050,11 @@ def alerts_check(monitor_id: int | None, json_output: bool) -> None:
 
 
 @cli.command()
-@click.argument("path", required=False, type=click.Path(path_type=Path))
+@click.argument(
+    "path",
+    required=False,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
 @click.option("--monitor", "monitor_identifier", default=None, help="Host one saved monitor")
 @click.option("--all", "watch_all", is_flag=True, help="Host all enabled monitors")
 @click.option("--interval", "-i", default=None, help="Transient scan interval")

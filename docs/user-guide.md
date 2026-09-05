@@ -376,6 +376,10 @@ disktide watch --all                     # host all enabled definitions
 `auto` mode (default) uses the native backend when installed, otherwise falls
 back to periodic. `--events` is strict and exits if the backend is missing.
 
+`PATH` must be an existing directory, as it must for `monitor add` and
+`monitor edit --path`; anything else is a usage error (exit 2) rather than a
+host that starts and logs "Not a directory" once a cycle.
+
 For long-running hosting, use tmux or a systemd user unit:
 
 ```bash
