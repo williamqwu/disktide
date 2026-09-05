@@ -252,11 +252,19 @@ class TileGeometry:
 
     Contour *m* is the rectangle of half-extents ``(m * unit_x,
     m * unit_y)``.  `unit_x` is a whole number of columns and `unit_y` a
-    whole number of half-rows -- the framebuffer's two quanta -- so every
-    ring boundary, the hole (contour 1) and the outer silhouette land
-    exactly on a cell edge in both axes, at any cell aspect.  That is the
-    difference between this and a shape whose single ring width has to
-    snap to two grids at once.
+    whole number of *rows*, so every ring boundary, the hole (contour 1)
+    and the outer silhouette land exactly on a cell edge in both axes, at
+    any cell aspect.  That is the difference between this and a shape
+    whose single ring width has to snap to two grids at once.
+
+    The vertical quantum is a whole row and not the framebuffer's own
+    half-row, which is what it was until the browser-terminal work.  A
+    half-row edge is drawn with `▀`/`▄`, and a browser terminal's default
+    font fits neither to a cell: an edge that landed on a half row came
+    out as a comb of slits and dragged the rows carrying it sideways.  A
+    tiles cell now never has two different halves, so `_render_cells`
+    emits a space for every one of them.  The price is that a pane whose
+    height gave an odd number of half-rows loses one ring-row.
 
     Band *k* is the annulus between contours k and k+1, and it is split
     into faces along its **inner** rectangle: a point belongs to a side
@@ -279,9 +287,11 @@ class TileGeometry:
     unit_x: float
     unit_y: float
     step: float
-    #: Half a character cell, in units: the framebuffer's vertical
-    #: quantum, and the grid a y coordinate is rounded to.
-    half_row: float = 1.0
+    #: One whole character cell, in units: this shape's vertical quantum,
+    #: and the grid a y coordinate is rounded to.  `unit_y` is a multiple
+    #: of it and the chart centre sits on one of its boundaries, so no
+    #: edge this shape draws can fall inside a row.
+    row_quantum: float = 1.0
     name: str = "tiles"
     #: Everything this shape draws lands on a cell edge, so its seams are
     #: whole cells rather than hairlines mixed into their neighbours -- an
@@ -291,11 +301,21 @@ class TileGeometry:
     _inv_x: float = field(init=False, repr=False, compare=False)
     _inv_y: float = field(init=False, repr=False, compare=False)
     _inv_step: float = field(init=False, repr=False, compare=False)
+    _rows_per_ring: float = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_inv_x", 1.0 / self.unit_x)
         object.__setattr__(self, "_inv_y", 1.0 / self.unit_y)
         object.__setattr__(self, "_inv_step", 1.0 / self.step)
+        # Rows a ring is tall, as the whole number `geometry_for` chose,
+        # recovered rather than divided out at every call: `unit_y /
+        # row_quantum` is 4.000000000000001 at a cell aspect of 2.43, and
+        # a ring seam one row deep sits exactly on the fraction of the
+        # ring the rasterizer will allow it. That comparison decided a
+        # whole ring boundary's worth of cells on the last bit.
+        object.__setattr__(
+            self, "_rows_per_ring", float(round(self.unit_y / self.row_quantum))
+        )
 
     def radius(self, dx: float, dy: float) -> float:
         u = (-dx if dx < 0.0 else dx) * self._inv_x
@@ -384,10 +404,10 @@ class TileGeometry:
     def cell_depth(self, dx: float, dy: float, band: float) -> float:
         """One cell measured *radially* at this point, in radius units.
 
-        A column where x is what put the point in this band and a
-        half-row where y did -- the framebuffer's quantum in each
-        direction, half blocks giving it half a cell vertically and
-        nothing horizontally.  What a ring seam is drawn one of.
+        A column where x is what put the point in this band and a whole
+        row where y did -- one character cell in each direction, which is
+        the smallest thing this shape is allowed to draw.  What a ring
+        seam is drawn one of.
 
         Note this asks which coordinate the *radius* came from, not which
         face the loop coordinate runs along: the two disagree inside a
@@ -400,15 +420,19 @@ class TileGeometry:
             (-dy if dy < 0.0 else dy) * self._inv_y
         ):
             return self.step * self._inv_x
-        return self.step * self.half_row * self._inv_y
+        return self.step / self._rows_per_ring
 
     def cell_edge(self, theta: float, band: float) -> float:
-        """One cell measured *along* the face at `theta`, in units."""
+        """One cell measured *along* the face at `theta`, in units.
+
+        A row on the side faces, where the loop runs down the screen, and
+        a column on the top and bottom, where it runs across.
+        """
         across, _down, c1, c2, c3, c4 = self._faces(band)
         total = c4 + across * self.unit_y
         area = theta / _TWO_PI * total
         on_side = c1 <= area < c2 or c3 <= area < c4
-        return self.half_row if on_side else 1.0
+        return self.row_quantum if on_side else 1.0
 
     def snap_angle(self, theta: float, band: float) -> float:
         """Move a segment boundary onto the nearest cell edge.
@@ -427,7 +451,7 @@ class TileGeometry:
         across, down, c1, c2, c3, c4 = self._faces(band)
         total = c4 + across * self.unit_y
         area = theta / _TWO_PI * total
-        row = self.half_row
+        row = self.row_quantum
         if area < c1:
             x = min(across, max(0.0, round(area / self.unit_y)))
             return x * self.unit_y / total * _TWO_PI
@@ -489,30 +513,35 @@ def geometry_for(
     side, one unit of margin held back -- with the hole and ring width
     derived from it.  `fill` keeps the same radius and reaches each edge
     on its own axis.  `tiles` works the other way round: it picks whole
-    numbers of columns and half-rows first, so that its boundaries land
-    on the grid, and reports the radius those add up to.
+    numbers of columns and whole numbers of rows first, so that its
+    boundaries land on the grid, and reports the radius those add up to.
     """
     rings = max_depth + 1
-    half_row = cell_aspect / 2.0
     half_w = char_width / 2.0
     half_h = char_height * cell_aspect / 2.0
 
     if shape == "tiles":
-        # The centre snaps to a column boundary (see `center_x`), so the
-        # room on each side of it is what the contours have to divide --
-        # not half the pane, which at an odd width is half a column more.
-        centre = round(half_w)
-        reach_x = min(centre, char_width - centre)
+        # The centre snaps to a cell boundary on both axes (see `center_x`
+        # and `center_y`), so the room on each side of it is what the
+        # contours have to divide -- not half the pane, which at an odd
+        # width or height is half a cell more.
+        centre_x = round(half_w)
+        reach_x = min(centre_x, char_width - centre_x)
+        centre_y = round(char_height / 2.0)
+        reach_y = min(centre_y, char_height - centre_y) * cell_aspect
         steps = rings + 1  # the hole is contour 1, the silhouette the last
         unit_x = float(int(reach_x / steps))
-        unit_y = float(int(half_h / (steps * half_row))) * half_row
-        if unit_x < 1.0 or unit_y < half_row:
+        unit_y = float(int(reach_y / (steps * cell_aspect))) * cell_aspect
+        if unit_x < 1.0 or unit_y < cell_aspect:
             # Too small to give every ring a whole cell on both axes.
-            return RingFit(TileGeometry(1.0, half_row, 1.0), 0.0, 1.0, 1.0)
+            return RingFit(
+                TileGeometry(1.0, cell_aspect, 1.0, cell_aspect), 0.0, 1.0, 1.0
+            )
         step = (unit_x + unit_y) / 2.0
         return RingFit(
             TileGeometry(
-                unit_x=unit_x, unit_y=unit_y, step=step, half_row=half_row
+                unit_x=unit_x, unit_y=unit_y, step=step,
+                row_quantum=cell_aspect,
             ),
             radius=step * steps,
             hole_radius=step,

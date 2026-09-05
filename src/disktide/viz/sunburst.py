@@ -25,6 +25,17 @@ dot, so rims and the walls of empty wedges came out as dotted plumes
 against solid interiors.  Averaging colours instead lets an edge land
 anywhere between the arc and the background, and the same machinery draws
 the ring and sibling separators that give the chart its structure.
+
+A shape that declares `crisp_seams` -- `tiles`, the default -- opts out
+of all of that.  Every edge it draws is already on a cell edge, so its
+eight subsamples are all taken at the cell's own centre and a cell comes
+out one flat colour: a space, never a half block.  That is not a
+refinement, it is the point.  A browser terminal's default font (Courier
+New) draws `▀` and `▄` narrower than the cell, so a chart with half
+blocks in it shows a comb of background-coloured slits along every
+horizontal edge and the rows carrying them slide sideways.  `disc` and
+`fill` keep the supersampled pass, because they are round and a whole-cell
+circle is a staircase.
 """
 
 from __future__ import annotations
@@ -103,6 +114,14 @@ _ARC_SEAM = 0.4
 # An arc only gets seams when it is this many seam-widths across; below
 # that the seam would eat the arc it is meant to delimit.
 _SEAM_MIN_SPAN_FACTOR = 4.0
+# An arc exactly that many cells wide is on the inside of the test, and
+# has to be on the inside at every cell aspect. The two sides of the
+# comparison reach it through different intermediates -- one carries the
+# ring's whole area, the other a single cell -- and on a four-cell arc at
+# a cell aspect of 2.43 they disagreed in the last bit, dropping one
+# divider from an otherwise identical chart. This slack is a billionth of
+# a cell: far below anything a terminal can draw, far above the error.
+_SEAM_MIN_SPAN_SLACK = 1.0 - 1e-9
 # Separators are a darkened copy of the arc they cut, not the panel
 # background: that reads as a division at any theme and any depth.
 _SEAM_DARKEN = 0.5
@@ -249,7 +268,23 @@ class SunburstLayout:
 
     @property
     def center_y(self) -> float:
-        """Disc centre along y, in units."""
+        """Chart centre along y, in units.
+
+        `tiles` snaps it to a *row* boundary, for the same reason
+        `center_x` snaps to a column: every edge that shape draws is
+        measured out from here, and an edge that lands inside a row can
+        only be drawn with `▀`/`▄` -- glyphs a browser terminal fits to
+        neither the cell's width nor its height.  Half a row of offset at
+        an odd height is the difference between a chart of whole cells and
+        a chart with a comb of half blocks down every horizontal edge.
+
+        The other two shapes keep the exact centre.  A disc has no
+        straight edges to align, and `fill`'s rings are round enough in
+        their corners that a staircase would cost more than the half
+        blocks do.
+        """
+        if self.shape == "tiles":
+            return round(self.char_height / 2.0) * self.cell_aspect
         return self.char_height * self.cell_aspect / 2.0
 
     def cell_center(self, char_x: int, char_y: int) -> tuple[float, float]:
@@ -696,7 +731,8 @@ def _build_sample_plan(
     width = layout.char_width
     height = layout.char_height
     hole = layout.hole_radius
-    half_row = layout.cell_aspect / 2.0
+    cell_aspect = layout.cell_aspect
+    half_row = cell_aspect / 2.0
     cx = layout.center_x
     cy = layout.center_y
     inv_ring = 1.0 / ring_width
@@ -758,6 +794,9 @@ def _build_sample_plan(
     for hy in range(2 * height):
         dy0 = (hy + 0.25) * half_row - cy
         dy1 = (hy + 0.75) * half_row - cy
+        # The centre of the character cell this half-row belongs to.  A
+        # crisp shape samples from there and nowhere else -- see below.
+        cell_dy = ((hy >> 1) + 0.5) * cell_aspect - cy
         nearest = 0.0 if dy0 * dy1 <= 0.0 else min(abs(dy0), abs(dy1))
         chord = row_half_width(nearest, reach)
         if chord < 0.0:
@@ -765,11 +804,30 @@ def _build_sample_plan(
         x_lo = max(0, int(cx - chord) - 1)
         x_hi = min(width - 1, int(cx + chord) + 1)
         for dy, base in ((dy0, 2 * hy * two_w), (dy1, (2 * hy + 1) * two_w)):
+            if crisp:
+                dy = cell_dy
             for hx in range(x_lo, x_hi + 1):
-                for dx, index in (
-                    (hx + 0.25 - cx, base + 2 * hx),
-                    (hx + 0.75 - cx, base + 2 * hx + 1),
-                ):
+                cell_dx = hx + 0.5 - cx
+                # A crisp shape puts every edge it draws on a cell edge,
+                # so there is nothing inside a cell to resolve and all
+                # eight of its subsamples answer from the cell's own
+                # centre.  Sampling the quarter points instead is what
+                # anti-aliasing is for, and it costs this shape the only
+                # thing it is for: at a corner tile the radius comes from
+                # x at one subsample and from y at its neighbour, so a
+                # ring seam covered half a cell and `_render_cells` had to
+                # reach for `▀` -- a glyph a browser terminal draws
+                # narrower than the cell.  Painting from the centre also
+                # makes the picture agree with `hit_test` exactly.
+                samples = (
+                    ((cell_dx, base + 2 * hx), (cell_dx, base + 2 * hx + 1))
+                    if crisp
+                    else (
+                        (hx + 0.25 - cx, base + 2 * hx),
+                        (hx + 0.75 - cx, base + 2 * hx + 1),
+                    )
+                )
+                for dx, index in samples:
                     radius = radius_of(dx, dy)
                     if radius < hole:
                         continue
@@ -933,7 +991,9 @@ def _rasterize_arcs(
                             edge = edges[index]
                             one = plan_cells[index]
                             if (
-                                span_end * edge >= one * _SEAM_MIN_SPAN_FACTOR
+                                span_end * edge
+                                >= one * _SEAM_MIN_SPAN_FACTOR
+                                * _SEAM_MIN_SPAN_SLACK
                                 and (ring.ends[arc_index] - theta) * edge < one
                             ):
                                 seam_alpha = 1.0
@@ -1055,6 +1115,13 @@ def _render_cells(layout: SunburstLayout) -> list[list[tuple[str, Style | None]]
     covered the half block is drawn as *foreground only*, so the widget's
     real background shows through the other half and an imperfect estimate
     of the panel colour cannot ring the disc with a halo.
+
+    Only `disc` and `fill` ever reach the half blocks.  A crisp shape's
+    two halves are the same sample, so this loop takes the `top ==
+    bottom` branch for every cell it draws -- gated by
+    `test_ring_shapes.py::test_tiles_emits_nothing_but_spaces_at_any_size`
+    rather than by a branch here, because a shape that started producing
+    them would be broken at the geometry, not here.
     """
     if is_safe_rendering():
         return _render_safe_cells(layout)

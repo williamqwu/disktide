@@ -144,25 +144,37 @@ def test_glyphs_in_safe_mode_label():
     assert "[!]" in plain_safe
 
 
-def _sunburst(width: int = 100, height: int = 46):
+def _sunburst(width: int = 100, height: int = 46, shape: str = "disc"):
     return compute_sunburst(
         _mixed_tree(), width, height, max_depth=4,
-        cell_aspect=2.0, panel_bg=PANEL_BG,
+        cell_aspect=2.0, panel_bg=PANEL_BG, shape=shape,
     )
 
 
 class TestSunburstUnderSafeRendering:
-    """The flagship chart is drawn with U+2580/U+2584 by default."""
+    """`disc` is drawn with U+2580/U+2584; safe rendering takes them away."""
 
-    def test_default_disc_uses_block_elements(self):
-        cells = _sunburst().rendered_cells
+    def test_the_disc_uses_block_elements_and_the_default_shape_does_not(self):
+        """Which is why safe rendering is not the web-shell answer.
+
+        A round chart has to anti-alias its rim, and half blocks are where
+        it puts the answer. `tiles` -- the default, and what a browser
+        terminal should be looking at -- has no edge that falls inside a
+        cell and draws none of them, in either rendering mode.
+        """
         blocks = {
             char
-            for row in cells
+            for row in _sunburst(shape="disc").rendered_cells
             for char, _style in row
             if ord(char) in BLOCK_ELEMENTS
         }
-        assert blocks, "the default renderer should draw half blocks"
+        assert blocks, "the disc should draw half blocks"
+        assert not {
+            char
+            for row in _sunburst(shape="tiles").rendered_cells
+            for char, _style in row
+            if ord(char) in BLOCK_ELEMENTS
+        }
 
     def test_safe_disc_has_no_block_glyphs(self):
         set_safe_rendering(True)

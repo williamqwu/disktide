@@ -143,6 +143,40 @@ def test_tiles_paints_no_partially_covered_cell(width, height, aspect):
     )
 
 
+@pytest.mark.parametrize("aspect", (1.5, 2.0, 2.43, 3.0))
+def test_tiles_emits_nothing_but_spaces_at_any_size(aspect):
+    """The whole-row quantum, checked at the far end of the renderer.
+
+    `_render_cells` folds two framebuffer half-cells into one character
+    and reaches for `▀`/`▄` whenever they disagree. Nothing this shape
+    draws lands inside a row any more, so nothing can disagree, so the
+    glyph never appears -- which is what makes the chart legible in a
+    browser terminal, whose default font fits neither half block to the
+    cell. Swept rather than sampled, because the fit is a floor division
+    and a size that rounds differently is exactly what would slip.
+    """
+    tree = _tree()
+    seen = set()
+    for width in range(40, 161, 11):
+        for height in range(12, 61, 7):
+            layout = compute_sunburst(
+                tree, width, height, max_depth=MAX_DEPTH,
+                cell_aspect=aspect, shape="tiles",
+            )
+            painted = 0
+            for y, row in enumerate(layout.rendered_cells):
+                for x, (glyph, style) in enumerate(row):
+                    seen.add(glyph)
+                    if style is not None:
+                        painted += 1
+                    assert glyph == " ", (
+                        f"{width}x{height} aspect {aspect} drew {glyph!r} "
+                        f"at ({x}, {y})"
+                    )
+            assert painted > 0, f"nothing was drawn at {width}x{height}"
+    assert seen == {" "}, sorted(seen)
+
+
 @pytest.mark.parametrize("width,height", VIEWPORTS)
 def test_the_disc_is_softer_than_tiles_at_the_same_size(width, height):
     """The comparison the default rests on, so it fails if it ever inverts."""
@@ -156,10 +190,10 @@ def test_the_disc_is_softer_than_tiles_at_the_same_size(width, height):
 def test_tiles_draws_the_same_picture_at_every_cell_aspect(width, height):
     """Which is why it needs no cell calibration to look right.
 
-    One ring width in units cannot snap to the column grid and the
-    half-row grid at once; `tiles` picks a whole number of each instead
-    and derives its radius from them, so the cell aspect stops being an
-    input to where anything lands.
+    One ring width in units cannot snap to the column grid and the row
+    grid at once; `tiles` picks a whole number of each instead and
+    derives its radius from them, so the cell aspect stops being an input
+    to where anything lands.
     """
     reference = None
     for aspect in ASPECTS:
@@ -183,25 +217,46 @@ def test_tiles_draws_the_same_picture_at_every_cell_aspect(width, height):
 
 @pytest.mark.parametrize("aspect", ASPECTS)
 @pytest.mark.parametrize("width,height", VIEWPORTS)
-def test_every_contour_lands_on_a_whole_column_and_half_row(width, height, aspect):
+def test_every_contour_lands_on_a_whole_column_and_whole_row(width, height, aspect):
     """Contour m is the rectangle (m*unit_x, m*unit_y).
 
-    Both have to be whole framebuffer quanta -- a column across, a half
-    cell down -- or a ring boundary falls inside a cell and the shape has
-    given up the only thing it is for.
+    Both have to be whole *cells* -- a column across, a row down -- or a
+    ring boundary falls inside a cell and the shape has given up the only
+    thing it is for.  A half row would be drawable, with `▀`/`▄`, and that
+    is the point: a browser terminal fits neither of those to a cell, so
+    this shape's quantum is the whole row and its cells are all spaces.
     """
     fit = geometry_for("tiles", width, height, aspect, MAX_DEPTH)
     geometry = fit.geometry
     assert isinstance(geometry, TileGeometry)
-    half_row = aspect / 2.0
+    assert geometry.row_quantum == pytest.approx(aspect)
     assert geometry.unit_x == pytest.approx(round(geometry.unit_x)), (
         f"a ring is {geometry.unit_x} columns wide"
     )
-    rows = geometry.unit_y / half_row
+    rows = geometry.unit_y / aspect
     assert rows == pytest.approx(round(rows)), (
-        f"a ring is {rows} half-rows tall"
+        f"a ring is {rows} rows tall"
     )
-    assert geometry.unit_x >= 1.0 and geometry.unit_y >= half_row
+    assert geometry.unit_x >= 1.0 and geometry.unit_y >= aspect - 1e-9
+
+
+@pytest.mark.parametrize("aspect", ASPECTS)
+@pytest.mark.parametrize("width,height", VIEWPORTS)
+def test_the_tiles_centre_is_on_a_row_boundary(width, height, aspect):
+    """Where every vertical measurement starts.
+
+    `unit_y` being a whole number of rows only puts the ring boundaries on
+    cell edges if the centre they are measured from is on one too, which
+    at an odd height it is not unless it is snapped.
+    """
+    layout = compute_sunburst(
+        _tree(), width, height, max_depth=MAX_DEPTH,
+        cell_aspect=aspect, shape="tiles",
+    )
+    rows = layout.center_y / aspect
+    assert rows == pytest.approx(round(rows)), (
+        f"the centre of a {width}x{height} chart is {rows} rows down"
+    )
 
 
 # --- area still equals value ----------------------------------------------
