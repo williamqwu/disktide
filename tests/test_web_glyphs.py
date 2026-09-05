@@ -27,6 +27,7 @@ import pytest
 from textual._border import BORDER_CHARS
 from textual.scrollbar import ScrollBarRender
 from textual.widgets import Button, Checkbox, Input, Select, Switch
+from textual.widgets._toggle_button import ToggleButton
 
 from disktide.app import DiskTideApp
 from disktide.config import AppConfig
@@ -34,11 +35,13 @@ from disktide.glyphs import (
     SAFE_BORDER_STYLES,
     SCROLLBAR_HORIZONTAL_BARS,
     SCROLLBAR_VERTICAL_BARS,
+    TOGGLE_BUTTON_SIDES,
     UNSAFE_BORDER_STYLES,
     UNSAFE_GLYPHS,
     WEB_SAFE_GLYPHS,
     unsafe_glyphs_in,
     use_web_safe_scrollbars,
+    use_web_safe_toggle_buttons,
 )
 from disktide.screens.explorer import ExplorerScreen
 from tests.waiting import wait_for_explorer, wait_until
@@ -94,6 +97,25 @@ def test_every_block_element_border_style_is_on_the_unsafe_list():
     }
     assert by_glyph <= UNSAFE_BORDER_STYLES
     assert UNSAFE_BORDER_STYLES - by_glyph == {"round", "dashed", "heavy"}
+
+
+def test_the_toggle_button_sides_are_installed_by_building_an_app():
+    """Textual's Checkbox draws `▐X▌`, and the sides are not decoration.
+
+    They are painted in the *button's* background colour on the widget's,
+    which is how a one-cell coloured box comes out two cells wide -- a
+    block element doing a background's job. They were the last two block
+    elements on the welcome screen.
+    """
+    ToggleButton.BUTTON_LEFT = "▐"
+    ToggleButton.BUTTON_RIGHT = "▌"
+    try:
+        DiskTideApp(config=AppConfig())
+        sides = (ToggleButton.BUTTON_LEFT, ToggleButton.BUTTON_RIGHT)
+        assert sides == TOGGLE_BUTTON_SIDES
+        assert not unsafe_glyphs_in("".join(sides) + ToggleButton.BUTTON_INNER)
+    finally:
+        use_web_safe_toggle_buttons()
 
 
 def test_the_scrollbar_lists_are_installed_by_building_an_app():

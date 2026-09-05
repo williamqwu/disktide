@@ -21,7 +21,10 @@ from disktide.rendering import (
     set_ring_shape,
     set_safe_rendering,
 )
-from disktide.glyphs import use_web_safe_scrollbars
+from disktide.glyphs import (
+    use_web_safe_scrollbars,
+    use_web_safe_toggle_buttons,
+)
 from disktide.commands import BindingCommands
 from disktide.keys import MODE, resolve_keymap
 from disktide.repositories import default_snapshot_repository
@@ -223,12 +226,14 @@ class DiskTideApp(App):
         # once the App exists, Textual has already installed (or not) the
         # filter that rewrites ANSI colour names into RGB, and that is
         # exactly what an ANSI theme must not have happen to it.
-        # Before any screen exists, because `ScrollBarRender.render_bar`
-        # is a classmethod reading two class attributes and the first
-        # scrollbar to paint would otherwise draw a stock eighth-block
-        # thumb end. Cheap and idempotent, so every entry point that
-        # builds an app -- CLI, `run_test`, `textual-serve` -- gets it.
+        # Before any screen exists, because both of these replace class
+        # attributes read at render time: the first scrollbar to paint
+        # would otherwise draw a stock eighth-block thumb end, and the
+        # first Checkbox a pair of half blocks. Cheap and idempotent, so
+        # every entry point that builds an app -- CLI, `run_test`,
+        # `textual-serve` -- gets them.
         use_web_safe_scrollbars()
+        use_web_safe_toggle_buttons()
         self._config = config or load_config()
         self._color_depth = colordepth.active_color_depth()
         saved_theme = resolve_theme(self._config.ui.color_theme)

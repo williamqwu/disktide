@@ -186,6 +186,25 @@ def use_web_safe_scrollbars() -> None:
     ScrollBarRender.HORIZONTAL_BARS = list(SCROLLBAR_HORIZONTAL_BARS)
 
 
+#: Replacements for `ToggleButton.BUTTON_LEFT` / `BUTTON_RIGHT`, which
+#: Textual draws as `▐` and `▌`.  The two are not decoration: they are
+#: painted in the *button's* background colour on the widget's, so they
+#: widen a one-cell coloured box to two by filling half a cell on each
+#: side -- a block element doing a background's job, and the only one left
+#: on the welcome screen.  A space paints the widget's own background
+#: instead, so the box is one whole cell and the checkbox reads exactly as
+#: it did minus its wings.  Every Checkbox and RadioButton in the process
+#: is covered, because these are class attributes read at render time.
+TOGGLE_BUTTON_SIDES: tuple[str, str] = (" ", " ")
+
+
+def use_web_safe_toggle_buttons() -> None:
+    """Take the half blocks out of Textual's checkbox and radio button."""
+    from textual.widgets._toggle_button import ToggleButton
+
+    ToggleButton.BUTTON_LEFT, ToggleButton.BUTTON_RIGHT = TOGGLE_BUTTON_SIDES
+
+
 def unsafe_glyphs_in(text: str) -> set[str]:
     """The mis-measured glyphs in *text*, if any."""
     return {char for char in text if char in UNSAFE_GLYPHS}

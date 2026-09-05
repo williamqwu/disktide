@@ -222,7 +222,12 @@ class InfoPanel(Widget):
             for child in ranked[:10]:
                 value_str = metric_text(child, self._metric)
                 child_value = metric_value(child, self._metric)
-                name = f"{'📁 ' if child.is_dir else '📄 '}{child.name}"
+                # A trailing slash marks a directory, the way the tree
+                # does it. The emoji that used to be here were the only
+                # double-width cells the app drew, and a browser terminal
+                # is where a glyph two cells wide in one font and one in
+                # another shears the column beside it.
+                name = f"{child.name}/" if child.is_dir else child.name
                 if total is not None and child_value is not None and total > 0:
                     value_str += f" ({child_value / total * 100:.1f}%)"
                 table.add_row(f"  {name}", value_str)
