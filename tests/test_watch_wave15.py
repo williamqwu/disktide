@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -349,6 +350,105 @@ def test_auto_backend_error_falls_back_to_periodic(repository, tmp_path):
         assert status.watch_diagnostics.fallback_reason == "inotify watch limit reached"
         assert status.degraded_reason == "inotify watch limit reached"
     finally:
+        service.stop_session(wait=True)
+
+
+def test_backend_failure_during_reconcile_finish_is_not_lost(
+    repository,
+    tmp_path,
+    monkeypatch,
+):
+    """The fallback is decided while the run that follows it is mid-finish.
+
+    `_execute_definition` re-reads the status when its scan is done, edits it
+    across `_finish_success_status` and `_finish_full_reconciliation_status`,
+    and saves it back. The backend's callback thread writes the periodic
+    fallback into that same row. Unsynchronised, the finish's save carried its
+    pre-fallback copy -- event-assisted/active -- back over the fallback, and
+    since `_finish_full_reconciliation_status` reads `event_backend_status` to
+    decide whether the backend failed, the row then said "active" for good with
+    no backend behind it. That is the interleaving the Python 3.10 CI job hit.
+
+    The gate parks the session thread between its re-read and its save; the
+    failure is fired from a helper thread, so with `_status_lock` in place it
+    has to queue behind that save instead of being overwritten by it.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_bytes(b"data")
+    backends: list[HandoffEventBackend] = []
+
+    def factory() -> HandoffEventBackend:
+        backend = HandoffEventBackend()
+        backends.append(backend)
+        return backend
+
+    parked = threading.Event()
+    resume = threading.Event()
+    original_finish = MonitorService._finish_full_reconciliation_status
+    calls = {"count": 0}
+
+    def gated_finish(self, status, run, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            parked.set()
+            assert resume.wait(10), "the backend failure never arrived"
+        return original_finish(self, status, run, **kwargs)
+
+    monkeypatch.setattr(
+        MonitorService, "_finish_full_reconciliation_status", gated_finish
+    )
+
+    service = MonitorService(
+        repository,
+        event_mode=MonitorEventMode.AUTO,
+        event_backend_probe=_available_backend,
+        event_backend_factory=factory,
+        event_debounce_seconds=0,
+        lease_seconds=6,
+    )
+    monitor = service.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    assert monitor.id is not None
+
+    try:
+        service.start_session(host_type="wave15-race")
+        assert parked.wait(10), "the first reconciliation never reached its finish"
+        backend = backends[-1]
+        failing = threading.Thread(
+            target=backend.fail,
+            args=(root, "inotify watch limit reached"),
+            name="wave15-backend-failure",
+        )
+        failing.start()
+        # `_stop_event_backend` pops and stops the backend before it touches the
+        # status, so the fallback is already decided here; what it cannot do is
+        # write it while the parked finish still holds the status lock. Only a
+        # timeout can observe a write that must *not* happen, and the check is
+        # read now but asserted at the end, so an unserialised tree fails on the
+        # lost fallback itself rather than on this.
+        failing.join(0.5)
+        had_to_queue = failing.is_alive()
+        resume.set()
+        failing.join(10)
+        assert not failing.is_alive(), "the fallback never completed"
+
+        # The fallback is persisted by the time that join returns, so the settle
+        # below cannot be satisfied by the finish's own FULL.
+        _wait_until(
+            lambda: repository.get_monitor_status(monitor.id).reconciliation_state
+            is MonitorReconciliationState.FULL
+        )
+        status = repository.get_monitor_status(monitor.id)
+        assert status.watch_mode is MonitorWatchMode.PERIODIC
+        assert status.event_backend_status == "degraded"
+        assert status.degraded_reason == "inotify watch limit reached"
+        assert backend.running is False
+        assert len(backends) == 1
+        assert had_to_queue, "the fallback did not have to queue behind the finish"
+    finally:
+        resume.set()
         service.stop_session(wait=True)
 
 

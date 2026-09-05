@@ -208,6 +208,27 @@ The recursive `scanner.walker.scan_directory()` and `ScanEngine().scan(path)`
 APIs remain for diagnostics and `tool/` scripts; product code does not
 construct the engine directly.
 
+`MonitorService` is written by four threads: the session loop, the event
+backend's callback thread, the scan-event consumer, and whichever thread calls
+`stop_session` (the TUI's is the UI thread, which uses `wait=False`). All four
+persist monitor status the same way -- read the row, edit fields, write it back
+-- so `_status_lock`, a plain `RLock`, is held across each of those sequences
+end to end, and across `release_monitor_lease`, which writes
+`activity_state='no-host'` itself. Anything a run decides *from* service state
+belongs inside the same acquisition as the save that records it: `hosted`, for
+one, is read from `_held_leases` and `_session_stop` under the lock that the
+release also needs.
+
+The lock is never held across `backend.stop()` or a backend start, a scan, a
+thread join, `self._condition.wait`, or `_emit`. `backend.stop()` joins the
+backend's watcher thread, and that thread may be inside
+`_handle_filesystem_event` waiting for the lock, so `_stop_event_backend` pops
+and stops the backend before it takes it; `_emit` hands the event to arbitrary
+consumer callables, so sites collect what to emit, release, and then emit. The
+lock order is `_status_lock` then `_condition`, never the reverse: no
+`with self._condition:` block may call into the repository or into a method
+that takes `_status_lock`.
+
 ### One GIL Release Per Directory
 
 The scanner's remaining distance from `du`, `diskus` and `gdu` was never

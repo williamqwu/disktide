@@ -390,6 +390,11 @@ def test_stopping_without_waiting_leaves_no_host_behind(
     `_held_leases.clear()` here is what `_release_all_leases` does first, and
     it is what makes the loop retake the lease on its next pass; the gate is an
     `Event`, so nothing in this test is timed.
+
+    The stop runs on its own thread. The parked save below holds
+    `_status_lock`, and `_release_all_leases` now takes that same lock to
+    release the lease, so a stop called from this thread would be waiting on a
+    gate only this thread can open.
     """
     root = tmp_path / "root"
     root.mkdir()
@@ -447,8 +452,94 @@ def test_stopping_without_waiting_leaves_no_host_behind(
             service._condition.notify_all()
         assert in_window.wait(10), "the session thread never retook the lease"
 
-        service.stop_session(wait=False)
+        stopper = threading.Thread(
+            target=service.stop_session,
+            kwargs={"wait": False},
+            name="wave06-stopper",
+        )
+        stopper.start()
+        deadline = time.time() + 10
+        while not service._session_stop.is_set() and time.time() < deadline:
+            time.sleep(0.02)
+        assert service._session_stop.is_set(), "the stop never entered the window"
         resume.set()
+        stopper.join(15)
+        assert not stopper.is_alive()
+        deadline = time.time() + 15
+        while service.session_running and time.time() < deadline:
+            time.sleep(0.02)
+        assert not service.session_running
+        # Read before the cleanup below, which takes the same release path.
+        status = repository.get_monitor_status(monitor.id)
+    finally:
+        resume.set()
+        service.stop_session(wait=True)
+
+    assert status.activity is MonitorActivityState.NO_HOST
+    assert status.host_id is None
+    assert status.host_type is None
+    assert status.lease_expires_at is None
+
+
+def test_a_finish_in_flight_cannot_outlive_the_stop(
+    repository, tmp_path, monkeypatch
+):
+    """The stop lands while a finished run is deciding whether it is still hosted.
+
+    `_execute_definition` re-reads the status when its scan is done, asks
+    whether the monitor is still leased here, and saves WAITING or NO_HOST to
+    match. The stop clears `_held_leases` and then has `release_monitor_lease`
+    write activity_state='no-host'. Unsynchronised, the finish could read "still
+    hosted", the release could land, and the finish's save could put WAITING
+    back on top of it -- the monitor reading as hosted by a process that had
+    gone, which is the wave06 failure CI kept re-finding. `_status_lock` now
+    covers the finish from its read through its save, and the release SQL with
+    it, so one of the two is wholly after the other.
+
+    The gate is an `Event`. The stop runs on its own thread because it waits for
+    that lock, and this thread is the only one that can release the gate.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload.bin").write_bytes(b"x" * 8)
+    service = MonitorService(repository, lease_seconds=60)
+    monitor = service.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+
+    parked = threading.Event()
+    resume = threading.Event()
+    original_finish = MonitorService._finish_success_status
+    calls = {"count": 0}
+
+    def gated_finish(self, status, run, snapshot, alerts, persistence_error, hosted):
+        # Parked *after* `hosted` has been decided by the caller: that decision
+        # and the save that follows it are what have to be one indivisible step.
+        calls["count"] += 1
+        if calls["count"] == 1:
+            parked.set()
+            assert resume.wait(10), "the stop never arrived"
+        return original_finish(
+            self, status, run, snapshot, alerts, persistence_error, hosted
+        )
+
+    monkeypatch.setattr(MonitorService, "_finish_success_status", gated_finish)
+    service.start_session(host_type="test")
+    try:
+        assert parked.wait(10), "the first run never reached its finish"
+        stopper = threading.Thread(
+            target=service.stop_session,
+            kwargs={"wait": False},
+            name="wave06-stopper",
+        )
+        stopper.start()
+        deadline = time.time() + 10
+        while not service._session_stop.is_set() and time.time() < deadline:
+            time.sleep(0.02)
+        assert service._session_stop.is_set(), "the stop never entered the window"
+        resume.set()
+        stopper.join(15)
+        assert not stopper.is_alive()
         deadline = time.time() + 15
         while service.session_running and time.time() < deadline:
             time.sleep(0.02)

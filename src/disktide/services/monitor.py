@@ -219,6 +219,15 @@ class MonitorService:
         self._monotonic = monotonic
         self._consumers: list[MonitorEventConsumer] = []
         self._condition = threading.Condition(threading.RLock())
+        # Serialises every read-modify-write of a MonitorStatus row. Four
+        # threads persist status -- the session loop, the event backend's
+        # callback thread, the scan-event consumer, and whichever thread calls
+        # stop_session -- and each of them reads the row, edits fields, and
+        # saves it back, so a write landing between another thread's read and
+        # its save was simply lost. Order is `_status_lock` then `_condition`,
+        # never the reverse, and the lock is never held across a scan, a
+        # backend start/stop, a thread join, a condition wait, or an `_emit`.
+        self._status_lock = threading.RLock()
         self._session_stop = threading.Event()
         self._session_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
@@ -629,29 +638,35 @@ class MonitorService:
     ) -> MonitorRunResult | None:
         monitor = self._resolve_monitor(identifier)
         assert monitor.id is not None
-        with self._condition:
-            hosted_here = (
-                self.session_running
-                and self._session_includes(monitor.id)
-                and monitor.desired_state is MonitorDesiredState.ENABLED
-            )
-            if hosted_here:
-                self._pending_monitor_ids.add(monitor.id)
-                status = self._repository.get_monitor_status(monitor.id)
-                if self._active_monitor_id == monitor.id:
-                    status.rerun_pending = True
-                else:
-                    status.activity = MonitorActivityState.QUEUED
-                    status.host_id = self._host_id
-                    status.host_type = self._host_type
-                self._repository.save_monitor_status(status)
-                self._condition.notify_all()
-                self._emit(
-                    MonitorEventKind.RUN_QUEUED,
-                    monitor.id,
-                    "manual run queued",
+        queued = False
+        with self._status_lock:
+            with self._condition:
+                hosted_here = (
+                    self.session_running
+                    and self._session_includes(monitor.id)
+                    and monitor.desired_state is MonitorDesiredState.ENABLED
                 )
-                return None
+                if hosted_here:
+                    self._pending_monitor_ids.add(monitor.id)
+                    status = self._repository.get_monitor_status(monitor.id)
+                    if self._active_monitor_id == monitor.id:
+                        status.rerun_pending = True
+                    else:
+                        status.activity = MonitorActivityState.QUEUED
+                        status.host_id = self._host_id
+                        status.host_type = self._host_type
+                    self._repository.save_monitor_status(status)
+                    self._condition.notify_all()
+                    queued = True
+        if queued:
+            # Emitted with both locks dropped: a consumer is an arbitrary
+            # callable and must never be able to stall a status write.
+            self._emit(
+                MonitorEventKind.RUN_QUEUED,
+                monitor.id,
+                "manual run queued",
+            )
+            return None
         return self._execute_definition(
             monitor,
             trigger=MonitorTrigger.MANUAL,
@@ -665,31 +680,35 @@ class MonitorService:
         monitor = self._resolve_monitor(identifier)
         assert monitor.id is not None
         self._reconciliation_retry_at.pop(monitor.id, None)
-        with self._condition:
-            hosted_here = (
-                self.session_running
-                and self._session_includes(monitor.id)
-                and monitor.desired_state is MonitorDesiredState.ENABLED
-            )
-            if hosted_here:
-                self._pending_reconcile_ids.add(monitor.id)
-                status = self._repository.get_monitor_status(monitor.id)
-                status.reconciliation_required = True
-                status.reconciliation_state = MonitorReconciliationState.DIRTY
-                if self._active_monitor_id == monitor.id:
-                    status.rerun_pending = True
-                else:
-                    status.activity = MonitorActivityState.QUEUED
-                    status.host_id = self._host_id
-                    status.host_type = self._host_type
-                self._repository.save_monitor_status(status)
-                self._condition.notify_all()
-                self._emit(
-                    MonitorEventKind.RUN_QUEUED,
-                    monitor.id,
-                    "full reconciliation queued",
+        queued = False
+        with self._status_lock:
+            with self._condition:
+                hosted_here = (
+                    self.session_running
+                    and self._session_includes(monitor.id)
+                    and monitor.desired_state is MonitorDesiredState.ENABLED
                 )
-                return None
+                if hosted_here:
+                    self._pending_reconcile_ids.add(monitor.id)
+                    status = self._repository.get_monitor_status(monitor.id)
+                    status.reconciliation_required = True
+                    status.reconciliation_state = MonitorReconciliationState.DIRTY
+                    if self._active_monitor_id == monitor.id:
+                        status.rerun_pending = True
+                    else:
+                        status.activity = MonitorActivityState.QUEUED
+                        status.host_id = self._host_id
+                        status.host_type = self._host_type
+                    self._repository.save_monitor_status(status)
+                    self._condition.notify_all()
+                    queued = True
+        if queued:
+            self._emit(
+                MonitorEventKind.RUN_QUEUED,
+                monitor.id,
+                "full reconciliation queued",
+            )
+            return None
         return self._execute_definition(
             monitor,
             trigger=MonitorTrigger.RECONCILE,
@@ -1022,10 +1041,11 @@ class MonitorService:
                         if not self._acquire_session_lease(definition.id):
                             continue
                     self._ensure_event_backend(definition)
-                    status = self._repository.get_monitor_status(definition.id)
-                    if status.next_due_at is None:
-                        status.next_due_at = now
-                        self._repository.save_monitor_status(status)
+                    with self._status_lock:
+                        status = self._repository.get_monitor_status(definition.id)
+                        if status.next_due_at is None:
+                            status.next_due_at = now
+                            self._repository.save_monitor_status(status)
                     tracker = self._dirty_trackers.get(definition.id)
                     retry_at = self._reconciliation_retry_at.get(
                         definition.id, 0.0
@@ -1135,9 +1155,10 @@ class MonitorService:
                         reason="monitor lease was lost; full reconciliation required",
                     )
                     continue
-                status = self._repository.get_monitor_status(monitor_id)
-                status.lease_expires_at = expires
-                self._repository.save_monitor_status(status)
+                with self._status_lock:
+                    status = self._repository.get_monitor_status(monitor_id)
+                    status.lease_expires_at = expires
+                    self._repository.save_monitor_status(status)
 
     def _execute_definition(
         self,
@@ -1158,27 +1179,28 @@ class MonitorService:
         drained_dirty = self._drain_monitor_dirty(monitor_id)
 
         started_at = self._now()
-        status = (
-            self._repository.get_monitor_status(monitor_id)
-            if monitor_id is not None
-            else None
-        )
-        previous_next_due_at = status.next_due_at if status is not None else None
-        if status is not None:
-            status.activity = MonitorActivityState.QUEUED
-            status.host_id = self._host_id
-            status.host_type = self._host_type
-            status.lease_expires_at = started_at + timedelta(
-                seconds=self._lease_seconds
+        with self._status_lock:
+            status = (
+                self._repository.get_monitor_status(monitor_id)
+                if monitor_id is not None
+                else None
             )
-            status.last_attempt_at = started_at
-            if trigger is MonitorTrigger.SCHEDULED or (
-                status.next_due_at is None or status.next_due_at <= started_at
-            ):
-                status.next_due_at = started_at + timedelta(
-                    seconds=definition.interval_seconds
+            previous_next_due_at = status.next_due_at if status is not None else None
+            if status is not None:
+                status.activity = MonitorActivityState.QUEUED
+                status.host_id = self._host_id
+                status.host_type = self._host_type
+                status.lease_expires_at = started_at + timedelta(
+                    seconds=self._lease_seconds
                 )
-            self._repository.save_monitor_status(status)
+                status.last_attempt_at = started_at
+                if trigger is MonitorTrigger.SCHEDULED or (
+                    status.next_due_at is None or status.next_due_at <= started_at
+                ):
+                    status.next_due_at = started_at + timedelta(
+                        seconds=definition.interval_seconds
+                    )
+                self._repository.save_monitor_status(status)
         self._emit(
             MonitorEventKind.RUN_QUEUED,
             monitor_id,
@@ -1208,22 +1230,23 @@ class MonitorService:
                     scheduled_for=scheduled_for,
                     host_id=self._host_id,
                 )
-            if status is not None:
-                status = self._repository.get_monitor_status(status.monitor_id)
-                self._finish_failed_status(status, run, blocked=True)
-                self._mark_reconciliation_failure(
-                    status,
-                    run.error_message or "full reconciliation validation failed",
-                )
-                self._sync_watch_diagnostics(
-                    status,
-                    self._event_backends.get(status.monitor_id),
-                )
-                self._repository.save_monitor_status(status)
-            if acquired_here and monitor_id is not None:
-                self._repository.release_monitor_lease(
-                    monitor_id, host_id=self._host_id
-                )
+            with self._status_lock:
+                if status is not None:
+                    status = self._repository.get_monitor_status(status.monitor_id)
+                    self._finish_failed_status(status, run, blocked=True)
+                    self._mark_reconciliation_failure(
+                        status,
+                        run.error_message or "full reconciliation validation failed",
+                    )
+                    self._sync_watch_diagnostics(
+                        status,
+                        self._event_backends.get(status.monitor_id),
+                    )
+                    self._repository.save_monitor_status(status)
+                if acquired_here and monitor_id is not None:
+                    self._repository.release_monitor_lease(
+                        monitor_id, host_id=self._host_id
+                    )
             self._emit(
                 MonitorEventKind.RUN_FINISHED,
                 monitor_id,
@@ -1245,7 +1268,10 @@ class MonitorService:
             status.resource_active_slot = None
             status.effective_workers = None
             status.worker_policy_reason = None
-            self._repository.save_monitor_status(status)
+            # Merged into a fresh read instead of written whole: the event
+            # thread may have persisted a watch-mode change since the read
+            # above, and this write must not carry it away.
+            self._save_scan_progress(status)
 
         last_status_write = 0.0
 
@@ -1422,67 +1448,71 @@ class MonitorService:
                     snapshot_id=snapshot.id if snapshot else None,
                 )
 
-            if status is not None:
-                status = self._repository.get_monitor_status(status.monitor_id)
-                if run.succeeded:
-                    if monitor_id is not None:
-                        self._reconciliation_retry_at.pop(monitor_id, None)
-                    self._finish_success_status(
-                        status,
-                        run,
-                        snapshot,
-                        alerts,
-                        persistence_error,
-                        (
-                            lease_owned
-                            and monitor_id is not None
-                            and monitor_id in self._held_leases
-                            and not self._session_stop.is_set()
+            with self._status_lock:
+                if status is not None:
+                    status = self._repository.get_monitor_status(status.monitor_id)
+                    if run.succeeded:
+                        if monitor_id is not None:
+                            self._reconciliation_retry_at.pop(monitor_id, None)
+                        self._finish_success_status(
+                            status,
+                            run,
+                            snapshot,
+                            alerts,
+                            persistence_error,
+                            (
+                                lease_owned
+                                and monitor_id is not None
+                                and monitor_id in self._held_leases
+                                and not self._session_stop.is_set()
+                            )
+                            or acquired_here,
                         )
-                        or acquired_here,
-                    )
-                    self._finish_full_reconciliation_status(
+                        self._finish_full_reconciliation_status(
+                            status,
+                            run,
+                            snapshot=snapshot,
+                            drained_dirty=drained_dirty,
+                        )
+                    elif self._is_session_stop_cancellation(run):
+                        self._finish_stopped_status(
+                            status,
+                            next_due_at=previous_next_due_at,
+                        )
+                    else:
+                        self._finish_failed_status(status, run)
+                        self._mark_reconciliation_failure(
+                            status,
+                            run.error_message
+                            or run.cancellation_reason
+                            or "full reconciliation failed",
+                        )
+                    self._sync_watch_diagnostics(
                         status,
-                        run,
-                        snapshot=snapshot,
-                        drained_dirty=drained_dirty,
+                        self._event_backends.get(status.monitor_id),
                     )
-                elif self._is_session_stop_cancellation(run):
-                    self._finish_stopped_status(
-                        status,
-                        next_due_at=previous_next_due_at,
-                    )
-                else:
-                    self._finish_failed_status(status, run)
-                    self._mark_reconciliation_failure(
-                        status,
-                        run.error_message
-                        or run.cancellation_reason
-                        or "full reconciliation failed",
-                    )
-                self._sync_watch_diagnostics(
-                    status,
-                    self._event_backends.get(status.monitor_id),
-                )
-                self._repository.save_monitor_status(status)
+                    self._repository.save_monitor_status(status)
         finally:
             self._finish_backend_registration(monitor_id)
-            with self._condition:
-                self._active_monitor_id = None
-                self._active_run_id = None
-                if monitor_id is not None:
-                    status_pending = (
-                        monitor_id in self._pending_monitor_ids
-                        or monitor_id in self._pending_reconcile_ids
+            with self._status_lock:
+                with self._condition:
+                    self._active_monitor_id = None
+                    self._active_run_id = None
+                    if monitor_id is not None:
+                        status_pending = (
+                            monitor_id in self._pending_monitor_ids
+                            or monitor_id in self._pending_reconcile_ids
+                        )
+                        current_status = self._repository.get_monitor_status(
+                            monitor_id
+                        )
+                        current_status.rerun_pending = status_pending
+                        self._repository.save_monitor_status(current_status)
+                    self._condition.notify_all()
+                if acquired_here and monitor_id is not None:
+                    self._repository.release_monitor_lease(
+                        monitor_id, host_id=self._host_id
                     )
-                    current_status = self._repository.get_monitor_status(monitor_id)
-                    current_status.rerun_pending = status_pending
-                    self._repository.save_monitor_status(current_status)
-                self._condition.notify_all()
-            if acquired_here and monitor_id is not None:
-                self._repository.release_monitor_lease(
-                    monitor_id, host_id=self._host_id
-                )
 
         message = run.status.value
         if persistence_error:
@@ -1591,31 +1621,32 @@ class MonitorService:
         except Exception as exc:
             self._event_backend_retry_at[monitor_id] = self._monotonic() + 5.0
             reason = f"event backend start failed: {type(exc).__name__}: {exc}"
-            status = self._repository.get_monitor_status(monitor_id)
-            status.event_backend = info.name
-            status.event_backend_status = "degraded"
-            status.watched_root_count = 0
-            status.watch_diagnostics = WatchDiagnostics(
-                descriptor_limit=info.descriptor_limit,
-                instance_limit=info.instance_limit,
-                queued_event_limit=info.queued_event_limit,
-                registration_strategy="failed",
-                fallback_reason=reason,
-            )
-            self._invalidate_provisional(status, reason)
-            status.reconciliation_required = True
-            status.reconciliation_state = MonitorReconciliationState.DEGRADED
-            status.degraded_reason = reason
-            if status.health not in {
-                MonitorHealthState.BLOCKED,
-                MonitorHealthState.FAILED,
-            }:
-                status.health = MonitorHealthState.WARNING
-            if self._event_mode is MonitorEventMode.AUTO:
-                status.watch_mode = MonitorWatchMode.PERIODIC
-            else:
-                status.watch_mode = MonitorWatchMode.EVENT_ASSISTED
-            self._repository.save_monitor_status(status)
+            with self._status_lock:
+                status = self._repository.get_monitor_status(monitor_id)
+                status.event_backend = info.name
+                status.event_backend_status = "degraded"
+                status.watched_root_count = 0
+                status.watch_diagnostics = WatchDiagnostics(
+                    descriptor_limit=info.descriptor_limit,
+                    instance_limit=info.instance_limit,
+                    queued_event_limit=info.queued_event_limit,
+                    registration_strategy="failed",
+                    fallback_reason=reason,
+                )
+                self._invalidate_provisional(status, reason)
+                status.reconciliation_required = True
+                status.reconciliation_state = MonitorReconciliationState.DEGRADED
+                status.degraded_reason = reason
+                if status.health not in {
+                    MonitorHealthState.BLOCKED,
+                    MonitorHealthState.FAILED,
+                }:
+                    status.health = MonitorHealthState.WARNING
+                if self._event_mode is MonitorEventMode.AUTO:
+                    status.watch_mode = MonitorWatchMode.PERIODIC
+                else:
+                    status.watch_mode = MonitorWatchMode.EVENT_ASSISTED
+                self._repository.save_monitor_status(status)
             with self._condition:
                 self._pending_reconcile_ids.add(monitor_id)
             self._emit(MonitorEventKind.WATCH_CHANGED, monitor_id, reason)
@@ -1639,19 +1670,20 @@ class MonitorService:
             "event backend started or restarted; full reconciliation required"
         )
         self._reconciliation_retry_at.pop(monitor_id, None)
-        status = self._repository.get_monitor_status(monitor_id)
-        status.watch_mode = MonitorWatchMode.EVENT_ASSISTED
-        status.event_backend = backend.name
-        status.event_backend_status = "active"
-        status.watched_root_count = len(backend.watched_roots)
-        self._sync_watch_diagnostics(status, backend, info=info)
-        self._invalidate_provisional(
-            status,
-            "event backend started or restarted; full reconciliation required",
-            dirty_paths=dirty.paths,
-        )
-        self._apply_dirty_snapshot_to_status(status, dirty)
-        self._repository.save_monitor_status(status)
+        with self._status_lock:
+            status = self._repository.get_monitor_status(monitor_id)
+            status.watch_mode = MonitorWatchMode.EVENT_ASSISTED
+            status.event_backend = backend.name
+            status.event_backend_status = "active"
+            status.watched_root_count = len(backend.watched_roots)
+            self._sync_watch_diagnostics(status, backend, info=info)
+            self._invalidate_provisional(
+                status,
+                "event backend started or restarted; full reconciliation required",
+                dirty_paths=dirty.paths,
+            )
+            self._apply_dirty_snapshot_to_status(status, dirty)
+            self._repository.save_monitor_status(status)
         self._emit(
             MonitorEventKind.WATCH_CHANGED,
             monitor_id,
@@ -1665,32 +1697,33 @@ class MonitorService:
         *,
         disabled: bool,
     ) -> None:
-        status = self._repository.get_monitor_status(monitor_id)
-        desired_status = "disabled" if disabled else info.status.value
-        changed = (
-            status.watch_mode is not MonitorWatchMode.PERIODIC
-            or status.event_backend != info.name
-            or status.event_backend_status != desired_status
-            or status.watched_root_count != 0
-        )
-        status.watch_mode = MonitorWatchMode.PERIODIC
-        status.event_backend = info.name
-        status.event_backend_status = desired_status
-        status.watched_root_count = 0
-        status.watch_diagnostics = WatchDiagnostics(
-            descriptor_limit=info.descriptor_limit,
-            instance_limit=info.instance_limit,
-            queued_event_limit=info.queued_event_limit,
-            registration_strategy="periodic-only",
-            fallback_reason=(None if disabled else info.reason),
-        )
-        if status.reconciliation_required:
-            retry_at = self._reconciliation_retry_at.get(monitor_id, 0.0)
-            if self._monotonic() >= retry_at:
-                with self._condition:
-                    self._pending_reconcile_ids.add(monitor_id)
-        if changed:
-            self._repository.save_monitor_status(status)
+        with self._status_lock:
+            status = self._repository.get_monitor_status(monitor_id)
+            desired_status = "disabled" if disabled else info.status.value
+            changed = (
+                status.watch_mode is not MonitorWatchMode.PERIODIC
+                or status.event_backend != info.name
+                or status.event_backend_status != desired_status
+                or status.watched_root_count != 0
+            )
+            status.watch_mode = MonitorWatchMode.PERIODIC
+            status.event_backend = info.name
+            status.event_backend_status = desired_status
+            status.watched_root_count = 0
+            status.watch_diagnostics = WatchDiagnostics(
+                descriptor_limit=info.descriptor_limit,
+                instance_limit=info.instance_limit,
+                queued_event_limit=info.queued_event_limit,
+                registration_strategy="periodic-only",
+                fallback_reason=(None if disabled else info.reason),
+            )
+            if status.reconciliation_required:
+                retry_at = self._reconciliation_retry_at.get(monitor_id, 0.0)
+                if self._monotonic() >= retry_at:
+                    with self._condition:
+                        self._pending_reconcile_ids.add(monitor_id)
+            if changed:
+                self._repository.save_monitor_status(status)
 
     def _stop_event_backend(
         self,
@@ -1699,7 +1732,12 @@ class MonitorService:
         reason: str,
         require_reconciliation: bool = True,
         fallback_to_periodic: bool = False,
+        release_lease: bool = False,
     ) -> None:
+        # The pop and `backend.stop()` stay outside `_status_lock` on purpose:
+        # a real backend's stop() joins its watcher thread, and that thread may
+        # be parked inside `_handle_filesystem_event` waiting for the very lock
+        # we would be holding.
         backend = self._event_backends.pop(monitor_id, None)
         self._event_backend_watches.pop(monitor_id, None)
         if backend is not None:
@@ -1708,48 +1746,62 @@ class MonitorService:
             except Exception:
                 pass
         tracker = self._dirty_trackers.get(monitor_id)
-        if backend is None and tracker is None:
-            return
-        if backend is None and not require_reconciliation:
-            return
-        dirty = tracker.force_full(reason) if tracker is not None else None
-        status = self._repository.get_monitor_status(monitor_id)
-        status.watched_root_count = 0
-        status.event_backend_status = (
-            "degraded" if fallback_to_periodic else "stopped"
+        write_status = not (
+            (backend is None and tracker is None)
+            or (backend is None and not require_reconciliation)
         )
-        diagnostics = self._backend_diagnostics(backend)
-        status.watch_diagnostics = replace(
-            diagnostics,
-            descriptor_count=0,
-            registration_in_progress=False,
-            fallback_reason=reason,
-        )
-        if self._event_mode is MonitorEventMode.PERIODIC or fallback_to_periodic:
-            status.watch_mode = MonitorWatchMode.PERIODIC
-        if require_reconciliation:
-            self._reconciliation_retry_at.pop(monitor_id, None)
-            status.reconciliation_required = True
-            status.reconciliation_state = MonitorReconciliationState.DEGRADED
-            status.degraded_reason = reason
-            self._invalidate_provisional(
-                status,
-                reason,
-                dirty_paths=(dirty.paths if dirty is not None else status.dirty_paths),
-            )
-            if dirty is not None:
-                self._apply_dirty_snapshot_to_status(status, dirty)
-            elif not status.dirty_paths:
-                monitor = self._repository.get_monitor(monitor_id)
-                if monitor is not None:
-                    status.dirty_paths = (monitor.root_path,)
-                    status.pending_dirty_paths = 1
-            if status.health not in {
-                MonitorHealthState.BLOCKED,
-                MonitorHealthState.FAILED,
-            }:
-                status.health = MonitorHealthState.WARNING
-        self._repository.save_monitor_status(status)
+        with self._status_lock:
+            if write_status:
+                dirty = tracker.force_full(reason) if tracker is not None else None
+                status = self._repository.get_monitor_status(monitor_id)
+                status.watched_root_count = 0
+                status.event_backend_status = (
+                    "degraded" if fallback_to_periodic else "stopped"
+                )
+                diagnostics = self._backend_diagnostics(backend)
+                status.watch_diagnostics = replace(
+                    diagnostics,
+                    descriptor_count=0,
+                    registration_in_progress=False,
+                    fallback_reason=reason,
+                )
+                if self._event_mode is MonitorEventMode.PERIODIC or fallback_to_periodic:
+                    status.watch_mode = MonitorWatchMode.PERIODIC
+                if require_reconciliation:
+                    self._reconciliation_retry_at.pop(monitor_id, None)
+                    status.reconciliation_required = True
+                    status.reconciliation_state = MonitorReconciliationState.DEGRADED
+                    status.degraded_reason = reason
+                    self._invalidate_provisional(
+                        status,
+                        reason,
+                        dirty_paths=(
+                            dirty.paths if dirty is not None else status.dirty_paths
+                        ),
+                    )
+                    if dirty is not None:
+                        self._apply_dirty_snapshot_to_status(status, dirty)
+                    elif not status.dirty_paths:
+                        monitor = self._repository.get_monitor(monitor_id)
+                        if monitor is not None:
+                            status.dirty_paths = (monitor.root_path,)
+                            status.pending_dirty_paths = 1
+                    if status.health not in {
+                        MonitorHealthState.BLOCKED,
+                        MonitorHealthState.FAILED,
+                    }:
+                        status.health = MonitorHealthState.WARNING
+                self._repository.save_monitor_status(status)
+            if release_lease:
+                # Under the same acquisition as the write above. This SQL sets
+                # activity_state='no-host', and a run finishing beside it must
+                # not be able to read `_held_leases`, decide "waiting", and
+                # save that on top of the release.
+                self._repository.release_monitor_lease(
+                    monitor_id, host_id=self._host_id
+                )
+        if not write_status:
+            return
         if not self._session_stop.is_set() and monitor_id in self._held_leases:
             with self._condition:
                 self._pending_reconcile_ids.add(monitor_id)
@@ -1784,46 +1836,50 @@ class MonitorService:
                     ),
                 )
                 return
-        status = self._repository.get_monitor_status(monitor_id)
-        status.watch_mode = MonitorWatchMode.EVENT_ASSISTED
-        status.event_backend = event.backend or status.event_backend
-        if event.kind is FilesystemEventKind.OVERFLOW:
-            status.overflow_count += 1
-        severe = event.kind in {
-            FilesystemEventKind.OVERFLOW,
-            FilesystemEventKind.ROOT_LOST,
-            FilesystemEventKind.BACKEND_ERROR,
-        }
-        if severe:
-            self._reconciliation_retry_at.pop(monitor_id, None)
-            status.event_backend_status = "degraded"
-            self._invalidate_provisional(status, event.detail or event.kind.value, dirty_paths=dirty.paths)
-        else:
-            self._mark_provisional_dirty(status, dirty.paths)
-        self._sync_watch_diagnostics(
-            status,
-            self._event_backends.get(monitor_id),
-        )
-        self._apply_dirty_snapshot_to_status(status, dirty)
-        now_mono = self._monotonic()
-        last_write = self._event_status_write_at.get(monitor_id)
-        should_write = (
-            severe
-            or last_write is None
-            or now_mono - last_write >= self._event_debounce_seconds
-        )
-        if should_write:
-            self._repository.save_monitor_status(status)
-            self._event_status_write_at[monitor_id] = now_mono
-            self._emit(
-                MonitorEventKind.WATCH_CHANGED,
-                monitor_id,
-                (
+        watch_message: str | None = None
+        with self._status_lock:
+            status = self._repository.get_monitor_status(monitor_id)
+            status.watch_mode = MonitorWatchMode.EVENT_ASSISTED
+            status.event_backend = event.backend or status.event_backend
+            if event.kind is FilesystemEventKind.OVERFLOW:
+                status.overflow_count += 1
+            severe = event.kind in {
+                FilesystemEventKind.OVERFLOW,
+                FilesystemEventKind.ROOT_LOST,
+                FilesystemEventKind.BACKEND_ERROR,
+            }
+            if severe:
+                self._reconciliation_retry_at.pop(monitor_id, None)
+                status.event_backend_status = "degraded"
+                self._invalidate_provisional(
+                    status,
+                    event.detail or event.kind.value,
+                    dirty_paths=dirty.paths,
+                )
+            else:
+                self._mark_provisional_dirty(status, dirty.paths)
+            self._sync_watch_diagnostics(
+                status,
+                self._event_backends.get(monitor_id),
+            )
+            self._apply_dirty_snapshot_to_status(status, dirty)
+            now_mono = self._monotonic()
+            last_write = self._event_status_write_at.get(monitor_id)
+            should_write = (
+                severe
+                or last_write is None
+                or now_mono - last_write >= self._event_debounce_seconds
+            )
+            if should_write:
+                self._repository.save_monitor_status(status)
+                self._event_status_write_at[monitor_id] = now_mono
+                watch_message = (
                     f"{event.kind.value}: {event.detail}"
                     if event.detail
                     else f"{event.kind.value}: {event.path}"
-                ),
-            )
+                )
+        if watch_message is not None:
+            self._emit(MonitorEventKind.WATCH_CHANGED, monitor_id, watch_message)
         with self._condition:
             self._condition.notify_all()
 
@@ -1996,26 +2052,27 @@ class MonitorService:
         )
 
     def _save_scan_progress(self, scan_status: MonitorStatus) -> None:
-        current = self._repository.get_monitor_status(scan_status.monitor_id)
-        current.activity = scan_status.activity
-        current.host_id = scan_status.host_id
-        current.host_type = scan_status.host_type
-        current.lease_expires_at = scan_status.lease_expires_at
-        current.next_due_at = scan_status.next_due_at
-        current.last_attempt_at = scan_status.last_attempt_at
-        current.active_run_id = scan_status.active_run_id
-        current.active_phase = scan_status.active_phase
-        current.progress_percent = scan_status.progress_percent
-        current.current_path = scan_status.current_path
-        current.resource_queue_position = scan_status.resource_queue_position
-        current.resource_queue_reason = scan_status.resource_queue_reason
-        current.resource_active_slot = scan_status.resource_active_slot
-        current.effective_workers = scan_status.effective_workers
-        current.worker_policy_reason = scan_status.worker_policy_reason
-        current.rerun_pending = scan_status.rerun_pending
-        if scan_status.last_error:
-            current.last_error = scan_status.last_error
-        self._repository.save_monitor_status(current)
+        with self._status_lock:
+            current = self._repository.get_monitor_status(scan_status.monitor_id)
+            current.activity = scan_status.activity
+            current.host_id = scan_status.host_id
+            current.host_type = scan_status.host_type
+            current.lease_expires_at = scan_status.lease_expires_at
+            current.next_due_at = scan_status.next_due_at
+            current.last_attempt_at = scan_status.last_attempt_at
+            current.active_run_id = scan_status.active_run_id
+            current.active_phase = scan_status.active_phase
+            current.progress_percent = scan_status.progress_percent
+            current.current_path = scan_status.current_path
+            current.resource_queue_position = scan_status.resource_queue_position
+            current.resource_queue_reason = scan_status.resource_queue_reason
+            current.resource_active_slot = scan_status.resource_active_slot
+            current.effective_workers = scan_status.effective_workers
+            current.worker_policy_reason = scan_status.worker_policy_reason
+            current.rerun_pending = scan_status.rerun_pending
+            if scan_status.last_error:
+                current.last_error = scan_status.last_error
+            self._repository.save_monitor_status(current)
 
     def _finish_full_reconciliation_status(
         self,
@@ -2032,12 +2089,18 @@ class MonitorService:
             or bool(drained_dirty and drained_dirty.full_reconciliation)
         )
         backend = self._event_backends.get(status.monitor_id)
+        # `_event_backend_fallbacks` is consulted beside the persisted string so
+        # that a fallback the event thread has already decided on still counts
+        # here, rather than the decision resting on one column alone.
         backend_failure = (
-            status.event_backend_status == "degraded"
-            and (
-                backend is None
-                or not backend.running
-                or bool(self._backend_diagnostics(backend).fallback_reason)
+            status.monitor_id in self._event_backend_fallbacks
+            or (
+                status.event_backend_status == "degraded"
+                and (
+                    backend is None
+                    or not backend.running
+                    or bool(self._backend_diagnostics(backend).fallback_reason)
+                )
             )
         )
         backend_failure_reason = status.degraded_reason
@@ -2133,11 +2196,12 @@ class MonitorService:
         monitor_id = definition.id
         if monitor_id is None or not batch.paths:
             return ()
-        status = self._repository.get_monitor_status(monitor_id)
-        status.activity = MonitorActivityState.RECONCILING
-        status.last_attempt_at = self._now()
-        status.current_path = batch.paths[0]
-        self._repository.save_monitor_status(status)
+        with self._status_lock:
+            status = self._repository.get_monitor_status(monitor_id)
+            status.activity = MonitorActivityState.RECONCILING
+            status.last_attempt_at = self._now()
+            status.current_path = batch.paths[0]
+            self._repository.save_monitor_status(status)
         base_snapshot = self._latest_monitor_snapshot(monitor_id)
         reason = self._local_projection_block_reason(
             definition,
@@ -2152,15 +2216,16 @@ class MonitorService:
                     full_reconciliation=True,
                     reason=reason,
                 )
-            current = self._repository.get_monitor_status(monitor_id)
-            self._mark_reconciliation_failure(current, reason)
-            current.activity = (
-                MonitorActivityState.WAITING
-                if monitor_id in self._held_leases
-                and not self._session_stop.is_set()
-                else MonitorActivityState.NO_HOST
-            )
-            self._repository.save_monitor_status(current)
+            with self._status_lock:
+                current = self._repository.get_monitor_status(monitor_id)
+                self._mark_reconciliation_failure(current, reason)
+                current.activity = (
+                    MonitorActivityState.WAITING
+                    if monitor_id in self._held_leases
+                    and not self._session_stop.is_set()
+                    else MonitorActivityState.NO_HOST
+                )
+                self._repository.save_monitor_status(current)
             self._emit(
                 MonitorEventKind.RECONCILIATION_FINISHED,
                 monitor_id,
@@ -2183,16 +2248,17 @@ class MonitorService:
                     run = self._scan_service.create_run(request)
                 except Exception as exc:
                     run = self._validation_failure_run(request, exc)
-                with self._condition:
-                    self._active_monitor_id = monitor_id
-                    self._active_run_id = run.run_id
-                progress_status = self._repository.get_monitor_status(monitor_id)
-                progress_status.activity = MonitorActivityState.RECONCILING
-                progress_status.active_run_id = run.run_id
-                progress_status.active_phase = run.phase.value
-                progress_status.progress_percent = 0.0
-                progress_status.current_path = path
-                self._repository.save_monitor_status(progress_status)
+                with self._status_lock:
+                    with self._condition:
+                        self._active_monitor_id = monitor_id
+                        self._active_run_id = run.run_id
+                    progress_status = self._repository.get_monitor_status(monitor_id)
+                    progress_status.activity = MonitorActivityState.RECONCILING
+                    progress_status.active_run_id = run.run_id
+                    progress_status.active_phase = run.phase.value
+                    progress_status.progress_percent = 0.0
+                    progress_status.current_path = path
+                    self._repository.save_monitor_status(progress_status)
                 last_status_write = 0.0
 
                 def consume_scan_event(event: ScanEvent) -> None:
@@ -2256,7 +2322,6 @@ class MonitorService:
                     )
                     break
 
-            current = self._repository.get_monitor_status(monitor_id)
             tracker = self._dirty_trackers.get(monitor_id)
             pending = tracker.snapshot() if tracker is not None else None
             if failure is None and pending is not None and pending.full_reconciliation:
@@ -2286,79 +2351,81 @@ class MonitorService:
                     )
                 except ProvisionalProjectionRequiresFull as exc:
                     failure = str(exc)
-            if failure is not None:
-                if tracker is not None:
-                    tracker.restore(
-                        batch.paths,
-                        full_reconciliation=True,
-                        reason=failure,
-                    )
-                self._mark_reconciliation_failure(current, failure)
-                if current.health not in {
-                    MonitorHealthState.BLOCKED,
-                    MonitorHealthState.FAILED,
-                }:
-                    current.health = MonitorHealthState.WARNING
-                current.last_error = failure
-            else:
-                assert state is not None
-                with self._condition:
-                    self._provisional_states[monitor_id] = state
-                current.provisional = state.summary
-                current.last_local_reconciliation_at = state.summary.updated_at
-                current.last_reconciliation_path = (
-                    batch.paths[0]
-                    if len(batch.paths) == 1
-                    else f"{len(batch.paths)} dirty paths"
-                )
-                current.last_local_size = state.summary.current_value
-                current.last_local_file_count = (
-                    state.summary.current.file_count
-                    if state.summary.current is not None
-                    else None
-                )
-                if pending is not None and pending.paths:
-                    current.reconciliation_required = pending.full_reconciliation
-                    current.degraded_reason = (
-                        "; ".join(pending.reasons)
-                        if pending.full_reconciliation
-                        else None
-                    )
-                    self._apply_dirty_snapshot_to_status(current, pending)
-                else:
-                    current.pending_dirty_paths = 0
-                    current.dirty_paths = ()
-                    current.reconciliation_required = False
-                    current.reconciliation_state = MonitorReconciliationState.LOCAL
-                    current.degraded_reason = None
-                    backend = self._event_backends.get(monitor_id)
-                    if backend is not None and backend.running:
-                        current.event_backend_status = "active"
+            with self._status_lock:
+                current = self._repository.get_monitor_status(monitor_id)
+                if failure is not None:
+                    if tracker is not None:
+                        tracker.restore(
+                            batch.paths,
+                            full_reconciliation=True,
+                            reason=failure,
+                        )
+                    self._mark_reconciliation_failure(current, failure)
                     if current.health not in {
                         MonitorHealthState.BLOCKED,
                         MonitorHealthState.FAILED,
                     }:
-                        current.health = (
-                            MonitorHealthState.HEALTHY
+                        current.health = MonitorHealthState.WARNING
+                    current.last_error = failure
+                else:
+                    assert state is not None
+                    with self._condition:
+                        self._provisional_states[monitor_id] = state
+                    current.provisional = state.summary
+                    current.last_local_reconciliation_at = state.summary.updated_at
+                    current.last_reconciliation_path = (
+                        batch.paths[0]
+                        if len(batch.paths) == 1
+                        else f"{len(batch.paths)} dirty paths"
+                    )
+                    current.last_local_size = state.summary.current_value
+                    current.last_local_file_count = (
+                        state.summary.current.file_count
+                        if state.summary.current is not None
+                        else None
+                    )
+                    if pending is not None and pending.paths:
+                        current.reconciliation_required = pending.full_reconciliation
+                        current.degraded_reason = (
+                            "; ".join(pending.reasons)
+                            if pending.full_reconciliation
+                            else None
                         )
-                self._sync_watch_diagnostics(
-                    current,
-                    self._event_backends.get(monitor_id),
+                        self._apply_dirty_snapshot_to_status(current, pending)
+                    else:
+                        current.pending_dirty_paths = 0
+                        current.dirty_paths = ()
+                        current.reconciliation_required = False
+                        current.reconciliation_state = MonitorReconciliationState.LOCAL
+                        current.degraded_reason = None
+                        backend = self._event_backends.get(monitor_id)
+                        if backend is not None and backend.running:
+                            current.event_backend_status = "active"
+                        if current.health not in {
+                            MonitorHealthState.BLOCKED,
+                            MonitorHealthState.FAILED,
+                        }:
+                            current.health = (
+                                MonitorHealthState.HEALTHY
+                            )
+                    self._sync_watch_diagnostics(
+                        current,
+                        self._event_backends.get(monitor_id),
+                    )
+                current.activity = (
+                    MonitorActivityState.WAITING
+                    if monitor_id in self._held_leases
+                    and not self._session_stop.is_set()
+                    else MonitorActivityState.NO_HOST
                 )
-            current.activity = (
-                MonitorActivityState.WAITING
-                if monitor_id in self._held_leases
-                and not self._session_stop.is_set()
-                else MonitorActivityState.NO_HOST
-            )
-            current.active_run_id = None
-            current.active_phase = None
-            current.progress_percent = 100.0 if failure is None else 0.0
-            current.current_path = None
-            current.resource_queue_position = 0
-            current.resource_queue_reason = None
-            current.resource_active_slot = None
-            self._repository.save_monitor_status(current)
+                current.active_run_id = None
+                current.active_phase = None
+                current.progress_percent = 100.0 if failure is None else 0.0
+                current.current_path = None
+                current.resource_queue_position = 0
+                current.resource_queue_reason = None
+                current.resource_active_slot = None
+                self._repository.save_monitor_status(current)
             self._emit(
                 MonitorEventKind.RECONCILIATION_FINISHED,
                 monitor_id,
@@ -2578,40 +2645,41 @@ class MonitorService:
             return False
         with self._condition:
             self._held_leases.add(monitor_id)
-        status = self._repository.get_monitor_status(monitor_id)
-        status.activity = MonitorActivityState.WAITING
-        status.host_id = self._host_id
-        status.host_type = self._host_type
-        status.lease_expires_at = expires
-        if status.next_due_at is None:
-            status.next_due_at = now
-        self._repository.save_monitor_status(status)
-        # Asked after the write rather than before it, because the write is
-        # what has to be undone. The monitor screen's stop button calls
-        # `stop_session(wait=False)` -- it cannot hold the UI thread for a
-        # ten-second join -- so `_release_all_leases` runs beside a session
-        # thread still inside a loop iteration it entered before the flag went
-        # up. When that release lands between the two statements above it
-        # clears `_held_leases` before this thread is in it and writes its
-        # no-host status before this one, so the WAITING above is the last
-        # word: the session loop's own `finally` then finds nothing left to
-        # release, and the monitor reads "waiting" against a host id whose
-        # process is gone until the lease expires. Every other writer of
-        # WAITING already asks this question; this one has to ask it late.
-        with self._condition:
-            lost = (
-                self._session_stop.is_set()
-                or monitor_id not in self._held_leases
-            )
+        with self._status_lock:
+            status = self._repository.get_monitor_status(monitor_id)
+            status.activity = MonitorActivityState.WAITING
+            status.host_id = self._host_id
+            status.host_type = self._host_type
+            status.lease_expires_at = expires
+            if status.next_due_at is None:
+                status.next_due_at = now
+            self._repository.save_monitor_status(status)
+            # Asked after the write rather than before it, because the write is
+            # what has to be undone. The monitor screen's stop button calls
+            # `stop_session(wait=False)` -- it cannot hold the UI thread for a
+            # ten-second join -- so `_release_all_leases` runs beside a session
+            # thread still inside a loop iteration it entered before the flag went
+            # up. When that release lands between the two statements above it
+            # clears `_held_leases` before this thread is in it and writes its
+            # no-host status before this one, so the WAITING above is the last
+            # word: the session loop's own `finally` then finds nothing left to
+            # release, and the monitor reads "waiting" against a host id whose
+            # process is gone until the lease expires. Every other writer of
+            # WAITING already asks this question; this one has to ask it late.
+            with self._condition:
+                lost = (
+                    self._session_stop.is_set()
+                    or monitor_id not in self._held_leases
+                )
+                if lost:
+                    self._held_leases.discard(monitor_id)
             if lost:
-                self._held_leases.discard(monitor_id)
-        if lost:
-            # Outside the lock, the way `_release_all_leases` releases outside
-            # it. This is also what puts the status back to no-host.
-            self._repository.release_monitor_lease(
-                monitor_id, host_id=self._host_id
-            )
-            return False
+                # Outside `_condition`, the way `_release_all_leases` releases
+                # outside it. This is also what puts the status back to no-host.
+                self._repository.release_monitor_lease(
+                    monitor_id, host_id=self._host_id
+                )
+                return False
         return True
 
     def _acquire_one_shot_lease(self, monitor_id: int) -> bool:
@@ -2632,9 +2700,7 @@ class MonitorService:
             self._stop_event_backend(
                 monitor_id,
                 reason="monitor host stopped; full reconciliation required",
-            )
-            self._repository.release_monitor_lease(
-                monitor_id, host_id=self._host_id
+                release_lease=True,
             )
 
     def _release_all_leases(self) -> None:
@@ -2642,12 +2708,12 @@ class MonitorService:
             monitor_ids = tuple(self._held_leases)
             self._held_leases.clear()
         for monitor_id in monitor_ids:
+            # The lease release rides inside `_stop_event_backend`, under the
+            # same `_status_lock` acquisition as the stopped-backend write.
             self._stop_event_backend(
                 monitor_id,
                 reason="monitor host stopped; full reconciliation required",
-            )
-            self._repository.release_monitor_lease(
-                monitor_id, host_id=self._host_id
+                release_lease=True,
             )
 
     def _session_includes(self, monitor_id: int) -> bool:
@@ -2657,86 +2723,88 @@ class MonitorService:
     def _record_retention_status(
         self, monitor_id: int, result: RetentionResult
     ) -> None:
-        status = self._repository.get_monitor_status(monitor_id)
-        status.last_retention_at = result.finished_at
-        status.last_retention_summary = (
-            f"{result.status}: kept {result.kept}, pruned {result.pruned}, "
-            f"rollups {result.rolled_up}"
-        )
-        self._repository.save_monitor_status(status)
+        with self._status_lock:
+            status = self._repository.get_monitor_status(monitor_id)
+            status.last_retention_at = result.finished_at
+            status.last_retention_summary = (
+                f"{result.status}: kept {result.kept}, pruned {result.pruned}, "
+                f"rollups {result.rolled_up}"
+            )
+            self._repository.save_monitor_status(status)
 
     def _normalized_status(self, monitor_id: int) -> MonitorStatus:
-        status = self._repository.get_monitor_status(monitor_id)
-        now = self._now()
-        changed = False
-        if (
-            status.activity is MonitorActivityState.NO_HOST
-            and status.health is MonitorHealthState.FAILED
-            and status.last_error == _SESSION_STOP_CANCELLATION_REASON
-        ):
-            status.health = (
-                MonitorHealthState.WARNING
-                if status.reconciliation_required or status.degraded_reason
-                else (
-                    MonitorHealthState.HEALTHY
-                    if status.last_success_at is not None
-                    else MonitorHealthState.UNKNOWN
+        with self._status_lock:
+            status = self._repository.get_monitor_status(monitor_id)
+            now = self._now()
+            changed = False
+            if (
+                status.activity is MonitorActivityState.NO_HOST
+                and status.health is MonitorHealthState.FAILED
+                and status.last_error == _SESSION_STOP_CANCELLATION_REASON
+            ):
+                status.health = (
+                    MonitorHealthState.WARNING
+                    if status.reconciliation_required or status.degraded_reason
+                    else (
+                        MonitorHealthState.HEALTHY
+                        if status.last_success_at is not None
+                        else MonitorHealthState.UNKNOWN
+                    )
                 )
-            )
-            status.last_failure_at = None
-            status.consecutive_failures = 0
-            status.last_error = None
-            status.blocked_reason = None
-            changed = True
-        if (
-            status.host_id
-            and status.lease_expires_at is not None
-            and status.lease_expires_at <= now
-        ):
-            stale_host = status.host_id
-            if self._repository.status.writable:
-                self._repository.release_monitor_lease(
-                    monitor_id, host_id=stale_host
-                )
-            status.activity = MonitorActivityState.NO_HOST
-            status.host_id = None
-            status.host_type = None
-            status.lease_expires_at = None
-            status.active_run_id = None
-            status.resource_queue_position = 0
-            status.resource_queue_reason = None
-            status.resource_active_slot = None
-            if status.watch_mode is MonitorWatchMode.EVENT_ASSISTED:
-                reason = "event host lease expired; full reconciliation required"
-                status.event_backend_status = "stopped"
-                status.watched_root_count = 0
-                status.reconciliation_required = True
-                status.reconciliation_state = MonitorReconciliationState.DEGRADED
-                status.degraded_reason = reason
-                if not status.dirty_paths:
-                    monitor = self._repository.get_monitor(monitor_id)
-                    if monitor is not None:
-                        status.dirty_paths = (monitor.root_path,)
-                        status.pending_dirty_paths = 1
-                status.watch_diagnostics = replace(
-                    status.watch_diagnostics,
-                    descriptor_count=0,
-                    registration_in_progress=False,
-                    fallback_reason=reason,
-                )
-                self._invalidate_provisional(
-                    status,
-                    reason,
-                    dirty_paths=status.dirty_paths,
-                )
-                if status.health not in {
-                    MonitorHealthState.BLOCKED,
-                    MonitorHealthState.FAILED,
-                }:
-                    status.health = MonitorHealthState.WARNING
-            changed = True
-        if changed and self._repository.status.writable:
-            self._repository.save_monitor_status(status)
+                status.last_failure_at = None
+                status.consecutive_failures = 0
+                status.last_error = None
+                status.blocked_reason = None
+                changed = True
+            if (
+                status.host_id
+                and status.lease_expires_at is not None
+                and status.lease_expires_at <= now
+            ):
+                stale_host = status.host_id
+                if self._repository.status.writable:
+                    self._repository.release_monitor_lease(
+                        monitor_id, host_id=stale_host
+                    )
+                status.activity = MonitorActivityState.NO_HOST
+                status.host_id = None
+                status.host_type = None
+                status.lease_expires_at = None
+                status.active_run_id = None
+                status.resource_queue_position = 0
+                status.resource_queue_reason = None
+                status.resource_active_slot = None
+                if status.watch_mode is MonitorWatchMode.EVENT_ASSISTED:
+                    reason = "event host lease expired; full reconciliation required"
+                    status.event_backend_status = "stopped"
+                    status.watched_root_count = 0
+                    status.reconciliation_required = True
+                    status.reconciliation_state = MonitorReconciliationState.DEGRADED
+                    status.degraded_reason = reason
+                    if not status.dirty_paths:
+                        monitor = self._repository.get_monitor(monitor_id)
+                        if monitor is not None:
+                            status.dirty_paths = (monitor.root_path,)
+                            status.pending_dirty_paths = 1
+                    status.watch_diagnostics = replace(
+                        status.watch_diagnostics,
+                        descriptor_count=0,
+                        registration_in_progress=False,
+                        fallback_reason=reason,
+                    )
+                    self._invalidate_provisional(
+                        status,
+                        reason,
+                        dirty_paths=status.dirty_paths,
+                    )
+                    if status.health not in {
+                        MonitorHealthState.BLOCKED,
+                        MonitorHealthState.FAILED,
+                    }:
+                        status.health = MonitorHealthState.WARNING
+                changed = True
+            if changed and self._repository.status.writable:
+                self._repository.save_monitor_status(status)
         return status
 
     def _resolve_monitor(self, identifier: int | str) -> MonitorDefinition:
