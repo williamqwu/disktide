@@ -1046,6 +1046,75 @@ def _size_value(value: str, *, param_hint: str) -> int:
     return size
 
 
+#: SQLite stores integers in 64 signed bits and raises `OverflowError`
+#: ("Python int too large to convert to SQLite INTEGER") on anything wider --
+#: which used to surface as exit 1 from `alerts add --size 1000000000000000000000`,
+#: a Python-internal message for what is plainly an invalid argument.
+_MAX_STORABLE_INTEGER = 2**63 - 1
+
+#: A growth threshold above a million percent is not a threshold anyone means;
+#: `--percent 1e300` was accepted and stored.
+_MAX_PERCENT_THRESHOLD = 1_000_000
+
+
+def _finite_number(value, *, param_hint: str) -> float:
+    """Parse a threshold that has to be a real number, not an idea of one."""
+    import math
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise click.BadParameter("expected a number", param_hint=param_hint) from exc
+    if not math.isfinite(number):
+        raise click.BadParameter(
+            "must be a finite number", param_hint=param_hint
+        )
+    return number
+
+
+def _alert_size_threshold(value: str, *, param_hint: str) -> int:
+    """A byte threshold an alert can fire on and the database can hold.
+
+    Zero was accepted and made a rule that fires on its first check, which is
+    not a threshold; anything past 2**63-1 was accepted here and failed at the
+    INSERT with a message about Python integers.
+    """
+    size = _size_value(value, param_hint=param_hint)
+    if size <= 0:
+        raise click.BadParameter(
+            "must be greater than zero", param_hint=param_hint
+        )
+    if size > _MAX_STORABLE_INTEGER:
+        raise click.BadParameter(
+            f"must be at most {_MAX_STORABLE_INTEGER} bytes",
+            param_hint=param_hint,
+        )
+    return size
+
+
+def _alert_percent_threshold(value, *, param_hint: str) -> float:
+    """A percentage-growth threshold. Negative growth is not a threshold."""
+    percent = _finite_number(value, param_hint=param_hint)
+    if not 0 < percent <= _MAX_PERCENT_THRESHOLD:
+        raise click.BadParameter(
+            "must be greater than zero and at most "
+            f"{_MAX_PERCENT_THRESHOLD}",
+            param_hint=param_hint,
+        )
+    return percent
+
+
+def _alert_inode_free_threshold(value, *, param_hint: str) -> float:
+    """A free-inode floor. Zero is meaningful here: "no inodes left"."""
+    count = _finite_number(value, param_hint=param_hint)
+    if not 0 <= count <= _MAX_STORABLE_INTEGER:
+        raise click.BadParameter(
+            f"must be between 0 and {_MAX_STORABLE_INTEGER}",
+            param_hint=param_hint,
+        )
+    return count
+
+
 @cli.group("monitor")
 def monitor_group() -> None:
     """Create and manage persistent monitor definitions."""
@@ -1831,22 +1900,28 @@ def alerts_add(
             )
         if absolute_size is not None:
             kind = AlertKind.ABSOLUTE_SIZE
-            threshold = _size_value(absolute_size, param_hint="--size")
+            threshold = _alert_size_threshold(absolute_size, param_hint="--size")
         elif growth is not None:
             kind = AlertKind.ABSOLUTE_GROWTH
-            threshold = _size_value(growth, param_hint="--growth")
+            threshold = _alert_size_threshold(growth, param_hint="--growth")
         elif percent is not None:
             kind = AlertKind.PERCENTAGE_GROWTH
-            threshold = percent
+            threshold = _alert_percent_threshold(percent, param_hint="--percent")
         elif free_space is not None:
             kind = AlertKind.FREE_SPACE
-            threshold = _size_value(free_space, param_hint="--free-space")
+            threshold = _alert_size_threshold(
+                free_space, param_hint="--free-space"
+            )
         elif inode_free is not None:
             kind = AlertKind.INODE_FREE
-            threshold = inode_free
+            threshold = _alert_inode_free_threshold(
+                inode_free, param_hint="--inode-free"
+            )
         else:
             kind = AlertKind.NEW_LARGE_ITEM
-            threshold = _size_value(new_large or "0", param_hint="--new-large")
+            threshold = _alert_size_threshold(
+                new_large, param_hint="--new-large"
+            )
         rule = service.create_alert_rule(
             AlertRule(
                 monitor_id=monitor_id,
@@ -1914,12 +1989,20 @@ def alerts_edit(
             raise click.ClickException(f"alert rule {rule_id} does not exist")
         parsed_threshold = rule.threshold
         if threshold is not None:
-            parsed_threshold = (
-                float(threshold)
-                if rule.kind
-                in {AlertKind.PERCENTAGE_GROWTH, AlertKind.INODE_FREE}
-                else float(_size_value(threshold, param_hint="--threshold"))
-            )
+            # The rule already on record says which of the three thresholds
+            # this is; the option itself carries no unit.
+            if rule.kind is AlertKind.PERCENTAGE_GROWTH:
+                parsed_threshold = _alert_percent_threshold(
+                    threshold, param_hint="--threshold"
+                )
+            elif rule.kind is AlertKind.INODE_FREE:
+                parsed_threshold = _alert_inode_free_threshold(
+                    threshold, param_hint="--threshold"
+                )
+            else:
+                parsed_threshold = float(
+                    _alert_size_threshold(threshold, param_hint="--threshold")
+                )
         updated = service.update_alert_rule(
             replace(
                 rule,

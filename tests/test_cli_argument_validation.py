@@ -68,3 +68,102 @@ def test_a_regular_file_as_a_root_is_rejected(argv, a_file):
 
     assert result.exit_code == 2, result.output
     assert "is a file" in result.output
+
+
+# --- alert thresholds ------------------------------------------------------
+
+
+@pytest.fixture
+def a_monitor(tmp_path):
+    """A monitor to hang alert rules on, and the directory it watches."""
+    root = tmp_path / "watched"
+    root.mkdir()
+    result = CliRunner().invoke(
+        cli, ["monitor", "add", str(root), "--interval", "1h"]
+    )
+    assert result.exit_code == 0, result.output
+    return 1
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        # Every size threshold has to be a size an alert can fire on...
+        ("--size", "0", "greater than zero"),
+        ("--growth", "0", "greater than zero"),
+        ("--free-space", "0", "greater than zero"),
+        ("--new-large", "0", "greater than zero"),
+        # ...and one SQLite can store: 10^21 used to reach the INSERT and
+        # come back as "Python int too large to convert to SQLite INTEGER".
+        ("--size", "1000000000000000000000", "at most"),
+        ("--growth", "1000000000000000000000", "at most"),
+        # Percentage growth: negative is not growth, 1e300 is not a threshold.
+        ("--percent", "-10", "greater than zero"),
+        ("--percent", "0", "greater than zero"),
+        ("--percent", "1e300", "at most"),
+        ("--percent", "inf", "finite"),
+        ("--percent", "nan", "finite"),
+        # A free-inode floor may be zero, but not negative or infinite.
+        ("--inode-free", "-1", "between 0"),
+        ("--inode-free", "1e300", "between 0"),
+        ("--inode-free", "inf", "finite"),
+    ],
+)
+def test_alerts_add_rejects_a_nonsensical_threshold(
+    a_monitor, option, value, message
+):
+    result = CliRunner().invoke(
+        cli, ["alerts", "add", str(a_monitor), option, value]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert option in result.output
+    assert message in result.output
+    assert "Python int" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--size", "1GB"),
+        ("--percent", "10"),
+        ("--inode-free", "0"),
+    ],
+)
+def test_alerts_add_still_accepts_a_sensible_threshold(
+    a_monitor, option, value
+):
+    result = CliRunner().invoke(
+        cli, ["alerts", "add", str(a_monitor), option, value]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Created alert rule" in result.output
+
+
+@pytest.mark.parametrize(
+    ("add_option", "add_value", "bad_threshold", "message"),
+    [
+        ("--size", "1GB", "0", "greater than zero"),
+        ("--size", "1GB", "1000000000000000000000", "at most"),
+        ("--percent", "10", "-10", "greater than zero"),
+        ("--percent", "10", "1e300", "at most"),
+        ("--inode-free", "100", "-1", "between 0"),
+        ("--inode-free", "100", "inf", "finite"),
+    ],
+)
+def test_alerts_edit_applies_the_same_rules_for_the_rules_own_kind(
+    a_monitor, add_option, add_value, bad_threshold, message
+):
+    """`--threshold` carries no unit; the stored kind says which rule to use."""
+    created = CliRunner().invoke(
+        cli, ["alerts", "add", str(a_monitor), add_option, add_value]
+    )
+    assert created.exit_code == 0, created.output
+
+    result = CliRunner().invoke(
+        cli, ["alerts", "edit", "1", "--threshold", bad_threshold]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert message in result.output

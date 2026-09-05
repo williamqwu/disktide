@@ -360,6 +360,14 @@ disktide alerts remove RULE_ID
 `alerts check` exits `0` (nothing), `2` (unsuppressed trigger), `3`
 (all suppressed).
 
+Thresholds are validated before the rule is stored, as usage errors (exit
+2). Every size threshold (`--size`, `--growth`, `--free-space`,
+`--new-large`) must be greater than zero and at most 2^63-1 bytes;
+`--percent` must be finite, greater than zero and at most 1,000,000;
+`--inode-free` must be finite and between 0 and 2^63-1. `alerts edit
+--threshold` applies whichever of the three rules matches the kind of the
+rule being edited.
+
 ### watch
 
 Run the foreground monitor host until interrupted or `--max-time`:
