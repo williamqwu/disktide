@@ -545,3 +545,148 @@ class TestConcurrentFirstMigration:
             assert connection.in_transaction is False
         finally:
             connection.close()
+
+
+class TestTheMigrationBackup:
+    """The whole-file copy that precedes a migration, and its interruptions.
+
+    A reported legacy store was 729 MiB with 12 million `nodes` rows at
+    schema 3. Migrating it copied the file with no output of any kind (a
+    ten-minute first launch that looked like a hang) and doubled the data
+    directory to 1.5 GB with nothing saying the second file was the user's
+    to delete. Worse, `sqlite3.connect` creates the destination the moment
+    it is called, and `KeyboardInterrupt` is not an `Exception`, so an
+    interrupted copy left a zero-byte `.bak` that the next run adopted as
+    its recovery point.
+    """
+
+    @staticmethod
+    def _legacy_database(path, *, rows: int = 40):
+        """A schema-3 file with data in it, the shape being migrated from."""
+        from disktide.storage.migrations import MIGRATIONS
+
+        connection = sqlite3.connect(str(path))
+        for version in (1, 2, 3):
+            for statement in MIGRATIONS[version]:
+                connection.execute(statement)
+        connection.execute("UPDATE schema_version SET version = 3")
+        connection.executemany(
+            "INSERT INTO snapshots (root_path, timestamp) VALUES (?, ?)",
+            [(f"/data/{index}", "2026-01-01T00:00:00+00:00") for index in range(rows)],
+        )
+        connection.commit()
+        connection.close()
+
+    def test_a_legacy_database_migrates_and_says_what_it_is_doing(self, tmp_path):
+        path = tmp_path / "data.db"
+        self._legacy_database(path)
+        lines: list[str] = []
+
+        connection = sqlite3.connect(str(path))
+        try:
+            backup = migrate(connection, progress=lines.append)
+            assert get_version(connection) == CURRENT_VERSION
+        finally:
+            connection.close()
+
+        assert backup == migration_backup_path(path)
+        assert backup.exists() and backup.stat().st_size > 0
+        assert lines, "the migration said nothing"
+        assert "from schema 3 to 10" in lines[0]
+        assert "backing up to" in lines[0]
+        assert f"{path}" in lines[0]
+        assert lines[-1].endswith(" s")
+        assert "done in" in lines[-1]
+
+    def test_the_progress_frames_only_go_forwards(self, tmp_path, monkeypatch):
+        """One page a step, so a small fixture still reports more than once."""
+        import disktide.storage.migrations as migrations_module
+
+        monkeypatch.setattr(migrations_module, "_BACKUP_STEP_PAGES", 1)
+        path = tmp_path / "data.db"
+        self._legacy_database(path, rows=400)
+        lines: list[str] = []
+
+        connection = sqlite3.connect(str(path))
+        try:
+            migrate(connection, progress=lines.append)
+        finally:
+            connection.close()
+
+        percents = [
+            int(line.rsplit("…", 1)[1].strip().rstrip("%"))
+            for line in lines
+            if line.rstrip().endswith("%")
+        ]
+        assert len(percents) > 2, percents
+        assert percents == sorted(percents)
+        assert percents[0] == 0 and percents[-1] == 100
+
+    def test_an_interrupted_backup_leaves_nothing_behind(self, tmp_path):
+        """Ctrl-C during the copy must not look like a recovery point."""
+        path = tmp_path / "data.db"
+        self._legacy_database(path)
+        backup = migration_backup_path(path)
+        partial = backup.with_name(backup.name + ".partial")
+
+        def interrupt(_line: str) -> None:
+            raise KeyboardInterrupt
+
+        connection = sqlite3.connect(str(path))
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                migrate(connection, progress=interrupt)
+        finally:
+            connection.close()
+
+        assert not backup.exists()
+        assert not partial.exists()
+        # And the schema did not move, so the next run does the same work.
+        connection = sqlite3.connect(str(path))
+        try:
+            assert get_version(connection) == 3
+            migrate(connection)
+            assert get_version(connection) == CURRENT_VERSION
+        finally:
+            connection.close()
+        assert backup.exists() and backup.stat().st_size > 0
+
+    def test_an_empty_backup_from_an_older_interruption_is_replaced(
+        self, tmp_path
+    ):
+        """The file that used to be adopted: present, zero bytes, useless."""
+        path = tmp_path / "data.db"
+        self._legacy_database(path)
+        backup = migration_backup_path(path)
+        backup.write_bytes(b"")
+
+        connection = sqlite3.connect(str(path))
+        try:
+            assert migrate(connection) == backup
+        finally:
+            connection.close()
+
+        assert backup.stat().st_size > 0
+        probe = sqlite3.connect(str(backup))
+        try:
+            assert probe.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0] == 40
+        finally:
+            probe.close()
+
+    def test_a_backup_that_is_not_a_database_is_replaced(self, tmp_path):
+        path = tmp_path / "data.db"
+        self._legacy_database(path)
+        backup = migration_backup_path(path)
+        backup.write_bytes(b"this is not a database" * 100)
+
+        connection = sqlite3.connect(str(path))
+        try:
+            migrate(connection)
+        finally:
+            connection.close()
+
+        probe = sqlite3.connect(str(backup))
+        try:
+            probe.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        finally:
+            probe.close()

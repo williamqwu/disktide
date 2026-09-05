@@ -113,7 +113,8 @@ def test_doctor_reports_watch_backend_version_and_configured_mode(
     payload = report.to_dict()
     watch = payload["optional_extras"]["watch"]
 
-    assert payload["schema_version"] == 7
+    # 8 since `database.integrity` and `database.backup` were added.
+    assert payload["schema_version"] == 8
     assert payload["config"]["monitor_event_mode"] == "auto"
     assert watch["available"] is True
     assert watch["version"] == "2.0.1"
@@ -487,3 +488,140 @@ def test_doctor_calls_a_matching_schema_current(tmp_path):
     )
 
     assert payload["database"]["schema_state"] == "current"
+
+
+# --- the integrity check that used to run on every open --------------------
+
+
+def _doctor_env(tmp_path) -> dict[str, str]:
+    return {
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
+
+
+def test_opening_the_database_no_longer_reads_the_whole_file(tmp_path, monkeypatch):
+    """`PRAGMA quick_check` on every open was unbounded and silent.
+
+    It ran once per `Database._open()` -- every subcommand, every TUI
+    launch -- and reads every page, so a 729 MiB legacy store cost 10 s warm
+    and over 300 s cold before the first line of output. Measured here on a
+    619 MiB synthetic database: `doctor` 1.16 s before, 0.45 s after, and
+    `scan --snapshot` 0.62 s before, 0.25 s after.
+    """
+    from disktide.storage import database as database_module
+
+    statements: list[str] = []
+    real_connect = database_module.sqlite3.connect
+
+    def traced(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(database_module.sqlite3, "connect", traced)
+    database = database_module.Database(path=str(tmp_path / "data.db"))
+    database.connect()
+    database.close()
+
+    assert statements, "nothing was traced"
+    assert not any("quick_check" in statement.lower() for statement in statements)
+    # The pragmas that do belong on the open path are still there.
+    assert any("journal_mode" in statement.lower() for statement in statements)
+
+
+def test_doctor_runs_the_integrity_check_and_times_it(tmp_path, monkeypatch):
+    _set_xdg(monkeypatch, tmp_path)
+    report = build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+
+    integrity = report.to_dict()["database"]["integrity"]
+    assert integrity["status"] == "ok"
+    assert isinstance(integrity["duration_seconds"], float)
+    assert "Integrity: ok (" in render_doctor_report(report)
+
+
+def test_doctor_skips_the_integrity_check_on_a_large_database(
+    tmp_path, monkeypatch
+):
+    """A diagnostic command may not impose minutes of reading unasked."""
+    import disktide.services.doctor as doctor_module
+
+    _set_xdg(monkeypatch, tmp_path)
+    monkeypatch.setattr(doctor_module, "INTEGRITY_SIZE_LIMIT", 1)
+    report = build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+
+    integrity = report.to_dict()["database"]["integrity"]
+    assert integrity["status"] == "skipped"
+    assert "run doctor --check-integrity" in integrity["detail"]
+    assert "Integrity: skipped (" in render_doctor_report(report)
+
+
+def test_check_integrity_forces_it_however_large(tmp_path, monkeypatch):
+    import disktide.services.doctor as doctor_module
+
+    _set_xdg(monkeypatch, tmp_path)
+    monkeypatch.setattr(doctor_module, "INTEGRITY_SIZE_LIMIT", 1)
+    report = build_doctor_report(
+        adapter=PortablePlatformAdapter("Linux"), check_integrity=True
+    )
+
+    assert report.to_dict()["database"]["integrity"]["status"] == "ok"
+
+
+def test_check_integrity_is_an_accepted_flag(tmp_path):
+    result = CliRunner().invoke(
+        cli, ["doctor", "--json", "--check-integrity"], env=_doctor_env(tmp_path)
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["database"]["integrity"]["forced"] is True
+
+
+def test_doctor_names_a_migration_backup_and_says_it_can_go(
+    tmp_path, monkeypatch
+):
+    """729 MiB of history became 1.5 GB of directory, unexplained."""
+    from disktide.paths import data_root
+    from disktide.storage.migrations import migration_backup_path
+
+    _set_xdg(monkeypatch, tmp_path)
+    database_path = data_root() / "data.db"
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(str(database_path)).close()
+    backup = migration_backup_path(database_path)
+    backup.write_bytes(b"x" * (3 * 1024 * 1024))
+
+    report = build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+    rendered = render_doctor_report(report)
+
+    assert report.to_dict()["database"]["backup"]["present"] is True
+    assert report.to_dict()["database"]["backup"]["bytes"] == 3 * 1024 * 1024
+    assert "Migration backup:" in rendered
+    assert "3 MiB" in rendered
+    assert "Safe to delete once this version has been used successfully." in rendered
+
+
+def test_the_open_path_still_refuses_a_file_that_is_not_a_database(tmp_path):
+    """What replaces `quick_check`: a schema read, not a whole-file read.
+
+    Without it the read-only recovery -- which runs no migrations and so
+    touches no page -- opened `b"this is not sqlite"` happily and reported it
+    as readable history.
+    """
+    from disktide.storage.database import Database
+
+    path = tmp_path / "not-a-database.db"
+    original = b"this is not sqlite"
+    path.write_bytes(original)
+
+    database = Database(path=str(path))
+    database.connect()
+    try:
+        assert database.degraded is True
+        assert database.read_only is False
+        assert path.read_bytes() == original
+    finally:
+        database.close()

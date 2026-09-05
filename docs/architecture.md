@@ -811,6 +811,19 @@ Before changing a non-empty database, migration writes a SQLite backup
 (`data.db.pre-v10.bak`). All DDL, backfill, and schema version changes run
 in one transaction; failure rolls back without advancing `schema_version`.
 
+The backup is written to `data.db.pre-vN.bak.partial` and renamed only when
+it is complete, so an interrupted run leaves nothing that could be mistaken
+for a recovery point; an existing backup is validated before it is reused.
+The copy runs in 4096-page steps and reports its progress, which the CLI
+prints on stderr when stderr is a terminal.
+
+There is no whole-file integrity check on the open path. `PRAGMA
+quick_check` reads every page, and it used to run on every
+`Database._open()`; `doctor` performs it as a named step instead, skipping it
+above 256 MiB unless `--check-integrity` is given. What the open path keeps
+is a `sqlite_master` read, which costs the schema rather than the data and is
+what makes the read-only recovery refuse a file that is not a database.
+
 The version is read twice: once cheaply, to skip the lock entirely for the
 usual already-migrated case, and again inside the `BEGIN IMMEDIATE` that
 guards the DDL. The second read is what makes two processes creating the

@@ -64,6 +64,41 @@ def _soften_stdio_encoding_errors() -> None:
             pass
 
 
+def _migration_progress_printer():
+    """A redrawable stderr line for a first-run migration, or None.
+
+    The pre-migration backup copies the whole database file. On a legacy
+    store of a few hundred megabytes on a rotating disk that is minutes, and
+    it used to happen with no output at all -- the reported symptom was a
+    first launch that hung for ten minutes. `migrate()` reports one status
+    line at a time; a line ending in a percentage is a frame of a redraw and
+    is rewritten in place, anything else finishes the line.
+
+    None when stderr is not a terminal: against a pipe or a file every frame
+    would survive as another carriage-return-separated copy, which is the
+    same reason the scan's own progress counter is gated on a tty.
+    """
+    if not _stream_isatty(sys.stderr):
+        return None
+    widest = 0
+
+    def report(line: str) -> None:
+        nonlocal widest
+        padded = line.ljust(widest)
+        widest = max(widest, len(line))
+        sys.stderr.write("\r" + padded + ("" if line.rstrip().endswith("%") else "\n"))
+        sys.stderr.flush()
+
+    return report
+
+
+def _open_snapshot_repository():
+    """The repository, told where to narrate a migration it may have to run."""
+    from disktide.repositories import default_snapshot_repository
+
+    return default_snapshot_repository(progress=_migration_progress_printer())
+
+
 def _json_safe(document):
     """Return `document` with every string in it safe to encode.
 
@@ -265,10 +300,26 @@ def _launch_tui(
     if scan_path is not None:
         _remember_last_visited(config, scan_path)
 
+    # Connected here rather than in `App.on_mount`, which is where it used
+    # to happen first: a first launch against a large legacy database has to
+    # migrate it, and the backup that precedes the migration can take
+    # minutes. On_mount runs with the alternate screen already up, so its
+    # progress line would be painted over by the first frame and lost. Doing
+    # it now puts the line on the terminal the user is still looking at, and
+    # `Database.connect` is idempotent so on_mount's call becomes a no-op.
+    repository = _open_snapshot_repository()
+    try:
+        repository.connect()
+    except Exception:
+        # connect() degrades to an in-memory database rather than raising,
+        # but a repository is not required to; the app reports the state.
+        pass
+
     app = DiskTideApp(
         scan_path=scan_path,
         show_welcome=scan_path is None,
         config=config,
+        snapshot_repository=repository,
     )
     try:
         # --no-mouse is a session override, not a preference: it never
@@ -522,14 +573,26 @@ def _force_teardown(app) -> None:
     is_flag=True,
     help="Include raw application paths instead of redacted XDG paths",
 )
-def doctor(json_output: bool, show_paths: bool) -> None:
+@click.option(
+    "--check-integrity",
+    is_flag=True,
+    help="Run PRAGMA quick_check however large the database is",
+)
+def doctor(json_output: bool, show_paths: bool, check_integrity: bool) -> None:
     """Report installation, database, and platform capabilities."""
     from disktide.services.doctor import (
         build_doctor_report,
         render_doctor_report,
     )
 
-    report = build_doctor_report(show_paths=show_paths)
+    # `doctor` is often the first command a user runs after an upgrade, so it
+    # is often the one that performs the migration; it needs the same
+    # narration every other CLI entry point has.
+    report = build_doctor_report(
+        show_paths=show_paths,
+        check_integrity=check_integrity,
+        migration_progress=_migration_progress_printer(),
+    )
     if json_output:
         click.echo(_json_dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
@@ -918,10 +981,9 @@ def _save_scan_snapshot(run) -> dict:
     The human report and the JSON document both need this result but
     place it differently, so saving is kept separate from rendering.
     """
-    from disktide.repositories import default_snapshot_repository
     from disktide.services.snapshots import SnapshotService
 
-    repository = default_snapshot_repository()
+    repository = _open_snapshot_repository()
     repository.connect()
     try:
         if not repository.status.writable:
@@ -972,7 +1034,6 @@ def compare(
     from datetime import timedelta
 
     from disktide.config import parse_duration
-    from disktide.repositories import default_snapshot_repository
     from disktide.services.compare import (
         CompareService,
         SnapshotRepositoryUnavailable,
@@ -999,7 +1060,7 @@ def compare(
             else None
         )
 
-    repository = default_snapshot_repository()
+    repository = _open_snapshot_repository()
     repository.connect()
     service = CompareService(repository)
     try:
@@ -1043,11 +1104,10 @@ def compare(
 
 def _monitor_service(*, event_mode: str | None = None):
     from disktide.config import load_config
-    from disktide.repositories import default_snapshot_repository
     from disktide.services.monitor import MonitorService
 
     config = load_config()
-    repository = default_snapshot_repository()
+    repository = _open_snapshot_repository()
     repository.connect()
     service = MonitorService(
         repository,
@@ -2415,14 +2475,13 @@ def _cleanup_session(config, rule_directory):
     """Open a repository-backed CleanupService and always close the handle."""
     from disktide.cleanup.actions import QuarantineExecutor
     from disktide.cleanup.rules import get_rule_by_name
-    from disktide.repositories import default_snapshot_repository
     from disktide.services.cleanup import (
         CleanupConfirmationRequired,
         CleanupError,
         CleanupService,
     )
 
-    repository = default_snapshot_repository()
+    repository = _open_snapshot_repository()
     repository.connect()
     service = CleanupService(
         repository,

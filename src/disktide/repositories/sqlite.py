@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from threading import RLock
 
@@ -30,11 +30,13 @@ class SQLiteSnapshotRepository:
         *,
         read_only: bool = False,
         run_migrations: bool = True,
+        migration_progress: Callable[[str], None] | None = None,
     ):
         self._database = Database(
             path=path,
             run_migrations=run_migrations and not read_only,
             read_only=read_only,
+            migration_progress=migration_progress,
         )
         self._lock = RLock()
 

@@ -269,13 +269,21 @@ Results go to stdout, run status to stderr. `--help` works at every level.
 ### doctor
 
 ```bash
-disktide doctor            # human-readable
-disktide doctor --json     # versioned JSON, suitable for issue reports
+disktide doctor                     # human-readable
+disktide doctor --json              # versioned JSON, suitable for issue reports
+disktide doctor --check-integrity   # PRAGMA quick_check however large the file is
 ```
 
 Reports version, Python/Textual versions, terminal geometry, colour depth,
 database status, platform capabilities, watch backend, scan policy, and
 which scanner backend is live (see *Scanner backend* below).
+
+The `Integrity` line is a `PRAGMA quick_check` over the whole database. It
+reads every page, so above 256 MiB it is reported as skipped and
+`--check-integrity` is what asks for it anyway. Nothing else runs it: opening
+the database for a scan or a TUI session does not. An existing
+`data.db.pre-vN.bak` from a schema migration is named here with its size; it
+is safe to delete once the new version has been used successfully.
 
 The Colour block prints `TERM`, `COLORTERM`, `TEXTUAL_COLOR_SYSTEM`, the tmux
 clients attached to your session, and the depth that was resolved from them —
@@ -308,8 +316,8 @@ and the report counts the root itself as one depth-limited subtree
 so it is distinguishable from scanning an empty directory.
 
 A filename is bytes, and not every filename on a filesystem is valid UTF-8.
-The text report renders the undecodable ones as their raw bytes -- a
-directory named `b"\xff\xfe"` prints as `\xff\xfe/` -- rather than failing
+The text report renders the undecodable ones as their raw bytes — a
+directory named `b"\xff\xfe"` prints as `\xff\xfe/` — rather than failing
 to encode them. `--json` cannot do that and stay valid JSON, so every
 undecodable byte is emitted as U+FFFD (`\ufffd`) instead; the document that
 comes out is one any consumer can re-encode. Use the text report when you
@@ -436,6 +444,16 @@ Built-in rule packs load from the package. User packs from
 Edit `~/.config/disktide/config.toml` directly or press `,` in the TUI.
 Respects `XDG_CONFIG_HOME`. Legacy `sizetrail`/`fsmonitor-cli` configs are
 picked up automatically.
+
+The same fallback applies to the database: with no `~/.local/share/disktide/`
+directory, an existing `~/.local/share/fsmonitor-cli/data.db` (or the
+`sizetrail` one) is opened *in place* and migrated to the current schema, so
+the old history carries over. The migration first copies the file to
+`data.db.pre-v10.bak`, which briefly doubles that directory — `disktide
+doctor` names the backup and its size, and it can be deleted once the new
+version has been used successfully. To keep the old data untouched instead,
+move or rename the legacy directory before the first run; disktide then
+creates an empty `disktide/` store.
 
 ```toml
 [scan]

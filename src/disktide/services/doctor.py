@@ -9,6 +9,7 @@ import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -27,10 +28,20 @@ from disktide.paths import cache_root, config_file, data_root, state_log_file
 from disktide.scanner.accel import ACCEL_BACKEND, ACCEL_REASON, NATIVE_AVAILABLE
 from disktide.scanner.sysinfo import detect_cpu_count, detect_cpu_quota
 from disktide.storage.database import Database
-from disktide.storage.migrations import CURRENT_VERSION, get_version
+from disktide.storage.migrations import (
+    CURRENT_VERSION,
+    get_version,
+    migration_backup_path,
+)
 
 
-DOCTOR_SCHEMA_VERSION = 7
+DOCTOR_SCHEMA_VERSION = 8
+
+#: Above this, `doctor` reports the integrity check as skipped rather than
+#: spending minutes on it unasked. `PRAGMA quick_check` reads every page: on
+#: a 729 MiB store on a rotating disk it measured 10 s warm and over 300 s
+#: cold, which is not a wait a diagnostic command may impose by default.
+INTEGRITY_SIZE_LIMIT = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,10 +89,24 @@ def build_doctor_report(
     *,
     adapter: PlatformAdapter | None = None,
     show_paths: bool = False,
+    check_integrity: bool = False,
+    migration_progress: Callable[[str], None] | None = None,
     database_factory: Callable[[], Database] = Database,
     config_loader: Callable[..., AppConfig] = load_config,
 ) -> DoctorReport:
-    """Build a complete report while isolating every optional probe."""
+    """Build a complete report while isolating every optional probe.
+
+    `migration_progress` exists because `doctor` is often the first command
+    run after an upgrade, and therefore often the one that performs a
+    schema migration -- which on a large legacy database spends minutes
+    copying the file. Binding it here rather than in the CLI keeps
+    `disktide.storage.database` out of the entry point, which
+    `tests/test_snapshot_wave05.py` pins.
+    """
+    if migration_progress is not None:
+        database_factory = partial(
+            database_factory, migration_progress=migration_progress
+        )
     platform_adapter = adapter or get_platform_adapter()
     capabilities = platform_adapter.capabilities("/")
     cpu_total, cpu_available = detect_cpu_count()
@@ -105,6 +130,7 @@ def build_doctor_report(
     database_report = _database_report(
         database_factory,
         show_paths=show_paths,
+        check_integrity=check_integrity,
     )
     catalog = get_rule_catalog(
         disabled_packs=config.cleanup.disabled_rule_packs,
@@ -287,6 +313,10 @@ def render_doctor_report(report: DoctorReport) -> str:
             else ""
         ),
         f"  Writable persistence: {database['writable']}",
+        _integrity_line(database.get("integrity")),
+    ])
+    lines.extend(_backup_lines(database.get("backup")))
+    lines.extend([
         "",
         "Storage metrics",
     ])
@@ -803,10 +833,86 @@ def _schema_state(schema_version: int | None) -> str:
     return SCHEMA_CURRENT
 
 
+def _mib(size: int) -> str:
+    return f"{size / (1024 * 1024):,.0f} MiB"
+
+
+def _integrity_report(
+    database: Database, *, check_integrity: bool
+) -> dict[str, object]:
+    """Run `PRAGMA quick_check`, or say why it was not run.
+
+    It used to run on every `Database._open()` -- every subcommand and every
+    TUI launch -- where it was invisible and unbounded in the size of the
+    file. Here it is a step with a name and a duration, and above
+    `INTEGRITY_SIZE_LIMIT` it is the user's decision (`--check-integrity`)
+    rather than the default cost of asking a diagnostic question.
+    """
+    import time
+
+    path = Path(database.path)
+    size = path.stat().st_size if path.exists() else None
+    report: dict[str, object] = {
+        "status": "skipped",
+        "detail": "",
+        "duration_seconds": None,
+        "database_bytes": size,
+        "threshold_bytes": INTEGRITY_SIZE_LIMIT,
+        "forced": check_integrity,
+    }
+    if size is None:
+        report["status"] = "unavailable"
+        report["detail"] = "no database file on disk"
+        return report
+    if database.degraded and not getattr(database, "read_only", False):
+        # The connection is the in-memory fallback, created fresh a moment
+        # ago. Checking it would report `ok` about a database that is not the
+        # file the user is asking about.
+        report["status"] = "unavailable"
+        report["detail"] = "running on the in-memory fallback, not this file"
+        return report
+    if not check_integrity and size > INTEGRITY_SIZE_LIMIT:
+        report["detail"] = (
+            f"database is {_mib(size)}; run doctor --check-integrity"
+        )
+        return report
+    started = time.perf_counter()
+    try:
+        row = database.conn.execute("PRAGMA quick_check").fetchone()
+    except Exception as exc:
+        report["status"] = "unavailable"
+        report["detail"] = f"{type(exc).__name__}: {exc}"
+        return report
+    report["duration_seconds"] = round(time.perf_counter() - started, 3)
+    verdict = "ok" if row is None else str(row[0])
+    report["status"] = "ok" if verdict == "ok" else "failed"
+    report["detail"] = "" if verdict == "ok" else verdict
+    return report
+
+
+def _backup_report(database_path: Path, *, show_paths: bool) -> dict[str, object]:
+    """Name the pre-migration copy, because it is the size of the database.
+
+    Migrating the 729 MiB legacy store took its data directory to 1.5 GB, and
+    nothing told the user the second file was theirs to delete.
+    """
+    backup_path = migration_backup_path(database_path)
+    try:
+        size = backup_path.stat().st_size
+    except OSError:
+        return {"present": False, "path": None, "bytes": None}
+    return {
+        "present": True,
+        "path": _redact_path(backup_path, show_paths),
+        "bytes": size,
+    }
+
+
 def _database_report(
     database_factory: Callable[[], Database],
     *,
     show_paths: bool,
+    check_integrity: bool = False,
 ) -> dict[str, object]:
     database: Database | None = None
     try:
@@ -834,6 +940,10 @@ def _database_report(
             "status": status,
             "reason": _redact_text(reason, show_paths),
             "path": path,
+            "integrity": _integrity_report(
+                database, check_integrity=check_integrity
+            ),
+            "backup": _backup_report(Path(database.path), show_paths=show_paths),
             "schema_version": schema_version,
             "expected_schema_version": CURRENT_VERSION,
             "schema_state": _schema_state(schema_version),
@@ -853,6 +963,15 @@ def _database_report(
                 show_paths,
             ),
             "path": _application_paths(show_paths)["database"],
+            "integrity": {
+                "status": "unavailable",
+                "detail": "the database could not be opened",
+                "duration_seconds": None,
+                "database_bytes": None,
+                "threshold_bytes": INTEGRITY_SIZE_LIMIT,
+                "forced": check_integrity,
+            },
+            "backup": {"present": False, "path": None, "bytes": None},
             "schema_version": None,
             "expected_schema_version": CURRENT_VERSION,
             "schema_state": _schema_state(None),
@@ -867,6 +986,35 @@ def _database_report(
                 database.close()
             except Exception:
                 pass
+
+
+def _integrity_line(integrity: object) -> str:
+    """One line for the whole-file check, including why it did not run."""
+    if not isinstance(integrity, dict):
+        return "  Integrity: unavailable"
+    status = integrity.get("status")
+    detail = str(integrity.get("detail") or "")
+    if status == "ok":
+        seconds = integrity.get("duration_seconds")
+        elapsed = f"{seconds:.1f} s" if isinstance(seconds, (int, float)) else "?"
+        return f"  Integrity: ok ({elapsed})"
+    if status == "failed":
+        return f"  Integrity: FAILED: {detail}"
+    if status == "skipped":
+        return f"  Integrity: skipped ({detail})"
+    return f"  Integrity: unavailable ({detail or 'no reason given'})"
+
+
+def _backup_lines(backup: object) -> list[str]:
+    """Name an existing pre-migration backup, and say it can go."""
+    if not isinstance(backup, dict) or not backup.get("present"):
+        return []
+    size = backup.get("bytes")
+    measured = _mib(size) if isinstance(size, int) else "unknown size"
+    return [
+        f"  Migration backup: {backup.get('path')} ({measured})",
+        "    Safe to delete once this version has been used successfully.",
+    ]
 
 
 def _cpu_quota_text(quota: object) -> str:

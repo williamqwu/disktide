@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote
 
 CURRENT_VERSION = 10
+
+#: Pages copied per `sqlite3.Connection.backup` step. Small enough that a
+#: large file reports progress often, large enough that the callback is not
+#: the cost. At the usual 4 KiB page size this is 16 MiB a step.
+_BACKUP_STEP_PAGES = 4096
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -540,6 +548,43 @@ def migration_backup_path(
     return Path(f"{database_path}.pre-v{target_version}.bak")
 
 
+def _partial_backup_path(backup_path: Path) -> Path:
+    """Where a backup lives while it is still being written."""
+    return backup_path.with_name(backup_path.name + ".partial")
+
+
+def _usable_backup(backup_path: Path) -> Path | None:
+    """An existing backup that is actually a database, or None.
+
+    `sqlite3.connect` creates the destination file the moment it is called,
+    so an interrupted backup used to leave a zero-byte `.bak` behind --
+    `KeyboardInterrupt` is not an `Exception` and never reached the cleanup.
+    The next run then found the file, took it for the recovery point, and
+    skipped making a real one; restoring from it produced `no such table:
+    nodes`. A backup nobody can read is worse than no backup, because it
+    stops the good one from being written, so an unusable file is deleted
+    and made again.
+    """
+    if not backup_path.exists():
+        return None
+    if backup_path.stat().st_size == 0:
+        backup_path.unlink(missing_ok=True)
+        return None
+    uri = f"file:{quote(str(backup_path.resolve()))}?mode=ro"
+    probe: sqlite3.Connection | None = None
+    try:
+        probe = sqlite3.connect(uri, uri=True)
+        probe.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        probe.execute("PRAGMA schema_version").fetchone()
+    except (sqlite3.Error, OSError):
+        backup_path.unlink(missing_ok=True)
+        return None
+    finally:
+        if probe is not None:
+            probe.close()
+    return backup_path
+
+
 def _database_path(conn: sqlite3.Connection) -> Path | None:
     row = conn.execute("PRAGMA database_list").fetchone()
     if row is None or not row[2]:
@@ -577,7 +622,21 @@ def _create_backup(
     *,
     current_version: int,
     target_version: int,
+    progress: Callable[[str], None] | None = None,
 ) -> Path | None:
+    """Copy the database aside before the first migration touches it.
+
+    Two things are worth knowing about the copy. It is a whole-file copy, so
+    on a large legacy database it is minutes of disk and doubles the data
+    directory (a measured 729 MiB store took the directory to 1.5 GB) -- and
+    it used to run with no output at all, which is what a ten-minute silent
+    first launch was. `pages=4096` breaks the copy into steps so the caller
+    can be told how far along it is.
+
+    And it is written to `<name>.partial` and renamed only once it is
+    complete, so that an interrupted run leaves nothing that could be
+    mistaken for a recovery point.
+    """
     database_path = _database_path(conn)
     if (
         database_path is None
@@ -588,16 +647,40 @@ def _create_backup(
     ):
         return None
     backup_path = migration_backup_path(database_path, target_version)
-    if backup_path.exists():
-        return backup_path
-    backup_conn = sqlite3.connect(str(backup_path))
+    existing = _usable_backup(backup_path)
+    if existing is not None:
+        return existing
+
+    partial_path = _partial_backup_path(backup_path)
+    partial_path.unlink(missing_ok=True)
+    size_mib = database_path.stat().st_size / (1024 * 1024)
+    prefix = (
+        f"Migrating database {database_path} ({size_mib:,.0f} MiB) from "
+        f"schema {current_version} to {target_version}: backing up to "
+        f"{backup_path}"
+    )
+
+    def report(_status: int, remaining: int, total: int) -> None:
+        if progress is None or total <= 0:
+            return
+        progress(f"{prefix} … {(total - remaining) * 100 // total}%")
+
+    started = time.monotonic()
+    backup_conn = sqlite3.connect(str(partial_path))
     try:
-        conn.backup(backup_conn)
-    except Exception:
+        if progress is not None:
+            progress(f"{prefix} … 0%")
+        conn.backup(backup_conn, pages=_BACKUP_STEP_PAGES, progress=report)
+    except BaseException:
+        # BaseException, not Exception: Ctrl-C is the interruption this is
+        # actually about, and it is not an Exception.
         backup_conn.close()
-        backup_path.unlink(missing_ok=True)
+        partial_path.unlink(missing_ok=True)
         raise
     backup_conn.close()
+    os.replace(partial_path, backup_path)
+    if progress is not None:
+        progress(f"{prefix} … done in {time.monotonic() - started:.0f} s")
     return backup_path
 
 
@@ -605,8 +688,14 @@ def migrate(
     conn: sqlite3.Connection,
     *,
     target_version: int | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> Path | None:
-    """Run pending migrations atomically and return the recovery backup path."""
+    """Run pending migrations atomically and return the recovery backup path.
+
+    `progress` receives one status line at a time from the pre-migration
+    backup, which is the part that can take minutes. A line ending in a
+    percentage is a frame of a redraw; the last line is not.
+    """
     target = CURRENT_VERSION if target_version is None else target_version
     if target < 0 or target > CURRENT_VERSION:
         raise ValueError(f"unsupported migration target: {target}")
@@ -624,6 +713,7 @@ def migrate(
         conn,
         current_version=current,
         target_version=target,
+        progress=progress,
     )
     try:
         conn.execute("BEGIN IMMEDIATE")

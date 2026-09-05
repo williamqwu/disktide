@@ -11,7 +11,7 @@ import logging
 import os
 import sqlite3
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from heapq import nsmallest
 from pathlib import Path
@@ -237,10 +237,14 @@ class Database:
         path: str | None = None,
         run_migrations: bool = True,
         read_only: bool = False,
+        migration_progress: Callable[[str], None] | None = None,
     ):
         self._path = path or _default_db_path()
         self._conn: sqlite3.Connection | None = None
         self._run_migrations = run_migrations
+        # Where a first-run migration says how far its backup has got. None
+        # everywhere but the CLI, which prints it on stderr.
+        self._migration_progress = migration_progress
         self._read_only_requested = read_only
         self.read_only = read_only
         # Set when the on-disk database can't be opened (typically a full
@@ -277,6 +281,21 @@ class Database:
         these can raise on a full disk (WAL needs to create -wal/-shm
         sidecars; migrations write the schema), which is how connect()
         detects that the location is unusable.
+
+        No *whole-file* integrity check here. `PRAGMA quick_check` used to
+        run on every open, which is every subcommand and every TUI launch: it
+        reads every page, so its cost is the size of the database and it ran
+        silently. Measured on a 729 MiB legacy store on a rotating disk, that
+        was 10 s warm and over 300 s cold before `doctor` printed its first
+        line. The deliberate whole-file check now lives in `doctor`, which
+        says how long it took and skips it above a threshold.
+
+        What stays is a read of `sqlite_master`, which is proportional to the
+        schema rather than the data and is what makes "this is a database"
+        different from "this file exists". It matters most on the read-only
+        recovery path, which runs no migrations and would otherwise open a
+        file that is not a database at all and report it as readable
+        history.
         """
         use_migrations = (
             self._run_migrations
@@ -295,13 +314,9 @@ class Database:
                 conn.execute("PRAGMA query_only=ON")
             else:
                 _enable_wal(conn)
-            quick_check = conn.execute("PRAGMA quick_check").fetchone()
-            if quick_check is not None and quick_check[0] != "ok":
-                raise sqlite3.DatabaseError(
-                    f"database integrity check failed: {quick_check[0]}"
-                )
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             if use_migrations and not read_only:
-                migrate(conn)
+                migrate(conn, progress=self._migration_progress)
             return conn
         except Exception:
             conn.close()
@@ -315,7 +330,14 @@ class Database:
         still launches and the explorer stays usable. The session's
         snapshots/history simply aren't persisted; `degraded` records that
         for callers to surface.
+
+        Idempotent: an already-open connection is left alone, so a caller
+        that wants the (possibly slow, possibly noisy) first-run migration to
+        happen at a moment of its own choosing can connect early and let the
+        usual call be a no-op.
         """
+        if self._conn is not None:
+            return
         failure_reason = "unknown database error"
         failure_exc: BaseException | None = None
         self.recovery_hint = None
