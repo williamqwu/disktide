@@ -400,30 +400,46 @@ def test_stopping_without_waiting_leaves_no_host_behind(
     )
 
     armed = threading.Event()
+    retaken = threading.Event()
     in_window = threading.Event()
     resume = threading.Event()
+    real_acquire = repository.acquire_monitor_lease
     real_save = repository.save_monitor_status
 
-    def gated_save(status):
-        if (
-            armed.is_set()
-            and status.activity is MonitorActivityState.WAITING
-            and threading.current_thread() is service._session_thread
-        ):
+    def gated_acquire(monitor_id, **kwargs):
+        # Arming on the *lease* rather than on the status write is what makes
+        # this deterministic. A run that has just finished writes WAITING twice
+        # more on its way out -- `_finish_success_status` and the
+        # `rerun_pending` write in `_execute_definition`'s `finally` -- and a
+        # gate that fired on either of those suspended the session thread
+        # somewhere this test is not about, half the time.
+        acquired = real_acquire(monitor_id, **kwargs)
+        if acquired and armed.is_set():
             armed.clear()
+            retaken.set()
+        return acquired
+
+    def gated_save(status):
+        if retaken.is_set() and status.activity is MonitorActivityState.WAITING:
+            retaken.clear()
             in_window.set()
             assert resume.wait(10), "the stop never arrived"
         real_save(status)
 
+    monkeypatch.setattr(repository, "acquire_monitor_lease", gated_acquire)
     monkeypatch.setattr(repository, "save_monitor_status", gated_save)
     service.start_session(host_type="test")
     try:
         deadline = time.time() + 10
         while time.time() < deadline:
-            if repository.get_monitor_status(monitor.id).last_success_at:
+            if (
+                repository.get_monitor_status(monitor.id).last_success_at
+                and service._active_run_id is None
+            ):
                 break
             time.sleep(0.02)
         assert repository.get_monitor_status(monitor.id).last_success_at
+        assert service._active_run_id is None
 
         armed.set()
         with service._condition:
