@@ -153,6 +153,28 @@ class _DiskTideGroup(click.Group):
     def parse_args(self, ctx, args):
         return super().parse_args(ctx, self._route(ctx, list(args)))
 
+    def invoke(self, ctx):
+        """Make Ctrl-C exit 130 wherever in a command it lands.
+
+        A `KeyboardInterrupt` raised anywhere in a command body is turned by
+        click's own `main()` into `Abort` -- the bare `Aborted!` line and
+        exit 1. The scan service already catches its own and exits 130, but
+        only once the walk is running: an interrupt in the first fifth of a
+        second, while the config and the database are still opening, took the
+        other path, so the same gesture answered 1 or 130 depending on how
+        quickly the user let go. Reproduced 3/3 at 0.12-0.15 s and 130 at
+        0.3 s. `Exit` rather than `sys.exit` because click's standalone mode
+        is what turns it into a status, and it does so from one place.
+
+        An interrupt during argument parsing itself is still click's to
+        handle; it happens before any command is invoked.
+        """
+        try:
+            return super().invoke(ctx)
+        except KeyboardInterrupt:
+            click.echo("Interrupted.", err=True)
+            raise click.exceptions.Exit(130) from None
+
     def _value_taking_options(self, ctx) -> frozenset[str]:
         names: set[str] = set()
         for param in self.get_params(ctx):

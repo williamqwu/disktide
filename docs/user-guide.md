@@ -294,7 +294,9 @@ disktide scan /path --json
 
 `--metric` controls sorting and the top-directory bars; the summary always
 prints all three byte totals. Exit codes: `0` success/partial, `1` failure,
-`2` invalid input, `130` cancelled.
+`2` invalid input, `130` cancelled. `130` covers Ctrl-C at any point in a
+command, including before the scan has started; an interrupt during argument
+parsing itself is click's own and still reports as `Aborted!`.
 
 Run status goes to stderr and the report to stdout, so closing stderr
 (`disktide scan /path 2>&- > report.txt`) costs the narration and keeps the

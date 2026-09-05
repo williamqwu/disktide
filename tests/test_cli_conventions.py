@@ -511,3 +511,41 @@ def test_scan_snapshot_exits_zero_when_it_was_saved(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Snapshot saved" in result.output
+
+
+def test_an_interrupt_before_the_scan_starts_is_also_130(tmp_path, monkeypatch):
+    """The same gesture used to answer 1 or 130 depending on the timing.
+
+    Click turns a `KeyboardInterrupt` raised in a command body into its own
+    `Abort`, which is the bare "Aborted!" line and exit 1. The scan service
+    catches its own only once the walk is running, so Ctrl-C in the first
+    ~0.15 s -- while the config and database are opening -- exited 1.
+    """
+    from disktide.services.scan import ScanService
+
+    def interrupted(self, run, *, consumers=()):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ScanService, "execute", interrupted)
+    result = CliRunner().invoke(cli, ["scan", str(tmp_path)])
+
+    assert result.exit_code == 130
+    assert "Aborted!" not in result.output
+    assert "Interrupted." in result.stderr
+
+
+def test_an_interrupt_in_any_command_is_130(tmp_path, monkeypatch):
+    """It is the group that answers, so every subcommand inherits it."""
+    from disktide.services.doctor import build_doctor_report
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "disktide.services.doctor.build_doctor_report", interrupted
+    )
+    assert build_doctor_report is not interrupted  # the import is deferred
+    result = CliRunner().invoke(cli, ["doctor"])
+
+    assert result.exit_code == 130
+    assert "Aborted!" not in result.output
