@@ -167,3 +167,25 @@ def test_alerts_edit_applies_the_same_rules_for_the_rules_own_kind(
 
     assert result.exit_code == 2, result.output
     assert message in result.output
+
+
+# --- durations -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("since", ["0s", "0", "-1s"])
+def test_compare_since_zero_or_negative_is_a_usage_error(tmp_path, since):
+    """`--since abc` was already 2; `--since 0s` was 1 for the same class."""
+    result = CliRunner().invoke(
+        cli, ["compare", "--since", since, str(tmp_path)]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--since" in result.output
+    assert "greater than zero" in result.output
+
+
+def test_compare_since_garbage_is_still_a_usage_error(tmp_path):
+    result = CliRunner().invoke(cli, ["compare", "--since", "abc", str(tmp_path)])
+
+    assert result.exit_code == 2, result.output
+    assert "expected a duration such as 7d, 12h, or 30m" in result.output

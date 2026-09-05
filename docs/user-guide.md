@@ -324,7 +324,8 @@ disktide compare --since 7d /path
 First selector is target, second is baseline (reads `baseline → target`).
 Selectors: `latest`, `previous`, `oldest`, or a numeric snapshot id. Policy
 must be compatible; incompatible comparisons exit with status 2. `--raw`
-forces an untrusted diagnostic diff.
+forces an untrusted diagnostic diff. `--since` must parse as a duration and
+be greater than zero; either way it is a usage error (exit 2).
 
 ### monitor
 

@@ -989,6 +989,14 @@ def compare(
                     "expected a duration such as 7d, 12h, or 30m",
                     param_hint="--since",
                 ) from exc
+            if seconds <= 0:
+                # Every other rejected `--since` is a usage error; this one
+                # reached the service, came back as a ClickException, and
+                # exited 1 for the same class of input. The service keeps
+                # its own check -- it has callers that are not this CLI.
+                raise click.BadParameter(
+                    "must be greater than zero", param_hint="--since"
+                )
             result = service.compare_since(
                 timedelta(seconds=seconds),
                 root_path=root_path,
