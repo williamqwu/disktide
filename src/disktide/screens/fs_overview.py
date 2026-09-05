@@ -484,7 +484,7 @@ class FSDetailModal(ModalScreen):
         width: 72;
         max-height: 32;
         background: $surface;
-        border: thick $primary;
+        border: double $primary;
         padding: 1 2;
     }
 

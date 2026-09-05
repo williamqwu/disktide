@@ -38,53 +38,58 @@ def visible_width(s: str) -> int:
 # --------------------------------------------------------------------------
 #
 # xterm.js (the Open OnDemand web shell, and every other browser terminal
-# built on it) falls back to a proportional font for glyphs the monospace
-# face does not carry, and draws them at that font's advance rather than at
-# one cell.  Measured on the welcome screen at 307x71: a 72-cell Input drew
-# its U+2594 border row 129 cells wide and its U+2581 row 86, while its text
-# row was the 72 it should have been.  Every widget whose border came from
-# Textual's `tall`/`panel`/`wide` family was torn apart the same way.
+# built on it) defaults to `fontFamily: courier-new, courier, monospace`.
+# Courier New decides this policy, and it fails the block elements in two
+# different ways that end the same place.
 #
-# The dividing line is WGL4 -- what Courier New and Consolas carry.  The box
-# drawing block and the five block elements CP437 had are in it; the eighth
-# blocks and the quadrants are not.  So the rule is about *which* block
-# elements, not about block elements as a class: the chart's `▀`/`▄`/`█` and
-# the panel divider's `▌`/`▐` are fine and always were.
+# It does not *have* the eighth blocks or the quadrants, so the browser
+# falls back to a proportional face and draws them at that face's advance.
+# Measured on the welcome screen at 307x71: a 72-cell Input drew its U+2594
+# border row 129 cells wide and its U+2581 row 86, while its text row was
+# the 72 it should have been.  Every widget whose border came from Textual's
+# `tall`/`panel`/`wide` family was torn apart the same way.
+#
+# It does have the WGL4 block elements -- the halves, the full block, the
+# shades -- and 04ee56b concluded from that they were safe.  They are not.
+# Courier New's ink for them is not fitted to a terminal cell: measured on
+# an explorer capture at 307x71 (8.28 px cells), every `░` in the tree's
+# size bar is drawn about 1.1 cells wide and 1.4 rows tall, so the track of
+# one row bleeds over the size text of the rows above and below it, and the
+# chart's `▀`/`▄` are drawn *narrower* than a cell, leaving a comb of
+# background-coloured slits along every horizontal edge and shifting the
+# rows that carry a long run of them sideways by up to 0.6 cell.  The
+# advance is still one cell -- the percent lands on the right column -- so
+# this is the glyph's ink box, not the layout.
+#
+# DiskTide cannot see the browser's font, and the only primitive guaranteed
+# to fill exactly one cell in every terminal is a space with a background
+# colour.  So the rule is about block elements as a class after all:
+#
+#   **Nothing DiskTide draws itself may be a block element (U+2580-U+259F).
+#   A fill is a background colour on spaces.  A ramp that needs height is
+#   ASCII.**
+#
+# Box drawing (U+2500-U+257F), `▶▼■●○◐`, the arrows and text stay: those were
+# verified glyph by glyph on the same capture and are drawn at one cell.
 
-#: Block elements WGL4 carries: the halves, the full block and the shades.
-_WGL4_BLOCK_ELEMENTS = frozenset(
-    chr(codepoint)
-    for codepoint in (
-        0x2580,  # ▀ upper half
-        0x2584,  # ▄ lower half
-        0x2588,  # █ full
-        0x258C,  # ▌ left half
-        0x2590,  # ▐ right half
-        0x2591,  # ░ light shade
-        0x2592,  # ▒ medium shade
-        0x2593,  # ▓ dark shade
-    )
-)
-
-#: The rest of the Block Elements range (U+2580-U+259F): the horizontal and
-#: vertical eighths, and the quadrants.  These are the glyphs a browser
-#: terminal mis-measures, and nothing DiskTide draws may be one of them.
+#: The Block Elements range, in full: the halves, the full block, the
+#: shades, the horizontal and vertical eighths, and the quadrants.  Some
+#: are missing from the browser's font and some are misfitted in it; a
+#: policy that has to tell them apart is a policy that gets it wrong
+#: again, so the range is the rule.
 UNSAFE_GLYPHS: frozenset[str] = frozenset(
-    chr(codepoint)
-    for codepoint in range(0x2580, 0x25A0)
-    if chr(codepoint) not in _WGL4_BLOCK_ELEMENTS
+    chr(codepoint) for codepoint in range(0x2580, 0x25A0)
 )
 
 #: Non-ASCII glyphs the app is allowed to put on screen.  The box drawing
 #: block is here in full -- including the heavy forms, which the browser
 #: renders at one cell (the tab underline's `━` has always been correct) --
-#: plus the WGL4 block elements and the handful of symbols the app draws by
-#: name.  Anything outside this set is not necessarily wrong; it is
-#: unreviewed, which is what `tool/capture_glyphs.py` reports.
+#: plus the handful of symbols the app draws by name.  Anything outside
+#: this set is not necessarily wrong; it is unreviewed, which is what
+#: `tool/capture_glyphs.py` reports.
 WEB_SAFE_GLYPHS: frozenset[str] = (
     frozenset(chr(codepoint) for codepoint in range(0x20, 0x7F))
     | frozenset(chr(codepoint) for codepoint in range(0x2500, 0x2580))
-    | _WGL4_BLOCK_ELEMENTS
     | frozenset(
         "·"   # U+00B7 middle dot, the breadcrumb separator
         "×"   # U+00D7 multiplication sign
@@ -103,23 +108,26 @@ WEB_SAFE_GLYPHS: frozenset[str] = (
     )
 )
 
-#: Two glyphs Textual's own chrome draws that are outside WGL4 and that
-#: this codebase does not choose: the `Header` icon (U+2B58) and the
-#: command palette's search icon (U+1F50E).  Kept apart from
-#: `WEB_SAFE_GLYPHS` rather than folded into it, because they are not
-#: reviewed-and-fine so much as noted-and-upstream: neither is a border
-#: row, so neither can tear a widget's geometry the way the eighth blocks
-#: did, and the magnifier is an emoji that Textual already lays out as two
-#: cells.  `tool/capture_glyphs.py` prints them under their own heading so
-#: a third one appearing is visible rather than absorbed.
+#: Two glyphs Textual's own chrome draws that this codebase does not
+#: choose: the `Header` icon (U+2B58) and the command palette's search
+#: icon (U+1F50E).  Kept apart from `WEB_SAFE_GLYPHS` rather than folded
+#: into it, because they are not reviewed-and-fine so much as
+#: noted-and-upstream: neither is a border row, so neither can tear a
+#: widget's geometry the way the eighth blocks did, and the magnifier is
+#: an emoji that Textual already lays out as two cells.
+#: `tool/capture_glyphs.py` prints them under their own heading so a third
+#: one appearing is visible rather than absorbed.
 FOREIGN_CHROME_GLYPHS: frozenset[str] = frozenset("\u2b58\U0001f50e")
 
 
 #: Textual border styles (`textual._border.BORDER_CHARS`) that draw at
-#: least one glyph outside WGL4.  `round`, `dashed` and `heavy` are here
-#: too: their glyphs render at one cell in the browser today, but they are
-#: outside the CP437 set the rest of this policy is drawn from, so the app
-#: does not spend them.
+#: least one block element.  `thick` and `block` are here now and were not
+#: before: they are built from `█`, `▀` and `▄`, which the WGL4 reading of
+#: the policy called safe and the browser draws at the wrong ink box like
+#: every other block element.  `round`, `dashed` and `heavy` are here for
+#: the older reason: their glyphs render at one cell in the browser today,
+#: but they are outside the CP437 set the rest of this policy is drawn
+#: from, so the app does not spend them.
 UNSAFE_BORDER_STYLES: frozenset[str] = frozenset(
     {
         "round",
@@ -133,26 +141,35 @@ UNSAFE_BORDER_STYLES: frozenset[str] = frozenset(
         "panel",
         "tab",
         "wide",
+        "thick",
+        "block",
     }
 )
 
-#: What is left, and what the app's own stylesheet may name.
+#: What is left, and what the app's own stylesheet may name.  `double` is
+#: the heaviest box a border can be drawn as now that `thick` is gone,
+#: which is what the app's modals and panels ask for instead.
 SAFE_BORDER_STYLES: frozenset[str] = frozenset(
-    {"", "none", "hidden", "blank", "ascii", "solid", "double", "thick", "block"}
+    {"", "none", "hidden", "blank", "ascii", "solid", "double"}
 )
 
 #: Replacements for `ScrollBarRender.VERTICAL_BARS` / `HORIZONTAL_BARS`,
-#: whose stock lists spend the eighth blocks on sub-cell thumb ends.  Two
-#: entries means half-cell granularity: `render_bar` indexes
-#: `bars[len(bars) - 1 - bar]`, so index 1 (`" "`) means "no partial cell"
-#: and index 0 is the half.  The tail end of the thumb is drawn with the
-#: same glyph reversed, which is why one half block covers both ends.
-SCROLLBAR_VERTICAL_BARS: list[str] = ["▄", " "]
-SCROLLBAR_HORIZONTAL_BARS: list[str] = ["▌", " "]
+#: whose stock lists spend the eighth blocks on sub-cell thumb ends.  Both
+#: entries are a space, which is `render_bar`'s own way of saying "no
+#: partial cell": it skips a thumb end whose glyph is `" "` and leaves the
+#: whole-cell body segment in place, so the thumb is drawn by background
+#: colour and starts and stops on cell boundaries.  Two entries rather than
+#: one because `render_bar` indexes `bars[len(bars) - 1 - bar]` for both
+#: ends and a one-entry list would only ever be read at index 0.
+#:
+#: This also covers `Switch`, which draws its slider through
+#: `ScrollBarRender`.
+SCROLLBAR_VERTICAL_BARS: list[str] = [" ", " "]
+SCROLLBAR_HORIZONTAL_BARS: list[str] = [" ", " "]
 
 
 def use_web_safe_scrollbars() -> None:
-    """Point Textual's scrollbar thumb ends at the WGL4 half blocks.
+    """Take the partial cells out of Textual's scrollbar thumb ends.
 
     A scrollbar thumb end is one cell in the middle of a row that also
     holds the tree and the chart.  Drawn 1.8 cells wide by the browser, it

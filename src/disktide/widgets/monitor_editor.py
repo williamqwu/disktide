@@ -67,7 +67,7 @@ class MonitorEditor(ModalScreen[MonitorEditorResult | None]):
         height: 38;
         max-height: 94%;
         background: $surface;
-        border: thick $primary;
+        border: double $primary;
         padding: 1 2;
     }
 

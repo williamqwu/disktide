@@ -23,7 +23,7 @@ class CleanupHistoryModal(ModalScreen[None]):
         height: 34;
         max-height: 90%;
         background: $surface;
-        border: thick $primary;
+        border: double $primary;
         padding: 1 2;
     }
 

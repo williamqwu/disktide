@@ -121,7 +121,7 @@ class CleanupMap(OpaqueStripMixin, Widget, can_focus=True):
     }
 
     CleanupMap:focus {
-        border: thick $accent;
+        border: double $accent;
     }
     """
 

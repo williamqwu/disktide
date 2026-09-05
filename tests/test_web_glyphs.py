@@ -1,12 +1,15 @@
-"""Nothing DiskTide draws may be a glyph a browser terminal mis-measures.
+"""Nothing DiskTide draws may be a block element.
 
 The failure this gates is invisible in a real terminal and in `capture-pane`,
-because both draw every block element at one cell. xterm.js does not: it has
-no monospace face for the eighth blocks or the quadrants, falls back to a
-proportional font and draws them at *that* font's advance. On the welcome
-screen in an Open OnDemand web shell a 72-cell Input drew its `▔` row 129
-cells wide and its `▁` row 86 -- three different widths for three rows of
-one widget -- and the same happened to every Button and Checkbox on screen.
+because both draw every block element at one cell. xterm.js does not. Its
+default face is Courier New, which has no glyph at all for the eighth blocks
+or the quadrants -- the browser falls back to a proportional font and draws
+them at *that* font's advance, which is how a 72-cell Input came to draw its
+`▔` row 129 cells wide and its `▁` row 86 -- and whose glyphs for the block
+elements it *does* carry are not fitted to a terminal cell either: `░` comes
+out 1.1 cells wide and 1.4 rows tall, `▀`/`▄` narrower than the cell. The
+first reading of this policy allowed the second group. It should not have,
+and the range is the rule now.
 
 So the gate cannot be a screenshot comparison; there is no host here that
 renders the way the browser does. It is a check on what the app *asks for*:
@@ -33,6 +36,7 @@ from disktide.glyphs import (
     SCROLLBAR_VERTICAL_BARS,
     UNSAFE_BORDER_STYLES,
     UNSAFE_GLYPHS,
+    WEB_SAFE_GLYPHS,
     unsafe_glyphs_in,
     use_web_safe_scrollbars,
 )
@@ -44,6 +48,21 @@ BORDER_EDGES = ("border_top", "border_right", "border_bottom", "border_left")
 
 def _border_glyphs(style: str) -> str:
     return "".join("".join(row) for row in BORDER_CHARS[style])
+
+
+def test_the_unsafe_set_is_the_whole_block_elements_range():
+    """No exceptions inside U+2580-U+259F, and none leaking into the allowlist.
+
+    The first version of this policy carved out the eight block elements
+    WGL4 carries, on the argument that a font either has a glyph or it does
+    not. Courier New has them and draws them at the wrong size, so having
+    the glyph was never the question.
+    """
+    assert UNSAFE_GLYPHS == {chr(code) for code in range(0x2580, 0x25A0)}
+    assert not WEB_SAFE_GLYPHS & UNSAFE_GLYPHS
+    # The box-drawing block right below it is untouched: it was verified on
+    # the same capture and is what the borders are drawn from now.
+    assert {chr(code) for code in range(0x2500, 0x2580)} <= WEB_SAFE_GLYPHS
 
 
 def test_the_two_border_style_sets_cover_textual_and_nothing_else():
@@ -111,8 +130,11 @@ def test_a_rendered_scrollbar_thumb_end_is_never_a_mis_measured_glyph(vertical):
         for segment in segments.segments:
             seen.update(segment.text)
     assert not seen & UNSAFE_GLYPHS, sorted(seen & UNSAFE_GLYPHS)
-    # And the check is worth something: a thumb end was actually drawn.
-    assert seen & set(SCROLLBAR_VERTICAL_BARS + SCROLLBAR_HORIZONTAL_BARS)
+    # And nothing else either: with both list entries a space, `render_bar`
+    # skips the partial-cell segment entirely and the thumb is whole cells
+    # of background colour, so a space is the only glyph a scrollbar emits.
+    assert seen - {"\n"} == {" "}, sorted(seen)
+    assert set(SCROLLBAR_VERTICAL_BARS + SCROLLBAR_HORIZONTAL_BARS) == {" "}
 
 
 def _unsafe_borders(screen, label: str) -> list[str]:

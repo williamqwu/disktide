@@ -176,7 +176,7 @@ class KeymapScreen(ModalScreen[None]):
         height: auto;
         max-height: 90%;
         background: $surface;
-        border: thick $primary;
+        border: double $primary;
         border-title-style: bold;
         border-title-color: $foreground;
         border-subtitle-color: $text-muted;

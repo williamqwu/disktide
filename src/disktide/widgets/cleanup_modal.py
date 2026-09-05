@@ -42,7 +42,7 @@ class CleanupModal(ModalScreen[CleanupModalResult | None]):
         max-width: 98%;
         max-height: 44;
         background: $surface;
-        border: thick $primary;
+        border: double $primary;
         padding: 1 2;
     }
 

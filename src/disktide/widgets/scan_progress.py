@@ -26,7 +26,7 @@ class ScanProgressOverlay(Widget):
         width: 1fr;
         height: 1fr;
         background: $surface;
-        border: thick $primary;
+        border: double $primary;
         padding: 1 2;
     }
     /* Textual's ProgressBar defaults to width:auto and its inner Bar

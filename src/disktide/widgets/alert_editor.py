@@ -44,7 +44,7 @@ class AlertEditor(ModalScreen[AlertRule | None]):
         height: auto;
         max-height: 94%;
         background: $surface;
-        border: thick $primary;
+        border: double $primary;
         padding: 1 2;
     }
 

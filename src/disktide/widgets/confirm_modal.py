@@ -23,7 +23,7 @@ class ConfirmModal(ModalScreen[bool]):
         width: 50;
         height: auto;
         background: $surface;
-        border: thick $primary;
+        border: double $primary;
         padding: 1 2;
     }
 

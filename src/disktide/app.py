@@ -147,11 +147,11 @@ class DiskTideApp(App):
     /* The footer's command-palette key is fenced off by a `vkey` rule. */
     FooterKey.-command-palette { border-left: solid $foreground 20%; }
 
-    /* Toast: `outer` puts a coloured bar down the left edge. `thick` is
-       the WGL4 way to say the same thing. */
-    Toast.-information { border-left: thick $success; }
-    Toast.-warning { border-left: thick $warning; }
-    Toast.-error { border-left: thick $error; }
+    /* Toast: `outer` puts a coloured bar down the left edge, out of the
+       quadrants. `solid` draws the same edge as a box-drawing rule. */
+    Toast.-information { border-left: solid $success; }
+    Toast.-warning { border-left: solid $warning; }
+    Toast.-error { border-left: solid $error; }
 
     /* The command palette. `hkey` reserves a column on each side and
        draws it blank, so the sides stay `blank` and only the rows that
