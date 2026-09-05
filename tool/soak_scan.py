@@ -52,6 +52,9 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
+
 from disktide.scanner.accounting import finalize_unique_allocated  # noqa: E402
 from disktide.scanner.engine import ScanEngine  # noqa: E402
 from tests.scheduler_invariants import (  # noqa: E402
@@ -65,6 +68,27 @@ from tests.scheduler_invariants import (  # noqa: E402
 # sorts before at least one DIR_NAME.
 DIR_NAMES = ["zdir", "archive_status", "summaries", "sub", "Zeta", "~tmp", "0dir"]
 FILE_NAMES = ["000000010000000000000002", "0file", "1file", "a.txt", "!bang", "AAA"]
+
+
+def entry_budget(quick: bool) -> int:
+    """Worst-case entries one case creates, for the scratch guard.
+
+    `_build` draws 0-4 subdirectories and 0-6 files per directory, so a case
+    is bounded by the full 4-way tree at its depth cap plus six files and two
+    symlinks per node. The wide shape multiplies that by up to 50 branches.
+    Cases run one at a time and each is removed after, so this is the peak,
+    not the total.
+    """
+    depth_cap = 3 if quick else 5
+    branches = 20 if quick else 50
+
+    def nodes(depth: int) -> int:
+        return sum(4 ** level for level in range(depth + 1))
+
+    per_node = 1 + 6 + 2  # the directory, its files, its two symlinks
+    wide = branches * nodes(depth_cap - 1) * per_node
+    deep = nodes(depth_cap) * per_node
+    return max(wide, deep)
 
 
 class _Monkeypatch:
@@ -170,7 +194,7 @@ def _reference_unique(leaves):
     return total
 
 
-def _run_case(seed, *, quick, shapes):
+def _run_case(seed, *, quick, shapes, scratch):
     rng = random.Random(seed)
     features = set()
     if seed % 2 == 0:
@@ -187,7 +211,7 @@ def _run_case(seed, *, quick, shapes):
         max_depth=rng.choice([None, None, 2, 3]),
         one_file_system=rng.random() < 0.3,
     )
-    root_dir = tempfile.mkdtemp(prefix="disktide-soak-")
+    root_dir = tempfile.mkdtemp(dir=scratch, prefix="case-")
     stop = threading.Event()
     patch = _Monkeypatch()
     try:
@@ -289,15 +313,20 @@ def main() -> int:
 
     shapes: Counter = Counter()
     failures = []
-    for offset in range(args.cases):
-        seed = args.seed + offset
-        try:
-            problems, config = _run_case(seed, quick=args.quick, shapes=shapes)
-        except BaseException as exc:  # noqa: BLE001 - soak reports, never aborts
-            failures.append((seed, None, [f"{type(exc).__name__}: {exc}"]))
-            continue
-        if problems:
-            failures.append((seed, config, problems))
+    with scratchguard.temporary_scratch(
+        "soak-scan", entries=entry_budget(args.quick)
+    ) as scratch:
+        for offset in range(args.cases):
+            seed = args.seed + offset
+            try:
+                problems, config = _run_case(
+                    seed, quick=args.quick, shapes=shapes, scratch=scratch
+                )
+            except BaseException as exc:  # noqa: BLE001 - soak reports, never aborts
+                failures.append((seed, None, [f"{type(exc).__name__}: {exc}"]))
+                continue
+            if problems:
+                failures.append((seed, config, problems))
     print(f"cases:  {args.cases} (base seed {args.seed})")
     print(f"shapes: {dict(shapes)}")
     if not failures:

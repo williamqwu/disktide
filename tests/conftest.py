@@ -10,9 +10,68 @@ suite's runtime.
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from tests.scheduler_invariants import install
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: Set to "1" to run anyway. Named in the refusal, so nobody has to find it.
+ALLOW_NETWORK_TMP_ENV = "DISKTIDE_ALLOW_NETWORK_TMP"
+
+
+def _load_scratchguard():
+    """`tool/scratchguard.py` by path: `tool/` is not an importable package."""
+    spec = importlib.util.spec_from_file_location(
+        "disktide_scratchguard", REPO_ROOT / "tool" / "scratchguard.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+scratchguard = _load_scratchguard()
+
+
+def temp_root(config) -> Path:
+    """Where `tmp_path` will put this run's trees.
+
+    `config._tmp_path_factory` is not built yet at `pytest_configure`, so the
+    option is read directly and the unset case is resolved the way `tempfile`
+    itself would -- which is the whole point: `tempfile` follows `TMPDIR`.
+    """
+    basetemp = config.getoption("basetemp", None)
+    return Path(basetemp) if basetemp else Path(tempfile.gettempdir())
+
+
+def network_tmp_refusal(root) -> str | None:
+    """Why this temp root must not be used, or None to let the run proceed.
+
+    Network, not home: a laptop whose `TMPDIR` sits under a local home is
+    fine, and refusing it would only teach people to set the escape hatch.
+    A *network* temp root is not fine -- the suite creates thousands of small
+    files per run, and on the quota'd NFS home this project is developed on
+    that is a measurable slice of an account's inode budget, spent silently.
+    """
+    if os.environ.get(ALLOW_NETWORK_TMP_ENV) == "1":
+        return None
+    found = scratchguard.is_network_path(root)
+    if found is None:
+        return None
+    mount, fstype = found
+    return (
+        f"tests would write their trees under {root}, which is on {mount} "
+        f"({fstype}) -- a network filesystem. This suite creates thousands "
+        f"of small files per run and deletes them again; a network home is "
+        f"usually quota'd by inode as well as by size. Fix it with "
+        f"`export TMPDIR=/tmp`, or pass `--basetemp=/tmp/pytest-disktide`. "
+        f"Set {ALLOW_NETWORK_TMP_ENV}=1 to run here anyway."
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -99,23 +158,32 @@ def host_shape(monkeypatch):
 
 
 def pytest_configure(config):
-    """Reject a typo'd shape name once, at startup.
+    """Refuse a network temp root, and reject a typo'd shape name, once.
 
-    `active_shapes` is called per-test as well, and a `UsageError` from a
-    fixture is reported once per test -- fifteen hundred copies of the same
-    message. Calling it here turns that into a single line before
-    collection starts.
+    Both are startup checks rather than fixtures. `active_shapes` is called
+    per-test as well, and a `UsageError` from a fixture is reported once per
+    test -- fifteen hundred copies of the same message. Calling it here turns
+    that into a single line before collection starts.
     """
+    refusal = network_tmp_refusal(temp_root(config))
+    if refusal is not None:
+        pytest.exit(refusal, returncode=4)
+
     from tests.hostshape import active_shapes
 
     active_shapes()
 
 
 def pytest_report_header(config):
-    """Name the active shapes in the header so a red log explains itself."""
+    """Name the temp root and active shapes, so a red log explains itself."""
+    root = temp_root(config)
+    found = scratchguard.filesystem_type(root)
+    where = f"{found[1]} at {found[0]}" if found else "unknown filesystem"
+    lines = [f"temp root: {root} ({where})"]
+
     from tests.hostshape import ENV_VAR, active_shapes
 
     shapes = active_shapes()
-    if not shapes:
-        return []
-    return [f"host shape: {', '.join(shapes)} (via {ENV_VAR})"]
+    if shapes:
+        lines.append(f"host shape: {', '.join(shapes)} (via {ENV_VAR})")
+    return lines

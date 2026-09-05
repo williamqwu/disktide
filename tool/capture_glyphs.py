@@ -37,6 +37,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
 
 from disktide.glyphs import (  # noqa: E402
     FOREIGN_CHROME_GLYPHS,
@@ -104,6 +106,19 @@ def tmux(server: str, *args: str, check: bool = True) -> str:
     return result.stdout
 
 
+#: `--slow-tree N` rounds up to whole directories of this many files.
+BULK_PER_DIR = 200
+
+
+def tree_entries(slow: int = 0) -> int:
+    """How many files and directories `make_tree` will create."""
+    fixed = len(TREE) + sum(len(files) for files in TREE.values()) + 1
+    if not slow:
+        return fixed
+    folders = (slow + BULK_PER_DIR - 1) // BULK_PER_DIR
+    return fixed + 1 + folders * (1 + BULK_PER_DIR)
+
+
 def make_tree(root: Path, slow: int = 0) -> Path:
     tree = root / "tree"
     for name, files in TREE.items():
@@ -117,7 +132,7 @@ def make_tree(root: Path, slow: int = 0) -> Path:
         # photographs the progress overlay rather than the finished tree.
         # Empty files: the point is the number of `stat` calls, not bytes.
         bulk = tree / "bulk"
-        per_dir = 200
+        per_dir = BULK_PER_DIR
         for index in range((slow + per_dir - 1) // per_dir):
             folder = bulk / f"d{index:04d}"
             folder.mkdir(parents=True, exist_ok=True)
@@ -264,7 +279,9 @@ def main() -> int:
     out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="dt-glyphs-"))
     out.mkdir(parents=True, exist_ok=True)
 
-    scratch = Path(tempfile.mkdtemp(prefix="disktide-glyphs-"))
+    scratch = Path(tempfile.mkdtemp(dir=scratchguard.scratch_dir(
+        "glyphs", entries=tree_entries(args.slow_tree) + 16,
+    )))
     tree = make_tree(scratch, slow=args.slow_tree)
     seed_config(scratch)
     tmux(args.server, "new-session", "-d", "-s", "base", "-x", "200", "-y", "50", "sh")

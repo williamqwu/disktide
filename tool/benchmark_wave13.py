@@ -9,7 +9,7 @@ import json
 import os
 import platform
 import statistics
-import tempfile
+import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +18,9 @@ from time import perf_counter
 from disktide.domain.scan import NodeAggregateUpdated, ScanRequest
 from disktide.models.tree import FSNode
 from disktide.services.scan import ScanService
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
 
 
 def _create_warm_tree(root: Path, directories: int, files: int) -> None:
@@ -139,8 +142,12 @@ def run(
     deep_directories: int,
     repeats: int,
 ) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="disktide-wave13-") as directory:
-        base = Path(directory)
+    # Three trees plus the directories that hold them; the guard is told the
+    # total before the first mkdir, not after.
+    entries = (
+        warm_files + warm_directories + flat_files + 2 * deep_directories + 8
+    )
+    with scratchguard.temporary_scratch("wave13", entries=entries) as base:
         warm = base / "warm"
         flat = base / "flat"
         deep = base / "deep"

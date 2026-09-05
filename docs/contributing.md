@@ -305,7 +305,8 @@ default_action = "safe"
 | `tool/gen_activity` | Generate filesystem activity for testing watch/monitor. `--max-files`, `--max-size` caps. |
 | `tool/bench_scan` | Scan timing. `--mode raw` (compatibility baseline), `events` (service delivery), `live` (view-model delivery). `--workers N`. |
 | `tool/diag_scan` | Diagnostic scan: 1s heartbeat, 5s stall detector, per-directory hotspot table. `--profile` for `cProfile`. Designed for NFS/remote slowness where the TUI progress bar pulses but you can't see what's slow. |
-| `tool/make_homelike` | Build the benchmark fixture: 88,000 dirs / 888,100 files, deterministic for a seed. |
+| `tool/make_homelike` | Build the benchmark fixture: 88,000 dirs / 888,100 files, deterministic for a seed. Plans the exact entry count before it creates anything. |
+| `tool/scratchguard` | The gate every generator above asks before writing in bulk: refuses `$HOME`, network filesystems, and paths without inode headroom. `python tool/scratchguard.py PATH --entries N` answers the same question from a shell. |
 | `tool/tui_time` | Time one scan in the *real* TUI, under a private tmux server, with per-thread CPU. |
 | `tool/spy_agg` | Aggregate a `py-spy record --format raw --threads` profile per thread. |
 | `tool/soak_memory` | Scan one tree N times in one process and watch RSS. The memory half of `soak_scan`, which is a randomised *invariants* soak. |
@@ -326,11 +327,41 @@ Build the fixture once:
 ```bash
 python tool/make_homelike.py /local/scratch/homelike     # 88,000 dirs, 11.5 s on xfs
 python tool/make_homelike.py /local/scratch/small --dirs 5000 --seed 7
+python tool/make_homelike.py --dirs 5000 --seed 7        # the guarded default
 ```
 
-It refuses a target under `$HOME` unless you pass `--allow-home`: it writes
-close to a million entries, and a network home is usually quota'd by inode as
-well as by size.
+Where it may write is decided by `tool/scratchguard.py`, which every generator
+in `tool/` goes through, and which you can ask directly:
+
+```bash
+python tool/scratchguard.py /local/scratch/homelike --entries 976100
+```
+
+Three refusals, each naming the path, the reason, and what lifts it:
+
+- **`$HOME`** -- lifted by `--allow-home`. A network home is usually quota'd
+  by inode as well as by size, and this writes close to a million entries.
+- **network filesystems** -- lifted by `--allow-network`. The mount is found
+  by longest-prefix match against `/proc/mounts`, which matters: on an HPC
+  login node `/users` is `autofs` and the `nfs4` that counts is mounted under
+  it, so a first-match walk answers with the wrong filesystem.
+- **inode headroom** -- **no flag lifts this one.** `os.statvfs` alone is not
+  enough: on the quota'd NFS home this was written for it reports orders of magnitude more
+  free inodes while `quota` reports far fewer left, so `quota -w -u -p` is asked
+  as well. A host without the `quota` binary (every CI runner) simply gets the
+  `statvfs` answer; a missing tool never fails closed.
+
+With no target the tree goes to `$DISKTIDE_SCRATCH` (or `$TMPDIR`)
+`/disktide-<user>/<label>`, through the same three checks -- a `TMPDIR` under
+`~`, which is common on HPC accounts, is refused exactly like a path typed out
+by hand. Point `DISKTIDE_SCRATCH` at local disk once and every generator
+follows.
+
+The test suite applies the network half of the same check to its own temp
+root: `tmp_path` follows `TMPDIR`, so a network `TMPDIR` would put every tree
+the suite builds on the quota'd filesystem. It exits 4 before collection with
+the fix in the message (`export TMPDIR=/tmp`), or runs anyway with
+`DISKTIDE_ALLOW_NETWORK_TMP=1`.
 
 Then A/B against a *frozen* copy of the revision you are comparing to, so
 neither side moves under you:

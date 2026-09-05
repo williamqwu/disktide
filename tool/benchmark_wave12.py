@@ -6,8 +6,8 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import sys
 import platform
-import tempfile
 import tracemalloc
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +24,9 @@ from disktide.services.monitor import MonitorService
 from disktide.services.visualization import VisualizationService
 from disktide.viz.sunburst import compute_sunburst
 from disktide.viz.treemap import compute_layout
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
 
 
 def _wide_tree(path: str, nodes: int, *, offset: int = 0) -> FSNode:
@@ -106,7 +109,9 @@ def _timed_peak(callable_):
 
 
 def run(history_nodes: int, snapshots: int, wide_nodes: int) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="disktide-wave12-") as directory:
+    # Not a tree: one SQLite database. Through the guard anyway, because
+    # `tempfile` follows TMPDIR and TMPDIR is `~/tmp` on plenty of accounts.
+    with scratchguard.temporary_scratch("wave12", entries=4) as directory:
         repository = SQLiteSnapshotRepository(str(Path(directory) / "bench.db"))
         repository.connect()
         monitor = repository.create_monitor(
@@ -159,7 +164,7 @@ def run(history_nodes: int, snapshots: int, wide_nodes: int) -> dict[str, object
     )
     live_peak = _peak_mib(lambda: build_live_view(wide_root, max_children=96))
 
-    with tempfile.TemporaryDirectory(prefix="disktide-wave12-wide-") as directory:
+    with scratchguard.temporary_scratch("wave12-wide", entries=4) as directory:
         repository = SQLiteSnapshotRepository(str(Path(directory) / "bench.db"))
         repository.connect()
         monitor = repository.create_monitor(

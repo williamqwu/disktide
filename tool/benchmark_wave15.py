@@ -7,7 +7,7 @@ import argparse
 import json
 import platform
 import statistics
-import tempfile
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -19,6 +19,9 @@ from disktide.repositories.sqlite import SQLiteSnapshotRepository
 from disktide.services.provisional import ProvisionalProjectionService
 from disktide.services.scan import ScanService
 from disktide.services.snapshots import SnapshotService
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
 
 
 def _create_fixture(root: Path, directories: int, files_per_directory: int) -> None:
@@ -41,8 +44,8 @@ def run_benchmark(
     files_per_directory: int,
     repeats: int,
 ) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="disktide-wave15-") as directory:
-        base = Path(directory)
+    entries = directories * (files_per_directory + 1) + 8
+    with scratchguard.temporary_scratch("wave15", entries=entries) as base:
         root = base / "tree"
         root.mkdir()
         setup_started = perf_counter()

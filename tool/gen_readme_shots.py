@@ -37,6 +37,9 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
+
 REPO = Path(__file__).resolve().parent.parent
 IMAGES = REPO / "docs" / "images"
 
@@ -50,8 +53,12 @@ CELL_W, CELL_H = 10, 20
 PAD = 16
 FONT_SIZE = 16
 
-# Deliberately a plain, public path: it is what the breadcrumb shows.
+# Deliberately a plain, public path: it is what the breadcrumb shows. It is
+# also a whole checkout plus its ephemera, written once per commit in the
+# history, so it goes through the scratch guard before the first export.
 STAGE = Path("/tmp/disktide")
+#: A checkout is well under two thousand entries; EPHEMERA adds a few dozen.
+STAGE_ENTRIES = 4000
 SOCKET = "disktide-shots"
 MONITOR_LABEL = "disktide dev"
 COMMIT_STEP = 1  # every commit; raise to 2 for a faster, sparser trend
@@ -662,7 +669,10 @@ def rasterize(src: Path, dst: Path) -> tuple[int, int]:
 def main() -> None:
     if shutil.which("tmux") is None:
         raise SystemExit("tmux is required")
-    scratch = Path(tempfile.mkdtemp(prefix="disktide-shots-"))
+    scratchguard.claim(STAGE, entries=STAGE_ENTRIES, label="readme-stage")
+    scratch = Path(tempfile.mkdtemp(
+        dir=scratchguard.scratch_dir("readme-shots", entries=64)
+    ))
     captures = scratch / "captures"
     captures.mkdir()
     for name in ("config", "data", "cache", "state"):

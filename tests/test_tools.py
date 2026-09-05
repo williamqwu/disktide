@@ -19,6 +19,7 @@ stable order, or a diff of two builds stops meaning anything.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -495,17 +496,41 @@ def test_archflags_for_this_machine_do_not_skip_the_check(monkeypatch):
 MAKE_HOMELIKE = TOOL_DIR / "make_homelike.py"
 
 
-def _make_homelike(args, home=None):
+def _make_homelike(args, home=None, tmpdir=None, extra_env=None):
     env = dict(os.environ)
+    env.pop("DISKTIDE_SCRATCH", None)
+    env.pop("DISKTIDE_SCRATCHGUARD_QUOTA", None)
     if home is not None:
         env["HOME"] = str(home)
+    if tmpdir is not None:
+        env["TMPDIR"] = str(tmpdir)
+    env.update(extra_env or {})
     return subprocess.run(
         [sys.executable, str(MAKE_HOMELIKE), *args],
         capture_output=True,
         text=True,
         env=env,
-        timeout=60,
+        timeout=120,
     )
+
+
+def _load_make_homelike():
+    """Import the builder by path, for the planner. It creates nothing."""
+    spec = importlib.util.spec_from_file_location(
+        "make_homelike_under_test", MAKE_HOMELIKE
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_scratchguard():
+    spec = importlib.util.spec_from_file_location(
+        "scratchguard_for_test_tools", TOOL_DIR / "scratchguard.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_make_homelike_help_prints_usage_and_exits_zero(tmp_path):
@@ -525,12 +550,28 @@ def test_make_homelike_help_prints_usage_and_exits_zero(tmp_path):
     assert not (Path.cwd() / "--help").exists()
 
 
-def test_make_homelike_without_a_target_exits_two(tmp_path):
-    result = _make_homelike([], home=tmp_path)
+def test_make_homelike_without_a_target_builds_in_the_scratch_root(tmp_path):
+    """No target used to be a usage error; now it is the guarded default.
 
-    assert result.returncode == 2
-    assert "the following arguments are required: target" in result.stderr
-    assert list(tmp_path.iterdir()) == []
+    Which is only an improvement if the default is somewhere safe, so `HOME`
+    and `TMPDIR` are pointed at separate directories and the tree has to land
+    under the second one.
+    """
+    home = tmp_path / "home"
+    scratch = tmp_path / "scratch"
+    home.mkdir()
+    scratch.mkdir()
+
+    result = _make_homelike(
+        ["--dirs", "20", "--seed", "3"], home=home, tmpdir=scratch
+    )
+
+    assert result.returncode == 0, result.stderr
+    built = Path(result.stdout.split(":")[0])
+    assert scratch in built.parents
+    assert home not in built.parents
+    assert built.is_dir()
+    assert list(home.iterdir()) == []
 
 
 def test_make_homelike_refuses_a_target_under_home(tmp_path):
@@ -539,7 +580,7 @@ def test_make_homelike_refuses_a_target_under_home(tmp_path):
     home.mkdir()
     target = home / "fixture"
 
-    result = _make_homelike([str(target)], home=home)
+    result = _make_homelike([str(target), "--dirs", "50"], home=home)
 
     assert result.returncode == 2
     assert "is under" in result.stderr
@@ -584,3 +625,73 @@ def test_make_homelike_allows_home_when_told_to(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert target.is_dir()
+
+
+def test_make_homelike_plans_exactly_what_it_builds(tmp_path):
+    """The guard is only as good as the number it is handed.
+
+    An estimate would either refuse trees that fit or wave through trees that
+    do not, so the count is planned by walking the same RNG sequence the build
+    walks -- and this pins that the two agree.
+    """
+    module = _load_make_homelike()
+    planned_dirs, planned_files, planned_depth = module.summarize(200, 7)
+
+    target = tmp_path / "fixture"
+    result = _make_homelike(
+        [str(target), "--dirs", "200", "--seed", "7"], home=tmp_path / "home"
+    )
+
+    assert result.returncode == 0, result.stderr
+    built_dirs = sum(1 for p in target.rglob("*") if p.is_dir()) + 1
+    built_files = sum(1 for p in target.rglob("*") if p.is_file())
+    assert (built_dirs, built_files) == (planned_dirs, planned_files)
+    assert f"{planned_dirs} dirs, {planned_files} files" in result.stdout
+    assert f"max depth {planned_depth}" in result.stdout
+
+
+def test_make_homelike_default_plan_is_the_documented_fixture():
+    """88,000 / 888,100 is the number `docs/contributing.md` quotes.
+
+    Planning only: this walks a million random draws and touches nothing, so
+    the documented fixture size can be checked on a machine that has nowhere
+    to put a documented fixture.
+    """
+    module = _load_make_homelike()
+
+    assert module.summarize(88_000, 42) == (88_000, 888_100, 10)
+
+
+def test_make_homelike_refuses_before_building_when_inodes_are_short(tmp_path):
+    """The refusal that matters most: nothing is created, not even the root.
+
+    `statvfs` on the quota'd NFS home reported orders of magnitude more free inodes while
+    the account had far fewer left, so the guard asks `quota` as well. Here it
+    is handed a report with ten files of headroom for the filesystem the
+    target is actually on.
+    """
+    guard = _load_scratchguard()
+    row = guard.mount_for(tmp_path)
+    if row is None:
+        pytest.skip("no /proc/mounts: the quota source cannot be located")
+
+    report = tmp_path / "quota.txt"
+    report.write_text(
+        "Disk quotas for user alice (uid 51234):\n"
+        "     Filesystem  blocks   quota   limit   grace   files   quota"
+        "   limit   grace\n"
+        f"{row[0]} 157286400  1048576000 1048576000       0  999990"
+        "  1000000 1000000       0\n"
+    )
+    target = tmp_path / "fixture"
+
+    result = _make_homelike(
+        [str(target), "--dirs", "300"],
+        home=tmp_path / "home",
+        extra_env={"DISKTIDE_SCRATCHGUARD_QUOTA": str(report)},
+    )
+
+    assert result.returncode == 2
+    assert "quota reports 10 left" in result.stderr
+    assert "No flag lifts this" in result.stderr
+    assert not target.exists()

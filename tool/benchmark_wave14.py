@@ -7,7 +7,7 @@ import argparse
 import json
 import platform
 import statistics
-import tempfile
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -28,6 +28,9 @@ from disktide.domain.cleanup import (
 from disktide.domain.metrics import MetricId
 from disktide.models.patterns import CleanupRuleActionPolicy, RiskLevel
 from disktide.services.cleanup import CleanupService
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
 from disktide.storage.database import Database
 
 
@@ -182,8 +185,11 @@ def _quarantine_benchmark(root: Path, count: int) -> dict[str, object]:
 
 
 def run(*, repeats: int) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="disktide-wave14-") as directory:
-        root = Path(directory)
+    # The quarantine fixtures are the only files on disk: one per action for
+    # the three sizes, plus the copies the executor moves aside, plus two
+    # SQLite databases.
+    entries = 2 * (100 + 300 + 600) + 16
+    with scratchguard.temporary_scratch("wave14", entries=entries) as root:
         overlap = [
             _overlap_benchmark(count, repeats)
             for count in (2_000, 5_000, 10_000)

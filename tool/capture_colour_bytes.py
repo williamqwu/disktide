@@ -42,6 +42,9 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
+
 WIDTH, HEIGHT = 200, 50
 
 # The SGR forms that are not sixteen-colour: 24-bit and 256-indexed, as
@@ -153,7 +156,10 @@ def main() -> int:
     parser.add_argument("--keep", action="store_true", help="keep the scratch tree")
     args = parser.parse_args()
 
-    scratch = Path(tempfile.mkdtemp(prefix="disktide-colour-"))
+    entries = len(TREE) + sum(len(files) for files in TREE.values()) + 16
+    scratch = Path(tempfile.mkdtemp(
+        dir=scratchguard.scratch_dir("colour-bytes", entries=entries)
+    ))
     tree = make_tree(scratch)
     tmux(
         args.server, "new-session", "-d", "-s", "base",
