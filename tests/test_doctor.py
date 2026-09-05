@@ -421,3 +421,69 @@ def test_an_rgb_tmux_client_needs_no_advice_at_all():
     )
     assert (report["depth"], report["source"]) == ("truecolor", "tmux-client")
     assert report["suggestion"] is None
+
+
+def _database_from_the_future(tmp_path) -> Path:
+    """An XDG data home whose database is stamped with a newer schema."""
+    import sqlite3
+
+    from disktide.storage.migrations import migrate
+
+    path = tmp_path / "data" / "disktide" / "data.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(path))
+    migrate(connection)
+    connection.execute("UPDATE schema_version SET version = 99")
+    connection.commit()
+    connection.close()
+    return path
+
+
+def test_doctor_says_a_newer_schema_is_newer_than_this_build(tmp_path):
+    """The two numbers were printed side by side and never compared.
+
+    A database written by a newer disktide is the one storage problem
+    nothing local can fix, and it read as an unremarkable pair of integers.
+    """
+    from disktide.storage.migrations import CURRENT_VERSION
+
+    _database_from_the_future(tmp_path)
+    env = {
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
+    runner = CliRunner()
+
+    payload = json.loads(
+        runner.invoke(cli, ["doctor", "--json"], env=env).output
+    )
+    database = payload["database"]
+
+    assert database["schema_version"] == 99
+    assert database["expected_schema_version"] == CURRENT_VERSION
+    assert database["schema_state"] == "newer-than-this-build"
+    assert database["writable"] is False
+    assert "newer than this build" in database["reason"]
+    assert "upgrade disktide" in (database["recovery_hint"] or "")
+
+    text = runner.invoke(cli, ["doctor"], env=env)
+    assert text.exit_code == 0, text.output
+    assert "Schema: 99 / " in text.output
+    assert "(newer than this build)" in text.output
+    assert "Traceback" not in text.output
+
+
+def test_doctor_calls_a_matching_schema_current(tmp_path):
+    env = {
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
+    payload = json.loads(
+        CliRunner().invoke(cli, ["doctor", "--json"], env=env).output
+    )
+
+    assert payload["database"]["schema_state"] == "current"

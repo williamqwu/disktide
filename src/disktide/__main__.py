@@ -525,6 +525,12 @@ def scan(
         if snapshot:
             payload["snapshot"] = _save_scan_snapshot(run)
         click.echo(json_module.dumps(payload, sort_keys=True))
+        if snapshot and not payload["snapshot"]["saved"]:
+            # `--snapshot` asked for a write that did not happen. The scan
+            # itself is in the payload and is still good, so the numbers go
+            # out either way; the status is what tells a script the history
+            # it was building has a hole in it.
+            ctx.exit(1)
         return
 
     # No leading blank line: the report is the first thing on stdout now
@@ -604,6 +610,12 @@ def scan(
                 f"still valid: {outcome['error']}",
                 err=True,
             )
+        if not outcome["saved"]:
+            # The report above is still worth printing -- the scan happened
+            # and the numbers are right -- but a `--snapshot` that saved
+            # nothing exited 0 and looked, to anything but a reader, exactly
+            # like one that saved something.
+            ctx.exit(1)
 
 
 def _save_scan_snapshot(run) -> dict:

@@ -492,6 +492,38 @@ MIGRATION_CALLBACKS: dict[int, Callable[[sqlite3.Connection], None]] = {
 }
 
 
+class MigrationError(sqlite3.DatabaseError):
+    """A migration this build cannot perform.
+
+    `sqlite3.DatabaseError` rather than a plain exception so that every
+    caller that already copes with a database it cannot open copes with this
+    too: `Database.connect` catches `(sqlite3.Error, OSError)` around the
+    read-write open and falls back to a read-only, `degraded` connection
+    carrying `degraded_reason` and `recovery_hint`, which is what the monitor
+    header, `doctor` and the CLI all read. It is a database error; there is
+    no reason for it to need a second mechanism.
+    """
+
+
+class SchemaTooNewError(MigrationError):
+    """The file was written by a newer disktide than this one.
+
+    `migrate` used to return `None` here, which is what "nothing to do"
+    looks like -- so a database from a future version opened cleanly and was
+    written to through a schema this build only half understands. Added
+    columns have defaults, so most of it would even appear to work; the
+    failure is a column whose *meaning* changed, read as if it had not.
+    """
+
+    def __init__(self, found: int, expected: int) -> None:
+        super().__init__(
+            f"database schema version {found} is newer than this build "
+            f"understands (version {expected}); upgrade disktide to open it"
+        )
+        self.found = found
+        self.expected = expected
+
+
 def get_version(conn: sqlite3.Connection) -> int:
     """Get current schema version."""
     try:
@@ -579,6 +611,11 @@ def migrate(
     if target < 0 or target > CURRENT_VERSION:
         raise ValueError(f"unsupported migration target: {target}")
     current = get_version(conn)
+    if current > CURRENT_VERSION:
+        # Before `target`, deliberately: a caller asking for an older target
+        # is asking for "bring this up to N", and a database from the future
+        # is not something this build may write at any N.
+        raise SchemaTooNewError(current, CURRENT_VERSION)
     if current >= target:
         return None
     if conn.in_transaction:

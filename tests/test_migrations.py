@@ -6,9 +6,12 @@ import os
 from pathlib import Path
 
 import pytest
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.storage.database import Database
 from disktide.storage.migrations import (
     CURRENT_VERSION,
     MIGRATION_CALLBACKS,
+    SchemaTooNewError,
     get_version,
     migrate,
     migration_backup_path,
@@ -362,3 +365,78 @@ class TestBackupBeforeADestructiveMigration:
             connection.close()
         assert not migration_backup_path(path, CURRENT_VERSION).exists()
         assert list(tmp_path.glob("*.bak")) == []
+
+
+class TestASchemaFromTheFuture:
+    """A database this build does not understand must be refused, not used.
+
+    `migrate` returned `None` for `current >= target`, which is also what
+    "already up to date" returns, so a file written by a newer disktide
+    opened cleanly and was then written through a schema this build only
+    half knows. Most of it would even appear to work -- added columns carry
+    defaults -- and the failure that is left is a column whose meaning
+    changed, read as though it had not.
+    """
+
+    @staticmethod
+    def _future(tmp_path) -> Path:
+        path = tmp_path / "future.db"
+        connection = sqlite3.connect(str(path))
+        migrate(connection)
+        connection.execute("UPDATE schema_version SET version = 99")
+        connection.commit()
+        connection.close()
+        return path
+
+    def test_migrate_refuses_a_newer_schema(self, tmp_path):
+        connection = sqlite3.connect(str(self._future(tmp_path)))
+        try:
+            with pytest.raises(SchemaTooNewError) as caught:
+                migrate(connection)
+        finally:
+            connection.close()
+
+        assert caught.value.found == 99
+        assert caught.value.expected == CURRENT_VERSION
+        assert "newer than this build" in str(caught.value)
+        # A `sqlite3.DatabaseError`, so every caller that already copes with a
+        # database it cannot open copes with this one too.
+        assert isinstance(caught.value, sqlite3.DatabaseError)
+
+    def test_an_older_target_is_refused_too(self, tmp_path):
+        """"Bring this up to N" is not a way round a database from the future."""
+        connection = sqlite3.connect(str(self._future(tmp_path)))
+        try:
+            with pytest.raises(SchemaTooNewError):
+                migrate(connection, target_version=3)
+        finally:
+            connection.close()
+
+    def test_the_database_opens_read_only_and_says_why(self, tmp_path):
+        database = Database(path=str(self._future(tmp_path)))
+        database.connect()
+        try:
+            assert database.read_only is True
+            assert database.degraded is True
+            reason = database.degraded_reason or ""
+            assert "SchemaTooNewError" in reason
+            assert "newer than this build" in reason
+            # The hint names the fix, not the generic advice about copies.
+            hint = database.recovery_hint or ""
+            assert "upgrade disktide" in hint
+            assert str(CURRENT_VERSION) in hint and "99" in hint
+        finally:
+            database.close()
+
+    def test_the_repository_reports_it_as_not_writable(self, tmp_path):
+        repository = SQLiteSnapshotRepository(path=str(self._future(tmp_path)))
+        repository.connect()
+        try:
+            status = repository.status
+            assert status.writable is False
+            assert status.read_only is True
+            assert status.degraded is True
+            assert "newer than this build" in (status.reason or "")
+            assert "upgrade disktide" in (status.recovery_hint or "")
+        finally:
+            repository.close()

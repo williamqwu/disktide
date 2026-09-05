@@ -279,7 +279,13 @@ def render_doctor_report(report: DoctorReport) -> str:
         "",
         "Database",
         f"  [{str(database['status']).upper()}] {database['reason']}",
-        f"  Schema: {database['schema_version']} / {database['expected_schema_version']}",
+        f"  Schema: {database['schema_version']} / "
+        f"{database['expected_schema_version']}"
+        + (
+            " (newer than this build)"
+            if database.get("schema_state") == SCHEMA_NEWER
+            else ""
+        ),
         f"  Writable persistence: {database['writable']}",
         "",
         "Storage metrics",
@@ -777,6 +783,26 @@ def _render_capability_group(items: object) -> list[str]:
     return lines
 
 
+#: What `schema_version` says relative to `expected_schema_version`. The two
+#: were printed next to each other and never compared, so a database written
+#: by a newer disktide -- the case that cannot be fixed by anything local --
+#: read as an unremarkable pair of numbers.
+SCHEMA_CURRENT = "current"
+SCHEMA_MIGRATION_PENDING = "migration-pending"
+SCHEMA_NEWER = "newer-than-this-build"
+SCHEMA_UNKNOWN = "unknown"
+
+
+def _schema_state(schema_version: int | None) -> str:
+    if schema_version is None:
+        return SCHEMA_UNKNOWN
+    if schema_version > CURRENT_VERSION:
+        return SCHEMA_NEWER
+    if schema_version < CURRENT_VERSION:
+        return SCHEMA_MIGRATION_PENDING
+    return SCHEMA_CURRENT
+
+
 def _database_report(
     database_factory: Callable[[], Database],
     *,
@@ -810,6 +836,7 @@ def _database_report(
             "path": path,
             "schema_version": schema_version,
             "expected_schema_version": CURRENT_VERSION,
+            "schema_state": _schema_state(schema_version),
             "writable": writable,
             "degraded": database.degraded,
             "read_only": read_only,
@@ -828,6 +855,7 @@ def _database_report(
             "path": _application_paths(show_paths)["database"],
             "schema_version": None,
             "expected_schema_version": CURRENT_VERSION,
+            "schema_state": _schema_state(None),
             "writable": False,
             "degraded": True,
             "read_only": False,

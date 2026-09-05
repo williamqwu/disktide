@@ -70,6 +70,7 @@ from disktide.models.tree import FSNode, LeafNode
 from disktide.paths import database_file
 from disktide.storage.migrations import (
     CURRENT_VERSION,
+    SchemaTooNewError,
     migrate,
     migration_backup_path,
 )
@@ -289,6 +290,7 @@ class Database:
         for callers to surface.
         """
         failure_reason = "unknown database error"
+        failure_exc: BaseException | None = None
         self.recovery_hint = None
         if self._read_only_requested:
             try:
@@ -313,6 +315,7 @@ class Database:
                 return
             except (sqlite3.Error, OSError) as exc:
                 failure_reason = f"{type(exc).__name__}: {exc}"
+                failure_exc = exc
                 log.warning(
                     "Could not open database at %s (%s); attempting "
                     "read-only recovery before falling back to memory.",
@@ -338,7 +341,18 @@ class Database:
                     backup_path = migration_backup_path(
                         self._path, CURRENT_VERSION
                     )
-                    if backup_path.exists():
+                    if isinstance(failure_exc, SchemaTooNewError):
+                        # Nothing is broken and there is nothing to restore:
+                        # the file is simply ahead of this build. Say the one
+                        # thing that fixes it rather than the generic advice
+                        # about copies and permissions.
+                        self.recovery_hint = (
+                            "upgrade disktide; this build understands schema "
+                            f"version {failure_exc.expected} and the database "
+                            f"is at {failure_exc.found}. History is readable "
+                            "meanwhile; nothing new will be written."
+                        )
+                    elif backup_path.exists():
                         self.recovery_hint = (
                             f"restore from {backup_path} after resolving "
                             "the migration or disk problem"

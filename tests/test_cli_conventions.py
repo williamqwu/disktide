@@ -29,6 +29,23 @@ def isolated_state(tmp_path_factory, monkeypatch):
         monkeypatch.setenv(variable, str(root / variable.lower()))
 
 
+def _stamp_the_database_with_a_future_schema(monkeypatch, tmp_path) -> None:
+    """Point the CLI at a database only a newer disktide could write."""
+    import sqlite3
+
+    from disktide.storage.migrations import migrate
+
+    data_home = tmp_path / "future-data"
+    path = data_home / "disktide" / "data.db"
+    path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(str(path))
+    migrate(connection)
+    connection.execute("UPDATE schema_version SET version = 99")
+    connection.commit()
+    connection.close()
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+
+
 # --- stream discipline -----------------------------------------------------
 
 
@@ -257,3 +274,55 @@ def test_cleanup_plan_and_bare_path_are_the_same_command(tmp_path):
 
     assert bare.exit_code == explicit.exit_code == 0
     assert bare.stdout == explicit.stdout
+
+
+# --- a write that did not happen -------------------------------------------
+
+
+def test_scan_snapshot_exits_nonzero_when_nothing_was_saved(
+    tmp_path, monkeypatch
+):
+    """`--snapshot` that saved nothing looked exactly like one that did.
+
+    A database written by a newer disktide opens read-only, so the scan is
+    fine and the save is impossible. The report is still worth printing --
+    the numbers are right -- but the status is the only thing a script
+    building a history has to go on.
+    """
+    (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
+    _stamp_the_database_with_a_future_schema(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(cli, ["scan", str(tmp_path), "--snapshot"])
+
+    assert result.exit_code == 1, result.output
+    assert "Could not save snapshot" in result.output
+    assert "newer than this build" in result.output
+    assert "Traceback" not in result.output
+    # The scan itself still reported.
+    assert "Top directories by" in result.output
+
+
+def test_scan_snapshot_json_says_it_was_not_saved_and_exits_nonzero(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
+    _stamp_the_database_with_a_future_schema(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        cli, ["scan", str(tmp_path), "--snapshot", "--json"]
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["snapshot"]["saved"] is False
+    assert payload["snapshot"]["kind"] == "unwritable"
+    assert "newer than this build" in payload["snapshot"]["error"]
+
+
+def test_scan_snapshot_exits_zero_when_it_was_saved(tmp_path):
+    (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
+
+    result = CliRunner().invoke(cli, ["scan", str(tmp_path), "--snapshot"])
+
+    assert result.exit_code == 0, result.output
+    assert "Snapshot saved" in result.output
