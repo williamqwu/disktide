@@ -36,6 +36,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from rich.style import Style
 
 from disktide.domain.visualization import VisualState
 from disktide.themes import LEGACY_THEMES, THEME_KEYS, resolve_theme
@@ -47,11 +48,12 @@ from disktide.viz.colors import (
     ANSI_OTHER_FILE,
     ANSI_SELECTED_ARC,
     CATEGORIES,
-    INK_ROLES,
     CATEGORY_DIR_RGB,
     CATEGORY_FILE_RGB,
     CATEGORY_LEGEND_RGB,
     DELTA_RGB,
+    FILL_ROLES,
+    INK_ROLES,
     MONO_LEGEND_RGB,
     NEUTRAL_DIR_RGB,
     SCHEMES,
@@ -393,8 +395,16 @@ def test_disktide_prints_exactly_the_styles_it_always_did():
     -- or became `cyan bold`, which renders the same and is still a
     different string -- would make those images photographs of a build that
     no longer exists.
+
+    `bar_track` is the one role with no legacy string to be checked
+    against: it is a fill, not text, and there was nothing behind the bar
+    to colour while the bar was `░`. It is named here so that a *second*
+    new role cannot be added without this test noticing.
     """
-    assert SCHEMES["disktide"].inks == _LEGACY_STYLES
+    inks = SCHEMES["disktide"].inks
+    assert {role: inks[role] for role in _LEGACY_STYLES} == _LEGACY_STYLES
+    assert set(inks) - set(_LEGACY_STYLES) == {"bar_track"}
+    assert inks["bar_track"] == "bright_black"
 
 
 def test_every_theme_answers_for_every_role():
@@ -418,11 +428,64 @@ def test_text_inks_clear_the_wcag_text_floor(theme):
     surface = gen_palette.THEME_SURFACE[theme]
     inks = SCHEMES[theme].inks
     for role in INK_ROLES:
+        if role in FILL_ROLES_THAT_ARE_NOT_TEXT:
+            continue
         hexed = gen_palette.ink_hex(inks[role])
         if hexed is None:
             continue
         ratio = palette_checks.contrast(hexed, surface)
         assert ratio >= 4.5, f"{theme}/{role} {hexed}: {ratio:.2f}:1"
+
+
+#: `bar_track` is in `INK_ROLES` because it is themed and looked up the
+#: same way, but it is never drawn as a glyph: it is the background of the
+#: empty half of the tree's proportional bar. WCAG asks 4.5:1 of text
+#: because a stroke one cell wide has little signal; an area is held to
+#: 3:1, and this one is held to a rule of its own below.
+FILL_ROLES_THAT_ARE_NOT_TEXT = frozenset({"bar_track"})
+
+
+@pytest.mark.parametrize("theme", ["cold", "colorblind", "cyberpunk", "mono"])
+def test_the_bar_track_is_a_step_you_can_see_from_both_sides(theme):
+    """It has the panel behind it and the bar in front of it.
+
+    Those two edges share one budget -- the bar's own contrast with the
+    surface, which is 4.9:1 in `colorblind` and 8.3:1 in `mono` -- so no
+    track can clear 3:1 on both sides, and a track pushed to 3:1 against
+    the panel leaves under 2.4:1 against the bar it is supposed to be
+    distinguishable from. Each theme puts it near the geometric middle
+    instead, which is the only placement where neither edge is the weak
+    one, and this is the gate on that.
+    """
+    surface = gen_palette.THEME_SURFACE[theme]
+    inks = SCHEMES[theme].inks
+    track = gen_palette.ink_hex(inks["bar_track"])
+    bar = gen_palette.ink_hex(inks["bar"])
+    behind = palette_checks.contrast(track, surface)
+    in_front = palette_checks.contrast(bar, track)
+    assert behind >= 2.0, f"{theme}: track {track} on surface {behind:.2f}:1"
+    assert in_front >= 2.0, f"{theme}: bar {bar} on track {in_front:.2f}:1"
+    # Neither edge more than half again as strong as the other.
+    assert max(behind, in_front) / min(behind, in_front) <= 1.5, (
+        f"{theme}: {behind:.2f}:1 behind, {in_front:.2f}:1 in front"
+    )
+    # And the track really is between them, not off to one side.
+    lit = palette_checks.oklch
+    assert lit(surface)[0] < lit(track)[0] < lit(bar)[0]
+
+
+def test_every_fill_role_is_a_bare_colour_in_every_theme():
+    """`ink_fill` builds `on <style>`, and only a colour parses there.
+
+    `on bold green` is a parse error, not a bold green background, so a
+    role that grows a modifier would take the tree's bar down with it at
+    render time rather than here.
+    """
+    for name, scheme in SCHEMES.items():
+        for role in FILL_ROLES:
+            style = scheme.inks[role]
+            assert " " not in style, f"{name}/{role} is {style!r}"
+            assert Style.parse(f"on {style}").bgcolor is not None
 
 
 def test_mono_inks_have_no_colour_at_all():
@@ -672,16 +735,22 @@ def test_every_rgb_theme_still_has_eight_marks_at_256_colours(theme):
     assert not collisions, f"{theme} merges at 256: {collisions}"
 
 
-def test_disktide_keeps_thirty_of_its_thirty_nine_colours_at_256():
-    """The whole window, not just the eight marks: 39 -> 30."""
+def test_disktide_keeps_thirty_one_of_its_forty_colours_at_256():
+    """The whole window, not just the eight marks: 40 -> 31.
+
+    Forty, not the thirty-nine this pinned before `bar_track`: the bar's
+    track is a themed colour that reaches the screen like any other, and
+    in `disktide` it is `bright_black`, which nothing else on the window
+    was using.
+    """
     row = gen_palette.downgrade_summary("disktide")
-    assert (row["rgb"], row["eight_bit"]) == (39, 30)
+    assert (row["rgb"], row["eight_bit"]) == (40, 31)
 
 
 def test_disktide_at_sixteen_colours_is_the_collapse_the_screenshot_showed():
     """The bug, pinned as a number so a palette change cannot hide it.
 
-    39 distinct colours reach the Open OnDemand web shell as 13, and the
+    40 distinct colours reach the Open OnDemand web shell as 13, and the
     three that merge are the three the screenshot showed merging:
     `archive`, `ephemeral` and the neutral directory ring all arrive as
     ANSI 1, which xterm.js's Monokai Remastered paints hot pink. `data`
@@ -691,7 +760,7 @@ def test_disktide_at_sixteen_colours_is_the_collapse_the_screenshot_showed():
     future palette happens to fix any of it, this test is what says so.
     """
     row = gen_palette.downgrade_summary("disktide")
-    assert (row["rgb"], row["tmux16"], row["rich16"]) == (39, 13, 12)
+    assert (row["rgb"], row["tmux16"], row["rich16"]) == (40, 13, 12)
 
     index = row["tmux_index"]
     assert index["file archive@2"] == index["file ephemeral@2"] == 1

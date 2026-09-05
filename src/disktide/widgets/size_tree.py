@@ -8,6 +8,7 @@ from textual import events
 from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 from rich.cells import cell_len
+from rich.style import Style
 from rich.text import Text
 
 from disktide.metrics import (
@@ -25,8 +26,14 @@ from disktide.presentation.tui.viewmodels.visualization import (
     sparkline,
     visual_token,
 )
-from disktide.rendering import bar_chars, denied_glyph, link_arrow, partial_glyph
-from disktide.viz.colors import ink
+from disktide.rendering import (
+    bar_chars,
+    denied_glyph,
+    is_safe_rendering,
+    link_arrow,
+    partial_glyph,
+)
+from disktide.viz.colors import ink, ink_fill
 
 
 class SizeTree(Tree[FSNode]):
@@ -375,6 +382,36 @@ class SizeTree(Tree[FSNode]):
                 ),
             )
 
+    def render_label(
+        self, node: TreeNode[FSNode], base_style: Style, style: Style
+    ) -> Text:
+        """Put the bar's own background back on top of the cursor style.
+
+        `Tree.render_label` applies the cursor/hover style over the whole
+        label *after* the label's own spans, and a later Rich span's
+        bgcolor wins.  That was free while the bar was `█` in a foreground
+        colour; a bar painted as a background disappears on the selected
+        row instead.  So the fill spans -- the only ones in a label that
+        carry a bgcolor -- are re-applied afterwards, at the offset the
+        expand glyph pushed them to.
+
+        Nothing else about the cursor row changes: the name still goes
+        white and bold, and the size column still takes the cursor's
+        background, because those spans are foreground-only and the
+        highlight is left to win over them exactly as before.
+        """
+        text = super().render_label(node, base_style, style)
+        label = node._label
+        offset = len(text.plain) - len(label.plain)
+        for span in label.spans:
+            span_style = span.style
+            if isinstance(span_style, str):
+                span_style = Style.parse(span_style)
+            if span_style.bgcolor is None:
+                continue
+            text.stylize(span_style, offset + span.start, offset + span.end)
+        return text
+
     def _make_label(self, node: FSNode) -> Text:
         """Create a rich label with name, a metric value, and a proportional bar.
 
@@ -493,9 +530,25 @@ class SizeTree(Tree[FSNode]):
 
         if bar_width >= self.MIN_BAR_WIDTH:
             filled = int(ratio * bar_width)
-            filled_ch, empty_ch = bar_chars()
-            bar = filled_ch * filled + empty_ch * (bar_width - filled)
-            text.append(f"  {bar} {percent}", style=ink("bar"))
+            if is_safe_rendering():
+                filled_ch, empty_ch = bar_chars()
+                bar = filled_ch * filled + empty_ch * (bar_width - filled)
+                text.append(f"  {bar} {percent}", style=ink("bar"))
+            else:
+                # Spaces under a background colour, not `█`/`░`: a browser
+                # terminal has no cell-fitted glyph for either, and drew the
+                # track 1.1 cells wide and 1.4 rows tall -- one row's bar
+                # bleeding over the size text of the rows above and below.
+                # A space with a background is the one primitive that fills
+                # exactly one cell everywhere.
+                text.append("  ")
+                if filled:
+                    text.append(" " * filled, style=ink_fill("bar"))
+                if bar_width > filled:
+                    text.append(
+                        " " * (bar_width - filled), style=ink_fill("bar_track")
+                    )
+                text.append(f" {percent}", style=ink("bar"))
         elif room is None or room >= 2 + len(percent):
             text.append(f"  {percent}", style=ink("bar"))
 

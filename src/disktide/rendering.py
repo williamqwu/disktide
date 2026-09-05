@@ -1,11 +1,17 @@
 """Runtime toggles for how the charts are drawn, and the render epoch.
 
-Web-based shells (e.g. OSC OnDemand) often ship fonts that don't
+Web-based shells (e.g. Open OnDemand) often ship fonts that don't
 include the full Unicode block-drawing or accessibility-symbol range.
 When the user enables `ui.safe_rendering`, this module's helpers return
 ASCII fallbacks so the tree stays readable even on those terminals, and
 the charts drop their block glyphs: the sunburst paints its disc with
 background colour alone instead of half blocks.
+
+Safe rendering is *not* the web-shell fix. Nothing the app draws is a
+block element in either mode any more (see `disktide.glyphs`), and every
+fill is a background colour on spaces. What safe mode is for is the
+terminal beyond that: one whose font stops at ASCII, where even the
+proportional bar has to be drawn out of `#`.
 
 The flag is mutable at runtime so the Settings screen can toggle it
 without a restart.  Because the chart widgets cache a fully-coloured
@@ -81,15 +87,17 @@ def set_ring_shape(name: str | None) -> str:
 
 
 def bar_chars() -> tuple[str, str]:
-    """Return (filled, empty) glyphs for the proportional bar.
+    """Return (filled, empty) glyphs for safe mode's proportional bar.
 
-    Default uses block-drawing (`█`, `░`). Safe mode uses ASCII so
-    web-shell fonts that lack U+2591 don't render the empty track as
-    a stray horizontal-rule glyph spanning the row.
+    Only safe mode draws the bar out of glyphs at all.  Everywhere else it
+    is a background colour on spaces, because no block element survives a
+    browser terminal's default font -- the `█`/`░` pair this used to
+    return came out 1.1 cells wide and 1.4 rows tall in an Open OnDemand
+    shell, so each row's track bled over the size text above and below it.
+    Safe mode keeps ASCII because it is the mode for a terminal that
+    cannot be trusted with background colours either.
     """
-    if _safe:
-        return ("#", " ")
-    return ("█", "░")
+    return ("#", " ")
 
 
 def denied_glyph() -> str:

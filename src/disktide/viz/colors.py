@@ -42,24 +42,33 @@ from disktide.themes import THEME_KEYS, resolve_theme
 # that looks like.
 INK_ROLES: tuple[str, ...] = (
     "dir", "file", "link", "link_dim", "crumb", "muted",
-    "bar", "bar_strong",
+    "bar", "bar_strong", "bar_track",
     "warning", "warning_strong", "warning_dim",
     "error", "error_strong",
     "accent", "accent_dim",
 )
 
+#: Roles a widget may hand to `ink_fill`, i.e. paint as a *background*
+#: rather than as text.  Every scheme has to spell these as a bare colour,
+#: because `on <style>` only parses when `<style>` is one: `on bold green`
+#: is a parse error, not a bold green background.  Gated in
+#: `tests/test_palette_gates.py`.
+FILL_ROLES: frozenset[str] = frozenset(
+    {"bar", "bar_track", "warning", "error"}
+)
+
 
 def _ink_table(
     *, directory: str, file: str, link: str, crumb: str,
-    bar: str, warning: str, error: str, accent: str,
+    bar: str, bar_track: str, warning: str, error: str, accent: str,
 ) -> dict[str, str]:
-    """Build one theme's fourteen Rich style strings from eight colours.
+    """Build one theme's sixteen Rich style strings from nine colours.
 
     The bold/dim/underline variants are composed here rather than listed,
     which is what lets `disktide` reproduce its legacy strings exactly by
     passing Rich's colour *names*: `directory="cyan"` yields `"bold cyan"`,
     `warning="yellow"` yields `"yellow"`, `"bold yellow"` and `"dim
-    yellow"`, and so on for all fourteen. There is no separate legacy
+    yellow"`, and so on for all of them. There is no separate legacy
     table to drift from — the default theme's strings are a consequence of
     the same code path every other theme takes.
     """
@@ -74,6 +83,14 @@ def _ink_table(
         "muted": "dim",
         "bar": bar,
         "bar_strong": f"bold {bar}",
+        # A fill, not a glyph: the empty part of the tree's proportional
+        # bar, painted as a background on spaces.  It has to be a step you
+        # can see from both sides -- from the panel behind it and from the
+        # bar in front of it -- and the two sides share one budget, which
+        # is why every theme puts it near the geometric middle of the
+        # contrast between its surface and its bar rather than pushing it
+        # to either end.
+        "bar_track": bar_track,
         "warning": warning,
         "warning_strong": f"bold {warning}",
         "warning_dim": f"dim {warning}",
@@ -88,7 +105,8 @@ def _ink_table(
 # the default theme is byte-identical to what the README shots photographed.
 _DISKTIDE_INK = _ink_table(
     directory="cyan", file="white", link="cyan", crumb="blue",
-    bar="green", warning="yellow", error="red", accent="magenta",
+    bar="green", bar_track="bright_black",
+    warning="yellow", error="red", accent="magenta",
 )
 # The other four take concrete hexes off their own chrome, each one measured
 # at >= 4.5:1 against that theme's surface (the WCAG floor for text, which is
@@ -96,25 +114,31 @@ _DISKTIDE_INK = _ink_table(
 # areas). `tool/gen_palette.py --check` prints the ratios.
 _COLD_INK = _ink_table(
     directory="#57a5e2", file="#d7e4f2", link="#4cc6c7", crumb="#57a5e2",
-    bar="#3dbf9c", warning="#dba43a", error="#e0607f", accent="#e78f37",
+    bar="#3dbf9c", bar_track="#1e716e",
+    warning="#dba43a", error="#e0607f", accent="#e78f37",
 )
 # Okabe-Ito throughout, except that vermillion is lifted from #d55e00 to
 # #e06600: the original measures 4.31:1 on #1e1e1e, just under the text
 # floor, and hue moves by one degree in the fix.
 _COLORBLIND_INK = _ink_table(
     directory="#56b4e9", file="#e8e8e8", link="#56b4e9", crumb="#56b4e9",
-    bar="#009e73", warning="#f0e442", error="#e06600", accent="#cc79a7",
+    bar="#009e73", bar_track="#0f5e48",
+    warning="#f0e442", error="#e06600", accent="#cc79a7",
 )
 _CYBERPUNK_INK = _ink_table(
     directory="#00e5ff", file="#ecdcff", link="#00e5ff", crumb="#ff2fd0",
-    bar="#00c800", warning="#ffb020", error="#ff4136", accent="#ff2fd0",
+    bar="#00c800", bar_track="#126919",
+    warning="#ffb020", error="#ff4136", accent="#ff2fd0",
 )
-# Seven distinct grays, ordered by how loudly the role needs to speak: an
-# error is the brightest thing on the screen, a link the quietest. With hue
-# gone this ordering is the whole of the encoding.
+# Seven distinct grays for the text, ordered by how loudly the role needs
+# to speak: an error is the brightest thing on the screen, a link the
+# quietest. With hue gone this ordering is the whole of the encoding. The
+# eighth, `bar_track`, is not on that ladder: it is a fill and sits below
+# every one of them, halfway between the surface and the bar.
 _MONO_INK = _ink_table(
     directory="#c4c4c4", file="#b0b0b0", link="#8c8c8c", crumb="#8c8c8c",
-    bar="#a8a8a8", warning="#d8d8d8", error="#f0f0f0", accent="#9c9c9c",
+    bar="#a8a8a8", bar_track="#595959",
+    warning="#d8d8d8", error="#f0f0f0", accent="#9c9c9c",
 )
 
 
@@ -129,7 +153,8 @@ _MONO_INK = _ink_table(
 _ANSI_INK = {
     **_ink_table(
         directory="cyan", file="white", link="cyan", crumb="blue",
-        bar="green", warning="yellow", error="red", accent="magenta",
+        bar="green", bar_track="bright_black",
+        warning="yellow", error="red", accent="magenta",
     ),
     "muted": "bright_black",
 }
@@ -400,6 +425,20 @@ def set_color_scheme(name: str) -> None:
 def get_color_scheme() -> ColorScheme:
     """Return the currently active color scheme."""
     return _active
+
+
+def ink_fill(role: str) -> str:
+    """The active theme's colour for *role*, as a background.
+
+    A fill DiskTide draws itself is a background colour on spaces -- no
+    block element survives a browser terminal's default font (see
+    `disktide.glyphs`) -- so a widget that used to write `█` in `ink("bar")`
+    writes spaces in `ink_fill("bar")` instead. Only `FILL_ROLES` may be
+    asked for: `on <style>` parses a colour and nothing else.
+    """
+    if role not in FILL_ROLES:
+        raise KeyError(f"{role!r} is not a fill role")
+    return f"on {_active.inks[role]}"
 
 
 def ink(role: str) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from rich.style import Style
 
 from disktide.glyphs import DENIED, PARTIAL
 from disktide.models.tree import FSNode
@@ -67,17 +68,23 @@ def _mixed_tree() -> FSNode:
 
 def test_default_is_unicode():
     assert not is_safe_rendering()
-    assert bar_chars() == ("█", "░")
     assert denied_glyph() == DENIED
     assert partial_glyph() == PARTIAL
 
 
-def test_safe_mode_switches_bar_to_ascii():
+def test_the_bar_glyphs_are_ascii_in_both_modes():
+    """`bar_chars` is safe mode's bar now, and only safe mode's.
+
+    It used to answer `█`/`░` outside safe mode. Nothing asks it outside
+    safe mode any more -- the bar is a background colour on spaces there,
+    because a browser terminal fits neither block element to a cell -- so
+    the ASCII pair is the only pair it has.
+    """
+    filled, empty = bar_chars()
+    assert (filled, empty) == ("#", " ")
     set_safe_rendering(True)
     assert is_safe_rendering()
-    filled, empty = bar_chars()
-    assert filled == "#"
-    assert empty == " "
+    assert bar_chars() == ("#", " ")
     # ASCII chars only — len matches visible width
     assert all(ord(c) < 128 for c in filled + empty)
 
@@ -92,18 +99,33 @@ def test_safe_mode_switches_glyphs_to_ascii():
 
 
 def test_toggle_is_observable_by_size_tree():
-    """Flipping the flag changes the rendered tree label content."""
+    """Flipping the flag changes how the bar is drawn.
+
+    Outside safe mode the bar is spaces under a background colour, so what
+    proves it is there is a span with a bgcolor -- there is no glyph to
+    look for, and that is the point. Safe mode has no background colours
+    to spend and draws `#` instead.
+    """
     root = FSNode(
         name="root", path="/r", size=200, is_dir=True, depth=0,
     )
     tree = SizeTree(root)
-    plain_unicode = tree._make_label(root).plain
-    assert "█" in plain_unicode
+    label = tree._make_label(root)
+    fills = [
+        span for span in label.spans
+        if Style.parse(span.style).bgcolor is not None
+    ]
+    assert fills, label.spans
+    assert all(set(label.plain[s.start:s.end]) == {" "} for s in fills)
+    assert "#" not in label.plain
 
     set_safe_rendering(True)
-    plain_safe = tree._make_label(root).plain
-    assert "█" not in plain_safe
-    assert "#" in plain_safe
+    safe = tree._make_label(root)
+    assert "#" in safe.plain
+    assert not [
+        span for span in safe.spans
+        if Style.parse(span.style).bgcolor is not None
+    ]
 
 
 def test_glyphs_in_safe_mode_label():

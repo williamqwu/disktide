@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import re
 
+from rich.style import Style
+
 from disktide.app import DiskTideApp
 from disktide.config import load_config
-from disktide.rendering import bar_chars
+from disktide.viz.colors import ink_fill
 from disktide.widgets.size_tree import SizeTree
 from tests.waiting import wait_for_explorer
 
@@ -79,12 +81,12 @@ def _visible_rows(tree: SizeTree) -> list[str]:
 
 
 def _assert_no_clipped_tail(rows: list[str], width: int) -> None:
-    filled_ch, empty_ch = bar_chars()
-    bar_glyphs = {filled_ch, empty_ch} - {" "}
     checked = 0
     for row in rows:
-        has_tail = "%" in row or any(ch in row for ch in bar_glyphs)
-        if not has_tail:
+        # The bar itself is spaces under a background colour now, so the
+        # percent is the whole of the tail's plain text and the only thing
+        # a crop can shear.
+        if "%" not in row:
             # File rows carry no bar or percent; their own truncation is a
             # separate concern from the tail this fix owns.
             continue
@@ -173,3 +175,86 @@ def test_labels_refit_when_the_panel_is_resized(tmp_path):
             assert narrow != wide, "labels were not re-fitted after the resize"
 
     asyncio.run(go())
+
+
+def _fill_colours(strip) -> set:
+    """Background colours of the space runs in a rendered row.
+
+    The bar is the only thing in a tree row drawn as spaces under a
+    colour, so this is the bar's fill and its track -- `default` dropped,
+    because that is the widget's own background showing through.
+    """
+    return {
+        segment.style.bgcolor
+        for segment in strip
+        if segment.text.strip() == ""
+        and segment.style is not None
+        and segment.style.bgcolor is not None
+        and not segment.style.bgcolor.is_default
+    }
+
+
+def test_the_bar_survives_the_cursor_row(tmp_path, monkeypatch):
+    """A background bar under a background highlight, in both colour modes.
+
+    `Tree.render_label` stylizes the whole label with the cursor style
+    *after* the label's own spans, and a later Rich span's bgcolor wins.
+    The old glyph bar was a foreground and never noticed; a bar drawn as a
+    background is painted over by the highlight and disappears on exactly
+    the row the user is looking at. `SizeTree.render_label` puts it back,
+    and the check is that the selected row still carries the same two
+    fills an unselected one does.
+
+    Both colour modes, because the `ansi` scheme reaches this through a
+    different set of colours and is the mode a 16-colour web shell gets.
+    """
+    _make_clipping_tree(tmp_path)
+
+    async def go(ansi: bool):
+        if ansi:
+            monkeypatch.setenv("NO_COLOR", "1")
+        else:
+            monkeypatch.delenv("NO_COLOR", raising=False)
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(140, 38)) as pilot:
+            await wait_for_explorer(pilot, app)
+            assert bool(app.ansi_color) is ansi
+            tree = app.screen.query_one("#size-tree", SizeTree)
+            await pilot.pause(delay=0.2)
+            await _expand_everything(tree, pilot)
+            tree.focus()
+            # Two adjacent directory rows: the cursor goes on the first and
+            # the second is the control.
+            rows = [
+                line
+                for line, node in enumerate(tree._tree_lines)
+                if line > 0
+                and node.node.data is not None
+                and node.node.data.is_dir
+            ]
+            assert len(rows) >= 2, rows
+            cursor, control = rows[0], rows[1]
+            tree.cursor_line = cursor
+            await pilot.pause()
+            assert tree.cursor_line == cursor
+
+            expected = {
+                Style.parse(ink_fill(role)).bgcolor
+                for role in ("bar", "bar_track")
+            }
+            assert len(expected) == 2, expected
+            control_fills = _fill_colours(tree.render_line(control))
+            assert expected <= control_fills, (
+                "an unselected row is not drawing the bar at all: "
+                f"{sorted(str(c) for c in control_fills)}"
+            )
+            on_cursor = _fill_colours(tree.render_line(cursor))
+            assert expected <= on_cursor, (
+                f"the cursor row lost the bar: {sorted(str(c) for c in on_cursor)}"
+                f" does not cover {sorted(str(c) for c in expected)}"
+            )
+
+    asyncio.run(go(False))
+    asyncio.run(go(True))

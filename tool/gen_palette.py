@@ -473,7 +473,7 @@ def downgrade_rows(theme: str) -> list[tuple[str, tuple[int, int, int]]]:
     """Every distinct colour a theme puts on screen, as 24-bit RGB.
 
     The chart fills at three depths, the neutral ladder, the `other`
-    ladder, the fourteen text inks that name a colour, and the nine
+    ladder, the text inks that name a colour, and the nine
     Textual variables that reach a border, a panel, the footer or the
     cursor row. ANSI names are resolved through Textual's own ANSI theme,
     because that is what `ANSIToTruecolor` does to them on the way out
