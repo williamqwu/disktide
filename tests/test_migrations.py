@@ -440,3 +440,108 @@ class TestASchemaFromTheFuture:
             assert "upgrade disktide" in (status.recovery_hint or "")
         finally:
             repository.close()
+
+
+class TestConcurrentFirstMigration:
+    """Two processes creating the same database at once must both succeed.
+
+    `migrate` read the version outside every transaction and only then took
+    the write lock, so both callers saw 0 and the loser replayed the whole
+    chain on top of a schema the winner had already built. Migration 1 ends
+    in `INSERT INTO schema_version (version) VALUES (1)`, so `schema_version`
+    gained a second row and a later `ALTER TABLE` failed against a column
+    that already existed -- observed from the CLI as one of two parallel
+    `scan --snapshot` runs reporting `no such column: path`, opening the
+    database read-only, and discarding its finished scan.
+
+    Threads rather than processes: SQLite locks are per connection, and each
+    thread here opens its own, which is the same contention.
+    """
+
+    @staticmethod
+    def _run_together(work, count=2):
+        """Run `work(index)` in `count` threads that start at the same moment."""
+        import threading
+
+        barrier = threading.Barrier(count)
+        failures: list[BaseException] = []
+        results: list[object] = [None] * count
+
+        def target(index):
+            try:
+                barrier.wait(timeout=30)
+                results[index] = work(index)
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                failures.append(exc)
+
+        threads = [
+            threading.Thread(target=target, args=(index,))
+            for index in range(count)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        return results, failures
+
+    def test_two_migrations_of_one_fresh_file_both_succeed(self, tmp_path):
+        path = tmp_path / "data.db"
+
+        def work(_index):
+            # Opened inside the thread: sqlite3 refuses a connection used
+            # from a thread other than the one that made it.
+            connection = sqlite3.connect(str(path), timeout=30)
+            try:
+                connection.execute("PRAGMA busy_timeout=5000")
+                return migrate(connection)
+            finally:
+                connection.close()
+
+        _, failures = self._run_together(work)
+        assert not failures, failures
+
+        inspector = sqlite3.connect(str(path))
+        try:
+            rows = inspector.execute(
+                "SELECT version FROM schema_version"
+            ).fetchall()
+        finally:
+            inspector.close()
+        # One row, not two: the loser must not have replayed migration 1.
+        assert rows == [(CURRENT_VERSION,)]
+
+    def test_two_database_connects_neither_falls_back_to_read_only(
+        self, tmp_path
+    ):
+        path = str(tmp_path / "data.db")
+        databases = [Database(path=path) for _ in range(2)]
+        try:
+            _, failures = self._run_together(
+                lambda index: databases[index].connect()
+            )
+            assert not failures, failures
+            for database in databases:
+                assert database.degraded is False, database.degraded_reason
+                assert database.read_only is False
+        finally:
+            for database in databases:
+                database.close()
+
+    def test_a_database_from_the_future_is_still_refused_under_the_lock(
+        self, tmp_path
+    ):
+        """The re-read must raise the same way the pre-check does."""
+        path = tmp_path / "data.db"
+        seed = sqlite3.connect(str(path))
+        migrate(seed)
+        seed.execute("UPDATE schema_version SET version = 99")
+        seed.commit()
+        seed.close()
+
+        connection = sqlite3.connect(str(path))
+        try:
+            with pytest.raises(SchemaTooNewError):
+                migrate(connection)
+            assert connection.in_transaction is False
+        finally:
+            connection.close()

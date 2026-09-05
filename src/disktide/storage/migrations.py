@@ -627,6 +627,26 @@ def migrate(
     )
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # Read the version again, now that the write lock is actually held.
+        # The check above is outside every transaction, so two processes
+        # creating the same fresh database both saw 0; the one that lost the
+        # race for the lock woke up against a schema the winner had already
+        # built and replayed the chain from version 1 on top of it. Migration
+        # 1 ends in `INSERT INTO schema_version (version) VALUES (1)`, so the
+        # table gained a second row, a later `ALTER TABLE` hit a column that
+        # was already there, and the whole transaction rolled back -- which
+        # the caller reads as a database it may not write, falls back to
+        # read-only, and discards the scan it had just finished. The cheap
+        # read stays because it answers correctly for the overwhelmingly
+        # common already-migrated case without taking a lock at all.
+        current = get_version(conn)
+        if current > CURRENT_VERSION:
+            raise SchemaTooNewError(current, CURRENT_VERSION)
+        if current >= target:
+            # Somebody else did the work between the two reads. Release the
+            # lock rather than hold it across the caller's next statement.
+            conn.commit()
+            return None
         for version in range(current + 1, target + 1):
             for sql in MIGRATIONS.get(version, ()):
                 conn.execute(sql)

@@ -811,6 +811,14 @@ Before changing a non-empty database, migration writes a SQLite backup
 (`data.db.pre-v10.bak`). All DDL, backfill, and schema version changes run
 in one transaction; failure rolls back without advancing `schema_version`.
 
+The version is read twice: once cheaply, to skip the lock entirely for the
+usual already-migrated case, and again inside the `BEGIN IMMEDIATE` that
+guards the DDL. The second read is what makes two processes creating the
+same database at once safe -- the one that gets the lock second finds the
+work already done and commits without replaying anything. The one statement
+`busy_timeout` does not cover, `PRAGMA journal_mode=WAL`, is retried for the
+same five seconds by hand.
+
 If migration or writes fail but the database is readable, it opens read-only
 so history remains available. If corrupt, the app uses an in-memory degraded
 repository for scan-only use. It never deletes or overwrites the database as

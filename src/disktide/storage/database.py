@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from collections.abc import Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from heapq import nsmallest
@@ -202,6 +203,32 @@ def _default_db_path() -> str:
     return str(path)
 
 
+def _enable_wal(conn: sqlite3.Connection, *, deadline_seconds: float = 5.0) -> None:
+    """Switch the file to WAL journaling, waiting out a competing first open.
+
+    `busy_timeout` covers every other statement here and not this one:
+    changing the journal mode needs an exclusive lock on the file, and for
+    that SQLite returns SQLITE_BUSY straight away instead of calling the busy
+    handler. Two processes opening the same brand-new database in the same
+    instant therefore had one of them fail on its very first pragma and fall
+    back to a read-only, degraded connection -- discarding whatever it was
+    about to write -- for a file that was perfectly healthy a millisecond
+    later. Retrying is all it takes, and only a first open can reach the
+    loop: once the mode is WAL the statement takes no lock at all.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc).lower():
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 class Database:
     """SQLite-backed storage for DiskTide data."""
 
@@ -267,7 +294,7 @@ class Database:
             if read_only:
                 conn.execute("PRAGMA query_only=ON")
             else:
-                conn.execute("PRAGMA journal_mode=WAL")
+                _enable_wal(conn)
             quick_check = conn.execute("PRAGMA quick_check").fetchone()
             if quick_check is not None and quick_check[0] != "ok":
                 raise sqlite3.DatabaseError(
