@@ -111,3 +111,57 @@ def _byte_frame() -> DiffFrame:
         weights={"/r": 8 * MIB, "/r/c": 8 * MIB},
         selected_path="/r",
     )
+
+
+def test_metric_toggle_keeps_the_attached_frame_in_its_own_units():
+    async def go() -> None:
+        frame = _byte_frame()
+        app = _ChartsApp()
+        async with app.run_test(size=(80, 48)) as pilot:
+            sunburst = app.query_one("#sunburst", SunburstView)
+            treemap = app.query_one("#treemap", TreemapView)
+            sunburst.set_diff(frame)
+            treemap.set_diff(frame)
+            await pilot.pause()
+            # The toggle runs ahead of the worker that rebuilds the frame,
+            # so the byte deltas must not be reprinted as file counts.
+            sunburst.set_metric("files")
+            treemap.set_metric("files")
+            await pilot.pause()
+            assert sunburst.diff_mode and treemap.diff_mode
+            assert any(
+                "+1.0 MiB" in label.text for label in sunburst._layout.labels
+            )
+            assert any(
+                rect.size_label and "+1.0 MiB" in rect.size_label
+                for rect in treemap._layout.rects
+            )
+            # Leaving diff mode applies the metric the user asked for.
+            sunburst.set_node(frame.visual_root)
+            await pilot.pause()
+            assert not sunburst.diff_mode
+            assert sunburst._metric == "files"
+
+    asyncio.run(go())
+
+
+class _TreeApp(App):
+    def compose(self) -> ComposeResult:
+        yield SizeTree(id="size-tree")
+
+
+def test_size_tree_metric_toggle_keeps_diff_labels_in_frame_units():
+    async def go() -> None:
+        frame = _byte_frame()
+        app = _TreeApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            tree = app.query_one("#size-tree", SizeTree)
+            tree.reload(frame.visual_root)
+            tree.set_visual_context(dict(frame.visuals), diff_mode=True)
+            await pilot.pause()
+            tree.metric = "files"
+            await pilot.pause()
+            label = str(tree._tree_nodes["/r/c"].label)
+            assert "+1.0 MiB" in label
+
+    asyncio.run(go())

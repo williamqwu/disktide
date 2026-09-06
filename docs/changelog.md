@@ -113,6 +113,7 @@
 - **Failed directory keeps the bytes it already listed** A directory whose worker died after publishing its first entry chunk kept those entries but reported zero own bytes, so every total above it was short by exactly them. The accumulated own bytes, allocated bytes and coverage counters now survive onto the failed directory alongside its error.
 - **Directory descriptor after a native read** The C reader now rewinds the directory before closing it, the way `os.scandir(fd)` does, so a descriptor read once by the native backend can be read again instead of coming back at the end of the directory.
 - **Sunburst hover percentage** The tooltip read its share off the arc's angle, so a directory's only child showed 100% while the size tree and info panel said 50% for the same node. It now reports the same metric share those two do.
+- **Metric toggle in diff mode** Switching the metric while a comparison was on screen relabelled the still-attached frame with the new metric's formatter, so a 1 MiB growth read as '+1,048,576' until the rebuilt frame landed. The frame's own metric now governs how its deltas are printed.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**

@@ -67,6 +67,11 @@ class SizeTree(Tree[FSNode]):
         self._tree_nodes: dict[str, TreeNode[FSNode]] = {}
         self._live_update_count = 0
         self._visuals: dict[str, VisualDelta] = {}
+        # The metric the attached visuals were computed in. A metric toggle
+        # changes `_metric` immediately but the frame is rebuilt by a worker,
+        # so until the new one lands its byte deltas must not be reprinted
+        # with the new metric's formatter.
+        self._visual_metric = self._metric
         self._mini_trends: dict[str, tuple[int | None, ...]] = {}
         self._diff_mode = False
         self._fitted_width = -1
@@ -171,6 +176,7 @@ class SizeTree(Tree[FSNode]):
     ) -> None:
         """Apply precomputed delta and trend labels without querying storage."""
         self._visuals = visuals or {}
+        self._visual_metric = self._metric
         self._mini_trends = mini_trends or {}
         self._diff_mode = diff_mode
         self._refresh_labels()
@@ -448,7 +454,7 @@ class SizeTree(Tree[FSNode]):
         if visual is not None:
             token = visual_token(visual.state)
             text.append(
-                f"  {format_visual_delta(visual, self._metric)}",
+                f"  {format_visual_delta(visual, self._visual_metric)}",
                 style=token.color,
             )
 

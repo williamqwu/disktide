@@ -246,7 +246,12 @@ class TreemapView(OpaqueStripMixin, Widget):
             self.size.width,
             self.size.height,
             max_depth=max_depth,
-            metric=self._metric,
+            # A metric toggle lands before the worker rebuilds the frame, so
+            # the frame stays authoritative for how its own visuals are
+            # formatted; set_diff restores the metric when the new one lands.
+            metric=(
+                self._diff.metric.value if self._diff is not None else self._metric
+            ),
             weights=self._diff.weights if self._diff is not None else None,
             visuals=self._diff.visuals if self._diff is not None else None,
             selected_path=(
