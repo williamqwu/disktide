@@ -30,6 +30,23 @@ class NativeEventBackendUnavailable(RuntimeError):
     pass
 
 
+#: Errnos that describe one directory rather than the inotify instance.
+#: `inotify_add_watch(2)` returns EACCES when the directory may not be read,
+#: and a directory disktide may not read is one no scan can look inside
+#: either -- so skipping it loses nothing, while treating it as a backend
+#: failure cost a full rescan of the whole tree on every session pass.
+_PER_DIRECTORY_ERRNOS = frozenset(
+    {
+        errno.EACCES,
+        errno.EPERM,
+        errno.ENOENT,
+        errno.ENOTDIR,
+        errno.ELOOP,
+        errno.ENAMETOOLONG,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _WatchState:
     path: str
@@ -130,6 +147,8 @@ class InotifyEventBackend:
         self._registration_in_progress = False
         self._warning: str | None = None
         self._fallback_reason: str | None = None
+        self._unwatchable_count = 0
+        self._unwatchable_first: str | None = None
         info = probe_native_event_backend()
         self._descriptor_limit = info.descriptor_limit
         self._instance_limit = info.instance_limit
@@ -161,7 +180,7 @@ class InotifyEventBackend:
                 registration_duration_seconds=duration,
                 registration_strategy=self._registration_strategy,
                 registration_in_progress=self._registration_in_progress,
-                warning=self._warning,
+                warning=self._skipped_warning_locked(),
                 fallback_reason=self._fallback_reason,
             )
 
@@ -274,6 +293,8 @@ class InotifyEventBackend:
         self._registration_in_progress = True
         self._warning = None
         self._fallback_reason = None
+        self._unwatchable_count = 0
+        self._unwatchable_first = None
 
     def _start_thread(self) -> None:
         self._thread = threading.Thread(
@@ -475,6 +496,10 @@ class InotifyEventBackend:
                         except OSError:
                             continue
             except OSError as exc:
+                if exc.errno in _PER_DIRECTORY_ERRNOS:
+                    with self._lock:
+                        self._note_unwatchable_locked(current_path, exc)
+                    continue
                 self._emit(
                     FilesystemEventKind.BACKEND_ERROR,
                     current_path,
@@ -519,6 +544,15 @@ class InotifyEventBackend:
             try:
                 wd = self._notifier.add_watch(path, mask)
             except OSError as exc:
+                if exc.errno in _PER_DIRECTORY_ERRNOS:
+                    # `inotify_add_watch` needs read access to the directory,
+                    # and so does `os.scandir`: a directory this fails on is
+                    # one no scan can see inside either, so there is nothing
+                    # for events to miss. Reporting it as a backend failure
+                    # made the service stop and restart the backend on every
+                    # session pass, and each restart forces a full rescan.
+                    self._note_unwatchable_locked(path, exc)
+                    return
                 self._fallback_reason = (
                     "inotify descriptor capacity was exhausted"
                     if exc.errno in {errno.ENOSPC, errno.EMFILE, errno.ENFILE}
@@ -563,7 +597,32 @@ class InotifyEventBackend:
                 f"({ratio:.0%}); periodic fallback may be required"
             )
 
+    def _note_unwatchable_locked(self, path: str, exc: OSError) -> None:
+        """Remember a directory that cannot be watched, without failing.
+
+        Only the first path is kept: a tree can hold thousands of these and
+        the diagnostics line has room for one example and a count.
+        """
+        self._unwatchable_count += 1
+        if self._unwatchable_first is None:
+            self._unwatchable_first = f"{path}: {exc}"
+
+    def _skipped_warning_locked(self) -> str | None:
+        if not self._unwatchable_count:
+            return self._warning
+        plural = "y" if self._unwatchable_count == 1 else "ies"
+        note = (
+            f"{self._unwatchable_count:,} director{plural} could not be "
+            f"watched and are left to the periodic scan "
+            f"(first: {self._unwatchable_first})"
+        )
+        return f"{self._warning}; {note}" if self._warning else note
+
     def _emit_watch_error(self, path: str, exc: OSError) -> None:
+        if exc.errno in _PER_DIRECTORY_ERRNOS:
+            with self._lock:
+                self._note_unwatchable_locked(path, exc)
+            return
         if exc.errno in {errno.ENOSPC, errno.EMFILE, errno.ENFILE}:
             detail = "inotify watch limit reached; full reconciliation required"
         else:

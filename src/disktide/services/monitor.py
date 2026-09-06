@@ -109,6 +109,9 @@ class MonitorEventBackendUnavailable(MonitorServiceError):
 
 _SESSION_STOP_CANCELLATION_REASON = "monitor session stopping"
 
+#: Floor on how long a failed event backend stays down before a restart.
+_EVENT_BACKEND_RETRY_SECONDS = 5.0
+
 
 class MonitorEventKind(StrEnum):
     DEFINITION_CHANGED = "definition-changed"
@@ -1634,7 +1637,9 @@ class MonitorService:
             else:
                 backend.start((watch,), callback)
         except Exception as exc:
-            self._event_backend_retry_at[monitor_id] = self._monotonic() + 5.0
+            self._event_backend_retry_at[monitor_id] = (
+                self._monotonic() + _EVENT_BACKEND_RETRY_SECONDS
+            )
             reason = f"event backend start failed: {type(exc).__name__}: {exc}"
             with self._status_lock:
                 status = self._repository.get_monitor_status(monitor_id)
@@ -1675,6 +1680,7 @@ class MonitorService:
             reason = diagnostics.fallback_reason
             if self._event_mode is MonitorEventMode.AUTO:
                 self._event_backend_fallbacks[monitor_id] = reason
+            self._defer_event_backend_retry(monitor_id, definition)
             self._stop_event_backend(
                 monitor_id,
                 reason=reason,
@@ -1739,6 +1745,26 @@ class MonitorService:
                         self._pending_reconcile_ids.add(monitor_id)
             if changed:
                 self._repository.save_monitor_status(status)
+
+    def _defer_event_backend_retry(
+        self, monitor_id: int, definition=None
+    ) -> None:
+        """Hold a failed backend down for at least the monitor's own interval.
+
+        Nothing else stops the session loop restarting a backend that failed
+        for the whole tree, and `events` mode has no periodic fallback to
+        record; every restart calls `force_full` and queues a reconciliation,
+        so a repeating failure turned an hourly monitor into a continuous
+        rescan. Waiting the interval makes a persistent failure cost no more
+        than the schedule it is degrading to.
+        """
+        delay = _EVENT_BACKEND_RETRY_SECONDS
+        if definition is None:
+            definition = self._repository.get_monitor(monitor_id)
+        interval = getattr(definition, "interval_seconds", None)
+        if interval:
+            delay = max(delay, float(interval))
+        self._event_backend_retry_at[monitor_id] = self._monotonic() + delay
 
     def _stop_event_backend(
         self,
@@ -1843,6 +1869,7 @@ class MonitorService:
                 reason = event.detail or "event backend failed"
                 if self._event_mode is MonitorEventMode.AUTO:
                     self._event_backend_fallbacks[monitor_id] = reason
+                self._defer_event_backend_retry(monitor_id)
                 self._stop_event_backend(
                     monitor_id,
                     reason=reason,
