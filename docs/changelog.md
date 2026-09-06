@@ -102,6 +102,7 @@
 - **Applying a finished plan twice no longer destroys its undo** The second pass re-validated already-succeeded actions, found the target gone, and rewrote them to `skipped` — after which `cleanup undo` restored nothing and `cleanup purge` found nothing eligible, leaving the files stranded in the trash.
 - **Trashed and quarantined content is protected from the next pass** When the trash root or a quarantine directory sat inside the scan root, pass two moved the isolated copy again, and the first plan's undo then refused with "isolated target identity changed".
 - **An unknown `default_viz` no longer takes the app down** A hand-typed or cross-version `[ui] default_viz` was copied verbatim into the Settings `Select`, which Textual makes fatal inside `compose`, so the first press of `,` exited with return code 1.
+- **Config strings are escaped when they are written** Visiting a directory whose name held a quote or a backslash produced a `config.toml` that `tomllib` refused, and every later `disktide` command died with a decode traceback until the file was hand-edited.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**

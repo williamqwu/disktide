@@ -246,6 +246,15 @@ def cleanup_rule_directory() -> Path:
     return config_root() / "cleanup-rules"
 
 
+def _toml_str(value: str) -> str:
+    """Quote a string so TOML reads back exactly what was written.
+
+    A directory name may hold a quote or a backslash; writing it raw made
+    the file unparseable and every later launch died in the loader.
+    """
+    return json.dumps(value, ensure_ascii=False)
+
+
 def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     """Save configuration to TOML file."""
     config_file = Path(path) if path else _config_path()
@@ -278,7 +287,7 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     )
     if config.monitor.auto_start_in_tui:
         lines.append("auto_start_in_tui = true")
-    lines.append(f'event_mode = "{config.monitor.event_mode}"')
+    lines.append(f"event_mode = {_toml_str(config.monitor.event_mode)}")
     lines.append("")
 
     lines.append("[cleanup]")
@@ -304,15 +313,15 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     if config.keys.preset != DEFAULT_KEY_PRESET or config.keys.overrides:
         lines.append("[keys]")
         if config.keys.preset != DEFAULT_KEY_PRESET:
-            lines.append(f'preset = "{config.keys.preset}"')
+            lines.append(f"preset = {_toml_str(config.keys.preset)}")
         for binding_id in sorted(config.keys.overrides):
             key = config.keys.overrides[binding_id]
             lines.append(f"{json.dumps(binding_id)} = {json.dumps(key)}")
         lines.append("")
 
     lines.append("[ui]")
-    lines.append(f'color_theme = "{config.ui.color_theme}"')
-    lines.append(f'default_viz = "{config.ui.default_viz}"')
+    lines.append(f"color_theme = {_toml_str(config.ui.color_theme)}")
+    lines.append(f"default_viz = {_toml_str(config.ui.default_viz)}")
     if config.ui.show_cleanup:
         lines.append("show_cleanup = true")
     if config.ui.safe_rendering:
@@ -327,24 +336,24 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
             rendered += ".0"
         lines.append(f"cell_aspect = {rendered}")
     if config.ui.ring_shape != DEFAULT_RING_SHAPE:
-        lines.append(f'ring_shape = "{config.ui.ring_shape}"')
+        lines.append(f"ring_shape = {_toml_str(config.ui.ring_shape)}")
     if config.ui.color_depth != "auto":
-        lines.append(f'color_depth = "{config.ui.color_depth}"')
+        lines.append(f"color_depth = {_toml_str(config.ui.color_depth)}")
     if config.ui.live_scan_render != "auto":
-        lines.append(f'live_scan_render = "{config.ui.live_scan_render}"')
+        lines.append(f"live_scan_render = {_toml_str(config.ui.live_scan_render)}")
     if config.ui.default_scan_path is not None:
-        lines.append(f'default_scan_path = "{config.ui.default_scan_path}"')
+        lines.append(f"default_scan_path = {_toml_str(config.ui.default_scan_path)}")
     if not config.ui.hostname_aware_paths:
         lines.append("hostname_aware_paths = false")
     lines.append("")
 
     # Per-hostname path storage
     for hostname, hp in config.host_paths.items():
-        lines.append(f'[paths."{hostname}"]')
+        lines.append(f"[paths.{_toml_str(hostname)}]")
         if hp.default_scan_path is not None:
-            lines.append(f'default_scan_path = "{hp.default_scan_path}"')
+            lines.append(f"default_scan_path = {_toml_str(hp.default_scan_path)}")
         if hp.last_visited_path is not None:
-            lines.append(f'last_visited_path = "{hp.last_visited_path}"')
+            lines.append(f"last_visited_path = {_toml_str(hp.last_visited_path)}")
         lines.append("")
 
     config_file.write_text("\n".join(lines))
