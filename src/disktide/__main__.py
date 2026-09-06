@@ -134,8 +134,20 @@ def _json_dumps(document, **kwargs) -> str:
 
 
 _TUI_OPTIONS = (
-    click.option("--max-depth", "-d", type=int, default=None, help="Maximum scan depth"),
-    click.option("--workers", "-w", type=int, default=None, help="Number of scan threads"),
+    click.option(
+        "--max-depth",
+        "-d",
+        type=click.IntRange(min=0),
+        default=None,
+        help="Maximum scan depth",
+    ),
+    click.option(
+        "--workers",
+        "-w",
+        type=click.IntRange(min=1),
+        default=None,
+        help="Number of scan threads",
+    ),
     click.option(
         "--one-file-system/--cross-filesystems",
         default=None,
@@ -602,8 +614,20 @@ def doctor(json_output: bool, show_paths: bool, check_integrity: bool) -> None:
 @cli.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
 @click.option("--snapshot", "-s", is_flag=True, help="Save snapshot to database")
-@click.option("--max-depth", "-d", type=int, default=None, help="Maximum scan depth")
-@click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
+@click.option(
+    "--max-depth",
+    "-d",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum scan depth",
+)
+@click.option(
+    "--workers",
+    "-w",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Number of scan threads",
+)
 @click.option(
     "--metric",
     type=click.Choice(["logical", "allocated", "unique", "files"]),
@@ -1295,10 +1319,10 @@ def monitor_list(include_archived: bool, json_output: bool) -> None:
     default="logical",
     show_default=True,
 )
-@click.option("--workers", type=int, default=None)
+@click.option("--workers", type=click.IntRange(min=1), default=None)
 @click.option("--one-file-system/--cross-filesystems", default=None)
 @click.option("--exclude-pseudo/--include-pseudo", default=None)
-@click.option("--max-depth", type=int, default=None)
+@click.option("--max-depth", type=click.IntRange(min=0), default=None)
 @click.option("--capture-now", is_flag=True, help="Capture the first snapshot now")
 def monitor_add(
     path: Path,
@@ -1385,10 +1409,10 @@ def monitor_add(
     type=click.Choice(["logical", "allocated", "unique", "files"]),
     default=None,
 )
-@click.option("--workers", type=int, default=None)
+@click.option("--workers", type=click.IntRange(min=1), default=None)
 @click.option("--one-file-system/--cross-filesystems", default=None)
 @click.option("--exclude-pseudo/--include-pseudo", default=None)
-@click.option("--max-depth", type=int, default=None)
+@click.option("--max-depth", type=click.IntRange(min=0), default=None)
 def monitor_edit(
     identifier: str,
     label: str | None,
@@ -2243,7 +2267,13 @@ def alerts_check(monitor_id: int | None, json_output: bool) -> None:
 @click.option("--all", "watch_all", is_flag=True, help="Host all enabled monitors")
 @click.option("--interval", "-i", default=None, help="Transient scan interval")
 @click.option("--max-time", "-t", default=None, help="Maximum foreground host time")
-@click.option("--workers", "-w", type=int, default=None, help="Transient scan workers")
+@click.option(
+    "--workers",
+    "-w",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Transient scan workers",
+)
 @click.option(
     "--events",
     is_flag=True,
@@ -2515,7 +2545,13 @@ def cleanup() -> None:
 
 @cleanup.command("plan")
 @click.argument("path", required=False)
-@click.option("--workers", "-w", type=int, default=None, help="Number of scan threads")
+@click.option(
+    "--workers",
+    "-w",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Number of scan threads",
+)
 @click.option(
     "--apply", "apply_safe", is_flag=True, help="Move targets to Trash/quarantine"
 )

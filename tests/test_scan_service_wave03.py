@@ -385,7 +385,10 @@ def test_cleanup_rejects_invalid_worker_count_with_usage_exit_code(tmp_path):
     )
 
     assert result.exit_code == 2
-    assert "workers must be greater than zero" in result.output
+    # Click's own range message names the option; the old wording pointed at
+    # `PATH`, which was never the parameter at fault.
+    assert "'--workers'" in result.output
+    assert "x>=1" in result.output
 
 
 def test_cli_uses_distinct_cancel_and_failure_exit_codes(tmp_path, monkeypatch):
