@@ -89,6 +89,12 @@ class ScanWorkerSelection:
     #: `Warning:` lines by the CLI and raised as notifications in the TUI.
     #: Advisory only: the request is honoured up to the host's ceiling.
     warnings: tuple[str, ...] = ()
+    #: How many threads one worker may spread the `stat` calls of a single
+    #: large directory across. 1 means the directory is read sequentially, as
+    #: every local mount wants; the policy raises it on latency-bound mounts,
+    #: where a directory of 200,000 entries otherwise costs one worker 200,000
+    #: server round-trips in a row.
+    stat_threads: int = 1
 
 
 @dataclass(frozen=True, slots=True)
