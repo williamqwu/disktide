@@ -164,9 +164,11 @@ class AlertEditor(ModalScreen[AlertRule | None]):
                 yield Label("Window", classes="alert-label")
                 yield Input(
                     value=(
-                        format_duration(rule.window_seconds)
-                        if rule and rule.window_seconds
-                        else "24h"
+                        "24h"
+                        if rule is None
+                        else format_duration(rule.window_seconds)
+                        if rule.window_seconds
+                        else ""
                     ),
                     placeholder="none",
                     id="alert-window",

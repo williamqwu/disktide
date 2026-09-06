@@ -84,3 +84,44 @@ def test_new_large_item_needs_a_baseline():
         {},
     )
     assert evaluated is None
+
+
+# --- editing a rule must not invent a window ---------------------------
+
+
+def test_editing_a_windowless_rule_leaves_it_windowless():
+    from textual.app import App
+    from textual.widgets import Input
+
+    from disktide.domain.alerts import AlertKind, AlertRule, AlertSeverity
+    from disktide.domain.metrics import MetricId
+    from disktide.widgets.alert_editor import AlertEditor
+
+    rule = AlertRule(
+        id=1,
+        monitor_id=1,
+        path="/x",
+        kind=AlertKind.ABSOLUTE_GROWTH,
+        metric=MetricId.LOGICAL,
+        threshold=10.0,
+        severity=AlertSeverity.WARNING,
+        window_seconds=None,
+    )
+
+    async def scenario():
+        app = App()
+        async with app.run_test() as pilot:
+            saved: list = []
+            app.push_screen(
+                AlertEditor(monitor_id=1, default_path="/x", rule=rule),
+                saved.append,
+            )
+            await pilot.pause()
+            assert app.screen.query_one("#alert-window", Input).value == ""
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            assert saved and saved[0].window_seconds is None
+
+    import asyncio
+
+    asyncio.run(scenario())
