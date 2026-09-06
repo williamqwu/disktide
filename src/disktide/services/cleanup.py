@@ -86,6 +86,12 @@ class CleanupService:
         self._protected_paths = {
             self._normalize(path) for path in protected_paths
         }
+        # Content the previous pass moved out of the way: re-targeting it
+        # breaks that plan's undo and purge, which match on identity.
+        trash_root = getattr(self._trash, "root", None)
+        self._isolation_roots = (
+            {self._normalize(trash_root)} if trash_root is not None else set()
+        )
         repository_path = getattr(repository, "path", None)
         if repository_path and repository_path != ":memory:":
             database_path = self._normalize(repository_path)
@@ -895,16 +901,24 @@ class CleanupService:
             return "scan root itself is protected"
         if not self._is_within(path, scan_root):
             return "target is outside the scan root"
-        if path.name in {
+        quarantine_names = {
             QUARANTINE_DIRECTORY_NAME,
             *LEGACY_QUARANTINE_DIRECTORY_NAMES,
-        }:
+        }
+        if path.name in quarantine_names:
             return "quarantine root is protected"
+        if any(part in quarantine_names for part in path.parts):
+            # A descendant of a quarantine directory is content an earlier
+            # plan isolated; re-targeting it breaks that plan's undo.
+            return "quarantine content is protected"
         if not path.is_symlink() and os.path.ismount(path):
             return "mount root is protected"
         mount_reason = _mount_boundary_reason(path)
         if mount_reason:
             return mount_reason
+        for isolated in self._isolation_roots:
+            if path == isolated or self._is_within(path, isolated):
+                return "isolated content is protected"
         for protected in self._protected_paths:
             if (
                 path == protected

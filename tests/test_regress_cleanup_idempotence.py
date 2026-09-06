@@ -65,3 +65,60 @@ def test_reapplying_a_finished_plan_keeps_the_first_result(tmp_path):
         assert action_id in still, again.plan.status
         assert still[action_id].error is None
     repository.close()
+
+
+# --- content already isolated must not be re-targeted -------------------
+
+
+def test_trashed_content_is_not_a_cleanup_target_again(tmp_path):
+    from disktide.cleanup.actions import XDGTrashAdapter
+    from disktide.cleanup.detector import detect_targets
+    from disktide.domain.cleanup import (
+        CleanupActionKind,
+        CleanupValidationStatus,
+    )
+    from disktide.repositories.sqlite import SQLiteSnapshotRepository
+    from disktide.scanner.walker import scan_directory
+    from disktide.services.cleanup import CleanupService
+
+    root = tmp_path / "root"
+    cache = root / "proj" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "m.pyc").write_bytes(b"x" * 64)
+    trash_root = root / "data" / "Trash"
+
+    repository = SQLiteSnapshotRepository(str(tmp_path / "cleanup.db"))
+    service = CleanupService(repository, trash=XDGTrashAdapter(trash_root))
+    plan = service.create_plan(root, detect_targets(scan_directory(str(root))))
+    service.execute(plan, action=CleanupActionKind.TRASH)
+
+    second = service.create_plan(
+        root, detect_targets(scan_directory(str(root)))
+    )
+    isolated = [
+        action
+        for action in second.actions
+        if str(Path(action.path)).startswith(str(trash_root))
+    ]
+    assert isolated, "the second pass should still see the trashed copy"
+    for action in isolated:
+        assert action.validation_status is CleanupValidationStatus.BLOCKED
+        assert "isolated" in (action.validation_detail or "")
+    repository.close()
+
+
+def test_quarantined_content_is_protected_from_the_next_pass(tmp_path):
+    from disktide.repositories.sqlite import SQLiteSnapshotRepository
+    from disktide.services.cleanup import CleanupService
+
+    root = tmp_path / "root"
+    nested = root / "proj" / ".disktide-quarantine" / "abc-__pycache__"
+    nested.mkdir(parents=True)
+    (nested / "m.pyc").write_bytes(b"x")
+
+    repository = SQLiteSnapshotRepository(str(tmp_path / "cleanup.db"))
+    service = CleanupService(repository)
+
+    assert service._danger_reason(nested, root) is not None
+    assert service._danger_reason(nested / "m.pyc", root) is not None
+    repository.close()
