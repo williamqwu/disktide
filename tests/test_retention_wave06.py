@@ -11,6 +11,7 @@ from disktide.domain.monitor import (
     MonitorHealthState,
     RetentionPolicy,
 )
+from disktide.domain.alerts import AlertEvent, AlertRule
 from disktide.domain.snapshot import Snapshot
 from disktide.models.tree import FSNode
 from disktide.repositories.sqlite import SQLiteSnapshotRepository
@@ -202,6 +203,62 @@ def test_retention_prune_keeps_the_kept_snapshot_measurements(
         for path, measurement in repository.load_measurements(kept).items()
     }
     assert after == before
+
+
+def test_retention_prune_keeps_the_alert_history_it_prunes_under(
+    repository, tmp_path
+):
+    """Pruning a snapshot used to take the alert events raised on it."""
+    root_path = str(tmp_path / "root")
+    monitor = repository.create_monitor(MonitorDefinition(root_path=root_path))
+    assert monitor.id is not None
+    now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+    snapshot_ids = [
+        _save_snapshot(
+            repository,
+            monitor.id,
+            root_path,
+            now - timedelta(hours=6, minutes=50 - index * 10),
+            index + 1,
+        )
+        for index in range(4)
+    ]
+    rule = repository.create_alert_rule(
+        AlertRule(monitor_id=monitor.id, path=root_path, threshold=1)
+    )
+    for snapshot_id in snapshot_ids:
+        repository.save_alert_event(
+            AlertEvent(
+                rule_id=rule.id,
+                monitor_id=monitor.id,
+                new_snapshot_id=snapshot_id,
+                message=f"snapshot {snapshot_id}",
+            )
+        )
+    assert len(repository.list_alert_events(monitor.id)) == 4
+
+    policy = RetentionPolicy(
+        keep_all_seconds=60 * 60,
+        keep_hourly_seconds=24 * 60 * 60,
+        keep_daily_seconds=30 * 24 * 60 * 60,
+        minimum_snapshots=1,
+    )
+    result = RetentionService(repository, now=lambda: now).run(
+        monitor.id, policy, compact=False
+    )
+
+    assert result.status == "completed"
+    assert result.pruned > 0
+    events = repository.list_alert_events(monitor.id)
+    assert len(events) == 4
+    survivors = {snapshot_ids[-1]}
+    for event in events:
+        if event.new_snapshot_id is None:
+            continue
+        assert event.new_snapshot_id in survivors
+    latest = repository.latest_alert_event(rule.id)
+    assert latest is not None
+    assert latest.message == f"snapshot {snapshot_ids[-1]}"
 
 
 def test_hard_budget_allows_scan_but_blocks_new_snapshot(repository, tmp_path):

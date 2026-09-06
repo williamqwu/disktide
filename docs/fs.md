@@ -159,7 +159,7 @@ and cleanup audit records remain available.
 | Create dir | `os.makedirs(db_dir, exist_ok=True)` |
 | Open/create DB | `sqlite3.connect(path)` |
 | Open read-only recovery | SQLite URI with `mode=ro`, then `PRAGMA query_only=ON` |
-| Pre-migration backup | SQLite backup API to `data.db.pre-v10.bak.partial`, then `os.replace` to `data.db.pre-v10.bak` |
+| Pre-migration backup | SQLite backup API to `data.db.pre-v11.bak.partial`, then `os.replace` to `data.db.pre-v11.bak` |
 | Open-path validity | `SELECT 1 FROM sqlite_master LIMIT 1` |
 | Integrity probe | `PRAGMA quick_check`, in `doctor` only |
 | Budget measurement | `Path.stat()` on the database, WAL, and shared-memory files |

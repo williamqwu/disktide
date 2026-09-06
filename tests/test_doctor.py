@@ -702,7 +702,7 @@ def test_the_report_opens_the_database_once(tmp_path, monkeypatch):
 def test_the_schema_line_says_when_the_number_is_the_memory_fallback(
     tmp_path, monkeypatch
 ):
-    """`Schema: 10 / 10` beside `[DEGRADED]` read as a contradiction.
+    """`Schema: N / N` beside `[DEGRADED]` read as a contradiction.
 
     The fallback database is created fresh in memory, so its schema is
     always current and says nothing about the file that could not be opened.
@@ -719,7 +719,10 @@ def test_the_schema_line_says_when_the_number_is_the_memory_fallback(
     database = report.to_dict()["database"]
     assert database["status"] == "degraded"
     assert database["schema_source"] == "in-memory fallback"
-    assert "Schema: 10 / 10 (in-memory fallback)" in render_doctor_report(report)
+    from disktide.storage.migrations import CURRENT_VERSION
+
+    expected = f"Schema: {CURRENT_VERSION} / {CURRENT_VERSION} (in-memory fallback)"
+    assert expected in render_doctor_report(report)
     # And the integrity check must not say `ok` about the wrong database.
     assert database["integrity"]["status"] != "ok"
 

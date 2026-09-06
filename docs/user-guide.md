@@ -454,7 +454,7 @@ The same fallback applies to the database: with no `~/.local/share/disktide/`
 directory, an existing `~/.local/share/fsmonitor-cli/data.db` (or the
 `sizetrail` one) is opened *in place* and migrated to the current schema, so
 the old history carries over. The migration first copies the file to
-`data.db.pre-v10.bak`, which briefly doubles that directory — `disktide
+`data.db.pre-v11.bak`, which briefly doubles that directory — `disktide
 doctor` names the backup and its size, and it can be deleted once the new
 version has been used successfully. To keep the old data untouched instead,
 move or rename the legacy directory before the first run; disktide then

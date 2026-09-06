@@ -808,7 +808,7 @@ full-state APIs. Interactive use prefers targeted contracts:
 ### Migration
 
 Before changing a non-empty database, migration writes a SQLite backup
-(`data.db.pre-v10.bak`). All DDL, backfill, and schema version changes run
+(`data.db.pre-v11.bak`). All DDL, backfill, and schema version changes run
 in one transaction; failure rolls back without advancing `schema_version`.
 
 The backup is written to `data.db.pre-vN.bak.partial` and renamed only when

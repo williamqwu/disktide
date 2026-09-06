@@ -138,6 +138,41 @@ class TestMigrations:
             "provisional_summary_json",
         } <= columns
 
+    def test_v11_keeps_alert_events_when_their_snapshot_goes(self, conn):
+        """A v10 database cascade-deleted alert history with pruned snapshots."""
+        migrate(conn, target_version=10)
+        conn.execute("PRAGMA foreign_keys=ON")
+        snapshot_id = conn.execute(
+            """INSERT INTO snapshots (root_path, timestamp)
+               VALUES ('/r', '2026-01-01T00:00:00+00:00')"""
+        ).lastrowid
+        rule_id = conn.execute(
+            "INSERT INTO alert_rules (path, enabled) VALUES ('/r', 1)"
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO alert_events
+               (rule_id, snapshot_id, triggered_at, message, new_snapshot_id)
+               VALUES (?, ?, '2026-01-01T00:00:00+00:00', 'grew', ?)""",
+            (rule_id, snapshot_id, snapshot_id),
+        )
+        conn.commit()
+
+        migrate(conn)
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("DELETE FROM snapshots WHERE id = ?", (snapshot_id,))
+        conn.commit()
+
+        rows = conn.execute(
+            "SELECT snapshot_id, new_snapshot_id, message FROM alert_events"
+        ).fetchall()
+        assert rows == [(None, None, "grew")]
+        actions = [
+            row[6]
+            for row in conn.execute("PRAGMA foreign_key_list(alert_events)")
+            if row[3] == "snapshot_id"
+        ]
+        assert actions == ["SET NULL"]
+
     def test_snapshots_has_baseline_columns(self, conn):
         migrate(conn)
         # Verify the columns exist by inserting a row
@@ -592,7 +627,7 @@ class TestTheMigrationBackup:
         assert backup == migration_backup_path(path)
         assert backup.exists() and backup.stat().st_size > 0
         assert lines, "the migration said nothing"
-        assert "from schema 3 to 10" in lines[0]
+        assert f"from schema 3 to {CURRENT_VERSION}" in lines[0]
         assert "backing up to" in lines[0]
         assert f"{path}" in lines[0]
         assert lines[-1].endswith(" s")

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
 
-CURRENT_VERSION = 10
+CURRENT_VERSION = 11
 
 #: Pages copied per `sqlite3.Connection.backup` step. Small enough that a
 #: large file reports progress often, large enough that the callback is not
@@ -414,6 +414,46 @@ MIGRATIONS: dict[int, list[str]] = {
     10: [
         "ALTER TABLE monitor_status ADD COLUMN watch_diagnostics_json TEXT NOT NULL DEFAULT '{}'",
         "ALTER TABLE monitor_status ADD COLUMN provisional_summary_json TEXT NOT NULL DEFAULT '{}'",
+    ],
+    11: [
+        # Alert history has to outlive the snapshot it was raised on: v5 gave
+        # `old_snapshot_id`/`new_snapshot_id` ON DELETE SET NULL for exactly
+        # that reason, but the v1 `snapshot_id` column kept its CASCADE, so
+        # every retention prune took the events with it. SQLite cannot ALTER
+        # a foreign key, so the table is rebuilt.
+        """CREATE TABLE alert_events_v11 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL,
+            snapshot_id INTEGER,
+            triggered_at TEXT NOT NULL,
+            message TEXT NOT NULL,
+            monitor_id INTEGER REFERENCES monitor_definitions(id),
+            old_snapshot_id INTEGER REFERENCES snapshots(id) ON DELETE SET NULL,
+            new_snapshot_id INTEGER REFERENCES snapshots(id) ON DELETE SET NULL,
+            observed_value REAL,
+            threshold_value REAL,
+            confidence TEXT,
+            suppressed INTEGER NOT NULL DEFAULT 0,
+            suppression_reason TEXT,
+            severity TEXT,
+            kind TEXT,
+            FOREIGN KEY (rule_id) REFERENCES alert_rules(id),
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE SET NULL
+        )""",
+        """INSERT INTO alert_events_v11 (
+               id, rule_id, snapshot_id, triggered_at, message, monitor_id,
+               old_snapshot_id, new_snapshot_id, observed_value,
+               threshold_value, confidence, suppressed, suppression_reason,
+               severity, kind
+           )
+           SELECT id, rule_id, snapshot_id, triggered_at, message, monitor_id,
+                  old_snapshot_id, new_snapshot_id, observed_value,
+                  threshold_value, confidence, suppressed, suppression_reason,
+                  severity, kind
+             FROM alert_events""",
+        "DROP TABLE alert_events",
+        "ALTER TABLE alert_events_v11 RENAME TO alert_events",
+        "CREATE INDEX idx_alert_events_monitor ON alert_events(monitor_id, triggered_at)",
     ],
 }
 
