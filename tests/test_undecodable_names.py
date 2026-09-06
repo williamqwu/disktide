@@ -30,6 +30,7 @@ def isolated_state(tmp_path_factory, monkeypatch):
         "XDG_STATE_HOME",
     ):
         monkeypatch.setenv(variable, str(root / variable.lower()))
+    return root
 
 
 def _make_undecodable_directory(tmp_path) -> str:
@@ -153,3 +154,101 @@ def test_doctor_json_still_parses():
 
     assert result.exit_code == 0, result.output
     assert isinstance(json.loads(result.stdout), dict)
+
+
+# --- the database ----------------------------------------------------------
+
+
+def test_store_text_round_trips_every_shape_of_name():
+    from disktide.textsafe import load_text, store_text
+
+    for name in (
+        "plain",
+        "Ünïcode dir",
+        "bad\udcffname",
+        "\udc80\udcff",
+        "￿literal marker",
+        "￿both\udcffways",
+    ):
+        stored = store_text(name)
+        stored.encode("utf-8")
+        assert load_text(stored) == name
+
+
+def test_store_text_leaves_a_decodable_name_byte_for_byte():
+    """Databases written before the escape existed must still read back."""
+    from disktide.textsafe import load_text, store_text
+
+    for name in ("/home/u/p", "Ünïcode dir", "100% of it"):
+        assert store_text(name) == name
+        assert load_text(name) == name
+
+
+def test_a_snapshot_saves_and_reloads_an_undecodable_name(tmp_path):
+    """One undecodable byte used to abort the whole snapshot."""
+    from disktide.models.snapshot import Snapshot
+    from disktide.models.tree import FSNode
+    from disktide.storage.database import Database
+
+    root_path = "/r\udcfe"
+    root = FSNode(
+        name="r\udcfe", path=root_path, size=7, own_size=0,
+        file_count=1, dir_count=0, is_dir=True, depth=0,
+        error="PermissionError on bad\udcffname",
+    )
+    root.children = [
+        FSNode(
+            name="bad\udcffname", path=f"{root_path}/bad\udcffname",
+            size=7, own_size=7, file_count=1, is_dir=False, depth=1,
+        )
+    ]
+    database = Database(path=str(tmp_path / "d.db"))
+    database.connect()
+    try:
+        snapshot_id = database.save_snapshot(
+            Snapshot(root_path=root_path, total_size=7), root
+        )
+        assert snapshot_id is not None
+
+        listed = database.list_snapshots(root_path, strict_path=True)
+        assert [item.id for item in listed] == [snapshot_id]
+        assert listed[0].root_path == root_path
+
+        tree = database.load_tree(snapshot_id)
+        assert tree.path == root_path
+        child = tree.children[0]
+        assert child.name == "bad\udcffname"
+        assert os.fsencode(child.path) == os.fsencode(root_path) + b"/bad\xffname"
+        assert tree.error == "PermissionError on bad\udcffname"
+
+        measurements = database.load_measurements(snapshot_id)
+        assert f"{root_path}/bad\udcffname" in measurements
+    finally:
+        database.close()
+
+
+def test_scan_snapshot_persists_a_tree_with_an_undecodable_name(
+    tmp_path, isolated_state
+):
+    """`scan --snapshot` used to print the report and then refuse to save."""
+    import sqlite3
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    with open(os.path.join(os.fsencode(str(tree)), b"bad\xffname.txt"), "wb") as fh:
+        fh.write(b"x" * 128)
+    (tree / "ok.txt").write_bytes(b"y" * 64)
+
+    result = CliRunner().invoke(cli, ["scan", "--snapshot", str(tree)])
+
+    assert result.exit_code == 0, result.output
+    assert "Could not save snapshot" not in result.output
+    database_path = isolated_state / "xdg_data_home" / "disktide" / "data.db"
+    assert database_path.exists()
+    connection = sqlite3.connect(str(database_path))
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM snapshots"
+        ).fetchone()[0] == 1
+    finally:
+        connection.close()

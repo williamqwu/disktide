@@ -69,6 +69,7 @@ log = logging.getLogger(__name__)
 
 from disktide.models.tree import FSNode, LeafNode
 from disktide.paths import database_file
+from disktide.textsafe import load_text, store_text
 from disktide.storage.migrations import (
     CURRENT_VERSION,
     SchemaTooNewError,
@@ -113,6 +114,23 @@ def _batches(
 ) -> Iterator[Sequence[_BatchValue]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
+
+
+def _decode_text(raw: bytes) -> str:
+    """Read a text column, undoing the escape `store_text` writes.
+
+    Installed as the connection's `text_factory`, so nothing that comes out
+    of the database still carries the escape and no read site has to know
+    the escape exists. Names written before it existed are stored verbatim
+    and `load_text` returns them untouched.
+    """
+    value = str(raw, "utf-8")
+    return value if value.isascii() else load_text(value)
+
+
+def _store_error(value: str | None) -> str | None:
+    """Escape a scan error, which usually quotes the path it failed on."""
+    return None if value is None else store_text(value)
 
 
 def _datetime_text(value: datetime | None) -> str | None:
@@ -307,6 +325,7 @@ class Database:
             conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         else:
             conn = sqlite3.connect(path, check_same_thread=False)
+        conn.text_factory = _decode_text
         try:
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA foreign_keys=ON")
@@ -472,13 +491,16 @@ class Database:
         # Batch insert (ignore duplicates)
         self.conn.executemany(
             "INSERT OR IGNORE INTO paths (path, name, depth) VALUES (?, ?, ?)",
-            ((node.path, node.name, node.depth) for node in nodes),
+            (
+                (store_text(node.path), store_text(node.name), node.depth)
+                for node in nodes
+            ),
         )
 
         # Fetch all path_ids without retaining a second full-tree path list.
         path_to_id: dict[str, int] = {}
         for batch in _batches(nodes):
-            paths = tuple(node.path for node in batch)
+            paths = tuple(store_text(node.path) for node in batch)
             placeholders = ",".join("?" * len(paths))
             rows = self.conn.execute(
                 f"SELECT id, path FROM paths WHERE path IN ({placeholders})",
@@ -604,7 +626,7 @@ class Database:
             node.file_count,
             node.dir_count,
             node.mtime,
-            node.error,
+            None if node.error is None else store_text(node.error),
             node.is_dir,
         )
 
@@ -635,7 +657,7 @@ class Database:
                    filesystem_type = excluded.filesystem_type,
                    last_seen_at = excluded.last_seen_at""",
             (
-                snapshot.root_path,
+                store_text(snapshot.root_path),
                 root_device_id,
                 root_inode,
                 root_filesystem,
@@ -644,7 +666,7 @@ class Database:
         )
         root_id = self.conn.execute(
             "SELECT id FROM monitored_roots WHERE root_path = ?",
-            (snapshot.root_path,),
+            (store_text(snapshot.root_path),),
         ).fetchone()[0]
         policy_json = json.dumps(
             policy_to_dict(snapshot.policy),
@@ -764,14 +786,14 @@ class Database:
                 """SELECT id FROM snapshots
                    WHERE root_path = ? AND is_baseline = 1
                    ORDER BY timestamp DESC, id DESC LIMIT 1""",
-                (snapshot.root_path,),
+                (store_text(snapshot.root_path),),
             ).fetchone()
 
             if last_baseline is not None:
                 delta_count = self.conn.execute(
                     """SELECT COUNT(*) FROM snapshots
                        WHERE root_path = ? AND baseline_id = ?""",
-                    (snapshot.root_path, last_baseline[0]),
+                    (store_text(snapshot.root_path), last_baseline[0]),
                 ).fetchone()[0]
 
                 if delta_count < _BASELINE_INTERVAL - 1:
@@ -788,7 +810,7 @@ class Database:
                     scan_duration, label, is_baseline, baseline_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    snapshot.root_path,
+                    store_text(snapshot.root_path),
                     timestamp.isoformat(),
                     snapshot.total_size,
                     snapshot.file_count,
@@ -878,7 +900,7 @@ class Database:
             """SELECT id FROM snapshots
                WHERE root_path = ? AND id < ?
                ORDER BY timestamp DESC LIMIT 1""",
-            (root_path, before_id),
+            (store_text(root_path), before_id),
         ).fetchone()
         return row[0] if row else None
 
@@ -900,7 +922,7 @@ class Database:
                     "SELECT * FROM snapshots WHERE root_path = ?"
                     " ORDER BY timestamp DESC, id DESC"
                 )
-                params: list = [root_path]
+                params: list = [store_text(root_path)]
             else:
                 sql = (
                     "SELECT * FROM snapshots WHERE ? = root_path"
@@ -908,7 +930,8 @@ class Database:
                     " OR root_path LIKE ? || '/%'"
                     " ORDER BY timestamp DESC, id DESC"
                 )
-                params = [root_path, root_path, root_path]
+                stored = store_text(root_path)
+                params = [stored, stored, stored]
             if limit > 0:
                 sql += " LIMIT ?"
                 params.append(limit)
@@ -1296,10 +1319,11 @@ class Database:
 
         path_to_id: dict[str, int] = {}
         for batch in _batches(ordered_paths):
-            placeholders = ",".join("?" * len(batch))
+            stored = tuple(store_text(path) for path in batch)
+            placeholders = ",".join("?" * len(stored))
             rows = self.conn.execute(
                 f"SELECT id, path FROM paths WHERE path IN ({placeholders})",
-                batch,
+                stored,
             ).fetchall()
             path_to_id.update({str(row[1]): int(row[0]) for row in rows})
 
@@ -1497,7 +1521,7 @@ class Database:
         root_path = str(snapshot_row[0])
         root_row = self.conn.execute(
             "SELECT depth FROM paths WHERE path = ?",
-            (root_path,),
+            (store_text(root_path),),
         ).fetchone()
         root_depth = int(root_row[0]) if root_row is not None else 0
         column = {
@@ -1516,7 +1540,12 @@ class Database:
                   AND p.path != ?
                 ORDER BY score DESC, p.path ASC
                 LIMIT ?""",
-            (*state_params, root_depth + max(0, max_depth), root_path, limit),
+            (
+                *state_params,
+                root_depth + max(0, max_depth),
+                store_text(root_path),
+                limit,
+            ),
         ).fetchall()
         ranked = {str(path): int(score or 0) for path, score in rows}
         ranked[root_path] = max(ranked.get(root_path, 0), 0)
@@ -1707,11 +1736,12 @@ class Database:
         metadata: dict[int, tuple[str, int | None, str, int]] = {}
         frontier: set[int] = set()
         for batch in _batches(requested):
-            placeholders = ",".join("?" * len(batch))
+            stored = tuple(store_text(path) for path in batch)
+            placeholders = ",".join("?" * len(stored))
             rows = self.conn.execute(
                 f"SELECT id, path, parent_id, name, depth FROM paths "
                 f"WHERE path IN ({placeholders})",
-                batch,
+                stored,
             ).fetchall()
             for row in rows:
                 path_id = int(row[0])
@@ -1886,7 +1916,8 @@ class Database:
 
         # Write full node state
         nodes_data = [
-            (snapshot_id, path_id, *values)
+            (snapshot_id, path_id, *values[:9], _store_error(values[9]),
+             values[10])
             for path_id, values in flat.items()
         ]
         self.conn.executemany(
@@ -1935,7 +1966,7 @@ class Database:
         to_delete = self.conn.execute(
             "SELECT id, is_baseline FROM snapshots "
             "WHERE root_path = ? AND timestamp < ?",
-            (root_path, cutoff),
+            (store_text(root_path), cutoff),
         ).fetchall()
 
         if not to_delete:
@@ -2059,7 +2090,7 @@ class Database:
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 item.label,
-                item.root_path,
+                store_text(item.root_path),
                 item.revision,
                 item.desired_state.value,
                 item.interval_seconds,
@@ -2115,7 +2146,7 @@ class Database:
                WHERE id = ? AND revision = ?""",
             (
                 item.label,
-                item.root_path,
+                store_text(item.root_path),
                 revision,
                 item.desired_state.value,
                 item.interval_seconds,
@@ -2154,7 +2185,7 @@ class Database:
                 f"""SELECT {columns} FROM monitor_definitions
                     WHERE root_path = ? OR label = ?
                     ORDER BY desired_state = 'archived', id DESC LIMIT 1""",
-                (resolved, raw),
+                (store_text(resolved), store_text(raw)),
             ).fetchone()
         return self._row_to_monitor(row) if row else None
 
@@ -2562,7 +2593,7 @@ class Database:
                    ),
                    last_seen_at = excluded.last_seen_at""",
             (
-                run.request.path,
+                store_text(run.request.path),
                 root_device_id,
                 root_inode,
                 root_filesystem,
@@ -2571,7 +2602,7 @@ class Database:
         )
         root_id = self.conn.execute(
             "SELECT id FROM monitored_roots WHERE root_path = ?",
-            (run.request.path,),
+            (store_text(run.request.path),),
         ).fetchone()[0]
         error_count = 0
         excluded_count = 0
@@ -3596,7 +3627,7 @@ class Database:
         """
         # Look up path_id
         row = self.conn.execute(
-            "SELECT id FROM paths WHERE path = ?", (path,)
+            "SELECT id FROM paths WHERE path = ?", (store_text(path),)
         ).fetchone()
         if not row:
             return []

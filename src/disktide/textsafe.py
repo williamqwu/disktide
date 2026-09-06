@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import os
 
-__all__ = ["display_text", "json_text"]
+__all__ = ["display_text", "json_text", "load_text", "store_text"]
 
 
 def display_text(value: str) -> str:
@@ -58,3 +58,79 @@ def json_text(value: str) -> str:
     -- the text report is where that question is answered.
     """
     return value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
+# A filesystem name that came through `surrogateescape` cannot be handed to
+# SQLite: the driver encodes bound text strictly, so one undecodable byte
+# anywhere in a tree used to abort the whole snapshot with
+# `UnicodeEncodeError: surrogates not allowed`. `store_text` escapes those
+# bytes into text SQLite accepts and `load_text` puts them back, so a path
+# still round-trips to the same bytes through `os.fsencode`.
+#
+# The marker is U+FFFF, a noncharacter: `surrogateescape` never produces it,
+# so a name that needs escaping is recognisable by its first character alone
+# and every other name is stored byte-for-byte as before -- which is what
+# keeps databases written by older builds readable and their interned path
+# rows matching.
+_ESCAPE_MARK = "\uffff"
+
+
+def store_text(value: str) -> str:
+    """Escape a name for SQLite, reversibly.
+
+    Names without undecodable bytes are returned unchanged, so nothing that
+    an earlier build stored moves. Otherwise each lone surrogate becomes the
+    marker followed by the two hex digits of the byte it stands for, a
+    literal marker becomes the marker followed by a dot, and the whole
+    string is prefixed with one more marker to say it is escaped.
+    """
+    if value.isascii():
+        return value
+    if _ESCAPE_MARK not in value and not any(
+        "\udc80" <= char <= "\udcff" for char in value
+    ):
+        return value
+    parts = [_ESCAPE_MARK]
+    for char in value:
+        if char == _ESCAPE_MARK:
+            parts.append(_ESCAPE_MARK + ".")
+        elif "\udc80" <= char <= "\udcff":
+            parts.append(_ESCAPE_MARK + format(ord(char) - 0xDC00, "02x"))
+        else:
+            parts.append(char)
+    return "".join(parts)
+
+
+def load_text(value: str) -> str:
+    """Undo `store_text`, leaving anything it did not write untouched.
+
+    A value that does not start with the marker was stored verbatim, which
+    covers every row written before this escape existed. A trailing or
+    otherwise malformed escape is left as it is rather than raising: a
+    truncated name is easier to look at than a failed query.
+    """
+    if value.isascii() or not value.startswith(_ESCAPE_MARK):
+        return value
+    parts: list[str] = []
+    index = 1
+    end = len(value)
+    while index < end:
+        char = value[index]
+        if char != _ESCAPE_MARK:
+            parts.append(char)
+            index += 1
+            continue
+        if value[index + 1:index + 2] == ".":
+            parts.append(_ESCAPE_MARK)
+            index += 2
+            continue
+        digits = value[index + 1:index + 3]
+        try:
+            byte = int(digits, 16)
+        except ValueError:
+            return value
+        if not 0x80 <= byte <= 0xFF:
+            return value
+        parts.append(chr(0xDC00 + byte))
+        index += 3
+    return "".join(parts)
