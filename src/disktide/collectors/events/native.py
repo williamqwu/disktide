@@ -512,6 +512,7 @@ class InotifyEventBackend:
             | flags.ONLYDIR
             | flags.DONT_FOLLOW
         )
+        failure: OSError | None = None
         with self._lock:
             if path in self._wd_by_path or self._notifier is None:
                 return
@@ -523,11 +524,16 @@ class InotifyEventBackend:
                     if exc.errno in {errno.ENOSPC, errno.EMFILE, errno.ENFILE}
                     else f"cannot register inotify descriptor: {exc}"
                 )
-                self._emit_watch_error(path, exc)
-                return
-            self._watches_by_wd[wd] = state
-            self._wd_by_path[path] = wd
-            self._update_limit_warning_locked()
+                failure = exc
+            else:
+                self._watches_by_wd[wd] = state
+                self._wd_by_path[path] = wd
+                self._update_limit_warning_locked()
+        if failure is not None:
+            # The service handles this by stopping the backend, which joins
+            # the reader thread -- and that thread reads `diagnostics`, which
+            # takes this lock. Emitting under it deadlocks the pair.
+            self._emit_watch_error(path, failure)
 
     def _build_root_state(self, root_path: str, watch: EventWatch) -> _WatchState:
         root_stat = os.stat(root_path, follow_symlinks=False)
