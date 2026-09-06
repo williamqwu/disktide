@@ -735,3 +735,191 @@ def test_a_healthy_database_does_not_carry_the_fallback_label(
 
     assert report.to_dict()["database"]["schema_source"] == "database"
     assert "in-memory fallback" not in render_doctor_report(report)
+
+
+# --- a readable database in a directory nobody may write -------------------
+
+
+def _checkpointed_database(directory) -> "object":
+    """A healthy WAL database with no sidecars left beside it."""
+    from disktide.models.snapshot import Snapshot
+    from disktide.models.tree import FSNode
+    from disktide.storage.database import Database
+
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "data.db"
+    database = Database(path=str(path))
+    database.connect()
+    database.save_snapshot(
+        Snapshot(root_path="/r", total_size=1),
+        FSNode(name="r", path="/r", size=1, own_size=1, is_dir=True),
+    )
+    database.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    database.close()
+    for sidecar in ("-wal", "-shm"):
+        (directory / f"data.db{sidecar}").unlink(missing_ok=True)
+    return path
+
+
+def _read_only_tree(path):
+    """chmod the file and its directory read-only, and put them back after."""
+    import contextlib
+    import os
+
+    @contextlib.contextmanager
+    def scope():
+        path.chmod(0o444)
+        path.parent.chmod(0o555)
+        try:
+            yield
+        finally:
+            path.parent.chmod(0o755)
+            path.chmod(0o644)
+
+    return scope() if os.geteuid() != 0 else None
+
+
+def test_a_checkpointed_database_opens_beside_no_write_access(tmp_path):
+    """`mode=ro` still wants the `-shm` sidecar, which a 0555 directory refuses.
+
+    A fully checkpointed database in such a directory therefore failed to
+    open at all, and `compare` and `doctor` reported readable history as
+    unusable and told the reader to restore a copy.
+    """
+    import os
+
+    import pytest
+
+    from disktide.storage.database import Database
+
+    if os.geteuid() == 0:
+        pytest.skip("root may write a 0o555 directory")
+    path = _checkpointed_database(tmp_path / "ro" / "disktide")
+
+    with _read_only_tree(path):
+        database = Database(path=str(path), read_only=True)
+        database.connect()
+        try:
+            assert database.read_only is True
+            assert database.degraded is False
+            assert database.conn.execute(
+                "SELECT COUNT(*) FROM snapshots"
+            ).fetchone() == (1,)
+        finally:
+            database.close()
+
+
+def test_a_pending_wal_is_never_read_around(tmp_path):
+    """`immutable=1` ignores the `-wal`, so it must not be used beside one.
+
+    Otherwise the rows of the last commits would be silently missing, which
+    is worse than refusing to open the file.
+    """
+    import os
+    import shutil
+    import sqlite3 as sqlite
+
+    import pytest
+
+    from disktide.storage.database import Database
+
+    if os.geteuid() == 0:
+        pytest.skip("root may write a 0o555 directory")
+    source = tmp_path / "src"
+    source.mkdir()
+    live = source / "w.db"
+    first = sqlite.connect(str(live))
+    first.execute("PRAGMA journal_mode=WAL")
+    first.execute("CREATE TABLE snapshots (id INTEGER PRIMARY KEY)")
+    first.execute("INSERT INTO snapshots VALUES (1)")
+    first.commit()
+    first.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    second = sqlite.connect(str(live))
+    second.execute("INSERT INTO snapshots VALUES (2)")
+    second.commit()
+
+    target = tmp_path / "ro"
+    target.mkdir()
+    path = target / "w.db"
+    shutil.copy(live, path)
+    shutil.copy(f"{live}-wal", f"{path}-wal")
+    first.close()
+    second.close()
+    assert path.with_name("w.db-wal").stat().st_size > 0
+
+    path.with_name("w.db-wal").chmod(0o444)
+    try:
+        with _read_only_tree(path):
+            database = Database(path=str(path), read_only=True)
+            database.connect()
+            try:
+                assert database._opened_immutable is False
+                if not database.degraded:
+                    # If it did open, it must see both rows, not just the
+                    # one the main file holds.
+                    assert database.conn.execute(
+                        "SELECT COUNT(*) FROM snapshots"
+                    ).fetchone() == (2,)
+            finally:
+                database.close()
+    finally:
+        path.with_name("w.db-wal").chmod(0o644)
+
+
+def test_doctor_calls_a_read_only_directory_read_only_not_broken(
+    tmp_path, monkeypatch
+):
+    import os
+
+    import pytest
+
+    if os.geteuid() == 0:
+        pytest.skip("root may write a 0o555 directory")
+    values = _set_xdg(monkeypatch, tmp_path)
+    path = _checkpointed_database(
+        tmp_path / "sensitive-data" / "disktide"
+    )
+    assert str(path).startswith(values["XDG_DATA_HOME"])
+
+    with _read_only_tree(path):
+        report = build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+
+    database = report.to_dict()["database"]
+    assert database["status"] == "read-only"
+    assert database["schema_source"] == "database"
+    assert "not writable" in database["reason"]
+    assert "restore a known-good database copy" not in (
+        database["recovery_hint"] or ""
+    )
+
+
+def test_compare_reads_history_from_a_read_only_directory(tmp_path, monkeypatch):
+    """It used to exit 1 with "restore a known-good database copy"."""
+    import os
+
+    import pytest
+
+    if os.geteuid() == 0:
+        pytest.skip("root may write a 0o555 directory")
+    _set_xdg(monkeypatch, tmp_path)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "a.txt").write_text("hello")
+    runner = CliRunner()
+    for _ in range(2):
+        seeded = runner.invoke(cli, ["scan", "--snapshot", str(tree)])
+        assert seeded.exit_code == 0, seeded.output
+    path = tmp_path / "sensitive-data" / "disktide" / "data.db"
+    connection = sqlite3.connect(str(path))
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    connection.close()
+    for sidecar in ("-wal", "-shm"):
+        path.with_name(f"data.db{sidecar}").unlink(missing_ok=True)
+
+    with _read_only_tree(path):
+        result = runner.invoke(
+            cli, ["compare", "latest", "previous", str(tree)]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "restore a known-good database copy" not in result.output

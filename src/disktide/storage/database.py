@@ -116,6 +116,24 @@ def _batches(
         yield values[start : start + size]
 
 
+def _wal_is_pending(path: str) -> bool:
+    """Whether a `-wal` sidecar still holds pages the main file does not.
+
+    `immutable=1` reads the database file alone and ignores any sidecar, so
+    it must never be used while one of these is waiting: the history it
+    returned would silently be the state before the last commits.
+    """
+    try:
+        return Path(f"{path}-wal").stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _is_readonly_error(exc: BaseException) -> bool:
+    """Whether SQLite refused because it could not write beside the file."""
+    return "readonly" in str(exc).lower()
+
+
 def _decode_text(raw: bytes) -> str:
     """Read a text column, undoing the escape `store_text` writes.
 
@@ -272,6 +290,10 @@ class Database:
         self.degraded = False
         self.degraded_reason: str | None = None
         self.recovery_hint: str | None = None
+        # Set when the file had to be opened with `immutable=1` because the
+        # directory around it is not writable. Only ever true when there is
+        # no pending `-wal`, so the history it reads is complete.
+        self._opened_immutable = False
         self._snapshot_generation = 0
 
     @property
@@ -321,10 +343,52 @@ class Database:
             else run_migrations
         )
         if read_only and path != ":memory:":
-            uri = f"file:{quote(str(Path(path).resolve()))}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-        else:
-            conn = sqlite3.connect(path, check_same_thread=False)
+            return self._open_read_only(path)
+        return self._prepare(
+            sqlite3.connect(path, check_same_thread=False),
+            read_only=read_only,
+            use_migrations=use_migrations,
+        )
+
+    def _open_read_only(self, path: str) -> sqlite3.Connection:
+        """Open an existing file for reading, even beside no write access.
+
+        `mode=ro` still asks for the `-shm` sidecar every WAL database
+        needs, and creating it needs write access to the *directory*. A
+        healthy, fully checkpointed database in a directory nobody may
+        write therefore failed to open at all, and `compare` and `doctor`
+        both reported readable history as unusable. `immutable=1` reads the
+        file with no sidecars -- which also means it ignores a pending
+        `-wal`, so it is only ever reached once there is not one.
+        """
+        resolved = str(Path(path).resolve())
+        uri = f"file:{quote(resolved)}?mode=ro"
+        try:
+            return self._prepare(
+                sqlite3.connect(uri, uri=True, check_same_thread=False),
+                read_only=True,
+                use_migrations=False,
+            )
+        except sqlite3.OperationalError as exc:
+            if not _is_readonly_error(exc) or _wal_is_pending(resolved):
+                raise
+        connection = self._prepare(
+            sqlite3.connect(
+                f"{uri}&immutable=1", uri=True, check_same_thread=False
+            ),
+            read_only=True,
+            use_migrations=False,
+        )
+        self._opened_immutable = True
+        return connection
+
+    def _prepare(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        read_only: bool,
+        use_migrations: bool,
+    ) -> sqlite3.Connection:
         conn.text_factory = _decode_text
         try:
             conn.execute("PRAGMA busy_timeout=5000")
@@ -409,7 +473,22 @@ class Database:
                     backup_path = migration_backup_path(
                         self._path, CURRENT_VERSION
                     )
-                    if isinstance(failure_exc, SchemaTooNewError):
+                    if self._opened_immutable:
+                        # Nothing is wrong with the database: the directory
+                        # around it simply cannot be written, so SQLite could
+                        # not make the `-shm` sidecar it wanted. Saying
+                        # "restore a known-good copy" about a file that reads
+                        # perfectly sends the reader after the wrong problem.
+                        self.degraded_reason = (
+                            f"{self._path} is in a directory that is not "
+                            "writable; opened read-only"
+                        )
+                        self.recovery_hint = (
+                            "make the directory writable, or point "
+                            "XDG_DATA_HOME somewhere else, to record new "
+                            "scans; existing history is readable as it is"
+                        )
+                    elif isinstance(failure_exc, SchemaTooNewError):
                         # Nothing is broken and there is nothing to restore:
                         # the file is simply ahead of this build. Say the one
                         # thing that fixes it rather than the generic advice
@@ -440,10 +519,24 @@ class Database:
         self.read_only = False
         self.degraded = True
         self.degraded_reason = f"cannot use {self._path}: {failure_reason}"
-        self.recovery_hint = (
-            "repair permissions, free disk space, or restore a known-good "
-            "database copy; disktide will not delete the file automatically"
-        )
+        if (
+            self._path != ":memory:"
+            and _wal_is_pending(self._path)
+            and not os.access(str(Path(self._path).parent), os.W_OK)
+        ):
+            # The one case the read-only recovery deliberately refuses: the
+            # file cannot be read without its `-wal`, and the `-wal` cannot
+            # be replayed without writing beside it.
+            self.recovery_hint = (
+                "the directory is not writable and a pending -wal cannot be "
+                "read without write access; make the directory writable, or "
+                "copy the database and its -wal somewhere that is"
+            )
+        else:
+            self.recovery_hint = (
+                "repair permissions, free disk space, or restore a known-good "
+                "database copy; disktide will not delete the file automatically"
+            )
 
     def _close_quietly(self) -> None:
         """Close and drop the connection, swallowing any error."""
