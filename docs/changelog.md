@@ -109,6 +109,7 @@
 - **A stopped backend cannot claim the status** Events queued behind a backend failure still reached `_handle_filesystem_event`, which unconditionally wrote `watch_mode = event-assisted`, so the dashboard and CLI showed event-assisted for a monitor running periodically with no backend registered.
 - **Welcome screen survives an unreadable path** Typing a directory whose parent you may not search, or a path longer than the filesystem allows, used to raise out of the input handler and take the whole app down with a traceback; it now raises an error toast naming the reason and stays on the welcome screen.
 - **Explorer survives a failed mini-trend lookup** A database error while filling the sparkline column beside a tree row used to exit the whole session; the column now just stays blank for that path, and the failed lookup is not retried every time the cursor returns to it.
+- **Shared-host warning for an explicit `-w`** A worker count above the shared-host cap now reports the other active users on an unallocated host, instead of silently reporting no warnings; the latency sample is still skipped for explicit counts.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**

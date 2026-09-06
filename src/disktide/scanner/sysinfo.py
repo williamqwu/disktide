@@ -147,6 +147,10 @@ def detect_host_allocation(*, count_users: bool = True) -> HostAllocation:
 
     ``other_users`` is only populated when it can change the answer, so it
     reads 0 on an allocated slice rather than claiming the machine is empty.
+    Callers pass ``count_users=False`` for the same reason when the count
+    cannot reach their answer either; an explicit worker count above
+    ``_SHARED_HOST_WORKER_CAP`` is not such a caller, because the shared-host
+    warning is exactly the answer it changes.
     """
     total, available = detect_cpu_count()
     quota = detect_cpu_quota()
@@ -560,9 +564,16 @@ def sample_directory_latency(
     )
 
 
-def detect_system_info(path: str = "/", *, sample: bool = True) -> SystemInfo:
-    """Detect system info and compute recommended workers."""
-    allocation = detect_host_allocation(count_users=sample)
+def detect_system_info(
+    path: str = "/", *, sample: bool = True, count_users: bool = True
+) -> SystemInfo:
+    """Detect system info and compute recommended workers.
+
+    ``sample`` and ``count_users`` are separate costs with separate payoffs:
+    skipping the latency sample does not mean the caller has stopped caring
+    who else is on the host.
+    """
+    allocation = detect_host_allocation(count_users=count_users)
     cpu_count, available_cpus = allocation.total_cpus, allocation.available_cpus
     load_average = detect_load_average()
     memory_total_mb, memory_available_mb = detect_memory()
@@ -688,7 +699,15 @@ def select_scan_workers(
     """Resolve an explicit override or explain the bounded auto policy."""
     if requested_workers is not None and requested_workers <= 0:
         raise ValueError("workers must be greater than zero")
-    info = detect_system_info(path, sample=requested_workers is None)
+    # An explicit count skips the latency sample but still needs to know the
+    # host is shared -- only above the cap, where that is what it warns about.
+    info = detect_system_info(
+        path,
+        sample=requested_workers is None,
+        count_users=(
+            requested_workers is None or requested_workers > _SHARED_HOST_WORKER_CAP
+        ),
+    )
     if requested_workers is not None:
         ceiling = worker_ceiling(info.available_cpus)
         effective = min(requested_workers, ceiling)
