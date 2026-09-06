@@ -49,3 +49,20 @@ def test_pinning_a_snapshot_that_does_not_exist_fails(verb):
     assert result.exit_code != 0, result.output
     assert "FOREIGN KEY" not in result.output
     assert "snapshot 999 does not exist" in result.output
+
+
+# --- pause/resume must not un-archive ----------------------------------
+
+
+@pytest.mark.parametrize("verb", ["pause", "resume"])
+def test_pause_and_resume_refuse_an_archived_monitor(verb, tree):
+    runner = CliRunner()
+    runner.invoke(cli, ["monitor", "add", str(tree), "--label", "t1"])
+    removed = runner.invoke(cli, ["monitor", "remove", "1", "--yes"])
+    assert removed.exit_code == 0, removed.output
+
+    result = runner.invoke(cli, ["monitor", verb, "1"])
+
+    assert result.exit_code != 0, result.output
+    assert "archived" in result.output
+    assert "No monitor definitions." in runner.invoke(cli, ["monitor", "list"]).output

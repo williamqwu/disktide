@@ -375,6 +375,7 @@ class MonitorService:
     def pause_monitor(self, identifier: int | str) -> MonitorDefinition:
         monitor = self._resolve_monitor(identifier)
         assert monitor.id is not None
+        self._require_not_archived(monitor)
         self._require_writable()
         self._repository.set_monitor_desired_state(
             monitor.id, MonitorDesiredState.PAUSED.value
@@ -395,6 +396,7 @@ class MonitorService:
     def resume_monitor(self, identifier: int | str) -> MonitorDefinition:
         monitor = self._resolve_monitor(identifier)
         assert monitor.id is not None
+        self._require_not_archived(monitor)
         self._require_writable()
         self._repository.set_monitor_desired_state(
             monitor.id, MonitorDesiredState.ENABLED.value
@@ -970,6 +972,19 @@ class MonitorService:
             f"retention {result.status}: pruned {result.pruned}",
         )
         return result
+
+    def _require_not_archived(self, monitor: MonitorDefinition) -> None:
+        """Refuse a state change that would quietly bring an archive back.
+
+        `set_monitor_desired_state` clears `archived_at`, so pausing or
+        resuming an archived monitor rescheduled it with its alert rules
+        still disabled -- an un-archive nobody asked for.
+        """
+        if monitor.desired_state is MonitorDesiredState.ARCHIVED:
+            raise MonitorServiceError(
+                f"monitor {monitor.id} ({monitor.label}) is archived; "
+                "re-create it with 'disktide monitor add' to watch it again"
+            )
 
     def pin_snapshot(self, snapshot_id: int, *, label: str = "") -> None:
         self._require_writable()

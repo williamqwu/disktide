@@ -96,6 +96,7 @@
 - **Explorer options before a subcommand are refused, not dropped** `disktide -d 0 scan tree` used to scan with unlimited depth and exit 0; it now exits 2 and says to write the option after `scan`.
 - **A quoted `~` reaches the explorer** The router judged `~` a directory and then handed `open` the unexpanded token, which `click.Path` refused as "does not exist".
 - **Duplicate roots and missing snapshots get plain messages** A second `monitor add` on the same root printed "UNIQUE constraint failed", `monitor pin 999` printed "FOREIGN KEY constraint failed", and `monitor unpin 999` reported success.
+- **Pausing or resuming an archived monitor is refused** `set_monitor_desired_state` clears `archived_at`, so either verb quietly brought the monitor back and rescheduled it with its alert rules still disabled.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**
