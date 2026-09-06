@@ -187,9 +187,11 @@ On network filesystems, placing the database on the network share would be slow.
 The core install performs no native watch calls. On Linux, installing
 `disktide[watch]` makes `inotify-simple` available through a lazy probe. A
 held monitor lease recursively adds directory watches while respecting
-`one_file_system`, pseudo-filesystem exclusion, maximum depth, and never-follow
-symlink policy. Newly created directories receive watches before later events
-are consumed when possible.
+`one_file_system`, pseudo-filesystem exclusion, snapshot-directory exclusion,
+maximum depth, and never-follow symlink policy. A snapshot directory stops the
+descent, so nothing inside one is watched and no event can arrive from there;
+the watch root itself is exempt, as the scan root is. Newly created
+directories receive watches before later events are consumed when possible.
 
 The backend emits normalized create, modify, delete, move, overflow, root-lost,
 and backend-error hints. Rename cookies are paired inside the adapter; unmatched

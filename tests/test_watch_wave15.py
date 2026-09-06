@@ -633,6 +633,68 @@ def test_local_projection_rejects_partial_policy_device_and_excluded_scope(
     )
 
 
+def test_local_projection_rejects_a_dirty_path_inside_a_snapshot_directory(
+    tmp_path,
+):
+    """A local reconciliation rescans the dirty path *as its own root*, and a
+    scan root is never excluded -- so reconciling inside a `.snapshot` copy
+    would add a whole second copy of the volume to a tree the canonical scan
+    measured without it. Treated exactly as a dirty path entering an excluded
+    filesystem: full reconciliation.
+    """
+    root = str((tmp_path / "root").resolve())
+    default = MonitorDefinition(root_path=root).normalized()
+    base = Snapshot(id=1, root_path=root, policy=default.policy)
+
+    for dirty in (
+        str(Path(root, ".snapshot")),
+        str(Path(root, ".snapshot", "daily.2026-09-06_0010", "data", "f.bin")),
+        str(Path(root, "sub", ".zfs", "snapshot", "weekly")),
+    ):
+        assert "snapshot directory" in (
+            MonitorService._local_projection_block_reason(default, base, (dirty,))
+            or ""
+        ), dirty
+
+    # An ordinary path is still reconciled locally, and so is every path when
+    # the policy is off.
+    assert (
+        MonitorService._local_projection_block_reason(
+            default, base, (str(Path(root, "real", "f.bin")),)
+        )
+        is None
+    )
+    included = replace(
+        default,
+        policy=replace(default.policy, exclude_snapshot_dirs=False),
+    )
+    assert (
+        MonitorService._local_projection_block_reason(
+            included,
+            replace(base, policy=included.policy),
+            (str(Path(root, ".snapshot", "copy", "f.bin")),),
+        )
+        is None
+    )
+
+
+def test_a_monitor_rooted_at_a_snapshot_reconciles_its_own_paths_locally(
+    tmp_path,
+):
+    """The monitor root is exempt, as the scan root is: a monitor aimed at
+    one snapshot is watching it deliberately."""
+    root = str((tmp_path / ".snapshot").resolve())
+    default = MonitorDefinition(root_path=root).normalized()
+    base = Snapshot(id=1, root_path=root, policy=default.policy)
+
+    assert (
+        MonitorService._local_projection_block_reason(
+            default, base, (str(Path(root, "daily", "f.bin")),)
+        )
+        is None
+    )
+
+
 def test_malformed_wave15_status_json_falls_back_to_defaults(repository, tmp_path):
     monitor = repository.create_monitor(
         MonitorDefinition(root_path=str(tmp_path / "root"))

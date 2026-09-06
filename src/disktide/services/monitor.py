@@ -74,7 +74,10 @@ from disktide.services.snapshots import SnapshotService
 from disktide.services.watch import DirtyBatch, DirtyPathTracker, DirtySnapshot
 from disktide.extensions.capabilities import CapabilityStatus
 from disktide.models.tree import FSNode
-from disktide.scanner.policy import discover_pseudo_mounts
+from disktide.scanner.policy import (
+    discover_pseudo_mounts,
+    is_snapshot_dir_name,
+)
 
 
 class MonitorStore(
@@ -172,6 +175,25 @@ def _path_is_within(path: str, root: str) -> bool:
         return os.path.commonpath((normalized_root, normalized_path)) == normalized_root
     except ValueError:
         return False
+
+
+def _enters_snapshot_dir(path: str, root: str) -> bool:
+    """Whether ``path`` lies at or below a snapshot directory under ``root``.
+
+    The scan excludes those directories, but a local reconciliation rescans
+    the dirty path *as its own root* -- and a scan root is never excluded --
+    so a dirty path inside a `.snapshot` copy would add a whole second copy
+    of the volume to a tree the canonical scan measured without it. Named
+    below the root only: a monitor rooted at `/vol/.snapshot/daily...` is
+    watching that snapshot deliberately, and every path in it is ordinary.
+    """
+    try:
+        relative = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+    except ValueError:
+        return False
+    if relative == os.curdir or relative.split(os.sep)[0] == os.pardir:
+        return False
+    return any(is_snapshot_dir_name(part) for part in relative.split(os.sep))
 
 
 class MonitorService:
@@ -2578,6 +2600,13 @@ class MonitorService:
                 for mountpoint in excluded_mounts
             ):
                 return "dirty path enters an excluded filesystem; full reconciliation required"
+        if definition.policy.exclude_snapshot_dirs and any(
+            _enters_snapshot_dir(path, definition.root_path) for path in paths
+        ):
+            return (
+                "dirty path enters a snapshot directory; "
+                "full reconciliation required"
+            )
         return None
 
     @staticmethod

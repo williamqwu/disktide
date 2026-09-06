@@ -212,3 +212,123 @@ def test_a_backend_that_fails_for_the_whole_tree_waits_the_monitor_interval(
         assert len(created) == 2
     finally:
         repository.close()
+
+
+# --- snapshot directories are never watched ---------------------------
+
+
+def _recording_backend():
+    """An `InotifyEventBackend` whose `add_watch` records and succeeds."""
+    from disktide.collectors.events.native import InotifyEventBackend
+
+    watched: list[str] = []
+
+    class _RecordingNotifier:
+        def add_watch(self, path, mask):
+            watched.append(path)
+            return len(watched)
+
+    backend = InotifyEventBackend()
+    backend._notifier = _RecordingNotifier()
+    backend._flags = type(
+        "Flags",
+        (),
+        {
+            name: 1 << index
+            for index, name in enumerate(
+                [
+                    "CREATE", "MODIFY", "ATTRIB", "CLOSE_WRITE", "DELETE",
+                    "DELETE_SELF", "MOVED_FROM", "MOVED_TO", "MOVE_SELF",
+                    "UNMOUNT", "ONLYDIR", "DONT_FOLLOW",
+                ]
+            )
+        },
+    )()
+    return backend, watched
+
+
+def _snapshot_tree(tmp_path):
+    """A watch root with `real/` beside a `.snapshot/copy/` snapshot copy."""
+    root = tmp_path / "root"
+    (root / "real").mkdir(parents=True)
+    (root / ".snapshot" / "copy").mkdir(parents=True)
+    return root
+
+
+def test_a_snapshot_subtree_is_never_given_an_inotify_watch(tmp_path):
+    """A NetApp `.snapshot` holds one automatic submount per retained
+    snapshot, each a complete copy of the volume. The scanner excludes them,
+    so watching them would report changes to a subtree no scan measures --
+    and on the measured export it would have asked for one descriptor per
+    directory of seven copies of a 1,173,122-directory tree.
+    """
+    from disktide.collectors.events.base import EventWatch
+
+    root = _snapshot_tree(tmp_path)
+    backend, watched = _recording_backend()
+
+    backend._add_watch_tree(str(root), EventWatch(root_path=str(root)))
+
+    assert str(root) in watched
+    assert str(root / "real") in watched
+    # The snapshot root is refused, and refusing it stops the descent, so
+    # nothing below it is ever offered a watch either.
+    assert str(root / ".snapshot") not in watched
+    assert str(root / ".snapshot" / "copy") not in watched
+    # No descriptor points into the subtree, so no event can carry one out.
+    assert not [
+        path
+        for path in backend._wd_by_path
+        if path.startswith(str(root / ".snapshot"))
+    ]
+
+
+def test_a_snapshot_subtree_is_watched_when_the_policy_is_off(tmp_path):
+    from disktide.collectors.events.base import EventWatch
+    from disktide.domain.policy import ScanPolicy
+
+    root = _snapshot_tree(tmp_path)
+    backend, watched = _recording_backend()
+
+    backend._add_watch_tree(
+        str(root),
+        EventWatch(
+            root_path=str(root),
+            policy=ScanPolicy(exclude_snapshot_dirs=False),
+        ),
+    )
+
+    assert str(root / ".snapshot") in watched
+    assert str(root / ".snapshot" / "copy") in watched
+
+
+def test_a_monitor_rooted_at_a_snapshot_still_watches_its_own_root(tmp_path):
+    """The watch root is exempt, exactly as the scan root is."""
+    from disktide.collectors.events.base import EventWatch
+
+    root = _snapshot_tree(tmp_path) / ".snapshot"
+    backend, watched = _recording_backend()
+
+    backend._add_watch_tree(str(root), EventWatch(root_path=str(root)))
+
+    assert str(root) in watched
+    assert str(root / "copy") in watched
+
+
+def test_the_scan_driven_handoff_refuses_a_snapshot_directory(tmp_path):
+    """`register_directory` is the other way a watch is added, and it
+    consults the same rule."""
+    from disktide.collectors.events.base import EventWatch
+
+    root = _snapshot_tree(tmp_path)
+    backend, watched = _recording_backend()
+    backend._roots = (str(root),)
+    backend._root_states[str(root)] = backend._build_root_state(
+        str(root), EventWatch(root_path=str(root))
+    )
+
+    backend.register_directory(str(root / ".snapshot"))
+    backend.register_directory(str(root / "real"))
+
+    assert str(root / ".snapshot") not in watched
+    assert str(root / "real") in watched

@@ -23,7 +23,7 @@ from disktide.collectors.events.base import (
 from disktide.domain.monitor import WatchDiagnostics
 from disktide.domain.policy import ScanPolicy
 from disktide.extensions.capabilities import CapabilityStatus
-from disktide.scanner.policy import discover_pseudo_mounts
+from disktide.scanner.policy import discover_pseudo_mounts, is_snapshot_dir_name
 
 
 class NativeEventBackendUnavailable(RuntimeError):
@@ -637,6 +637,26 @@ class InotifyEventBackend:
     def _path_allowed(self, path: str, state: _WatchState) -> bool:
         real = os.path.realpath(path)
         if real in state.excluded_mounts:
+            return False
+        if (
+            state.policy.exclude_snapshot_dirs
+            and path != state.root_path
+            and is_snapshot_dir_name(os.path.basename(path))
+        ):
+            # The scanner skips these -- a NetApp `.snapshot` holds one
+            # automatic submount per retained snapshot, each a complete copy
+            # of the volume -- so watching them would report changes to a
+            # subtree no scan measures, and on the measured export it would
+            # have asked for an inotify descriptor per directory of seven
+            # copies of a 1,173,122-directory tree. `_add_watch_tree` tests
+            # every directory it pops before it lists it, so refusing the
+            # snapshot root here stops the descent and nothing below one is
+            # ever offered a watch; with no watch inside, no event can carry
+            # a descriptor from there either.
+            #
+            # Not the monitor root itself: a monitor aimed straight at
+            # `/vol/.snapshot/daily...` watches it, the same exception the
+            # scan root gets.
             return False
         if state.policy.one_file_system:
             try:
