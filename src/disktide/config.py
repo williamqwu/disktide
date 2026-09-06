@@ -18,6 +18,12 @@ from disktide.themes import resolve_theme
 from disktide.viz.colordepth import normalize_depth
 from disktide.viz.ringshape import DEFAULT_RING_SHAPE, resolve_ring_shape
 
+#: The three visualisations the Settings picker offers. Textual's `Select`
+#: makes a value outside its options fatal, so loader and picker share one
+#: vocabulary rather than disagreeing about what a config file may say.
+VIZ_CHOICES = ("treemap", "sunburst", "details")
+DEFAULT_VIZ = "sunburst"
+
 _DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _SIZE_MULTIPLIERS = {
     "b": 1,
@@ -444,7 +450,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         # (hand-typed, or from a newer build) lands on the default rather
         # than raising when the picker tries to show it.
         config.ui.color_theme = resolve_theme(ui.get("color_theme"))
-        config.ui.default_viz = ui.get("default_viz", "sunburst")
+        raw_viz = str(ui.get("default_viz", DEFAULT_VIZ)).lower()
+        # The Settings picker offers exactly these three and Textual makes
+        # any other value fatal inside `compose`, so a hand-typed name has
+        # to land on the default here rather than at the first `,`.
+        config.ui.default_viz = (
+            raw_viz if raw_viz in VIZ_CHOICES else DEFAULT_VIZ
+        )
         config.ui.show_cleanup = ui.get("show_cleanup", False)
         config.ui.safe_rendering = ui.get("safe_rendering", False)
         config.ui.mouse = bool(ui.get("mouse", True))

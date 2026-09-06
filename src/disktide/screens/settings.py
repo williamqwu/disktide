@@ -20,6 +20,8 @@ from textual.widgets import (
 )
 
 from disktide.config import (
+    DEFAULT_VIZ,
+    VIZ_CHOICES,
     AppConfig,
     cleanup_rule_directory,
     current_hostname,
@@ -305,7 +307,11 @@ class SettingsScreen(Screen):
                         ("Sunburst", "sunburst"),
                         ("Details", "details"),
                     ],
-                    value=self._config.ui.default_viz,
+                    value=(
+                        self._config.ui.default_viz
+                        if self._config.ui.default_viz in VIZ_CHOICES
+                        else DEFAULT_VIZ
+                    ),
                     id="default-viz",
                     classes="viz-select",
                     allow_blank=False,
