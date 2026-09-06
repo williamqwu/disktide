@@ -137,6 +137,12 @@ static PyObject *scan_dir(PyObject *self, PyObject *args)
                 else
                     fail = ENOMEM;
             }
+            /* os.scandir(fd) rewinds before it lets the directory go, so the
+             * descriptor it was handed can be read again; `dup` shares the
+             * file offset, so without this the caller gets its descriptor
+             * back at the end of the directory and a second read of it --
+             * by either reader -- finds nothing. */
+            rewinddir(d);
             closedir(d);
         }
     }

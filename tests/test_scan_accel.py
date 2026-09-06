@@ -55,11 +55,11 @@ def reader(backend: str):
 def read(backend: str, path, stat_dirs: bool = False) -> list[tuple]:
     """One directory, read through one backend, on a descriptor of its own.
 
-    A fresh descriptor per call because both readers hand theirs to
-    `fdopendir` through a `dup`, which shares the file offset: after either
-    of them has run, the caller's descriptor is at the end of the directory.
-    That is `os.scandir(fd)`'s behaviour too, and the scheduler opens a
-    descriptor per directory and reads it once.
+    A fresh descriptor per call because that is what the scheduler does: it
+    opens one per directory and reads it once. Both readers hand theirs to
+    `fdopendir` through a `dup`, which shares the file offset, and both
+    rewind before letting the directory go, so a descriptor survives a read
+    re-readable -- `test_regress_scanner_scanfast_c.py` pins that.
     """
     scan_dir = reader(backend)
     handle = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)

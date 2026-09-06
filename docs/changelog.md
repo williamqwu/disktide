@@ -111,6 +111,7 @@
 - **Explorer survives a failed mini-trend lookup** A database error while filling the sparkline column beside a tree row used to exit the whole session; the column now just stays blank for that path, and the failed lookup is not retried every time the cursor returns to it.
 - **Shared-host warning for an explicit `-w`** A worker count above the shared-host cap now reports the other active users on an unallocated host, instead of silently reporting no warnings; the latency sample is still skipped for explicit counts.
 - **Failed directory keeps the bytes it already listed** A directory whose worker died after publishing its first entry chunk kept those entries but reported zero own bytes, so every total above it was short by exactly them. The accumulated own bytes, allocated bytes and coverage counters now survive onto the failed directory alongside its error.
+- **Directory descriptor after a native read** The C reader now rewinds the directory before closing it, the way `os.scandir(fd)` does, so a descriptor read once by the native backend can be read again instead of coming back at the end of the directory.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**
