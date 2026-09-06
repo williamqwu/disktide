@@ -278,6 +278,11 @@ class DiskTideApp(App):
         self.__cleanup_service: CleanupService | None = None
         self.__cleanup_safe_action: CleanupActionKind | None = None
         self._show_welcome = show_welcome
+        # The mode screens do not exist until a path has been chosen, and
+        # the keys that reach them are bound from mount. `check_action`
+        # below reads this to keep 1/2/3/4 and `,` off the welcome screen.
+        self._modes_installed = False
+        self._explorer = None
         # Ensures the "running without persistence" warning is only shown
         # once per session, no matter how many times we check.
         self._warned_degraded = False
@@ -582,7 +587,33 @@ class DiskTideApp(App):
             name="settings",
         )
 
+        self._modes_installed = True
         self.push_screen("explorer")
+
+    def check_action(
+        self, action: str, parameters: tuple[object, ...]
+    ) -> bool | None:
+        """Hide the mode keys until there are modes to switch to.
+
+        `1`/`2`/`3`/`4` and `,` are app-level bindings, so they are live
+        from mount, but the screens they name are only installed once the
+        welcome screen has produced a path. Pressing one before that raised
+        out of the key handler -- `No screen called 'explorer' installed`,
+        or an attribute error for the explorer that does not exist yet --
+        and took the whole app down with it. Returning False both refuses
+        the key and takes it out of the footer, so the welcome screen
+        advertises only what it can do.
+        """
+        if action == "switch_mode" and not self._modes_installed:
+            return False
+        if (
+            action == "push_screen"
+            and not self._modes_installed
+            and parameters
+            and parameters[0] == "settings"
+        ):
+            return False
+        return True
 
     def open_monitor_setup(
         self,
@@ -703,6 +734,13 @@ class DiskTideApp(App):
 
     def action_switch_mode(self, mode: str) -> None:
         """Switch between explorer/cleanup/monitor/fs_overview modes."""
+        if not self._modes_installed or self._explorer is None:
+            # `check_action` already refuses the keys; this covers a caller
+            # that reaches the action some other way.
+            self.notify(
+                "Choose a directory first.", severity="warning",
+            )
+            return
         if mode == "explorer":
             self.switch_screen("explorer")
         elif mode == "cleanup":
