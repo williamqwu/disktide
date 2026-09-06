@@ -362,6 +362,116 @@ class TestDatabase:
         assert promoted.is_baseline is True
         assert promoted.baseline_id is None
 
+    def _chain_tree(self, a_size, b_size=None):
+        root_size = a_size + (b_size or 0)
+        root = FSNode(
+            name="r", path="/r", size=root_size, own_size=0,
+            file_count=1 if b_size is None else 2, dir_count=0,
+            is_dir=True, depth=0,
+        )
+        children = [
+            FSNode(
+                name="a", path="/r/a", size=a_size, own_size=a_size,
+                file_count=1, is_dir=False, depth=1,
+            )
+        ]
+        if b_size is not None:
+            children.append(
+                FSNode(
+                    name="b", path="/r/b", size=b_size, own_size=b_size,
+                    file_count=1, is_dir=False, depth=1,
+                )
+            )
+        root.children = children
+        return root
+
+    def test_deleting_a_mid_chain_delta_keeps_later_snapshots_intact(self, db):
+        """A pruned mid-chain delta must not rewrite its successors."""
+        id1 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=1), self._chain_tree(1)
+        )
+        id2 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=2), self._chain_tree(2)
+        )
+        id3 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=7), self._chain_tree(2, 5)
+        )
+        assert db.get_snapshot(id1).is_baseline is True
+        assert db.get_snapshot(id2).is_baseline is False
+        assert db.get_snapshot(id3).is_baseline is False
+
+        before = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id3).items()
+        }
+        assert before == {"/r": 7, "/r/a": 2, "/r/b": 5}
+
+        db.delete_snapshot(id2)
+
+        after = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id3).items()
+        }
+        assert after == before
+        tree = db.load_tree(id3)
+        assert {child.name: child.size for child in tree.children} == {
+            "a": 2, "b": 5,
+        }
+
+    def test_deleting_two_mid_chain_deltas_keeps_the_survivor_intact(self, db):
+        """Consecutive prunes must each fold their rows forward."""
+        db.save_snapshot(
+            Snapshot(root_path="/r", total_size=1), self._chain_tree(1)
+        )
+        id2 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=2), self._chain_tree(2)
+        )
+        id3 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=3), self._chain_tree(3)
+        )
+        id4 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=8), self._chain_tree(3, 5)
+        )
+        before = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id4).items()
+        }
+        assert before == {"/r": 8, "/r/a": 3, "/r/b": 5}
+
+        db.delete_snapshot(id2)
+        db.delete_snapshot(id3)
+
+        after = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id4).items()
+        }
+        assert after == before
+
+    def test_deleting_a_delta_that_removed_a_path_keeps_it_removed(self, db):
+        """A removal recorded by the victim must survive its deletion."""
+        db.save_snapshot(
+            Snapshot(root_path="/r", total_size=6), self._chain_tree(1, 5)
+        )
+        id2 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=1), self._chain_tree(1)
+        )
+        id3 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=4), self._chain_tree(4)
+        )
+        before = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id3).items()
+        }
+        assert before == {"/r": 4, "/r/a": 4}
+
+        db.delete_snapshot(id2)
+
+        after = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id3).items()
+        }
+        assert after == before
+
     def test_recent_paths_empty(self, db):
         assert db.recent_paths() == []
 

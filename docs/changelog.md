@@ -114,6 +114,7 @@
 - **Directory descriptor after a native read** The C reader now rewinds the directory before closing it, the way `os.scandir(fd)` does, so a descriptor read once by the native backend can be read again instead of coming back at the end of the directory.
 - **Sunburst hover percentage** The tooltip read its share off the arc's angle, so a directory's only child showed 100% while the size tree and info panel said 50% for the same node. It now reports the same metric share those two do.
 - **Metric toggle in diff mode** Switching the metric while a comparison was on screen relabelled the still-attached frame with the new metric's formatter, so a 1 MiB growth read as '+1,048,576' until the rebuilt frame landed. The frame's own metric now governs how its deltas are printed.
+- **Pruned history no longer rewrites the snapshots that were kept** Deltas are chained snapshot-to-snapshot, so deleting one from the middle of a chain -- which every hourly or daily retention prune does -- silently reverted its changes in every later snapshot: a file that grew from 1 to 2 bytes in the pruned snapshot read as 1 byte again afterwards, while the directory totals above it kept the newer number. A delete now hands the doomed snapshot's rows to its successor first, for the paths the successor does not describe itself.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**

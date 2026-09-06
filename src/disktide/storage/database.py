@@ -944,7 +944,7 @@ class Database:
             return []
 
     def delete_snapshot(self, snapshot_id: int) -> None:
-        """Delete a snapshot, promoting dependents if it's a baseline."""
+        """Delete a snapshot, keeping the rest of its delta chain intact."""
         if self.read_only:
             raise sqlite3.OperationalError("snapshot repository is read-only")
         snap = self.get_snapshot(snapshot_id)
@@ -957,10 +957,92 @@ class Database:
             ).fetchone()
             if first_dep:
                 self._promote_to_baseline(first_dep[0])
+        elif snap is not None and snap.baseline_id is not None:
+            self._fold_delta_forward(snapshot_id, snap.baseline_id)
 
         self.conn.execute("DELETE FROM snapshots WHERE id = ?", (snapshot_id,))
         self.conn.commit()
         self._touch_snapshot_generation()
+
+    def _fold_delta_forward(
+        self, snapshot_id: int, baseline_id: int
+    ) -> None:
+        """Hand a doomed delta's rows to the next snapshot in its chain.
+
+        ``_resolve_flat`` replays every surviving delta of a chain on top of
+        the baseline, so simply dropping a mid-chain delta would undo the
+        changes it recorded for every later snapshot.  Copying its rows into
+        the immediate successor, but only for paths the successor does not
+        itself describe, leaves every resolved state byte-identical.
+        """
+        successor = self.conn.execute(
+            """SELECT id, timestamp FROM snapshots
+               WHERE baseline_id = ? AND id > ?
+               ORDER BY id ASC LIMIT 1""",
+            (baseline_id, snapshot_id),
+        ).fetchone()
+        if successor is None:
+            return
+        successor_id, successor_stamp = successor[0], successor[1]
+
+        victim_stamp = self.conn.execute(
+            "SELECT timestamp FROM snapshots WHERE id = ?", (snapshot_id,)
+        ).fetchone()
+        victim_stamp = victim_stamp[0] if victim_stamp else None
+
+        # The replay is ordered by timestamp, so the cheap fold is only exact
+        # while the chain's timestamps rise with its ids.  When a hand-set
+        # timestamp breaks that, materialise the successor instead.
+        if victim_stamp is None or not self._chain_is_ordered(
+            baseline_id, snapshot_id, victim_stamp, successor_id,
+            successor_stamp,
+        ):
+            self._promote_to_baseline(successor_id)
+            return
+
+        self.conn.execute(
+            """INSERT INTO deltas (
+                   snapshot_id, path_id, size, own_size, allocated_size,
+                   own_allocated_size, unique_allocated_size,
+                   own_unique_allocated_size, file_count, dir_count, mtime,
+                   error, is_dir, is_removed
+               )
+               SELECT ?, d.path_id, d.size, d.own_size, d.allocated_size,
+                      d.own_allocated_size, d.unique_allocated_size,
+                      d.own_unique_allocated_size, d.file_count, d.dir_count,
+                      d.mtime, d.error, d.is_dir, d.is_removed
+                 FROM deltas d
+                WHERE d.snapshot_id = ?
+                  AND d.path_id NOT IN (
+                      SELECT path_id FROM deltas WHERE snapshot_id = ?
+                  )""",
+            (successor_id, snapshot_id, successor_id),
+        )
+
+    def _chain_is_ordered(
+        self,
+        baseline_id: int,
+        victim_id: int,
+        victim_stamp: str,
+        successor_id: int,
+        successor_stamp: str,
+    ) -> bool:
+        """Report whether the successor really replays right after the victim."""
+        if (successor_stamp, successor_id) < (victim_stamp, victim_id):
+            return False
+        intervening = self.conn.execute(
+            """SELECT 1 FROM snapshots
+                WHERE baseline_id = ? AND id NOT IN (?, ?)
+                  AND (timestamp > ? OR (timestamp = ? AND id > ?))
+                  AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                LIMIT 1""",
+            (
+                baseline_id, victim_id, successor_id,
+                victim_stamp, victim_stamp, victim_id,
+                successor_stamp, successor_stamp, successor_id,
+            ),
+        ).fetchone()
+        return intervening is None
 
     def _row_to_snapshot(self, row) -> Snapshot:
         if len(row) <= 8:
