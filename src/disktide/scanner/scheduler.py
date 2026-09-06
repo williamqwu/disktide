@@ -1344,6 +1344,8 @@ class TreeScanScheduler:
         previous = _child_contribution(state.node)
         children = state.node.children
         result.node.children = children
+        if result.node.error is not None and not result.streamed and children:
+            self._carry_streamed_progress(result, state)
         if _recalculate_directory(
             result.node, result.direct_inaccessible, result.direct_vanished
         ):
@@ -1367,6 +1369,31 @@ class TreeScanScheduler:
         if state.remaining_children == 0:
             self._mark_settled(state)
         return state
+
+    @staticmethod
+    def _carry_streamed_progress(
+        result: DirectoryScanResult,
+        state: _DirectoryState,
+    ) -> None:
+        """Keep what a directory published before its worker died.
+
+        `_failed_result` is a bare placeholder -- zero own bytes, zero
+        inaccessible entries, no ancestors -- because the worker that built
+        it has no state to report. Installed over a directory whose entry
+        chunks had already been applied, it kept the children those chunks
+        delivered and discarded everything else they had accumulated: the
+        directory listed hundreds of files and reported `own_size=0`, and
+        every total above it was short by exactly those bytes. The entries
+        stay in the tree, so the numbers they contributed stay with them;
+        only `error` is new.
+        """
+
+        node = result.node
+        node.own_size = state.node.own_size
+        node.own_allocated_size = state.node.own_allocated_size
+        result.direct_inaccessible = state.direct_inaccessible
+        result.direct_vanished = state.direct_vanished
+        result.child_ancestors = state.child_ancestors
 
     def _apply_whole_directory(
         self,
