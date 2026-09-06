@@ -36,6 +36,28 @@ And one platform difference: a CPython extension on macOS is a *bundle*
 fails to link, because the Python symbols the module calls are resolved by
 the interpreter that loads it and are in no library at build time.
 
+And one thing an editable install needs that a wheel does not: **the object
+has to be in the source tree**. An editable install is a `.pth` file naming
+`<root>/src`, so `import disktide` resolves to `src/disktide/` -- a real
+package, which beats the `disktide/` directory the wheel's own copy creates
+in `site-packages` (that one has no `__init__.py`, so it is only a namespace
+*portion* and loses the moment a regular package is found). Measured on this
+repository: an editable install that force-included the object built in a
+temporary directory put a healthy `.so` in `site-packages/disktide/scanner/`
+and `disktide doctor` still said `python fallback`, because nothing ever
+looked there -- which is what every editable install of this project had
+been doing, the maintainer's included. So for
+`version == "editable"` the object is compiled *in place*, next to
+`_scanfast.c`, which is the one directory that install imports from -- and
+registered in `build_data["force_include_editable"]`, which is the hook API
+for what an editable wheel carries, so the object is in RECORD and
+`pip uninstall` takes it away again. The in-place copy is what runs; the
+recorded copy is what makes the install honest about owning it.
+
+`tool/build_scanfast.py` does the same in-place build on demand, for the
+case no install covers: editing the C file in a checkout that is already
+installed.
+
 No setuptools: it would be a second build requirement for a hundred lines of
 compiler invocation, and this project ships `hatchling` alone.
 """
@@ -165,8 +187,33 @@ class CustomBuildHook(BuildHookInterface):
             return
 
         suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
-        self._scratch = tempfile.mkdtemp(prefix="disktide-scanfast-")
-        output = os.path.join(self._scratch, "_scanfast" + suffix)
+        editable = version == "editable"
+        if editable:
+            # In place, deliberately: see the module docstring. An editable
+            # install imports from `src/`, so anywhere else is a `.so` that
+            # loads for nobody. `.so` is gitignored, and the wheel target
+            # excludes it, so a later *wheel* build cannot pick it up.
+            output = os.path.join(os.path.dirname(source), "_scanfast" + suffix)
+            # Delete first. Every failure below this line -- no compiler, a
+            # compile that errors, an object that will not import -- leaves
+            # the install running the pure-Python reader, and an object left
+            # over from an older ABI or an older `.c` would be loaded
+            # instead of that fallback and would be wrong in a way nothing
+            # reports. There is no state worth keeping here: the file is
+            # rebuilt from the source next to it.
+            try:
+                os.remove(output)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                self.app.display_warning(
+                    f"scanfast: could not remove the previous {output} "
+                    f"({exc}); building a pure-Python wheel"
+                )
+                return
+        else:
+            self._scratch = tempfile.mkdtemp(prefix="disktide-scanfast-")
+            output = os.path.join(self._scratch, "_scanfast" + suffix)
         include = sysconfig.get_paths()["include"]
         # cibuildwheel sets ARCHFLAGS when it cross-compiles on macOS; a
         # build that ignored it would put the host's architecture in a wheel
@@ -191,12 +238,14 @@ class CustomBuildHook(BuildHookInterface):
         try:
             subprocess.run(command, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
+            self._discard(editable, output)
             self.app.display_warning(
                 f"scanfast: {compiler[0]} failed ({exc.stderr.strip()}); "
                 "building a pure-Python wheel"
             )
             return
         except OSError as exc:
+            self._discard(editable, output)
             self.app.display_warning(
                 f"scanfast: {compiler[0]} could not be run ({exc}); "
                 "building a pure-Python wheel"
@@ -215,6 +264,7 @@ class CustomBuildHook(BuildHookInterface):
         else:
             failure = _import_failure(output)
             if failure is not None:
+                self._discard(editable, output)
                 self.app.display_warning(
                     f"scanfast: {compiler[0]} succeeded but the object it "
                     f"produced does not import ({failure}); building a "
@@ -224,15 +274,38 @@ class CustomBuildHook(BuildHookInterface):
 
         build_data["pure_python"] = False
         build_data["infer_tag"] = True
-        build_data["force_include"][output] = (
-            "disktide/scanner/_scanfast" + suffix
-        )
+        target = "disktide/scanner/_scanfast" + suffix
+        build_data["force_include"][output] = target
+        # A non-empty `force_include_editable` is what hatchling reads
+        # instead of `force_include` when it builds the editable wheel; both
+        # are set because one hook serves both versions, and each build
+        # takes the map that belongs to it.
+        build_data.setdefault("force_include_editable", {})[output] = target
+        where = " in place" if editable else ""
         self.app.display_info(
-            f"scanfast: built _scanfast{suffix} with {compiler[0]}"
+            f"scanfast: built _scanfast{suffix}{where} with {compiler[0]}"
         )
+
+    @staticmethod
+    def _discard(editable, output):
+        """Remove a half-built in-place object after a failure.
+
+        Only for the editable version: the wheel version builds into a
+        temporary directory that `finalize` throws away whole. A compiler
+        that failed part way through can still have written something, and a
+        broken object in `src/` would be imported in preference to the
+        fallback this build is about to settle for.
+        """
+        if not editable:
+            return
+        try:
+            os.remove(output)
+        except OSError:
+            pass
 
     def finalize(self, version, build_data, artifact_path):
         # The wheel has been written by now; the object file has done its job.
+        # The editable version's object is the install, so it stays.
         if self._scratch is not None:
             shutil.rmtree(self._scratch, ignore_errors=True)
             self._scratch = None

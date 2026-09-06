@@ -371,17 +371,36 @@ class _RecordingApp:
         self.info.append(message)
 
 
-def _run_hook(monkeypatch, module, app):
+def _run_hook(monkeypatch, module, app, version="standard", root=None):
     hook = module.CustomBuildHook()
     hook.target_name = "wheel"
-    hook.root = str(REPO_ROOT)
+    hook.root = str(root) if root is not None else str(REPO_ROOT)
     hook.app = app
+    # Only `force_include` is seeded, deliberately: hatchling's real default
+    # build data has `force_include_editable` too, and the hook has to
+    # `setdefault` it rather than assume it.
     build_data: dict = {"force_include": {}}
     try:
-        hook.initialize("0.0.0", build_data)
+        hook.initialize(version, build_data)
     finally:
-        hook.finalize("0.0.0", build_data, "")
+        hook.finalize(version, build_data, "")
     return build_data
+
+
+def _hook_root_with_source(tmp_path: Path) -> Path:
+    """A minimal tree the hook can build from.
+
+    Used wherever a test runs the *editable* version, which compiles in
+    place: pointed at the checkout it would overwrite the developer's own
+    `_scanfast.so`, which is a side effect a test has no business having.
+    """
+    scanner = tmp_path / "src" / "disktide" / "scanner"
+    scanner.mkdir(parents=True)
+    shutil.copyfile(
+        REPO_ROOT / "src" / "disktide" / "scanner" / "_scanfast.c",
+        scanner / "_scanfast.c",
+    )
+    return tmp_path
 
 
 def _fake_compiler(tmp_path, body: str) -> Path:
@@ -488,6 +507,172 @@ def test_archflags_for_this_machine_do_not_skip_the_check(monkeypatch):
     assert module._cross_architecture(["-arch", host, "-arch", "sparc64"]) == (
         "sparc64"
     )
+
+
+# --- hatch_build.py: the editable version -----------------------------------
+#
+# An editable install is a `.pth` naming `<root>/src`, so `import disktide`
+# resolves to `src/disktide/` -- a real package, which beats the `disktide/`
+# directory the wheel's own copy leaves in `site-packages` (no `__init__.py`,
+# so only a namespace portion). An editable install that force-included an
+# object built in a temporary directory therefore shipped a perfectly healthy
+# `.so` where nothing would ever look, and `disktide doctor` said `python
+# fallback`. These pin the fix: in place for editable, never in place for a
+# wheel.
+
+
+def _require_compiler() -> str:
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("no C compiler on PATH")
+    return compiler
+
+
+def _in_place_objects(root: Path) -> list[Path]:
+    return sorted((root / "src" / "disktide" / "scanner").glob("_scanfast*.so"))
+
+
+def test_an_editable_build_puts_the_object_where_the_pth_will_find_it(
+    tmp_path, monkeypatch
+):
+    """In place, next to the C file, and registered for the editable wheel."""
+    monkeypatch.setenv("CC", _require_compiler())
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+    root = _hook_root_with_source(tmp_path)
+
+    build_data = _run_hook(monkeypatch, module, app, version="editable", root=root)
+
+    assert app.warnings == []
+    assert build_data["pure_python"] is False
+    assert build_data["infer_tag"] is True
+    editable_map = build_data["force_include_editable"]
+    assert len(editable_map) == 1
+    source, destination = next(iter(editable_map.items()))
+    assert destination.startswith("disktide/scanner/_scanfast")
+    # The source is the object in the tree, and it is still there after
+    # `finalize`: that copy *is* the install.
+    assert Path(source).parent == root / "src" / "disktide" / "scanner"
+    assert Path(source).is_file()
+    assert _in_place_objects(root) == [Path(source)]
+
+
+def test_a_wheel_build_never_writes_into_the_source_tree(tmp_path, monkeypatch):
+    """The other half, and the older bug: a `.so` under src/ was swept into
+    a *pure* wheel that then claimed `py3-none-any` while carrying an
+    x86_64 binary."""
+    monkeypatch.setenv("CC", _require_compiler())
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+    root = _hook_root_with_source(tmp_path)
+
+    build_data = _run_hook(monkeypatch, module, app, root=root)
+
+    assert build_data["pure_python"] is False
+    assert _in_place_objects(root) == []
+    built = next(iter(build_data["force_include"]))
+    assert Path(built).parent != root / "src" / "disktide" / "scanner"
+
+
+def test_an_editable_build_that_cannot_compile_leaves_nothing_behind(
+    tmp_path, monkeypatch
+):
+    """A stale object would be loaded instead of the fallback, and be wrong.
+
+    Two ways to get one: an object from an older ABI still sitting there
+    when this build fails, and a half-written file from a compiler that
+    died. Both end with no object and a pure-Python install.
+    """
+    compiler = _fake_compiler(
+        tmp_path,
+        'while [ $# -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then shift; printf "half an object" > "$1"; fi\n'
+        '  shift\n'
+        'done\n'
+        'exit 1\n',
+    )
+    monkeypatch.setenv("CC", str(compiler))
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+    root = _hook_root_with_source(tmp_path / "tree")
+    stale = root / "src" / "disktide" / "scanner" / "_scanfast.stale-abi.so"
+    stale.write_bytes(b"an object from another interpreter")
+
+    build_data = _run_hook(monkeypatch, module, app, version="editable", root=root)
+
+    assert "pure_python" not in build_data
+    assert build_data.get("force_include_editable", {}) == {}
+    assert len(app.warnings) == 1
+    assert "pure-Python wheel" in app.warnings[0]
+    # The one it would have written is gone; a differently-suffixed object
+    # for another interpreter is not this build's to delete.
+    scanner = root / "src" / "disktide" / "scanner"
+    assert sorted(p.name for p in scanner.glob("_scanfast*.so")) == [stale.name]
+
+
+def test_an_editable_build_can_be_switched_off_like_a_wheel_build(
+    tmp_path, monkeypatch
+):
+    """`DISKTIDE_NO_EXTENSION` covers both versions, and writes nothing."""
+    monkeypatch.setenv("DISKTIDE_NO_EXTENSION", "1")
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+    root = _hook_root_with_source(tmp_path)
+
+    build_data = _run_hook(monkeypatch, module, app, version="editable", root=root)
+
+    assert "pure_python" not in build_data
+    assert _in_place_objects(root) == []
+    assert len(app.warnings) == 1
+    assert "DISKTIDE_NO_EXTENSION" in app.warnings[0]
+
+
+# --- tool/build_scanfast.py: the in-place builder ---------------------------
+
+
+def test_build_scanfast_prints_the_command_it_would_run():
+    """`--print-command` resolves everything and compiles nothing."""
+    cp = _run("build_scanfast.py", "--print-command")
+    if cp.returncode != 0 and "no C compiler" in cp.stderr:
+        pytest.skip("no C compiler on PATH")
+    assert cp.returncode == 0, cp.stderr
+    assert "_scanfast.c" in cp.stdout
+    assert " -o " in cp.stdout
+    # A CPython extension is a bundle on macOS and a shared library elsewhere.
+    assert "-shared" in cp.stdout or "-bundle" in cp.stdout
+
+
+def test_build_scanfast_builds_an_object_that_imports(tmp_path):
+    """`--output` keeps the test out of the checkout's own in-place object."""
+    cp = _run("build_scanfast.py", "--output", str(tmp_path))
+    if cp.returncode != 0 and "no C compiler" in cp.stderr:
+        pytest.skip("no C compiler on PATH")
+    assert cp.returncode == 0, cp.stderr + cp.stdout
+    assert "scanfast: built" in cp.stdout
+    # One object, and the tool only says "built" after loading it in a
+    # subprocess -- an object that compiles and will not import is the
+    # failure this whole path exists to catch.
+    built = sorted(tmp_path.glob("_scanfast*"))
+    assert len(built) == 1
+
+
+def test_build_scanfast_fails_loudly_when_there_is_no_compiler(monkeypatch):
+    """Exit status, not a shrug: the developer asked for the fast reader."""
+    env = dict(os.environ)
+    env["CC"] = "/nonexistent/not-a-compiler"
+    env["PATH"] = ""
+    cp = subprocess.run(
+        [sys.executable, str(TOOL_DIR / "build_scanfast.py"), "--print-command"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert cp.returncode == 1
+    assert "no C compiler" in cp.stderr
 
 
 # --- tool/make_homelike.py: the benchmark fixture builder -------------------

@@ -616,6 +616,12 @@ scan now comes from.
 It is optional. Everything works without it; scans on several workers are
 just slower.
 
+A released install gets it prebuilt in the Linux and macOS wheels, and an
+install from source builds it when there is a compiler. A checkout installed
+with `pip install -e .` or `uv sync` builds it too — for a while it did not,
+and quietly ran the fallback, which is worth knowing if you are comparing a
+development checkout against a release.
+
 **Which one am I on?**
 
 ```bash

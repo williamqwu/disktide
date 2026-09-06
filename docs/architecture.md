@@ -293,6 +293,33 @@ when a compiler is present (see `docs/contributing.md`), absent from a pure
 wheel, and switched off by `DISKTIDE_ACCEL=0`; `disktide doctor` prints
 which reader is live. What the fallback loses is speed and nothing else.
 
+Editable installs get it too, and the *place* matters. An editable install
+is a `.pth` file naming `<root>/src`, so `import disktide` resolves to
+`src/disktide/` — a real package, which beats the `disktide/` directory the
+wheel's copy leaves in `site-packages` (no `__init__.py`, so only a
+namespace portion). An editable build that force-included an object compiled
+in a temporary directory therefore installed a perfectly healthy `.so` where
+nothing would ever look. So for the editable version the hook compiles in
+place, next to `_scanfast.c`, and `tool/build_scanfast.py` does the same on
+demand for the one case no install covers: editing the C file in a checkout
+that is already installed.
+
+**One directory is read by one thread, and that is a measurement.** The
+obvious next step from here is to spread a single directory's stats across
+threads, which would matter on a high-latency mount: a directory belongs to
+one scan worker from open to close, so its stats are issued strictly one
+round trip at a time. It was built and measured on the slowest mount
+available — NFSv3 over TCP with `sec=krb5p`, mean GETATTR round trip about
+0.5 ms — and it bought 1.23x at the very best. On an 80,182-entry directory
+there, cold, the times were 2.43/2.34 s at one thread, 2.05/2.30 s at eight,
+1.94 s at sixteen and 2.04 s at thirty-two, and the RPC counters were flat
+across all of them: 504–507 READDIRPLUS and 760–762 GETATTR, about one
+GETATTR per 105 entries. READDIRPLUS already returns each child's attributes
+alongside its name, so nearly every stat is answered from the client's cache
+and there is almost nothing to overlap; what is left is the readdir cursor,
+which is serial by construction. The parallelism that does pay on such a
+mount is across directories — more scan workers — and that already scales.
+
 ### The Collector and the Scan
 
 A scan builds about a million objects the cyclic garbage collector tracks —

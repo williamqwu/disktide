@@ -56,8 +56,11 @@ Python 3.10–3.14, five runtime dependencies, nothing to configure. The
 scanner carries one small optional C extension, prebuilt in the Linux and
 macOS wheels; where there is no wheel for your platform the source
 distribution builds it if a compiler is present and runs a pure-Python
-fallback if not, so the install never fails for the want of one.
-`disktide doctor` says which is live.
+fallback if not, so the install never fails for the want of one. Editable
+installs (`pip install -e .`, `uv sync`) build it too, in place, so a
+development checkout gets the same reader a release does — see
+[contributing.md](docs/contributing.md#scanner-extension-in-a-development-checkout)
+for rebuilding it after editing the C. `disktide doctor` says which is live.
 
 ```bash
 git clone https://github.com/williamqwu/disktide && cd disktide

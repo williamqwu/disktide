@@ -23,6 +23,25 @@
  *     entry with an empty name and that errno, so the caller counts it the
  *     way it counted the OSError the scandir iterator used to raise -- one
  *     inaccessible-or-vanished entry, with everything read before it kept.
+ *
+ * One directory stays serial, and that was measured rather than assumed.
+ * The stats of a single directory were spread across pthread workers pulling
+ * from a shared cursor while this loop kept reading names, and tried on the
+ * slowest mount available -- NFSv3 over TCP with sec=krb5p, mean GETATTR
+ * round trip about 0.5 ms.  On an 80,182-entry directory there, runs
+ * interleaved 70 s apart so the attribute caches had expired, it bought
+ * nothing worth having: 2.43 and 2.34 s at one thread, 2.05 and 2.30 s at
+ * eight, 1.94 s at sixteen, 2.04 s at thirty-two -- 1.23x at the very best,
+ * against a 2x that would have been worth the machinery.
+ * The RPC counters say why: the same 80,182 entries cost 504 READDIRPLUS
+ * and only 762 GETATTR, identical at every thread count.  READDIRPLUS
+ * already returns each child's attributes alongside its name, so nearly
+ * every stat here is answered out of the client's cache and there is
+ * essentially nothing left to overlap; what remains is the readdir cursor
+ * itself, which is serial by construction.  The parallelism that does pay
+ * on such a mount is across directories -- more scan workers -- and that
+ * one already scales.  So this reads one directory on one thread, and the
+ * threading lives a level up.
  */
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>

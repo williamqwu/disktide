@@ -128,17 +128,36 @@ entries in one GIL release. It is optional: `disktide/scanner/accel.py`
 falls back to `_scanfast_py.py` when it is not importable, and the two
 produce identical trees.
 
-`uv sync` does **not** build it — the editable install has no build hook to
-run. Build it in place when you want the fast path locally:
+### Scanner extension in a development checkout
+
+Editable installs build it. `pip install -e .` and `uv sync` run the same
+`hatch_build.py` hook a wheel build does, and for an editable version it
+compiles the object **in place**, into `src/disktide/scanner/`.
+
+In place, and not into a temporary directory, for a reason worth knowing:
+an editable install is a `.pth` file naming `<root>/src`, so `import
+disktide` resolves to `src/disktide/` — a real package, which beats the
+`disktide/` directory the wheel's copy leaves in `site-packages` (no
+`__init__.py`, so only a namespace *portion*, and a regular package wins).
+An editable install that force-included the object from a build directory
+therefore put a perfectly healthy `.so` where nothing would ever look, and
+`disktide doctor` said `python fallback` — which is what the maintainer's
+own `uv sync` had been doing for the life of the extension.
+
+Nothing reruns the hook when you *edit the C file*, though, so:
 
 ```bash
-PY=.venv/bin/python
-INC=$($PY -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
-EXT=$($PY -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')
-gcc -O2 -Wall -shared -fPIC -I"$INC" \
-    -o "src/disktide/scanner/_scanfast$EXT" src/disktide/scanner/_scanfast.c
-.venv/bin/disktide doctor | grep Scanner
+python tool/build_scanfast.py       # rebuild in place, then verify it loads
+disktide doctor | grep Scanner      # says which reader is live
+#   Scanner: native (_scanfast)
+#   Scanner: python fallback (...)
 ```
+
+The tool makes the same three decisions the hook makes — the compiler
+search order, the macOS bundle flags, and loading the object in a subprocess
+before believing it — and exits non-zero on any of them. `--print-command`
+shows the invocation without running it; `--output DIR` builds somewhere
+else.
 
 `.so` is gitignored. Delete it to go back to the fallback, or set
 `DISKTIDE_ACCEL=0` for one command. The suite has to pass both ways:
@@ -164,13 +183,18 @@ diff <(tail -n +2 a.tsv) <(tail -n +2 b.tsv)   # line 1 names the backend
 silently* when it cannot, so an sdist installs everywhere. Two things it has
 to keep getting right:
 
-1. **Compile outside the source tree.** A `.so` left under
+1. **Compile outside the source tree — for a *wheel*.** A `.so` left under
    `src/disktide/scanner/` — which is exactly what the in-place build above
    leaves — is an ordinary package file to the next build, and one was swept
    into a *pure* wheel that then claimed `py3-none-any` while carrying an
-   x86_64 binary. The hook compiles into a temporary directory and
-   `force_include`s the result; `exclude = ["*.so", "*.pyd", "*.dylib",
-   "*.c"]` on the wheel target is the belt to that brace.
+   x86_64 binary. For the wheel version the hook compiles into a temporary
+   directory and `force_include`s the result; `exclude = ["*.so", "*.pyd",
+   "*.dylib", "*.c"]` on the wheel target is the belt to that brace, and it
+   is what makes the editable version's in-place object safe to leave lying
+   around. The editable version also fills
+   `build_data["force_include_editable"]`, which is what hatchling reads
+   instead of `force_include` when it builds an editable wheel, so the
+   object is in `RECORD` and `pip uninstall` takes it away again.
 2. **Find a compiler that exists.** `sysconfig`'s `CC` is whatever built the
    interpreter, and a uv-managed CPython says `clang`, which most Linux
    runners do not have. The hook tries `$CC`, then sysconfig's, then `cc`,
@@ -312,6 +336,7 @@ default_action = "safe"
 | `tool/soak_memory` | Scan one tree N times in one process and watch RSS. The memory half of `soak_scan`, which is a randomised *invariants* soak. |
 | `tool/dump_tree` | Every node of one scan as sorted text, for byte-identity diffs. `--backend native\|python` picks the directory reader; the first header line names it. |
 | `tool/check_doctor_backend` | Assert which scanner backend a `doctor --json` report names. Used by CI on each install shape. |
+| `tool/build_scanfast` | Compile the optional scanner extension in place after editing `_scanfast.c`, then load it to check it imports. `--print-command`, `--dry-run`, `--output DIR`. |
 | `tool/capture_glyphs` | Walk every screen in a private tmux server and report any non-ASCII glyph outside `disktide.glyphs`'s reviewed set. `--size 307x71 --size 120x32` by default; `--slow-tree N` makes the scan last long enough to photograph the progress overlay. |
 
 ### Benchmarking a scan
