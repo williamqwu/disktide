@@ -1394,6 +1394,13 @@ def monitor_add(
             workers=workers if workers is not None else config.scan.workers,
         )
         warnings = service.definition_warnings(definition)
+        root = definition.normalized().root_path
+        for existing in service.list_monitors():
+            if existing.root_path == root:
+                raise click.ClickException(
+                    f"monitor {existing.id} ({existing.label}) already "
+                    f"watches {root}"
+                )
         created = service.create_monitor(definition)
         click.echo(
             f"Created monitor {created.id}: {created.label} · {created.root_path} "
@@ -1853,6 +1860,8 @@ def monitor_pin(snapshot_id: int, label: str) -> None:
     """Protect a snapshot from retention."""
     _, repository, service = _monitor_service()
     try:
+        if repository.get_snapshot(snapshot_id) is None:
+            raise click.ClickException(f"snapshot {snapshot_id} does not exist")
         service.pin_snapshot(snapshot_id, label=label)
         click.echo(f"Pinned snapshot #{snapshot_id}")
     except Exception as exc:
@@ -1867,6 +1876,8 @@ def monitor_unpin(snapshot_id: int) -> None:
     """Allow a snapshot to be pruned again."""
     _, repository, service = _monitor_service()
     try:
+        if repository.get_snapshot(snapshot_id) is None:
+            raise click.ClickException(f"snapshot {snapshot_id} does not exist")
         service.unpin_snapshot(snapshot_id)
         click.echo(f"Unpinned snapshot #{snapshot_id}")
     except Exception as exc:
