@@ -44,3 +44,30 @@ def test_a_failed_watch_registration_emits_outside_the_backend_lock():
     backend._add_one("/nope", object())
 
     assert held == [False]
+
+
+# --- a stopped backend cannot claim the status ------------------------
+
+
+def test_an_event_after_the_fallback_does_not_restore_event_assisted():
+    """A service built bare has no status lock and no repository, so the
+    handler can only get through if it returns before reaching for either."""
+    from disktide.collectors.events.base import (
+        FilesystemEvent,
+        FilesystemEventKind,
+    )
+    from disktide.services.monitor import MonitorService
+
+    service = MonitorService.__new__(MonitorService)
+    service._dirty_trackers = {1: type("T", (), {"record": lambda self, e: ()})()}
+    service._event_backends = {}
+
+    service._handle_filesystem_event(
+        1,
+        FilesystemEvent(
+            kind=FilesystemEventKind.CREATE,
+            path="/r/new",
+            is_directory=False,
+            backend="inotify-simple",
+        ),
+    )

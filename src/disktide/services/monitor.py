@@ -1851,6 +1851,11 @@ class MonitorService:
                     ),
                 )
                 return
+        if monitor_id not in self._event_backends:
+            # A backend that has already fallen back can still deliver the
+            # events queued behind the failure; writing EVENT_ASSISTED for
+            # them left the status claiming a backend that no longer exists.
+            return
         watch_message: str | None = None
         with self._status_lock:
             status = self._repository.get_monitor_status(monitor_id)
