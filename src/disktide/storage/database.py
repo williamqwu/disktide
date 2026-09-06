@@ -3321,7 +3321,8 @@ class Database:
         if self.read_only:
             raise sqlite3.OperationalError("alert repository is read-only")
         cursor = self.conn.execute(
-            "UPDATE alert_rules SET enabled = ?, updated_at = ? WHERE id = ?",
+            "UPDATE alert_rules SET enabled = ?, updated_at = ? "
+            "WHERE id = ? AND deleted_at IS NULL",
             (int(enabled), _datetime_text(datetime.now(timezone.utc)), rule_id),
         )
         if cursor.rowcount != 1:
@@ -3332,16 +3333,19 @@ class Database:
     def delete_alert_rule(self, rule_id: int) -> None:
         if self.read_only:
             raise sqlite3.OperationalError("alert repository is read-only")
-        self.conn.execute(
+        cursor = self.conn.execute(
             """UPDATE alert_rules
                SET enabled = 0, deleted_at = ?, updated_at = ?
-               WHERE id = ?""",
+               WHERE id = ? AND deleted_at IS NULL""",
             (
                 _datetime_text(datetime.now(timezone.utc)),
                 _datetime_text(datetime.now(timezone.utc)),
                 rule_id,
             ),
         )
+        if cursor.rowcount != 1:
+            self.conn.rollback()
+            raise KeyError(f"alert rule {rule_id} does not exist")
         self.conn.commit()
 
     @staticmethod

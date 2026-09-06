@@ -97,6 +97,7 @@
 - **A quoted `~` reaches the explorer** The router judged `~` a directory and then handed `open` the unexpanded token, which `click.Path` refused as "does not exist".
 - **Duplicate roots and missing snapshots get plain messages** A second `monitor add` on the same root printed "UNIQUE constraint failed", `monitor pin 999` printed "FOREIGN KEY constraint failed", and `monitor unpin 999` reported success.
 - **Pausing or resuming an archived monitor is refused** `set_monitor_desired_state` clears `archived_at`, so either verb quietly brought the monitor back and rescheduled it with its alert rules still disabled.
+- **Removing or enabling a rule that is gone is an error** `alerts remove 999` on a fresh database printed "Removed alert rule 999" with exit 0, and `alerts enable` on a soft-deleted rule flipped `enabled` back on a dead row.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**
