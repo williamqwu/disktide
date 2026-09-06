@@ -18,7 +18,12 @@ from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane, Tree
 
-from disktide.config import AppConfig, resolve_live_scan_render, save_config
+from disktide.config import (
+    AppConfig,
+    ScanOverrides,
+    resolve_live_scan_render,
+    save_config,
+)
 from disktide.keys import NAV, SNAPSHOT
 from disktide.domain.live_view import LiveViewNode, build_live_view
 from disktide.domain.metrics import MetricId
@@ -239,11 +244,17 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         scan_service: ScanService | None = None,
         visualization_service: VisualizationService | None = None,
         monitor_service: MonitorService | None = None,
+        scan_overrides: ScanOverrides | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._scan_path = scan_path
         self._config = config
+        # What `-d`/`-w`/`--one-file-system`/`--exclude-pseudo` asked for on
+        # this launch. Kept apart from `config` because the app writes that
+        # file back and these are transient; `_scan_setting` below is where
+        # the two meet.
+        self._scan_overrides = scan_overrides or ScanOverrides()
         self._scan_service = scan_service or ScanService()
         self._visualization_service = visualization_service
         self._monitor_service = monitor_service
@@ -394,15 +405,12 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             )
         else:
             self._live_render = resolve_live_scan_render(setting)
-        workers = self._config.scan.workers if self._config else None
-        max_depth = self._config.scan.max_depth if self._config else None
+        workers = self._scan_setting("workers", None)
+        max_depth = self._scan_setting("max_depth", None)
         policy = ScanPolicy(
-            one_file_system=(
-                self._config.scan.one_file_system if self._config else False
-            ),
-            exclude_pseudo_filesystems=(
-                self._config.scan.exclude_pseudo_filesystems
-                if self._config else True
+            one_file_system=self._scan_setting("one_file_system", False),
+            exclude_pseudo_filesystems=self._scan_setting(
+                "exclude_pseudo_filesystems", True
             ),
             max_depth=max_depth,
         )
@@ -1802,6 +1810,20 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             "to return to auto",
             timeout=4,
         )
+
+    def _scan_setting(self, name: str, default):
+        """This launch's value for a scan setting: option, then config.
+
+        The command-line options used to be written into the loaded config
+        before the app was built, which is how a single `disktide -w 2 /srv`
+        left `workers = 2` in `config.toml` for every run after it.
+        """
+        override = getattr(self._scan_overrides, name)
+        if override is not None:
+            return override
+        if self._config is None:
+            return default
+        return getattr(self._config.scan, name)
 
     def action_cycle_ring_shape(self) -> None:
         """Step the ring chart through tiled, round and pane-filling.

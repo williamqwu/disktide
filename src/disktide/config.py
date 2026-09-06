@@ -359,6 +359,36 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
     config_file.write_text("\n".join(lines))
 
 
+@dataclass(slots=True)
+class ScanOverrides:
+    """Scan settings that belong to one launch rather than to the config.
+
+    `-d`, `-w`, `--one-file-system` and `--exclude-pseudo` used to be
+    written into the loaded `AppConfig` before the app was built, and the
+    app saves that config -- on quit, and again whenever a path is
+    remembered -- so a single `disktide -w 2 /srv` left `workers = 2` in
+    `config.toml` for every later run, including plain `disktide scan`.
+    `None` here means "not given on this launch"; the config's own value
+    is what applies then.
+    """
+
+    max_depth: int | None = None
+    workers: int | None = None
+    one_file_system: bool | None = None
+    exclude_pseudo_filesystems: bool | None = None
+
+    def __bool__(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.max_depth,
+                self.workers,
+                self.one_file_system,
+                self.exclude_pseudo_filesystems,
+            )
+        )
+
+
 def _parse_cell_aspect(value: object) -> float | None:
     """Read a manual cell aspect out of a config file, or None.
 

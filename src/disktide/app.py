@@ -13,7 +13,7 @@ from textual.binding import Binding
 
 from disktide import APP_NAME
 from disktide.config import (
-    AppConfig, cleanup_rule_directory, load_config, save_config,
+    AppConfig, ScanOverrides, cleanup_rule_directory, load_config, save_config,
     get_effective_paths, set_effective_paths,
 )
 from disktide.rendering import (
@@ -220,6 +220,7 @@ class DiskTideApp(App):
         config: AppConfig | None = None,
         show_welcome: bool = False,
         snapshot_repository: SnapshotRepository | None = None,
+        scan_overrides: ScanOverrides | None = None,
         **kwargs,
     ):
         # The config is read before `super().__init__` because
@@ -278,6 +279,12 @@ class DiskTideApp(App):
         self.__cleanup_service: CleanupService | None = None
         self.__cleanup_safe_action: CleanupActionKind | None = None
         self._show_welcome = show_welcome
+        # `-d`/`-w`/`--one-file-system`/`--exclude-pseudo` apply to this
+        # launch only, so they are kept beside the config rather than in it:
+        # `_perform_quit` and `_save_last_visited` both write the config
+        # file, and one `disktide -w 2 /srv` used to leave `workers = 2` in
+        # it for every later run.
+        self._scan_overrides = scan_overrides or ScanOverrides()
         # The mode screens do not exist until a path has been chosen, and
         # the keys that reach them are bound from mount. `check_action`
         # below reads this to keep 1/2/3/4 and `,` off the welcome screen.
@@ -392,8 +399,12 @@ class DiskTideApp(App):
         set_safe_rendering(self._config.ui.safe_rendering)
         # The environment wins over the config so a shape can be asked for
         # per-launch — which is the whole of how the two are compared,
-        # including by the README capture pipeline.
-        self._config.ui.ring_shape = set_ring_shape(
+        # including by the README capture pipeline. Session-only, the way
+        # `_session_theme` is: quitting saves the config, and one
+        # `DISKTIDE_RING_SHAPE=disc` launch used to leave `ring_shape =
+        # "disc"` in the file behind it. `g` in the explorer is the
+        # deliberate way to change the saved one.
+        self._session_ring_shape = set_ring_shape(
             os.environ.get("DISKTIDE_RING_SHAPE") or self._config.ui.ring_shape
         )
         cellgeom.set_configured_aspect(self._config.ui.cell_aspect)
@@ -559,6 +570,7 @@ class DiskTideApp(App):
             scan_service=self._scan_service,
             visualization_service=self._visualization_service,
             monitor_service=self._monitor_service,
+            scan_overrides=self._scan_overrides,
         )
         self._cleanup = CleanupScreen(
             service=self._cleanup_service,

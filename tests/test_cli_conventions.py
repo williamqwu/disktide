@@ -352,6 +352,97 @@ def test_a_command_line_path_is_remembered_like_a_chosen_one(tmp_path):
 # --- session overrides -----------------------------------------------------
 
 
+def test_launch_options_do_not_end_up_in_the_config_file(tmp_path, monkeypatch):
+    """`-d`/`-w`/`--one-file-system` are per-launch, as `-w`'s help says.
+
+    They were applied to the loaded config before the app was built, and
+    the app writes that config -- `_remember_last_visited` before
+    `app.run`, `_perform_quit` on the way out -- so one
+    `disktide -w 2 -d 3 /srv` left `workers = 2` and `max_depth = 3` in
+    `config.toml` for every later run, including plain `disktide scan`.
+    """
+    from disktide.__main__ import _launch_tui
+    from disktide.app import DiskTideApp
+    from disktide.config import get_effective_paths, load_config
+
+    started: dict[str, object] = {}
+    monkeypatch.setattr(
+        DiskTideApp, "run", lambda self, **kwargs: started.update(app=self)
+    )
+    monkeypatch.setattr("disktide.__main__._force_teardown", lambda app: None)
+    monkeypatch.setattr("disktide.__main__._pin_color_system", lambda: None)
+    monkeypatch.setattr(
+        "disktide.__main__._probe_terminal_if_unmeasured", lambda config: None
+    )
+    monkeypatch.setattr(
+        "disktide.__main__._stdio_is_interactive", lambda: True
+    )
+    monkeypatch.setattr(os, "_exit", lambda code: None)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+
+    _launch_tui(
+        None,
+        str(tree),
+        max_depth=3,
+        workers=2,
+        one_file_system=True,
+        exclude_pseudo=None,
+        no_mouse=False,
+    )
+
+    saved = load_config()
+    assert saved.scan.workers is None
+    assert saved.scan.max_depth is None
+    assert saved.scan.one_file_system is False
+    # The path itself is still remembered, which is the one thing that
+    # launch is meant to write.
+    assert get_effective_paths(saved).last_visited_path == str(tree)
+    # And the session really did get the options.
+    app = started["app"]
+    assert app._scan_overrides.workers == 2
+    assert app._scan_overrides.max_depth == 3
+    assert app._scan_overrides.one_file_system is True
+
+
+def test_the_ring_shape_environment_override_is_not_written_back(
+    tmp_path, monkeypatch
+):
+    """`DISKTIDE_RING_SHAPE=disc disktide` used to make it the saved shape."""
+    import asyncio
+
+    from disktide.app import DiskTideApp
+    from disktide.config import load_config
+    from disktide.rendering import ring_shape
+    from disktide.viz.ringshape import DEFAULT_RING_SHAPE
+
+    monkeypatch.setenv("DISKTIDE_RING_SHAPE", "disc")
+
+    async def go():
+        app = DiskTideApp(show_welcome=True)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            shape = ring_shape()
+            app._perform_quit()
+            await pilot.pause()
+            return shape
+
+    try:
+        session_shape = asyncio.run(go())
+    finally:
+        from disktide.rendering import set_ring_shape
+
+        set_ring_shape(DEFAULT_RING_SHAPE)
+
+    assert session_shape == "disc"
+    assert load_config().ui.ring_shape == DEFAULT_RING_SHAPE
+    from disktide.config import _config_path
+
+    written = _config_path()
+    if written.exists():
+        assert "ring_shape" not in written.read_text()
+
+
 def test_no_mouse_is_an_accepted_root_option():
     """It reaches the same TTY check `disktide` alone does, not a parse error."""
     result = CliRunner().invoke(cli, ["--no-mouse"])

@@ -298,16 +298,18 @@ def _launch_tui(
     _pin_color_system()
 
     from disktide.app import DiskTideApp
+    from disktide.config import ScanOverrides
 
     config = _load_config_or_exit()
-    if max_depth is not None:
-        config.scan.max_depth = max_depth
-    if workers is not None:
-        config.scan.workers = workers
-    if one_file_system is not None:
-        config.scan.one_file_system = one_file_system
-    if exclude_pseudo is not None:
-        config.scan.exclude_pseudo_filesystems = exclude_pseudo
+    # Kept out of `config`, which the app writes back: these four are
+    # transient, as `-w`'s own help says, and the app scans with them
+    # through `scan_overrides` instead.
+    scan_overrides = ScanOverrides(
+        max_depth=max_depth,
+        workers=workers,
+        one_file_system=one_file_system,
+        exclude_pseudo_filesystems=exclude_pseudo,
+    )
 
     _probe_terminal_if_unmeasured(config)
 
@@ -335,6 +337,7 @@ def _launch_tui(
         show_welcome=scan_path is None,
         config=config,
         snapshot_repository=repository,
+        scan_overrides=scan_overrides,
     )
     try:
         # --no-mouse is a session override, not a preference: it never
