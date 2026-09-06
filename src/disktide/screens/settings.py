@@ -242,6 +242,8 @@ class SettingsScreen(Screen):
         #: The value the workers box was just clamped to, waiting for
         #: its own `Input.Changed` to come back. See `on_input_changed`.
         self._workers_echo: str | None = None
+        #: Same trick for Max depth, which now also rewrites its own field.
+        self._max_depth_echo: str | None = None
         self._entry_epoch = render_epoch()
         self._rule_catalog = get_rule_catalog(
             disabled_packs=self._config.cleanup.disabled_rule_packs,
@@ -653,7 +655,9 @@ class SettingsScreen(Screen):
 
         return worker_ceiling(self._system_info.available_cpus)
 
-    def _render_workers_hint(self, *, clamped: bool = False) -> None:
+    def _render_workers_hint(
+        self, *, clamped: bool = False, reset: bool = False
+    ) -> None:
         """Say what auto would pick and what the host will not exceed."""
         info = self._system_info
         if info is None:
@@ -662,6 +666,11 @@ class SettingsScreen(Screen):
         hint = f"(recommended: {info.recommended_workers} · max {ceiling} on this host)"
         if clamped:
             hint = f"(clamped to {ceiling}; max {ceiling} on this host)"
+        elif reset:
+            hint = (
+                f"(0 or less means auto: {info.recommended_workers} here · "
+                f"max {ceiling} on this host)"
+            )
         self.query_one("#workers-hint", Label).update(hint)
 
     def _detect_db_size(self) -> None:
@@ -901,7 +910,16 @@ class SettingsScreen(Screen):
                 except ValueError:
                     pass  # Silently ignore non-numeric input
                 else:
-                    if parsed > 0:
+                    if parsed <= 0:
+                        # There is no zeroth worker, and the field must not
+                        # keep showing a number the config does not have:
+                        # `0` used to sit there across a dismiss and a
+                        # re-open while `config.toml` still said 8.
+                        self._config.scan.workers = None
+                        self._workers_echo = ""
+                        event.input.value = ""
+                        self._render_workers_hint(reset=True)
+                    else:
                         ceiling = self._worker_ceiling()
                         clamped = ceiling is not None and parsed > ceiling
                         if clamped:
@@ -927,15 +945,28 @@ class SettingsScreen(Screen):
                     if parsed > 0:
                         self._apply_cell_aspect(clamp_cell_aspect(parsed))
         elif event.input.id == "max-depth-input":
+            if value == self._max_depth_echo:
+                # Our own rewrite arriving back as a message; see the
+                # workers branch above for why it has to be swallowed.
+                self._max_depth_echo = None
+                return
+            self._max_depth_echo = None
             if value == "":
                 self._config.scan.max_depth = None
             else:
                 try:
                     parsed = int(value)
+                except ValueError:
+                    pass  # Mid-typing, or not a number at all
+                else:
                     if parsed >= 0:
                         self._config.scan.max_depth = parsed
-                except ValueError:
-                    pass
+                    else:
+                        # No negative depth exists, and the box must not
+                        # keep showing one the config never took.
+                        self._config.scan.max_depth = None
+                        self._max_depth_echo = ""
+                        event.input.value = ""
         elif event.input.id == "interval-input":
             try:
                 parsed = parse_duration(value)

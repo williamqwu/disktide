@@ -662,3 +662,112 @@ def test_a_workers_value_typed_in_settings_reaches_the_next_scan(tmp_path):
             assert requests and requests[0].workers == 3
 
     asyncio.run(go())
+
+
+def _isolate_xdg(monkeypatch, tmp_path) -> None:
+    for variable in (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ):
+        monkeypatch.setenv(variable, str(tmp_path / variable.lower()))
+
+
+def test_settings_boxes_never_show_a_value_the_config_did_not_take(
+    tmp_path, monkeypatch
+):
+    """`0` and `-1` sat in the boxes while config.toml kept the old numbers.
+
+    Nothing said they had been rejected, `action_dismiss_settings` saved the
+    previous values anyway, and the screen is installed once, so the stale
+    text survived leaving Settings and coming back.
+    """
+    from textual.widgets import Input, Label
+
+    from disktide.config import load_config, save_config
+    from disktide.screens.settings import SettingsScreen
+
+    _isolate_xdg(monkeypatch, tmp_path)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    _make_tree_dir(tree)
+    config = load_config()
+    config.scan.workers = 8
+    config.scan.max_depth = 4
+    save_config(config)
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tree), show_welcome=False, config=config
+        )
+        async with app.run_test(size=(120, 50)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("comma")
+            settings = await _await_screen(pilot, app, SettingsScreen)
+            workers = settings.query_one("#workers-input", Input)
+            depth = settings.query_one("#max-depth-input", Input)
+            assert (workers.value, depth.value) == ("8", "4")
+
+            workers.value = "0"
+            await pilot.pause()
+            depth.value = "-1"
+            await pilot.pause()
+
+            assert workers.value == "", "the box kept the rejected count"
+            assert depth.value == "", "the box kept the rejected depth"
+            assert config.scan.workers is None
+            assert config.scan.max_depth is None
+            assert "means auto" in settings.query_one(
+                "#workers-hint", Label
+            ).render().plain
+
+            await pilot.press("escape")
+            await pilot.pause()
+            saved = load_config()
+            assert saved.scan.workers is None
+            assert saved.scan.max_depth is None
+
+            # And re-entering shows what the config actually holds.
+            await pilot.press("comma")
+            reopened = await _await_screen(pilot, app, SettingsScreen)
+            assert reopened.query_one("#workers-input", Input).value == ""
+            assert reopened.query_one("#max-depth-input", Input).value == ""
+
+    asyncio.run(go())
+
+
+def test_settings_still_takes_an_ordinary_worker_count_and_depth(
+    tmp_path, monkeypatch
+):
+    """The reset path must not have eaten the values that are valid."""
+    from textual.widgets import Input
+
+    from disktide.config import load_config
+    from disktide.screens.settings import SettingsScreen
+
+    _isolate_xdg(monkeypatch, tmp_path)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    _make_tree_dir(tree)
+    config = load_config()
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tree), show_welcome=False, config=config
+        )
+        async with app.run_test(size=(120, 50)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("comma")
+            settings = await _await_screen(pilot, app, SettingsScreen)
+            settings.query_one("#workers-input", Input).value = "3"
+            await pilot.pause()
+            settings.query_one("#max-depth-input", Input).value = "0"
+            await pilot.pause()
+
+            assert settings.query_one("#workers-input", Input).value == "3"
+            assert settings.query_one("#max-depth-input", Input).value == "0"
+            assert config.scan.workers == 3
+            assert config.scan.max_depth == 0
+
+    asyncio.run(go())
