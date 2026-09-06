@@ -422,7 +422,13 @@ class CleanupService:
 
         audit_available = True
         for item in plan.active_actions:
-            if item.execution_status is CleanupExecutionStatus.SKIPPED:
+            if item.execution_status in {
+                CleanupExecutionStatus.SKIPPED,
+                CleanupExecutionStatus.SUCCEEDED,
+                CleanupExecutionStatus.PURGED,
+            }:
+                # Re-validating an item whose target is already in the trash
+                # rewrote it to SKIPPED, which is what undo and purge key on.
                 continue
             validation, detail, mutation_token = self.prepare_mutation(plan, item)
             item.validation_status = validation

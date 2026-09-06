@@ -99,6 +99,7 @@
 - **Pausing or resuming an archived monitor is refused** `set_monitor_desired_state` clears `archived_at`, so either verb quietly brought the monitor back and rescheduled it with its alert rules still disabled.
 - **Removing or enabling a rule that is gone is an error** `alerts remove 999` on a fresh database printed "Removed alert rule 999" with exit 0, and `alerts enable` on a soft-deleted rule flipped `enabled` back on a dead row.
 - **A new-large-item rule needs a baseline** With one snapshot, or a monitor younger than `--window`, every path at or above the threshold read as new, so `alerts check` exited 2 and `monitor run` persisted an event for an unchanged tree.
+- **Applying a finished plan twice no longer destroys its undo** The second pass re-validated already-succeeded actions, found the target gone, and rewrote them to `skipped` — after which `cleanup undo` restored nothing and `cleanup purge` found nothing eligible, leaving the files stranded in the trash.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**
