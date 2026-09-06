@@ -933,6 +933,8 @@ def scan(
                     "mode": run.worker_selection.mode,
                     "reason": run.worker_selection.reason,
                     "warnings": list(run.worker_selection.warnings),
+                    "mount_latency_seconds": run.worker_selection.mount_latency_seconds,
+                    "cpu_budget": run.worker_selection.cpu_budget,
                 }
             ),
             # Direct child directories only. That is the "where did the

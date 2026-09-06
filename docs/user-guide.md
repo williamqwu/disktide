@@ -535,11 +535,31 @@ to reach the first piece of arithmetic that touched it.
 
 When `workers` is omitted, the scanner measures the
 path and picks a count: 1 on warm local storage, 2 on a rotational disk, 8 on
-a network or FUSE mount, and 16 / 32 / 64 as a sampled mount turns out to
-cost 0.5 / 1 / 3 ms per entry. Two things pull that back down: a shared host
-that gave this process no CPU allocation (a cluster login node) caps it at 2,
-and a 1-minute load above three-quarters of the host's CPUs halves whatever
-is left.
+a network or FUSE mount, and 16 / 32 / 64 as that mount turns out to cost
+0.5 / 1 / 3 ms per entry. The per-entry cost is the worse of two numbers --
+a 64-entry sample of the scan root, and the mean round trip an NFS mount's own
+kernel counters report (`/proc/self/mountstats`). The sample alone is not
+enough: a scan root with fourteen already-cached directories in it reads
+0.07 ms an entry on a mount whose server really costs 0.65.
+
+How much of the machine you may spend on that is the other half, and it is a
+budget of cores rather than a cap. Inside a batch job or a CPU-limited
+container, the budget is every CPU you can see and the host's load is somebody
+else's problem. On a machine of your own it is what the 1-minute load leaves.
+On a shared host with no allocation --- the cluster login node --- it is your
+fair share of what is *idle*: the host's CPUs minus the worse of the 1- and
+5-minute load, divided by everyone with a process on it.
+
+What a worker costs out of that budget follows the mount. A scan burns about
+160 us of CPU per entry (measured: 986 CPU-seconds over 6.1 million entries),
+and it burns it once per round trip --- so on a mount that answers in 0.65 ms
+a worker holds a quarter of a core, and on one that takes 5 ms it holds 0.03.
+A fair share of 21 cores therefore buys 84 workers on the first and far more
+than the widest tier asks for on the second, which is why the tier is usually
+what actually binds. A local worker costs a whole core, because it is working
+rather than waiting. A latency-bound mount never drops below 2 workers and
+local storage never below 1, and under 512 MB of available memory the scan
+goes serial whatever the rest of this says.
 
 An explicit `workers` value skips the measurement but not the host's
 ceiling, which is `max(64, 4 × available CPUs)` --- four per CPU because a
@@ -586,9 +606,13 @@ workers actively hurt — 20.5–23.8 s at 8 and 16 workers on the local tree,
 against 7.9 s at one.
 
 Two things that look like worker questions and are not: the first-ever touch
-of a cold network tree (131 s at 8 workers here) is the server warming up,
-and a shared login node caps at 2 because the cost lands on other people, not
-because more would be slower. disktide warns when you override the second.
+of a cold network tree (131 s at 8 workers here) is the server warming up, and
+the count on a shared login node is a share of the machine rather than a
+measure of the storage. That share moves with the node: 128 CPUs at load 0.5
+with five other people is 21 cores, enough that the mount's 0.65 ms round trip
+picks the number (16 workers); the same node at load 120 leaves nothing and
+gives 2. disktide warns when you ask for more than the share allows, and says
+what auto would have picked.
 
 ### Ring shape
 

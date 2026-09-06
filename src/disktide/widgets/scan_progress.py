@@ -329,8 +329,8 @@ class ScanProgressOverlay(Widget):
         for warning in self._warnings:
             if "shared host" in warning:
                 return (
-                    "Shared login node: auto caps at 2; raise it only if "
-                    "the node is yours."
+                    "Shared login node: auto takes only this account's fair "
+                    "share of the idle CPUs."
                 )
         for warning in self._warnings:
             if "exceeds the ceiling" in warning:

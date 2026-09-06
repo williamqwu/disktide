@@ -60,6 +60,19 @@ class PlatformAdapter:
             "Set scan.workers explicitly if automatic I/O tuning is unsuitable.",
         )
 
+    def mount_latency(self, mountpoint: str) -> ProbeResult[float | None]:
+        """Mean server round trip for one metadata call, in seconds.
+
+        A number the *server* kept, rather than one we measured: a sample
+        taken here is a sample of whatever the client has already cached.
+        Nothing but Linux/NFS publishes it, so the portable answer is that
+        there is none and worker selection keeps its own sample.
+        """
+        return ProbeResult.unavailable(
+            f"mount latency statistics are not implemented by the {self.name} adapter",
+            "Worker selection falls back to its own metadata sample.",
+        )
+
     def detect_transforms(
         self,
         device: str,
@@ -75,10 +88,54 @@ class PlatformAdapter:
         return transforms
 
     def find_mount(self, path: str) -> MountRecord | None:
+        """The mount whose filesystem actually serves ``path``.
+
+        Longest mountpoint wins, as always, plus two rules for the mounts
+        that share one. Among records with the *same* mountpoint the **last**
+        one wins, because mount order is stacking order: what you reach at
+        that path is whatever was mounted over it most recently. An autofs
+        trigger and the filesystem its automounter mounted on top are both
+        recorded at the identical path -- the trigger first -- so keeping the
+        first match described the doormat instead of the room. On this
+        project's cluster that answered ``autofs`` for an NFSv3 home,
+        ``is_network`` came back False, and worker selection tuned a 0.65 ms
+        round trip as if it were local disk.
+
+        An autofs record that still wins after that is a trigger that has not
+        fired yet. Opening the path once makes the automounter mount the real
+        filesystem; the table then has the answer, so it is read again. The
+        open is best-effort -- a path that cannot be opened tells us nothing
+        new, and the second read costs one `/proc/mounts` parse.
+        """
+        canonical = os.path.realpath(path)
+        best = self._longest_mount_match(canonical)
+        if best is not None and best.filesystem_type == "autofs":
+            try:
+                descriptor = os.open(
+                    canonical, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                )
+            except OSError:
+                pass
+            else:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            triggered = self._longest_mount_match(canonical)
+            if triggered is not None:
+                best = triggered
+        return best
+
+    def _longest_mount_match(self, canonical: str) -> MountRecord | None:
+        """Longest matching mountpoint in one pass, later records winning ties.
+
+        Two matching records of equal mountpoint length are the same
+        mountpoint -- both are prefixes of the same resolved path -- so
+        ``>=`` only ever chooses between records stacked at one path.
+        """
         result = self.enumerate_mounts()
         if result.value is None:
             return None
-        canonical = os.path.realpath(path)
         best: MountRecord | None = None
         for record in result.value:
             mountpoint = record.mountpoint
@@ -87,7 +144,7 @@ class PlatformAdapter:
                 or canonical.startswith(mountpoint.rstrip("/") + "/")
                 or mountpoint == "/"
             ):
-                if best is None or len(mountpoint) > len(best.mountpoint):
+                if best is None or len(mountpoint) >= len(best.mountpoint):
                     best = record
         return best
 

@@ -74,10 +74,40 @@ _MAX_LATENCY_WORKERS = 64
 # as likely to hurt as help. Raise this only with local measurements to match.
 _SLOW_LOCAL_WORKER_CAP = 4
 
-# What a guest may take on a machine it was given no allocation on. A cluster
-# login node is the case that matters: it is shared by everyone who is not
-# currently inside a job, and a wide metadata walk is felt by all of them.
+# The floor under the CPU budget below, not a cap any more. A guest on a
+# machine that gave it no allocation still gets two workers when the fair
+# share rounds to nothing: two threads asleep in a `stat` are not what a busy
+# login node is short of, and one worker on a mount whose stat costs half a
+# millisecond is a scan that never ends. What used to be here was a flat cap
+# of 2 for every shared host, which is how a 128-CPU node at load 0.5, with
+# five other users and 127 idle cores, recommended two workers for an NFS
+# mount.
 _SHARED_HOST_WORKER_CAP = 2
+
+# What one entry of a latency-bound walk costs in CPU. Measured on a full
+# scan of this project's NFSv3 `sec=krb5p` mount with 16 workers and the
+# native reader: 368 s wall for 172 s user + 814 s sys -- krb5p encrypts on
+# the calling thread, so the kernel time is the scan's too -- over 1,173,122
+# directories and 4,931,204 files. That is 986 CPU-seconds over 6,104,326
+# entries, about 160 us each.
+#
+# Per *entry*, not per second, which is the whole point: a worker burns this
+# once per round trip, so how much of a core it holds depends on how long the
+# round trip takes. At the 0.65 ms/entry this was measured at, that is a
+# quarter of a core -- the flat number this used to carry. At 5 ms/entry it
+# is 0.03, and pricing such a worker at 0.25 told a two-core box it could not
+# afford the 64-worker tier its own measurements say that mount repays.
+_CPU_SECONDS_PER_ENTRY = 0.00016
+
+# Bounds on that ratio, and what to charge when no latency is known at all.
+# A worker cannot hold more than one core (it is one thread) and is not
+# charged less than a fiftieth of one, because a mount slow enough to reach
+# that floor has other reasons -- server queues, `readdir` bandwidth -- not
+# to be walked by a thousand threads. The default is the measured 0.65 ms
+# figure: the mounts with no signal are the ones nothing has timed yet.
+_MIN_CORES_PER_WORKER = 0.02
+_MAX_CORES_PER_WORKER = 1.0
+_DEFAULT_CORES_PER_WORKER = 0.25
 
 # How many workers one visible CPU is allowed to carry when the user names a
 # count explicitly. A scan worker spends most of its life asleep in a stat, so
@@ -86,8 +116,10 @@ _SHARED_HOST_WORKER_CAP = 2
 # second-guess someone who knows their mount.
 _WORKERS_PER_CPU_CEILING = 4
 
-# Load at or above this fraction of the host's CPUs is "already busy". Shared
-# with the auto policy, which halves itself at the same line.
+# Load at or above this fraction of the host's CPUs is "already busy". Only
+# the explicit-count warning uses it now: the auto policy prices load through
+# the CPU budget instead of halving itself at a threshold, and a threshold is
+# still the honest way to decide whether a *warning* is worth printing.
 _BUSY_LOAD_RATIO = 0.75
 
 
@@ -101,8 +133,9 @@ class HostAllocation:
       us, either as a cpuset or as a CPU quota. That subset is ours; host-wide
       load reflects other jobs we are isolated from and must not throttle us.
     * ``shared`` -- no allocation, and other people have processes here. This is
-      the cluster login node case: stay modest whatever the storage suggests,
-      latency-bound mounts included.
+      the cluster login node case: take a fair share of what is idle rather
+      than the whole machine, and count the other users to decide what that
+      share is.
     * ``dedicated`` -- no allocation and nobody else is present, so the machine
       is effectively ours.
     """
@@ -149,8 +182,9 @@ def detect_host_allocation(*, count_users: bool = True) -> HostAllocation:
     reads 0 on an allocated slice rather than claiming the machine is empty.
     Callers pass ``count_users=False`` for the same reason when the count
     cannot reach their answer either; an explicit worker count above
-    ``_SHARED_HOST_WORKER_CAP`` is not such a caller, because the shared-host
-    warning is exactly the answer it changes.
+    ``_SHARED_HOST_WORKER_CAP`` is not such a caller, because the count both
+    sizes the fair share this host offers and decides whether the request is
+    above it.
     """
     total, available = detect_cpu_count()
     quota = detect_cpu_quota()
@@ -222,6 +256,12 @@ class SystemInfo:
     recommended_workers: int
     recommendation_reason: str
     allocation: HostAllocation | None = None
+    #: Mean server round trip for one metadata call, from the mount's own
+    #: counters. None when the platform publishes none, or when the mount is
+    #: local -- nothing asks the question there.
+    mount_latency_seconds: float | None = None
+    #: Cores the policy believed this scan could spend here; see `_cpu_budget`.
+    cpu_budget: float | None = None
 
 
 _NETWORK_FS_TYPES = set(NETWORK_FS_TYPES)
@@ -404,6 +444,23 @@ def detect_fs_type(path: str) -> tuple[str, bool]:
     return mount.filesystem_type, mount.is_network
 
 
+def detect_mount_latency(path: str) -> float | None:
+    """Mean server round trip for one metadata call on the mount under `path`.
+
+    Seconds, from the mount's own lifetime counters (`/proc/self/mountstats`
+    on Linux/NFS), or None where nothing publishes them. This is the number a
+    64-entry sample of a warm directory cannot see: on this project's cluster
+    mount the sample reads 0.07 ms/entry and the server's own average is
+    0.66 ms, and it is the second one a scan of a million cold directories
+    pays.
+    """
+    adapter = get_platform_adapter()
+    mount = adapter.find_mount(path)
+    if mount is None:
+        return None
+    return adapter.mount_latency(mount.mountpoint).value
+
+
 def detect_storage_type(path: str) -> bool | None:
     """Return True for HDD, False for SSD, None if unknown.
 
@@ -418,6 +475,102 @@ def _find_block_device(path: str) -> str | None:
     return get_platform_adapter().find_block_device(path)
 
 
+def _cpu_budget(
+    allocation: HostAllocation | None,
+    load_average: tuple[float, float, float],
+    available_cpus: int,
+) -> tuple[float, str]:
+    """Cores this scan may spend here, and the phrase that explains the number.
+
+    One question -- *how much of this machine is ours to use right now* --
+    answered from whichever fact settles it:
+
+    * an **allocated** slice was handed to us whole, and host-wide load counts
+      jobs we are isolated from, so the budget is every CPU we can see;
+    * a **dedicated** machine is ours except for what is already running on
+      it, so the budget is what the 1-minute load leaves;
+    * on a **shared** machine we are one tenant among several, so the budget
+      is our share of what is *idle* -- the 1/5-minute load, whichever is
+      worse, subtracted from the host, divided by everyone present. It is a
+      fair share rather than a fixed cap, which is the difference between
+      2 workers and 16 on a 128-CPU login node at load 0.5.
+    """
+    load_1min, load_5min = load_average[0], load_average[1]
+    if allocation is not None and allocation.kind == "allocated":
+        budget = float(max(1, available_cpus))
+        return budget, (
+            f"own CPU allocation of {available_cpus} CPUs ignores host load, "
+            f"leaving {budget:.1f} cores"
+        )
+    if allocation is not None and allocation.kind == "shared":
+        idle = max(0.0, allocation.total_cpus - max(load_1min, load_5min))
+        tenants = allocation.other_users + 1
+        budget = idle / tenants
+        return budget, (
+            f"fair share of {idle:.0f} idle CPUs across {tenants} users is "
+            f"{budget:.1f} cores"
+        )
+    budget = max(1.0, available_cpus - load_1min)
+    return budget, (
+        f"host load {load_1min:.2f} on {available_cpus} CPUs leaves "
+        f"{budget:.1f} cores"
+    )
+
+
+def _cores_per_worker(latency_seconds: float) -> float:
+    """How much of a core one latency-bound worker holds, at this latency.
+
+    A worker spends `_CPU_SECONDS_PER_ENTRY` of CPU per entry and the rest of
+    its time asleep in the round trip, so its share of a core is the ratio of
+    the two: a quarter at 0.65 ms/entry, 0.03 at 5 ms, one whole core once
+    the wait is no longer than the work. Rounded to hundredths because the
+    numerator has two significant figures and the answer is printed.
+    """
+    if latency_seconds <= 0:
+        return _DEFAULT_CORES_PER_WORKER
+    ratio = _CPU_SECONDS_PER_ENTRY / latency_seconds
+    return round(
+        min(_MAX_CORES_PER_WORKER, max(_MIN_CORES_PER_WORKER, ratio)), 2
+    )
+
+
+def _budget_worker_cap(
+    budget: float, latency_bound: bool, latency_seconds: float = 0.0
+) -> int:
+    """How many workers a budget of cores buys on this kind of mount.
+
+    A latency-bound worker is asleep in a server round trip for most of its
+    life, so a budget buys as many of them as `_cores_per_worker` says --
+    and never fewer than `_SHARED_HOST_WORKER_CAP`, because a mount that slow
+    cannot be walked one entry at a time. A local worker is CPU the whole
+    time it runs, so it costs a core.
+    """
+    if latency_bound:
+        cores = _cores_per_worker(latency_seconds)
+        return max(_SHARED_HOST_WORKER_CAP, int(budget / cores))
+    return max(1, int(budget))
+
+
+def _latency_estimate(
+    sampled_seconds: float, mount_latency_seconds: float | None
+) -> tuple[float, str]:
+    """Per-entry latency and which measurement it came from.
+
+    The worse of the two, because they fail in opposite directions: a sample
+    of an already-cached scan root reads far too fast, and a server's
+    lifetime average cannot see a tree colder than everything it has served
+    so far.
+    """
+    latency = max(sampled_seconds, mount_latency_seconds or 0.0)
+    source = (
+        "mount RTT"
+        if mount_latency_seconds is not None
+        and mount_latency_seconds >= sampled_seconds
+        else "sampled"
+    )
+    return latency, source
+
+
 def _compute_recommended_workers(
     available_cpus: int,
     load_average: tuple[float, float, float],
@@ -430,18 +583,37 @@ def _compute_recommended_workers(
     sample_elapsed_seconds: float = 0.0,
     sample_outcome: str = "not-run",
     allocation: HostAllocation | None = None,
+    mount_latency_seconds: float | None = None,
 ) -> tuple[int, str]:
-    """Choose a conservative local default and bounded latency parallelism."""
+    """Two questions, and the smaller answer wins.
+
+    *How many workers would this storage repay* is the latency tier below.
+    *How many may we spend on this machine* is `_cpu_budget`. Neither one is
+    a cap on the other: a fast local disk gets one worker on an idle
+    128-core node, and a slow mount gets two on a login node with nothing
+    left. What was here before answered the second question with two fixed
+    rules -- a flat cap of 2 for any shared host and a halving above
+    0.75 x CPUs -- which read a 128-CPU box at load 0.5 as a machine with no
+    room on it.
+    """
     cpu_cap = max(1, min(available_cpus, 8))
     medium = classify_medium(fs_type, is_network_fs, is_rotational)
     latency_bound = is_latency_bound(fs_type, is_network_fs)
     reasons: list[str] = []
 
-    average = (
+    sampled = (
         sample_elapsed_seconds / sample_entries
         if sample_entries > 0
         else 0.0
     )
+    # The sample is 64 entries of the scan root, and a root can be small,
+    # warm, or both: the NFS mount this policy was rebuilt for holds 14
+    # directories whose attributes are already cached, so it samples
+    # 0.07 ms/entry on storage whose cold stat costs 543 us. The mount's own
+    # lifetime round trip does not have that problem and cannot be faster
+    # than the network, so the estimate is whichever of the two is worse.
+    latency, latency_source = _latency_estimate(sampled, mount_latency_seconds)
+
     if latency_bound:
         # No `cpu_cap` here. A thread waiting on a server is descheduled for
         # the whole wait; it does not need a core to hold that wait open, and
@@ -450,18 +622,25 @@ def _compute_recommended_workers(
         base = _NETWORK_WORKER_CAP
         tier = "measured network base"
         for threshold, workers in _LATENCY_WORKER_TIERS:
-            if sample_entries > 0 and average >= threshold:
+            if latency >= threshold:
                 base = workers
                 tier = f"{threshold * 1000:g} ms/entry tier"
                 break
-        reasons.append(
-            f"latency-bound {fs_type} mount at {average * 1000:.2f} ms/entry "
-            f"takes {base} workers ({tier})"
-        )
-    elif sample_entries > 0 and average >= 0.002:
+        if latency > 0:
+            reasons.append(
+                f"latency-bound {fs_type} mount at "
+                f"{latency * 1000:.2f} ms/entry ({latency_source}) takes "
+                f"{base} workers ({tier})"
+            )
+        else:
+            reasons.append(
+                f"latency-bound {fs_type} mount, no latency signal, takes "
+                f"{base} workers ({tier})"
+            )
+    elif sample_entries > 0 and sampled >= 0.002:
         base = min(cpu_cap, _SLOW_LOCAL_WORKER_CAP)
         reasons.append(
-            f"metadata sample is high latency ({average * 1000:.2f} ms/entry)"
+            f"metadata sample is high latency ({sampled * 1000:.2f} ms/entry)"
         )
     elif is_rotational is True:
         base = min(cpu_cap, 2)
@@ -470,7 +649,7 @@ def _compute_recommended_workers(
         base = 1
         if sample_entries > 0:
             reasons.append(
-                f"low-latency local metadata ({average * 1000:.3f} ms/entry)"
+                f"low-latency local metadata ({sampled * 1000:.3f} ms/entry)"
             )
         elif sample_outcome == "empty":
             reasons.append("empty local directory uses serial scheduling")
@@ -479,46 +658,25 @@ def _compute_recommended_workers(
         else:
             reasons.append(f"conservative {medium} local fallback")
 
-    # Being a guest costs more than being slow. On a machine that handed us no
-    # allocation and that other people are using -- a cluster login node, the
-    # canonical case -- stay modest no matter how much the storage would bear.
-    # Latency-bound storage does not buy an exemption. The threads sleep, but
-    # the node building between the sleeps does not: eight workers on a warm
-    # NFS mount burn 1.54 cores against 0.42 for one, on a box we were given
-    # no claim to.
-    if allocation is not None and allocation.kind == "shared":
-        if base > _SHARED_HOST_WORKER_CAP:
-            base = _SHARED_HOST_WORKER_CAP
+    budget, budget_reason = _cpu_budget(
+        allocation, load_average, available_cpus
+    )
+    cap = _budget_worker_cap(budget, latency_bound, latency)
+    if latency_bound:
         reasons.append(
-            f"shared host with no allocation and {allocation.other_users} "
-            "other active user(s) caps parallelism"
-        )
-
-    load_1min = load_average[0]
-    if allocation is not None and allocation.kind == "allocated":
-        # os.getloadavg() is host-wide and cgroups do not virtualize it, so on
-        # an allocated slice the numerator counts jobs we are isolated from
-        # while the denominator counts only our own CPUs. Dividing one by the
-        # other reads a quiet 128-core node as heavily oversubscribed and
-        # throttles a scan that is entitled to every core it can see.
-        reasons.append(
-            "host load not applied; this process has its own CPU allocation"
+            f"{budget_reason} at {_cores_per_worker(latency):.2f} "
+            f"core/worker -> up to {cap} workers"
         )
     else:
-        # Compare the load against the CPUs it was actually measured across.
-        load_scope = (
-            allocation.total_cpus if allocation is not None else available_cpus
-        )
-        load_ratio = load_1min / max(load_scope, 1)
-        if load_ratio > _BUSY_LOAD_RATIO and base > 1:
-            base = max(1, base // 2)
-            reasons.append("host load reduced parallelism")
+        reasons.append(f"{budget_reason} -> up to {cap} workers")
 
+    result = max(
+        1, min(base, cap, _MAX_LATENCY_WORKERS if latency_bound else 8)
+    )
     if 0 < available_mb < 512:
-        base = 1
+        result = 1
         reasons.append("low memory forced serial scheduling")
 
-    result = max(1, min(base, _MAX_LATENCY_WORKERS if latency_bound else 8))
     reason = f"{result} ({'; '.join(reasons)})"
     return (result, reason)
 
@@ -582,6 +740,17 @@ def detect_system_info(
     latency_sample = (
         sample_directory_latency(path) if sample else DirectoryLatencySample()
     )
+    # Only worth asking on a mount whose answer can change a tier: a local
+    # filesystem publishes no round trip, and the question costs a read of
+    # `/proc/self/mountstats`.
+    mount_latency = (
+        detect_mount_latency(path)
+        if is_latency_bound(fs_type, is_network_fs)
+        else None
+    )
+    cpu_budget, _budget_reason = _cpu_budget(
+        allocation, load_average, available_cpus
+    )
 
     recommended_workers, recommendation_reason = _compute_recommended_workers(
         available_cpus=available_cpus,
@@ -594,6 +763,7 @@ def detect_system_info(
         sample_elapsed_seconds=latency_sample.elapsed_seconds,
         sample_outcome=latency_sample.outcome,
         allocation=allocation,
+        mount_latency_seconds=mount_latency,
     )
 
     return SystemInfo(
@@ -617,6 +787,8 @@ def detect_system_info(
         recommended_workers=recommended_workers,
         recommendation_reason=recommendation_reason,
         allocation=allocation,
+        mount_latency_seconds=mount_latency,
+        cpu_budget=cpu_budget,
     )
 
 
@@ -652,15 +824,33 @@ def _explicit_worker_warnings(
             f"for {info.available_cpus} available CPU(s); using {effective}."
         )
     allocation = info.allocation
+    latency_bound = is_latency_bound(info.fs_type, info.is_network_fs)
+    budget, budget_reason = _cpu_budget(
+        allocation, info.load_average, info.available_cpus
+    )
+    # The explicit path skips the metadata sample, so this is usually the
+    # mount's own round trip or nothing at all -- and "nothing at all" is
+    # priced at the measured default rather than guessed at.
+    latency, _source = _latency_estimate(
+        info.sample_elapsed_seconds / info.sample_entries
+        if info.sample_entries > 0
+        else 0.0,
+        info.mount_latency_seconds,
+    )
+    cap = _budget_worker_cap(budget, latency_bound, latency)
+    # Against what the auto policy would actually pick here, not against a
+    # fixed 2: on an idle 128-CPU login node the fair share is 16 workers on
+    # a network mount, and warning about 8 of them would be noise.
     if (
         allocation is not None
         and allocation.kind == "shared"
-        and requested > _SHARED_HOST_WORKER_CAP
+        and requested > info.recommended_workers
     ):
         warnings.append(
             f"{requested} workers on a shared host with "
             f"{allocation.other_users} other active user(s) and no CPU "
-            f"allocation; the auto policy would use {_SHARED_HOST_WORKER_CAP}. "
+            f"allocation; the auto policy would use "
+            f"{info.recommended_workers} ({budget_reason}). "
             "Other users will feel a wide metadata walk."
         )
     total_cpus = (
@@ -675,11 +865,12 @@ def _explicit_worker_warnings(
     if (
         load_applies
         and load_1min / max(total_cpus, 1) > _BUSY_LOAD_RATIO
-        and requested > info.recommended_workers
+        and requested > cap
     ):
         warnings.append(
             f"host load {load_1min:.2f} on {total_cpus} CPUs is already high; "
-            f"{requested} workers will compete for it (auto would pick "
+            f"the CPU budget here supports about {cap} worker(s), so "
+            f"{requested} will compete for it (auto would pick "
             f"{info.recommended_workers})."
         )
     if requested > info.available_cpus and not is_latency_bound(
@@ -700,7 +891,11 @@ def select_scan_workers(
     if requested_workers is not None and requested_workers <= 0:
         raise ValueError("workers must be greater than zero")
     # An explicit count skips the latency sample but still needs to know the
-    # host is shared -- only above the cap, where that is what it warns about.
+    # host is shared, because the warning compares the request against what
+    # auto would pick here -- and that answer is not known until after this
+    # call. So the gate stays the cheap one: anything at or below the floor
+    # a shared host is guaranteed (`_SHARED_HOST_WORKER_CAP`) cannot be above
+    # the recommendation, and skips the `/proc` walk.
     info = detect_system_info(
         path,
         sample=requested_workers is None,
@@ -733,6 +928,8 @@ def select_scan_workers(
             warnings=_explicit_worker_warnings(
                 requested_workers, effective, ceiling, info
             ),
+            mount_latency_seconds=info.mount_latency_seconds,
+            cpu_budget=info.cpu_budget,
         )
     average = (
         info.sample_elapsed_seconds / info.sample_entries
@@ -754,4 +951,6 @@ def select_scan_workers(
         sample_average_seconds=average,
         sample_errors=info.sample_errors,
         sample_outcome=info.sample_outcome,
+        mount_latency_seconds=info.mount_latency_seconds,
+        cpu_budget=info.cpu_budget,
     )

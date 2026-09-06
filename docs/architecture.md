@@ -474,21 +474,42 @@ engine, and allocate or cache them outside the walk.
 ### Adaptive Worker Count
 
 `sysinfo.select_scan_workers()` resolves policy against the actual scan
-path. Automatic selection considers CPU availability, load, memory,
-filesystem/media classification, and a bounded 64-entry/75ms metadata
-sample:
+path. It answers two independent questions and takes the smaller answer.
+*What would this storage repay* is a latency tier, from the worse of a
+bounded 64-entry/75 ms metadata sample and the mount's own mean GETATTR
+round trip (`PlatformAdapter.mount_latency`, `/proc/self/mountstats`, NFS
+only, ignored under 100 calls). *What may we spend here* is a CPU budget in
+cores (`_cpu_budget`), spent at `_cores_per_worker` --- a scan costs
+`_CPU_SECONDS_PER_ENTRY` (160 us, measured) of CPU per entry and pays it once
+per round trip, so a latency-bound worker holds `160 us / latency` of a core
+clamped to [0.02, 1.0] (0.25 at 0.65 ms/entry, 0.03 at 5 ms) --- and one whole
+core per local worker (`_budget_worker_cap`):
 
-| Condition | Workers |
+| Storage says | Workers |
 |-----------|---------|
 | Low-latency local or RAM-backed storage | 1 |
 | Rotational local storage | ≤ 2 |
-| Network or FUSE mount, unsampled | 8 (measured network base) |
+| Network or FUSE mount, no latency signal | 8 (measured network base) |
 | Latency-bound mount, ≥ 0.5 / ≥ 1 / ≥ 3 ms per entry | 16 / 32 / 64 |
 | Measured high-latency *local* storage | ≤ 4 |
-| Shared host with no allocation and other users present | ≤ 2 |
-| Host load > 0.75 × CPUs (not on an allocated slice) | halved |
-| < 512 MB available memory | 1 |
-| Probe error | 1 (conservative fallback) |
+
+| The host says | Budget | Workers it buys |
+|-----------|---------|---------|
+| Allocated slice (batch job, cpuset, CPU quota) | `available_cpus` | budget ÷ cores-per-worker, ≥ 2 |
+| Dedicated machine (and no allocation known) | `max(1, available_cpus − load_1min)` | budget ÷ cores-per-worker, ≥ 2 |
+| Shared host, *n* other users | `max(0, total_cpus − max(load_1, load_5)) / (n + 1)` | budget ÷ cores-per-worker, ≥ 2 |
+| Any of the above, local filesystem | as above | `max(1, floor(budget))` |
+| < 512 MB available memory | — | 1 |
+| Probe error | — | 1 (conservative fallback) |
+
+The budget replaced a flat cap of 2 for every shared host and a halving above
+0.75 × CPUs, which together read a 128-CPU login node at load 0.5 with five
+other users --- 127 idle cores --- as a machine with room for two workers on a
+0.65 ms NFS mount. `ScanWorkerSelection` carries `cpu_budget` and
+`mount_latency_seconds` so `scan --json` and the TUI can show what the number
+was decided from, and the reason string names the budget, the price it was
+spent at, and the tier: *fair share of 127 idle CPUs across 6 users is
+21.2 cores at 0.25 core/worker -> up to 84 workers*.
 
 An explicit `workers` value skips detection but not the ceiling.
 `worker_ceiling(available_cpus)` is `max(64, 4 × available_cpus)`: four
@@ -500,11 +521,12 @@ reason says so. `-w 0` and negative values still raise `ValueError` and exit
 2.
 
 Clamping and three other host facts arrive as `ScanWorkerSelection.warnings`,
-a tuple of one-sentence strings: an explicit count above the ceiling, more
-than `_SHARED_HOST_WORKER_CAP` workers on a shared host, a request above the
-recommendation while host load is already over 0.75 × CPUs (skipped on an
-allocated slice for the same reason the auto policy skips its load guard
-there), and more workers than CPUs on a mount that is not latency-bound. They are advisory --- the
+a tuple of one-sentence strings: an explicit count above the ceiling, a count
+above what auto would pick on a shared host (which is a share of the idle
+CPUs, not a fixed 2), a request above what the CPU budget supports while host
+load is already over 0.75 × CPUs (skipped on an allocated slice, because
+`os.getloadavg()` counts jobs a slice is isolated from), and more workers than
+CPUs on a mount that is not latency-bound. They are advisory --- the
 request is honoured up to the ceiling either way. `disktide scan` prints them
 as `Warning:` lines on stderr (in `--json` mode too, so the payload stays
 clean) and carries them in `workers.warnings`; the explorer raises one

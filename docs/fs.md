@@ -351,10 +351,21 @@ A directory's *own* allocated bytes (`own_allocated_size`, the "Own allocated" r
 
 Worker count is chosen from a *measured* per-entry latency, not from the
 filesystem name alone. The mount type (via `/proc/mounts`) decides whether the
-scan is latency-bound at all; a 64-entry, 75 ms metadata sample of the scan root
-then decides how many workers that buys:
+scan is latency-bound at all; the per-entry cost then decides how many workers
+that buys. Two measurements answer that, and the **worse** of them is used:
 
-| Sampled latency per entry | Workers |
+- a 64-entry, 75 ms metadata sample of the scan root, and
+- the mean GETATTR round trip the kernel has recorded for the mount over its
+  whole life, from `/proc/self/mountstats` (NFS only, ignored under 100 calls).
+
+The second exists because the first can be flattered by exactly the directory
+it looks at: the scan root of this project's cluster mount holds fourteen
+directories whose attributes are already cached, so it samples 0.07 ms an entry
+on storage whose real GETATTR averages 0.66 ms across 58 million calls --- and
+whose cold `scan_dir` of a 1,258-entry directory measured 543 us an entry over
+2,419 RPCs.
+
+| Per-entry latency (sample or server RTT) | Workers |
 |---|---|
 | under 0.5 ms (warm NFS, GPFS) | 8 |
 | 0.5 ms and up | 16 |
@@ -369,11 +380,37 @@ mounts. The `min(available_cpus, 8)` cap that applies to local storage does not
 apply here: a thread waiting on a server is descheduled for the whole wait and
 does not need a core to hold it open.
 
-Two limits still win over the tier. A *shared* host -- no CPU allocation and
-other people's processes present, the cluster login-node case -- caps at 2
-whatever the storage says, because the node building between the waits is real
-CPU on a machine we are a guest on. Under 512 MB of available memory the scan
-goes serial.
+A CPU budget still wins over the tier, because the node building between the
+waits is real CPU. The budget is every visible CPU inside a batch job or a
+CPU-limited container; what the 1-minute load leaves on a machine of our own;
+and, on a *shared* host -- no CPU allocation and other people's processes
+present, the cluster login-node case -- our fair share of what is idle: the
+host's CPUs minus the worse of the 1- and 5-minute load, over everyone with a
+process on it.
+
+What that budget buys depends on what a worker costs, and a worker costs CPU
+per *round trip* rather than per second: about 160 us an entry. A full scan of
+the NFSv3 `sec=krb5p` mount above with 16 workers took 368 s wall for 172 s
+user and 814 s sys (krb5p encrypts on the calling thread) across 1,173,122
+directories and 4,931,204 files --- 986 CPU-seconds over 6.1 million entries.
+So a worker holds `160 us / per-entry latency` of a core, clamped to
+[0.02, 1.0]: a quarter of a core at the 0.65 ms this was measured at, 0.03 at
+5 ms. 128 CPUs at load 0.5 with five other users is a share of 21 cores, which
+on that mount is 84 workers and the tier's 16 is what binds; the same node at
+load 120 gives the floor of 2; and a two-core box on a 5 ms mount can still
+afford the whole 64-worker tier, which is what the latency sweep says that
+mount repays. Under 512 MB of available memory the scan goes serial.
+
+An automounted share is detected as the filesystem mounted *on top of* the
+autofs trigger, not as the trigger. A direct automount leaves two records with
+the identical mountpoint in `/proc/mounts` --- `systemd-1 ... autofs` first,
+then the `nfs` mount the automounter made --- and among equal mountpoints the
+last record wins, because mount order is stacking order. A trigger that is
+still the winner has not fired: the path is opened once to make the
+automounter mount it, and the table is read again. Excluded-mount discovery
+follows the same rule, so an automounted share below a scan root is walked
+rather than skipped as a pseudo filesystem, while a trigger with nothing over
+it stays excluded.
 
 - Latency per `os.scandir()` call is higher, so scans take longer
 - `st_mtime` may have lower resolution or be subject to clock skew between client and server

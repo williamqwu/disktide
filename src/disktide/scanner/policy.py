@@ -62,20 +62,35 @@ def discover_pseudo_mounts(
 
     The root itself is never excluded. Explicitly scanning `/proc` or a tmpfs
     remains possible, while scanning `/` avoids descending into pseudo mounts.
+
+    A mountpoint is judged by the **last** record that claims it, because
+    mount order is stacking order and what a path serves is whatever was
+    mounted over it most recently. That is what keeps automounted storage in
+    a scan: an automounted NFS share appears twice, first as the `autofs`
+    trigger and then as the `nfs` filesystem the automounter mounted on top
+    of it, and excluding the trigger excluded the share -- a scan of
+    `/research` would have skipped `/research/share` entirely, and a
+    scan of `/` every automounted home on the host. A trigger that has *not*
+    fired has no record above it and is still excluded: there is nothing
+    under it to walk, and walking it would fire every automount in the table.
     """
     root = os.path.realpath(scan_root)
-    result: dict[str, str] = {}
+    effective: dict[str, str] = {}
     for entry in read_mount_entries() if entries is None else entries:
         mountpoint = os.path.realpath(entry.mountpoint)
-        if mountpoint == root or entry.filesystem_type not in PSEUDO_FS_TYPES:
+        if mountpoint == root:
             continue
         try:
             if os.path.commonpath((root, mountpoint)) != root:
                 continue
         except ValueError:
             continue
-        result[mountpoint] = entry.filesystem_type
-    return result
+        effective[mountpoint] = entry.filesystem_type
+    return {
+        mountpoint: filesystem_type
+        for mountpoint, filesystem_type in effective.items()
+        if filesystem_type in PSEUDO_FS_TYPES
+    }
 
 
 def paths_stay_canonical(scan_root: str) -> bool:

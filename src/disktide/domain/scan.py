@@ -89,12 +89,16 @@ class ScanWorkerSelection:
     #: `Warning:` lines by the CLI and raised as notifications in the TUI.
     #: Advisory only: the request is honoured up to the host's ceiling.
     warnings: tuple[str, ...] = ()
-    #: How many threads one worker may spread the `stat` calls of a single
-    #: large directory across. 1 means the directory is read sequentially, as
-    #: every local mount wants; the policy raises it on latency-bound mounts,
-    #: where a directory of 200,000 entries otherwise costs one worker 200,000
-    #: server round-trips in a row.
-    stat_threads: int = 1
+    #: Mean server round trip for one metadata call on this mount, from the
+    #: mount's own lifetime counters rather than from our sample, or None
+    #: when the platform publishes none. The worker tier is chosen from the
+    #: worse of this and the sample, so a report that disagrees with the
+    #: count can show which number drove it.
+    mount_latency_seconds: float | None = None
+    #: Cores the auto policy believed this scan could spend here: the whole
+    #: allocation on an allocated slice, what the load leaves on a machine of
+    #: our own, and our fair share of the idle CPUs on a shared one.
+    cpu_budget: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

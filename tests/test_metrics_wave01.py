@@ -361,6 +361,52 @@ def test_explicit_pseudo_root_is_allowed_but_nested_mount_is_excluded(tmp_path):
     }
 
 
+def test_an_automounted_share_below_the_root_is_not_a_pseudo_mount(tmp_path):
+    """The autofs trigger and the NFS mount over it share one mountpoint.
+
+    Excluding the trigger excluded the share: a scan of `/research` would
+    have skipped the automounted project directory under it, and a scan of
+    `/` every automounted home on the host.
+    """
+    share = tmp_path / "share"
+    share.mkdir()
+    entries = [
+        MountEntry(str(tmp_path), "ext4"),
+        MountEntry(str(share), "autofs"),
+        MountEntry(str(share), "nfs"),
+    ]
+
+    assert discover_pseudo_mounts(str(tmp_path), entries) == {}
+
+
+def test_an_automount_trigger_that_never_fired_is_still_excluded(tmp_path):
+    """Nothing is mounted over it, so there is nothing under it to walk."""
+    trigger = tmp_path / "trigger"
+    trigger.mkdir()
+    entries = [
+        MountEntry(str(tmp_path), "ext4"),
+        MountEntry(str(trigger), "autofs"),
+    ]
+
+    assert discover_pseudo_mounts(str(tmp_path), entries) == {
+        os.path.realpath(trigger): "autofs"
+    }
+
+
+def test_a_pseudo_mount_stacked_over_a_real_one_is_still_excluded(tmp_path):
+    """The rule is "the last record wins", not "autofs loses"."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    entries = [
+        MountEntry(str(nested), "ext4"),
+        MountEntry(str(nested), "tmpfs"),
+    ]
+
+    assert discover_pseudo_mounts(str(tmp_path), entries) == {
+        os.path.realpath(nested): "tmpfs"
+    }
+
+
 def test_max_depth_is_visible_policy_omission(tmp_path):
     child = tmp_path / "child"
     child.mkdir()

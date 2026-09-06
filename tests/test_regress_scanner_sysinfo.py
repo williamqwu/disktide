@@ -50,6 +50,66 @@ class TestExplicitWorkersOnASharedHost:
         assert unconfined_shared_host == []
         assert selection.warnings == ()
 
-    def test_auto_still_names_the_other_users(self, tmp_path, unconfined_shared_host):
+    def test_auto_still_names_the_share_the_other_users_leave(
+        self, tmp_path, unconfined_shared_host
+    ):
+        """16 cores at load 1, four people on the box: 3.8 cores are ours."""
         selection = select_scan_workers(str(tmp_path), None)
-        assert "3 other active user(s)" in selection.reason
+        assert "fair share of 15 idle CPUs across 4 users" in selection.reason
+
+
+class TestAnAutomountedShareIsNotLocalDisk:
+    """The reported case: `autofs` shadowing the NFS mount above it.
+
+    `/proc/self/mounts` holds two records with the identical mountpoint for a
+    *direct* automount -- the trigger first, then the filesystem the
+    automounter mounted over it. Keeping the first match made
+    `select_scan_workers` answer 1 worker with "low-latency local metadata"
+    for a mount whose server round trip is 0.65 ms.
+    """
+
+    @pytest.fixture
+    def automounted(self, monkeypatch, tmp_path):
+        from disktide.collectors.platform.base import PlatformAdapter
+        from disktide.collectors.platform.models import MountRecord, ProbeResult
+
+        mountpoint = str(tmp_path)
+
+        class _Adapter(PlatformAdapter):
+            def enumerate_mounts(self):
+                return ProbeResult.available(
+                    [
+                        MountRecord("/dev/sda1", "/", "ext4"),
+                        MountRecord("systemd-1", mountpoint, "autofs"),
+                        MountRecord("server:/export", mountpoint, "nfs"),
+                    ],
+                    "fake mount table",
+                )
+
+            def mount_latency(self, mount_point):
+                return ProbeResult.available(0.00066, "fake server round trip")
+
+        monkeypatch.setattr(
+            "disktide.scanner.sysinfo.get_platform_adapter", lambda *a: _Adapter()
+        )
+        for name in sysinfo._BATCH_JOB_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(sysinfo, "detect_cpu_count", lambda: (128, 128))
+        monkeypatch.setattr(sysinfo, "detect_cpu_quota", lambda: None)
+        monkeypatch.setattr(
+            sysinfo, "detect_load_average", lambda: (1.0, 1.0, 1.0)
+        )
+        monkeypatch.setattr(sysinfo, "count_other_users", lambda: 5)
+        return mountpoint
+
+    def test_the_mount_is_seen_as_the_network_filesystem_it_is(self, automounted):
+        selection = select_scan_workers(automounted, None)
+        assert selection.filesystem_type == "nfs"
+        assert selection.is_network_fs is True
+
+    def test_and_gets_the_workers_its_round_trip_pays_for(self, automounted):
+        selection = select_scan_workers(automounted, None)
+        assert selection.effective_workers == 16
+        assert selection.mount_latency_seconds == 0.00066
+        assert "0.5 ms/entry tier" in selection.reason
+        assert "fair share of 127 idle CPUs across 6 users" in selection.reason

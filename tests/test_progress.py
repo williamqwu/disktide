@@ -216,7 +216,10 @@ class TestScanProgressHint:
                     warnings=selection.warnings,
                 )
                 await pilot.pause(delay=self.THRESHOLD * 3)
-                assert "Shared login node: auto caps at 2" in self._hint(overlay)
+                assert (
+                    "Shared login node: auto takes only this account's fair "
+                    "share" in self._hint(overlay)
+                )
 
         asyncio.run(go())
 
