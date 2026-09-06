@@ -1458,14 +1458,36 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             selected = None
         self.query_one("#sunburst-view", SunburstView).set_selected_path(selected)
 
-    @work(thread=True, exclusive=True, group="explorer-path-trend")
+    @work(
+        thread=True,
+        exclusive=True,
+        group="explorer-path-trend",
+        exit_on_error=False,
+    )
     def _load_selected_trend(
         self, path: str, snapshot_ids: tuple[int, ...], metric: str
     ) -> None:
+        """Fill one row's mini-trend, and never end the session doing it.
+
+        This runs on every cursor move onto a path whose trend is not
+        cached, and it reads the database each time -- which can fail for
+        reasons the session had no part in: another process holding the
+        write lock past the busy timeout, an I/O error on the volume the
+        database lives on.  A worker that raises exits the app by default,
+        so an arrow key would throw away the tree the user was reading for
+        the sake of a decorative sparkline.
+
+        An empty trend is cached for the failed path so the column simply
+        stays blank and returning to that row does not re-fire the query
+        that just failed.
+        """
         service = self._visualization_service
         if service is None:
             return
-        values = service.path_trend(path, snapshot_ids, metric)
+        try:
+            values = service.path_trend(path, snapshot_ids, metric)
+        except Exception:
+            values = ()
         self.app.call_from_thread(self._apply_selected_trend, path, values)
 
     def _apply_selected_trend(
