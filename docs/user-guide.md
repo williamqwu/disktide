@@ -594,8 +594,13 @@ with `tool/bench_scan.py`, raw mode, native reader, on a 16-CPU node
 | Local xfs, 88k dirs / 888k files, warm | 7.9 | 8.6 | 8.3 | 8.7 | 8.2 | — |
 | NFSv4 home, client cache expired | — | — | 16.5 | 14.2 | 13.1 | 12.5 |
 | The same NFSv4 tree, client cache warm | — | 9.8 | 9.7 | 10.7 | 10.1 | 9.7 |
+| NFSv3 `sec=krb5p` export, 1.17M dirs / 4.93M files, 128-CPU login node, attribute caches expired | — | — | — | 283 | 233 | 229 |
 
-On a latency-bound mount, 16 workers takes most of the gain — about 15% over
+On the krb5p export the auto policy picks 16 (a 0.66 ms server round trip lands
+in the 0.5 ms tier) and holds about three cores while it runs; `workers = 32`
+is 18% faster for one more core, and 64 buys nothing on top of that, because
+wall clock has reached user time plus the scheduler's share of the lock.
+On the NFSv4 home, 16 workers takes most of the gain — about 15% over
 the auto default of 8 — and 32 to 64 buys another ~10% while system CPU
 climbs from 12.7 s to 21 s for it. On warm local disk, or on that same
 network tree with the client attribute cache still warm, the count makes no
