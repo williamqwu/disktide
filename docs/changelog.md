@@ -107,6 +107,7 @@
 - **The monitor editor checks the root path** A typo saved a monitor that listed as enabled and failed every run, while `monitor add` exited 2 for the same input; editing an existing monitor's path this way also bumped the revision and severed trusted compare.
 - **A refused inotify watch no longer wedges the monitor** `_add_one` emitted the backend error while still holding the backend lock; the service handles that by stopping the backend, which joins the reader thread, and that thread reads `diagnostics` under the same lock — the scan then never finished and the session had to be killed.
 - **A stopped backend cannot claim the status** Events queued behind a backend failure still reached `_handle_filesystem_event`, which unconditionally wrote `watch_mode = event-assisted`, so the dashboard and CLI showed event-assisted for a monitor running periodically with no backend registered.
+- **Welcome screen survives an unreadable path** Typing a directory whose parent you may not search, or a path longer than the filesystem allows, used to raise out of the input handler and take the whole app down with a traceback; it now raises an error toast naming the reason and stays on the welcome screen.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**

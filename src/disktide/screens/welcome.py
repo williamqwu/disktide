@@ -359,8 +359,21 @@ class WelcomeScreen(Screen[tuple[str, bool]]):
             self.notify("Please enter a path", severity="error")
             return
 
-        resolved = Path(os.path.expanduser(raw)).resolve()
-        if not resolved.is_dir():
+        try:
+            resolved = Path(os.path.expanduser(raw)).resolve()
+            is_dir = resolved.is_dir()
+        except OSError as exc:
+            # `resolve()` and `is_dir()` only swallow the "no such directory"
+            # errors; an unsearchable parent or an over-long name comes back
+            # out, and an exception raised in a message handler is Textual's
+            # fatal path -- a typo would take the whole app down.
+            self.notify(
+                f"Cannot read {raw}: {exc.strerror or exc}. "
+                "Enter a path to a directory you can open.",
+                severity="error",
+            )
+            return
+        if not is_dir:
             self.notify(f"Not a directory: {resolved}", severity="error")
             return
 
