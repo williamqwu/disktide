@@ -497,7 +497,15 @@ default_viz = "sunburst"                 # treemap, sunburst, details
 # "cleanup.review_plan" = "p"           # override individual keys
 ```
 
-All fields are optional. When `workers` is omitted, the scanner measures the
+All fields are optional, and an unknown *value* is ignored rather than
+fatal: a theme, ring shape, visualization or key binding this build does not
+know falls back to the default so a file written by a newer release still
+opens the app. A value of the wrong *type* is a usage error (exit 2) naming
+the section and key --- `workers = "4"` is a string, `workers = 4` is a
+count --- because there is no sensible fallback for it and the bad value used
+to reach the first piece of arithmetic that touched it.
+
+When `workers` is omitted, the scanner measures the
 path and picks a count: 1 on warm local storage, 2 on a rotational disk, 8 on
 a network or FUSE mount, and 16 / 32 / 64 as a sampled mount turns out to
 cost 0.5 / 1 / 3 ms per entry. Two things pull that back down: a shared host

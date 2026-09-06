@@ -382,44 +382,137 @@ def _parse_cell_aspect(value: object) -> float | None:
     return clamp_cell_aspect(numeric)
 
 
+class ConfigError(ValueError):
+    """A config file this build cannot read as written.
+
+    Raised only for a value whose *type* is wrong, never for one whose
+    meaning this build does not recognise: an unknown theme, ring shape or
+    key binding still falls back to the default, because a file written by
+    a newer release has to keep opening the app. A string where a number
+    belongs has no such fallback -- it used to be copied into a monitor's
+    stored policy, where it outlived the config edit that made it -- so it
+    is reported where it is written, naming the section and the key.
+    """
+
+
+def _wrong_type(section: str, key: str, value: object, expected: str):
+    return ConfigError(f"[{section}] {key}: expected {expected}, got {value!r}")
+
+
+def _table(data: dict, name: str) -> dict:
+    """One `[section]` of the file, or `{}` when there is not one."""
+    value = data.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"[{name}]: expected a table of settings, got {value!r}"
+        )
+    return value
+
+
+def _int_value(
+    table: dict, section: str, key: str, default, *, allow_none: bool = False
+):
+    """A whole number. `bool` is excluded: it is an `int` subclass."""
+    if key not in table:
+        return default
+    value = table[key]
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _wrong_type(
+            section, key, value, "a whole number written without quotes"
+        )
+    return value
+
+
+def _bool_value(table: dict, section: str, key: str, default: bool) -> bool:
+    if key not in table:
+        return default
+    value = table[key]
+    if not isinstance(value, bool):
+        raise _wrong_type(section, key, value, "true or false")
+    return value
+
+
+def _str_value(table: dict, section: str, key: str, default=None):
+    if key not in table:
+        return default
+    value = table[key]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _wrong_type(section, key, value, "a quoted string")
+    return value
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     """Load configuration from TOML file.
 
-    Falls back to defaults if file doesn't exist.
+    Falls back to defaults if the file doesn't exist. Raises `ConfigError`
+    for a file that exists but cannot be read as written -- malformed TOML,
+    or a value of the wrong type -- naming the section and key so the reader
+    knows which line to fix.
     """
     config_file = Path(path) if path else _config_path()
 
     if not config_file.exists():
         return AppConfig()
 
-    with open(config_file, "rb") as f:
-        data = tomllib.load(f)
+    try:
+        with open(config_file, "rb") as f:
+            data = tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{config_file}: {exc}") from exc
 
     config = AppConfig()
 
-    if "scan" in data:
-        scan = data["scan"]
-        config.scan.max_depth = scan.get("max_depth")
-        config.scan.workers = scan.get("workers")
-        config.scan.one_file_system = scan.get("one_file_system", False)
-        config.scan.exclude_pseudo_filesystems = scan.get(
-            "exclude_pseudo_filesystems", True
+    scan = _table(data, "scan")
+    if scan:
+        config.scan.max_depth = _int_value(
+            scan, "scan", "max_depth", None, allow_none=True
+        )
+        config.scan.workers = _int_value(
+            scan, "scan", "workers", None, allow_none=True
+        )
+        config.scan.one_file_system = _bool_value(
+            scan, "scan", "one_file_system", False
+        )
+        config.scan.exclude_pseudo_filesystems = _bool_value(
+            scan, "scan", "exclude_pseudo_filesystems", True
         )
 
-    if "monitor" in data:
-        monitor = data["monitor"]
-        config.monitor.default_interval = monitor.get("default_interval", 21600)
-        config.monitor.max_watch_time = monitor.get("max_watch_time")
-        soft_budget = monitor.get("database_soft_budget", 2 * 1024**3)
-        hard_budget = monitor.get("database_hard_budget", 3 * 1024**3)
+    monitor = _table(data, "monitor")
+    if monitor:
+        config.monitor.default_interval = _int_value(
+            monitor, "monitor", "default_interval", 21600
+        )
+        config.monitor.max_watch_time = _int_value(
+            monitor, "monitor", "max_watch_time", None, allow_none=True
+        )
+        soft_budget = _int_value(
+            monitor,
+            "monitor",
+            "database_soft_budget",
+            2 * 1024**3,
+            allow_none=True,
+        )
+        hard_budget = _int_value(
+            monitor,
+            "monitor",
+            "database_hard_budget",
+            3 * 1024**3,
+            allow_none=True,
+        )
         config.monitor.database_soft_budget = (
             None if soft_budget is None or soft_budget <= 0 else soft_budget
         )
         config.monitor.database_hard_budget = (
             None if hard_budget is None or hard_budget <= 0 else hard_budget
         )
-        config.monitor.auto_start_in_tui = monitor.get(
-            "auto_start_in_tui", False
+        config.monitor.auto_start_in_tui = _bool_value(
+            monitor, "monitor", "auto_start_in_tui", False
         )
         raw_event_mode = str(monitor.get("event_mode", "auto")).lower()
         config.monitor.event_mode = (
@@ -428,15 +521,21 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             else "auto"
         )
 
-    if "cleanup" in data:
-        cleanup = data["cleanup"]
-        config.cleanup.prefer_trash = cleanup.get("prefer_trash", True)
+    cleanup = _table(data, "cleanup")
+    if cleanup:
+        config.cleanup.prefer_trash = _bool_value(
+            cleanup, "cleanup", "prefer_trash", True
+        )
         config.cleanup.quarantine_retention_days = max(
             1,
-            int(cleanup.get("quarantine_retention_days", 7)),
+            _int_value(cleanup, "cleanup", "quarantine_retention_days", 7),
         )
-        quarantine_max = cleanup.get("quarantine_max_bytes", 10 * 1024**3)
-        config.cleanup.quarantine_max_bytes = max(1, int(quarantine_max))
+        config.cleanup.quarantine_max_bytes = max(
+            1,
+            _int_value(
+                cleanup, "cleanup", "quarantine_max_bytes", 10 * 1024**3
+            ),
+        )
         disabled = cleanup.get("disabled_rule_packs", [])
         if isinstance(disabled, list):
             config.cleanup.disabled_rule_packs = sorted(
@@ -448,11 +547,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             )
         config.cleanup.map_max_points = min(
             500,
-            max(10, int(cleanup.get("map_max_points", 80))),
+            max(10, _int_value(cleanup, "cleanup", "map_max_points", 80)),
         )
 
-    if "ui" in data:
-        ui = data["ui"]
+    ui = _table(data, "ui")
+    if ui:
         # `warm`, `default` and `vivid` are all retired keys for what is
         # now `disktide`; `resolve_theme` owns that mapping so the loader,
         # the picker and the renderer cannot disagree. An unknown name
@@ -466,9 +565,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.default_viz = (
             raw_viz if raw_viz in VIZ_CHOICES else DEFAULT_VIZ
         )
-        config.ui.show_cleanup = ui.get("show_cleanup", False)
-        config.ui.safe_rendering = ui.get("safe_rendering", False)
-        config.ui.mouse = bool(ui.get("mouse", True))
+        config.ui.show_cleanup = _bool_value(ui, "ui", "show_cleanup", False)
+        config.ui.safe_rendering = _bool_value(
+            ui, "ui", "safe_rendering", False
+        )
+        config.ui.mouse = _bool_value(ui, "ui", "mouse", True)
         config.ui.cell_aspect = _parse_cell_aspect(ui.get("cell_aspect"))
         config.ui.ring_shape = resolve_ring_shape(ui.get("ring_shape"))
         # An unusable value reads as `auto` rather than as an error: the
@@ -481,8 +582,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         config.ui.live_scan_render = (
             raw_live if raw_live in ("auto", "on", "off") else "auto"
         )
-        config.ui.default_scan_path = ui.get("default_scan_path")
-        config.ui.hostname_aware_paths = ui.get("hostname_aware_paths", True)
+        config.ui.default_scan_path = _str_value(
+            ui, "ui", "default_scan_path"
+        )
+        config.ui.hostname_aware_paths = _bool_value(
+            ui, "ui", "hostname_aware_paths", True
+        )
 
     if "keys" in data:
         keys = data["keys"]
@@ -498,12 +603,17 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 if name != "preset" and isinstance(key, str)
             }
 
-    if "paths" in data:
-        for hostname, hp_data in data["paths"].items():
-            config.host_paths[hostname] = HostPaths(
-                default_scan_path=hp_data.get("default_scan_path"),
-                last_visited_path=hp_data.get("last_visited_path"),
-            )
+    for hostname, hp_data in _table(data, "paths").items():
+        # A stray `host = "x"` at the top of [paths] is skipped rather than
+        # refused, the way an unknown [keys] entry is: the block is written
+        # by disktide itself and a hand-edit here costs nothing but itself.
+        if not isinstance(hp_data, dict):
+            continue
+        where = f"paths.{hostname}"
+        config.host_paths[hostname] = HostPaths(
+            default_scan_path=_str_value(hp_data, where, "default_scan_path"),
+            last_visited_path=_str_value(hp_data, where, "last_visited_path"),
+        )
 
     return config
 

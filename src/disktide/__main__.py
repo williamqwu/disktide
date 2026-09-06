@@ -298,9 +298,8 @@ def _launch_tui(
     _pin_color_system()
 
     from disktide.app import DiskTideApp
-    from disktide.config import load_config
 
-    config = load_config()
+    config = _load_config_or_exit()
     if max_depth is not None:
         config.scan.max_depth = max_depth
     if workers is not None:
@@ -1152,10 +1151,9 @@ def compare(
 
 
 def _monitor_service(*, event_mode: str | None = None):
-    from disktide.config import load_config
     from disktide.services.monitor import MonitorService
 
-    config = load_config()
+    config = _load_config_or_exit()
     repository = _open_snapshot_repository()
     repository.connect()
     service = MonitorService(
@@ -1166,6 +1164,23 @@ def _monitor_service(*, event_mode: str | None = None):
         event_mode=event_mode or config.monitor.event_mode,
     )
     return config, repository, service
+
+
+def _load_config_or_exit():
+    """Read the config file, or exit 2 saying which line is unreadable.
+
+    A wrong type used to reach the first place that did arithmetic on it,
+    which reported `'<=' not supported between instances of 'str' and
+    'int'` with a traceback and exit 1 -- and for `[scan] max_depth` it did
+    not even do that, it copied the string into the monitor's stored policy
+    where it outlived the config edit.
+    """
+    from disktide.config import ConfigError, load_config
+
+    try:
+        return load_config()
+    except ConfigError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 def _duration_value(value: str, *, param_hint: str) -> int:
@@ -2480,9 +2495,9 @@ class _DefaultCommandGroup(click.Group):
 def _cleanup_catalog():
     """Load the config and rule catalog every cleanup subcommand starts from."""
     from disktide.cleanup.rules import get_rule_catalog
-    from disktide.config import cleanup_rule_directory, load_config
+    from disktide.config import cleanup_rule_directory
 
-    config = load_config()
+    config = _load_config_or_exit()
     rule_directory = cleanup_rule_directory()
     catalog = get_rule_catalog(
         disabled_packs=config.cleanup.disabled_rule_packs,
