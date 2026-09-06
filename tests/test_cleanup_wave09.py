@@ -449,3 +449,135 @@ def test_doctor_reports_isolated_user_rule_pack(tmp_path, monkeypatch):
     assert report["pack_count"] == 6
     assert len(report["issues"]) == 1
     assert report["issues"][0]["path"] == "broken.toml"
+
+
+# --- purge and undo have to say when they did nothing ----------------------
+
+
+def _cli_env(tmp_path: Path) -> dict[str, str]:
+    config = tmp_path / "config" / "disktide"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "config.toml").write_text("[cleanup]\nprefer_trash = false\n")
+    return {
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
+
+
+def _isolated_path(runner, plan_id: str, env: dict[str, str]) -> str:
+    """Where the applied plan moved its target."""
+    history = runner.invoke(cli, ["cleanup", "history", "--json"], env=env)
+    assert history.exit_code == 0, history.output
+    plan = next(
+        item for item in json.loads(history.output) if item["id"] == plan_id
+    )
+    isolated = plan["actions"][0]["undo"]["isolated_path"]
+    assert isolated
+    return isolated
+
+
+def _planned_and_applied(runner, root: Path, env: dict[str, str]) -> str:
+    import re
+
+    preview = runner.invoke(cli, ["cleanup", str(root)], env=env)
+    assert preview.exit_code == 0, preview.output
+    match = re.search(r"Cleanup plan ([0-9a-f]{32})", preview.output)
+    assert match is not None
+    plan_id = match.group(1)
+    applied = runner.invoke(
+        cli, ["cleanup", "--plan", plan_id, "--apply"], env=env
+    )
+    assert applied.exit_code == 0, applied.output
+    return plan_id
+
+
+def test_purge_that_refuses_every_item_exits_non_zero(tmp_path):
+    """It printed "0 purged", nothing on stderr, and exited 0."""
+    root = tmp_path / "root"
+    cache = root / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "module.pyc").write_bytes(b"cache")
+    runner = CliRunner()
+    env = _cli_env(tmp_path)
+    plan_id = _planned_and_applied(runner, root, env)
+
+    isolated = _isolated_path(runner, plan_id, env)
+    assert Path(isolated).exists()
+    # Make the isolated copy fail its identity reverification.
+    os.utime(isolated, (0, 0))
+
+    result = runner.invoke(
+        cli,
+        ["cleanup", "purge", plan_id, "--confirm", f"PURGE {plan_id}"],
+        env=env,
+    )
+
+    assert result.exit_code != 0
+    assert "purge refused" in result.output
+    assert Path(isolated).exists()
+
+
+def test_undo_with_nothing_to_restore_exits_non_zero(tmp_path):
+    """A preview-only plan reported "restored 0 item(s)" with exit 0."""
+    import re
+
+    root = tmp_path / "root"
+    cache = root / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "module.pyc").write_bytes(b"cache")
+    runner = CliRunner()
+    env = _cli_env(tmp_path)
+    preview = runner.invoke(cli, ["cleanup", str(root)], env=env)
+    assert preview.exit_code == 0, preview.output
+    plan_id = re.search(r"Cleanup plan ([0-9a-f]{32})", preview.output).group(1)
+
+    result = runner.invoke(cli, ["cleanup", "undo", plan_id], env=env)
+
+    assert result.exit_code != 0
+    assert "nothing to restore" in result.output
+    assert cache.exists()
+
+
+def test_undo_of_an_applied_plan_still_succeeds(tmp_path):
+    """The happy path must keep its exit 0 and its count."""
+    root = tmp_path / "root"
+    cache = root / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "module.pyc").write_bytes(b"cache")
+    runner = CliRunner()
+    env = _cli_env(tmp_path)
+    plan_id = _planned_and_applied(runner, root, env)
+    assert not cache.exists()
+
+    result = runner.invoke(cli, ["cleanup", "undo", plan_id], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert "restored 1 item" in result.output
+    assert cache.exists()
+
+
+def test_a_failed_purge_still_emits_json_before_it_exits(tmp_path):
+    """`--json` consumers get the document *and* a non-zero status."""
+    root = tmp_path / "root"
+    cache = root / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "module.pyc").write_bytes(b"cache")
+    runner = CliRunner()
+    env = _cli_env(tmp_path)
+    plan_id = _planned_and_applied(runner, root, env)
+    os.utime(_isolated_path(runner, plan_id, env), (0, 0))
+
+    result = runner.invoke(
+        cli,
+        [
+            "cleanup", "purge", plan_id, "--json",
+            "--confirm", f"PURGE {plan_id}",
+        ],
+        env=env,
+    )
+
+    assert result.exit_code != 0
+    document = json.loads(result.stdout)
+    assert document["id"] == plan_id

@@ -2799,25 +2799,26 @@ def cleanup_history(history_group: str | None, json_output: bool) -> None:
 def cleanup_undo(plan_or_action_id: str, json_output: bool) -> None:
     """Restore quarantined content from a plan or a single action."""
 
-    from disktide.domain.cleanup import CleanupExecutionStatus, cleanup_plan_to_dict
+    from disktide.domain.cleanup import cleanup_plan_to_dict
 
     config, rule_directory, _ = _cleanup_catalog()
     with _cleanup_session(config, rule_directory) as (_, service):
         result = service.undo(plan_or_action_id)
+        failed = result.failed_this_run
         if json_output:
             click.echo(_json_dumps(cleanup_plan_to_dict(result.plan)))
-            return
-        restored = sum(
-            action.execution_status is CleanupExecutionStatus.UNDONE
-            for action in result.plan.actions
-        )
-        click.echo(
-            f"Undo {result.plan.id}: restored {restored} item(s); "
-            f"status {result.plan.status.value}."
-        )
-        for action in result.plan.actions:
-            if action.error:
+        else:
+            click.echo(
+                f"Undo {result.plan.id}: restored {len(result.completed)} "
+                f"item(s); status {result.plan.status.value}."
+            )
+            # Only the errors this undo produced. The plan can also carry
+            # an apply-time error on an action undo never looked at, and
+            # printing those beside a successful restore read as failures
+            # of the restore.
+            for action in failed:
                 click.echo(f"  skipped {action.path}: {action.error}", err=True)
+        _fail_if_nothing_happened(result, verb="restore")
 
 
 @cleanup.command("purge")
@@ -2854,6 +2855,7 @@ def cleanup_purge(
                 show_default=False,
             )
         result = service.purge(plan_or_action_id, confirmation=confirm)
+        failed = result.failed_this_run
         if json_output:
             click.echo(_json_dumps(cleanup_plan_to_dict(result.plan)))
         else:
@@ -2862,6 +2864,32 @@ def cleanup_purge(
                 f"actual reclaimed "
                 f"{humanize.naturalsize(result.plan.actual_reclaimed_bytes, binary=True)}."
             )
+            for action in failed:
+                click.echo(f"  failed {action.path}: {action.error}", err=True)
+        _fail_if_nothing_happened(result, verb="purge")
+
+
+def _fail_if_nothing_happened(result, *, verb: str) -> None:
+    """Exit non-zero when a cleanup run finished without doing its job.
+
+    Both commands used to print their summary and exit 0 whatever
+    happened: a purge every one of whose items refused identity
+    reverification reported "0 purged" with nothing on stderr, and an undo
+    of a plan that was never quarantined reported "restored 0 item(s)".
+    The per-action error was recorded in the database and carried in
+    `--json`, but `$?` said success either way.
+    """
+    failed = result.failed_this_run
+    if failed:
+        raise click.ClickException(
+            f"{len(failed)} of {len(result.attempted)} item(s) could not be "
+            f"{'purged' if verb == 'purge' else 'restored'}; see the errors above"
+        )
+    if not result.completed:
+        raise click.ClickException(
+            f"nothing to {verb} for plan {result.plan.id} "
+            f"(status {result.plan.status.value})"
+        )
 
 
 @cleanup.group("rules")

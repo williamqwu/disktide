@@ -276,6 +276,28 @@ class CleanupAuditEvent:
 @dataclass(frozen=True, slots=True)
 class CleanupExecutionResult:
     plan: CleanupPlan
+    #: Ids of the actions *this* call acted on, and of those, the ones it
+    #: finished. The plan's own counters are cumulative, so they cannot
+    #: tell a caller whether the run it just made did anything -- which is
+    #: how `cleanup purge` came to report success for a purge that refused
+    #: every item and `cleanup undo` for a plan with nothing to restore.
+    attempted: tuple[str, ...] = ()
+    completed: tuple[str, ...] = ()
+
+    @property
+    def attempted_actions(self) -> list[CleanupAction]:
+        chosen = set(self.attempted)
+        return [action for action in self.plan.actions if action.id in chosen]
+
+    @property
+    def failed_this_run(self) -> list[CleanupAction]:
+        """Actions this call tried and did not finish."""
+        done = set(self.completed)
+        return [
+            action
+            for action in self.attempted_actions
+            if action.id not in done
+        ]
 
     @property
     def succeeded(self) -> list[CleanupAction]:

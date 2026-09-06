@@ -440,6 +440,12 @@ The first command scans and saves a plan but makes no filesystem changes.
 `--apply` revalidates each target and uses Trash with quarantine fallback.
 `--permanent` is irreversible and requires a typed confirmation.
 
+`undo` and `purge` exit non-zero when they restored or purged nothing ---
+because there was nothing eligible, or because every item they tried refused
+its identity reverification --- and name each failure on stderr. With
+`--json` the document is still written to stdout first, so a script gets both
+the detail and the status.
+
 Built-in rule packs load from the package. User packs from
 `~/.config/disktide/cleanup-rules/*.toml`. `rules validate` takes one pack
 file; a missing path or a directory is a usage error (exit 2).

@@ -792,7 +792,15 @@ class CleanupService:
             plan.status = CleanupPlanStatus.PARTIAL
         plan.updated_at = utc_now()
         self._repository.update_cleanup_plan_summary(plan)
-        return CleanupExecutionResult(plan)
+        return CleanupExecutionResult(
+            plan,
+            attempted=tuple(action.id for action in candidates),
+            completed=tuple(
+                action.id
+                for action in candidates
+                if action.execution_status is CleanupExecutionStatus.UNDONE
+            ),
+        )
 
     def purge(
         self,
@@ -884,7 +892,15 @@ class CleanupService:
             )
         self._finalize_plan(plan)
         self._repository.update_cleanup_plan_summary(plan)
-        return CleanupExecutionResult(plan)
+        return CleanupExecutionResult(
+            plan,
+            attempted=tuple(action.id for action in candidates),
+            completed=tuple(
+                action.id
+                for action in candidates
+                if action.execution_status is CleanupExecutionStatus.PURGED
+            ),
+        )
 
     @staticmethod
     def permanent_confirmation(plan_id: str) -> str:
