@@ -1094,34 +1094,32 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
     def action_run_now(self) -> None:
         if self._selected_monitor_id is None:
             return
-        if self._service.session_running:
-            try:
-                self._service.run_monitor_now(self._selected_monitor_id)
-                self.app.notify("Run queued in the active TUI session.")
-            except Exception as exc:
-                self._notify_error(exc)
-            self._load_data()
-            return
         self._run_one_shot(self._selected_monitor_id)
 
     def action_reconcile(self) -> None:
         if self._selected_monitor_id is None:
             return
-        if self._service.session_running:
-            try:
-                self._service.reconcile_monitor(self._selected_monitor_id)
-                self.app.notify("Full reconciliation queued in the active TUI session.")
-            except Exception as exc:
-                self._notify_error(exc)
-            self._load_data()
-            return
         self._reconcile_one_shot(self._selected_monitor_id)
 
     @work(thread=True, exclusive=True, group="monitor-run")
     def _run_one_shot(self, monitor_id: int) -> None:
+        """Ask for a run off the UI thread and report what actually happened.
+
+        A running session only takes the request off our hands when it is
+        hosting *this* monitor -- an enabled one it is sampling. For a paused
+        monitor, or one the session was not started for, the service runs the
+        scan in the calling thread and returns its result. Branching on
+        `session_running` before the call therefore ran a whole scan on
+        Textual's event loop and then toasted "queued" for a run that had
+        already finished. The return value is the only thing that knows.
+        """
         try:
             result = self._service.run_monitor_now(monitor_id)
-            if result is not None and result.run is not None:
+            if result is None:
+                self.app.call_from_thread(
+                    self.app.notify, "Run queued in the active TUI session."
+                )
+            elif result.run is not None:
                 message = f"Run {result.run.run_id[:8]} {result.run.status.value}"
                 self.app.call_from_thread(self.app.notify, message)
         except Exception as exc:
@@ -1131,9 +1129,15 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
 
     @work(thread=True, exclusive=True, group="monitor-run")
     def _reconcile_one_shot(self, monitor_id: int) -> None:
+        """The same queued-or-inline question as `_run_one_shot`."""
         try:
             result = self._service.reconcile_monitor(monitor_id)
-            if result is not None and result.run is not None:
+            if result is None:
+                self.app.call_from_thread(
+                    self.app.notify,
+                    "Full reconciliation queued in the active TUI session.",
+                )
+            elif result.run is not None:
                 message = (
                     f"Reconciliation {result.run.run_id[:8]} "
                     f"{result.run.status.value}"

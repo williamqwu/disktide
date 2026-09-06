@@ -444,3 +444,96 @@ def test_monitor_screen_depends_on_service_not_sqlite_adapter():
     assert "SQLite" not in source
     assert "Database(" not in source
     assert "default_snapshot_repository" not in source
+
+
+def test_run_now_on_a_paused_monitor_stays_off_the_ui_thread(tmp_path):
+    """A manual run the session will not take must not block the event loop.
+
+    `run_monitor_now` only queues when the running session is actually
+    hosting that monitor; for a paused one it runs the scan in the calling
+    thread and returns the result. The screen used to branch on
+    `session_running` alone, so the whole scan ran on Textual's event loop
+    and the toast then claimed the run had been queued.
+    """
+    import threading
+
+    from disktide.domain.monitor import MonitorDesiredState
+    from disktide.services.monitor import MonitorService
+
+    root = tmp_path / "root"
+    root.mkdir()
+    for index in range(4):
+        (root / f"payload{index}").write_text("x" * 64)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "payload").write_text("y")
+
+    path = tmp_path / "paused.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    paused = bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(other), interval_seconds=3600)
+    )
+    bootstrap.set_monitor_desired_state(paused.id, MonitorDesiredState.PAUSED)
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    threads: list[str] = []
+    original = MonitorService._execute_definition
+
+    def recording(self, definition, *args, **kwargs):
+        if definition.id == paused.id:
+            threads.append(threading.current_thread().name)
+        return original(self, definition, *args, **kwargs)
+
+    toasts: list[str] = []
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+
+            screen.query_one("#monitor-session-toggle", Button).press()
+            await _settle(pilot, lambda: app._monitor_service.session_running)
+            await _wait_for_monitor_load(pilot, screen)
+
+            notify = app.notify
+            app.notify = lambda message, **kwargs: (
+                toasts.append(str(message)), notify(message, **kwargs)
+            )[1]
+            screen._selected_monitor_id = paused.id
+            screen.action_run_now()
+            await _settle(pilot, lambda: bool(threads))
+            await _settle(pilot, lambda: bool(toasts))
+            app.notify = notify
+
+            app._monitor_service.stop_session(wait=True)
+            await _drain_monitor_loads(pilot, app)
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        MonitorService._execute_definition = recording
+        asyncio.run(exercise())
+    finally:
+        MonitorService._execute_definition = original
+        repository.close()
+
+    assert threads, "the paused monitor never ran"
+    assert "MainThread" not in threads
+    assert toasts
+    assert toasts[0].startswith("Run ")
+    assert "queued" not in toasts[0]
