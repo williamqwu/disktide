@@ -152,6 +152,7 @@ def build_doctor_report(
                 pass
     catalog = get_rule_catalog(
         disabled_packs=config.cleanup.disabled_rule_packs,
+        enabled_packs=config.cleanup.enabled_rule_packs,
         user_directory=config_path.parent / "cleanup-rules",
     )
     cleanup_rules = {

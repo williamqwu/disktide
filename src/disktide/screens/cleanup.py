@@ -127,6 +127,7 @@ class CleanupScreen(RenderEpochRefreshMixin, Screen):
             return
         catalog = get_rule_catalog(
             disabled_packs=self._config.cleanup.disabled_rule_packs,
+            enabled_packs=self._config.cleanup.enabled_rule_packs,
             user_directory=cleanup_rule_directory(),
         )
         self._rule_issue_count = len(catalog.issues)

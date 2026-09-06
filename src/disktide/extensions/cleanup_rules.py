@@ -101,9 +101,19 @@ def validate_rule_pack(path: str | Path) -> CleanupRulePack:
 def load_rule_catalog(
     *,
     disabled_packs: Iterable[str] = (),
+    enabled_packs: Iterable[str] = (),
     user_directory: str | Path | None = None,
 ) -> CleanupRuleCatalog:
+    """Load every rule pack, honouring both halves of the config's opinion.
+
+    `default_enabled = false` in a pack means "opt in", so a name in
+    `enabled_packs` turns it on -- without that, `cleanup rules enable`
+    could only ever undo a `disable`, and reported success for an opt-in
+    pack that stayed off. `disabled_packs` still wins: an explicit "off"
+    is the more recent instruction either way.
+    """
     disabled = set(disabled_packs)
+    opted_in = set(enabled_packs)
     packs: list[CleanupRulePack] = []
     issues: list[RulePackIssue] = []
     seen_packs: set[str] = set()
@@ -140,7 +150,9 @@ def load_rule_catalog(
                 raise RulePackValidationError(
                     "duplicate rule name(s): " + ", ".join(duplicate_rules)
                 )
-            enabled = pack.enabled and pack.name not in disabled
+            enabled = (
+                pack.enabled or pack.name in opted_in
+            ) and pack.name not in disabled
             if enabled != pack.enabled:
                 pack = CleanupRulePack(
                     name=pack.name,
@@ -150,7 +162,7 @@ def load_rule_catalog(
                     source=pack.source,
                     enabled=enabled,
                     rules=tuple(
-                        _copy_rule(rule, enabled=False) for rule in pack.rules
+                        _copy_rule(rule, enabled=enabled) for rule in pack.rules
                     ),
                     path=pack.path,
                 )

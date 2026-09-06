@@ -245,6 +245,7 @@ class SettingsScreen(Screen):
         self._entry_epoch = render_epoch()
         self._rule_catalog = get_rule_catalog(
             disabled_packs=self._config.cleanup.disabled_rule_packs,
+            enabled_packs=self._config.cleanup.enabled_rule_packs,
             user_directory=cleanup_rule_directory(),
         )
 
@@ -801,11 +802,18 @@ class SettingsScreen(Screen):
         elif event.switch.id and event.switch.id.startswith("cleanup-pack-"):
             pack = event.switch.id.removeprefix("cleanup-pack-")
             disabled = set(self._config.cleanup.disabled_rule_packs)
+            opted_in = set(self._config.cleanup.enabled_rule_packs)
+            # Both halves, because a pack shipping `default_enabled = false`
+            # is opt-in: dropping it from `disabled` cannot turn it on, it
+            # was never in there.
             if event.value:
                 disabled.discard(pack)
+                opted_in.add(pack)
             else:
                 disabled.add(pack)
+                opted_in.discard(pack)
             self._config.cleanup.disabled_rule_packs = sorted(disabled)
+            self._config.cleanup.enabled_rule_packs = sorted(opted_in)
         elif event.switch.id == "one-file-system":
             self._config.scan.one_file_system = event.value
         elif event.switch.id == "exclude-pseudo-filesystems":

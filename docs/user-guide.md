@@ -447,8 +447,11 @@ its identity reverification --- and name each failure on stderr. With
 the detail and the status.
 
 Built-in rule packs load from the package. User packs from
-`~/.config/disktide/cleanup-rules/*.toml`. `rules validate` takes one pack
-file; a missing path or a directory is a usage error (exit 2).
+`~/.config/disktide/cleanup-rules/*.toml`. A pack with `default_enabled =
+false` is opt-in: `rules enable` records it in `[cleanup] enabled_rule_packs`,
+`rules disable` records it in `disabled_rule_packs`, and an entry in
+`disabled_rule_packs` wins over one in `enabled_rule_packs`. `rules validate`
+takes one pack file; a missing path or a directory is a usage error (exit 2).
 
 ## Configuration
 
@@ -485,6 +488,7 @@ event_mode = "auto"                      # auto | events | periodic
 quarantine_retention_days = 7
 quarantine_max_bytes = 10737418240       # 10 GiB
 # disabled_rule_packs = ["node"]
+# enabled_rule_packs = ["mine"]        # packs shipping default_enabled = false
 
 [ui]
 color_theme = "disktide"                 # disktide, cold, colorblind, cyberpunk, mono

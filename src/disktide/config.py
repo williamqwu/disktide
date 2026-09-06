@@ -114,6 +114,10 @@ class CleanupConfig:
     quarantine_retention_days: int = 7
     quarantine_max_bytes: int = 10 * 1024**3
     disabled_rule_packs: list[str] = field(default_factory=list)
+    #: Packs turned on by hand. A pack that ships `default_enabled = false`
+    #: is opt-in, so removing it from `disabled_rule_packs` cannot switch it
+    #: on -- it was never in there. `disabled_rule_packs` still wins.
+    enabled_rule_packs: list[str] = field(default_factory=list)
     map_max_points: int = 80
 
 
@@ -307,6 +311,12 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
             for name in sorted(set(config.cleanup.disabled_rule_packs))
         )
         lines.append(f"disabled_rule_packs = [{values}]")
+    if config.cleanup.enabled_rule_packs:
+        values = ", ".join(
+            json.dumps(name)
+            for name in sorted(set(config.cleanup.enabled_rule_packs))
+        )
+        lines.append(f"enabled_rule_packs = [{values}]")
     lines.append(f"map_max_points = {config.cleanup.map_max_points}")
     lines.append("")
 
@@ -566,15 +576,23 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 cleanup, "cleanup", "quarantine_max_bytes", 10 * 1024**3
             ),
         )
-        disabled = cleanup.get("disabled_rule_packs", [])
-        if isinstance(disabled, list):
-            config.cleanup.disabled_rule_packs = sorted(
-                {
-                    str(name)
-                    for name in disabled
-                    if isinstance(name, str) and name
-                }
-            )
+        for key, target in (
+            ("disabled_rule_packs", "disabled_rule_packs"),
+            ("enabled_rule_packs", "enabled_rule_packs"),
+        ):
+            names = cleanup.get(key, [])
+            if isinstance(names, list):
+                setattr(
+                    config.cleanup,
+                    target,
+                    sorted(
+                        {
+                            str(name)
+                            for name in names
+                            if isinstance(name, str) and name
+                        }
+                    ),
+                )
         config.cleanup.map_max_points = min(
             500,
             max(10, _int_value(cleanup, "cleanup", "map_max_points", 80)),

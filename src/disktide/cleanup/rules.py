@@ -15,10 +15,12 @@ from disktide.models.patterns import CleanupRule
 def get_rule_catalog(
     *,
     disabled_packs: Iterable[str] = (),
+    enabled_packs: Iterable[str] = (),
     user_directory: str | Path | None = None,
 ) -> CleanupRuleCatalog:
     return load_rule_catalog(
         disabled_packs=disabled_packs,
+        enabled_packs=enabled_packs,
         user_directory=user_directory,
     )
 
@@ -27,11 +29,13 @@ def get_rules(
     include_disabled: bool = False,
     *,
     disabled_packs: Iterable[str] = (),
+    enabled_packs: Iterable[str] = (),
     user_directory: str | Path | None = None,
 ) -> list[CleanupRule]:
     """Return declarative rules while preserving the Wave 01 API."""
     catalog = get_rule_catalog(
         disabled_packs=disabled_packs,
+        enabled_packs=enabled_packs,
         user_directory=user_directory,
     )
     return list(catalog.all_rules if include_disabled else catalog.rules)

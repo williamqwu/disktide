@@ -581,3 +581,78 @@ def test_a_failed_purge_still_emits_json_before_it_exits(tmp_path):
     assert result.exit_code != 0
     document = json.loads(result.stdout)
     assert document["id"] == plan_id
+
+
+# --- an opt-in rule pack can actually be opted into ------------------------
+
+
+def _opt_in_pack(tmp_path: Path) -> None:
+    rules = tmp_path / "config" / "disktide" / "cleanup-rules"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "mine.toml").write_text(
+        'schema_version = 1\n'
+        'name = "mine"\n'
+        'version = "1.0.0"\n'
+        'description = "My own opt-in pack"\n'
+        'default_enabled = false\n'
+        '\n'
+        '[[rules]]\n'
+        'name = "mine_cache"\n'
+        'description = "A private cache directory"\n'
+        'patterns = [".mycache"]\n'
+        'risk = "safe"\n'
+        'category = "cache"\n',
+        encoding="utf-8",
+    )
+
+
+def test_enabling_an_opt_in_rule_pack_actually_enables_it(tmp_path):
+    """`enable` only ever undid a `disable`, and said "enabled" regardless."""
+    _opt_in_pack(tmp_path)
+    runner = CliRunner()
+    env = {
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
+
+    def state() -> bool:
+        listed = runner.invoke(cli, ["cleanup", "rules", "list", "--json"], env=env)
+        assert listed.exit_code == 0, listed.output
+        packs = json.loads(listed.output)["packs"]
+        return next(pack["enabled"] for pack in packs if pack["name"] == "mine")
+
+    assert state() is False
+
+    enabled = runner.invoke(cli, ["cleanup", "rules", "enable", "mine"], env=env)
+
+    assert enabled.exit_code == 0, enabled.output
+    assert state() is True
+    config = load_config(tmp_path / "config" / "disktide" / "config.toml")
+    assert config.cleanup.enabled_rule_packs == ["mine"]
+
+    disabled = runner.invoke(cli, ["cleanup", "rules", "disable", "mine"], env=env)
+
+    assert disabled.exit_code == 0, disabled.output
+    assert state() is False
+    config = load_config(tmp_path / "config" / "disktide" / "config.toml")
+    assert config.cleanup.enabled_rule_packs == []
+    assert config.cleanup.disabled_rule_packs == ["mine"]
+
+
+def test_an_opted_in_pack_contributes_its_rules(tmp_path):
+    """The pack's rules were copied with enabled=False whatever happened."""
+    _opt_in_pack(tmp_path)
+    directory = tmp_path / "config" / "disktide" / "cleanup-rules"
+
+    off = get_rule_catalog(user_directory=directory)
+    on = get_rule_catalog(enabled_packs=["mine"], user_directory=directory)
+    off_again = get_rule_catalog(
+        disabled_packs=["mine"], enabled_packs=["mine"], user_directory=directory
+    )
+
+    assert "mine_cache" not in {rule.name for rule in off.rules}
+    assert "mine_cache" in {rule.name for rule in on.rules}
+    # An explicit disable is the more recent instruction either way.
+    assert "mine_cache" not in {rule.name for rule in off_again.rules}

@@ -2504,6 +2504,7 @@ def _cleanup_catalog():
     rule_directory = cleanup_rule_directory()
     catalog = get_rule_catalog(
         disabled_packs=config.cleanup.disabled_rule_packs,
+        enabled_packs=config.cleanup.enabled_rule_packs,
         user_directory=rule_directory,
     )
     return config, rule_directory, catalog
@@ -2984,11 +2985,19 @@ def _toggle_cleanup_rule_pack(pack_name: str, *, enable: bool) -> None:
     ):
         raise click.ClickException(f"unknown cleanup rule pack: {pack_name}")
     disabled = set(config.cleanup.disabled_rule_packs)
+    opted_in = set(config.cleanup.enabled_rule_packs)
+    # Both halves. A pack that ships `default_enabled = false` is opt-in, so
+    # removing it from `disabled` cannot switch it on -- it was never in
+    # there, and `enable` used to report success while the pack stayed off
+    # and contributed no rules to `cleanup plan`.
     if enable:
         disabled.discard(pack_name)
+        opted_in.add(pack_name)
     else:
         disabled.add(pack_name)
+        opted_in.discard(pack_name)
     config.cleanup.disabled_rule_packs = sorted(disabled)
+    config.cleanup.enabled_rule_packs = sorted(opted_in)
     save_config(config)
     click.echo(
         f"Cleanup rule pack '{pack_name}' {'enabled' if enable else 'disabled'}."
