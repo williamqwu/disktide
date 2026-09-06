@@ -419,6 +419,23 @@ def cli(
         raise click.ClickException(
             "stdout is closed; there is nowhere to write the report"
         )
+    # These four belong to the explorer alone: every subcommand declares its
+    # own copies and reads them, so a value parked on the group would be
+    # dropped in silence rather than applied.
+    if ctx.invoked_subcommand not in (None, "open"):
+        for name, value, default in (
+            ("--max-depth", max_depth, None),
+            ("--workers", workers, None),
+            ("--one-file-system", one_file_system, None),
+            ("--exclude-pseudo", exclude_pseudo, None),
+            ("--no-mouse", no_mouse or None, None),
+        ):
+            if value is not default:
+                raise click.UsageError(
+                    f"{name} belongs to the explorer, and "
+                    f"'{ctx.invoked_subcommand}' does not read it from here; "
+                    "put it after the subcommand if that command accepts it"
+                )
     ctx.ensure_object(dict)
     ctx.obj["max_depth"] = max_depth
     ctx.obj["workers"] = workers

@@ -99,3 +99,24 @@ def test_scan_refuses_to_run_with_stdout_closed(tree):
 
     assert proc.returncode == 1, proc.stderr
     assert b"stdout is closed" in proc.stderr
+
+
+# --- explorer options written before a subcommand ----------------------
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [["-d", "0"], ["-w", "1"], ["--one-file-system"], ["--exclude-pseudo"]],
+)
+def test_explorer_options_before_a_subcommand_are_refused(prefix, tree):
+    result = CliRunner().invoke(cli, [*prefix, "scan", str(tree)])
+
+    assert result.exit_code == 2, result.output
+    assert "scan" in result.output
+
+
+def test_the_same_options_after_the_subcommand_still_work(tree):
+    result = CliRunner().invoke(cli, ["scan", str(tree), "--max-depth", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert "max depth 0" in result.output
