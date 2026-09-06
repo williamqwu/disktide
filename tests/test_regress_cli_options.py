@@ -81,3 +81,21 @@ def test_a_bad_option_is_not_reported_as_a_bad_path(argv, hint, tree):
     assert hint in result.output
     assert "Invalid value for path" not in result.output
     assert "Invalid value for 'PATH'" not in result.output
+
+
+# --- nowhere to write the report ---------------------------------------
+
+
+def test_scan_refuses_to_run_with_stdout_closed(tree):
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "disktide", "scan", str(tree), "--json"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        preexec_fn=lambda: os.close(1),
+    )
+
+    assert proc.returncode == 1, proc.stderr
+    assert b"stdout is closed" in proc.stderr

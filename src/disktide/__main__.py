@@ -415,6 +415,10 @@ def cli(
     Subcommands: scan, watch, cleanup, compare, monitor, alerts, doctor
     """
     _soften_stdio_encoding_errors()
+    if sys.stdout is None:
+        raise click.ClickException(
+            "stdout is closed; there is nowhere to write the report"
+        )
     ctx.ensure_object(dict)
     ctx.obj["max_depth"] = max_depth
     ctx.obj["workers"] = workers
