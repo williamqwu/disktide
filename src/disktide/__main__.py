@@ -250,8 +250,12 @@ class _DiskTideGroup(click.Group):
                 continue
             if argument in self.commands:
                 return args
-            if os.path.isdir(os.path.expanduser(argument)):
-                return [*args[:index], "open", *args[index:]]
+            expanded = os.path.expanduser(argument)
+            if os.path.isdir(expanded):
+                # `open` re-validates the path, and `click.Path` does not
+                # expand `~`; hand it the string this branch actually
+                # tested so a quoted tilde is not accepted then refused.
+                return [*args[:index], "open", expanded, *args[index + 1 :]]
             raise click.UsageError(
                 f"'{argument}' is neither a command nor a directory. "
                 "Commands: scan, watch, cleanup, compare, monitor, alerts, "

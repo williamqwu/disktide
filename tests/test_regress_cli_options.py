@@ -120,3 +120,16 @@ def test_the_same_options_after_the_subcommand_still_work(tree):
 
     assert result.exit_code == 0, result.output
     assert "max depth 0" in result.output
+
+
+# --- a literal tilde routed to `open` ----------------------------------
+
+
+def test_a_literal_tilde_reaches_the_explorer(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / "sub").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    result = CliRunner().invoke(cli, ["~/sub"])
+
+    assert "does not exist" not in result.output, result.output

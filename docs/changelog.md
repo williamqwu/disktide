@@ -94,6 +94,7 @@
 - **`--workers 0` and `--max-depth -1` were stored by one command, refused by another, and blamed the path either way** `monitor add`/`monitor edit` accepted them, stored them, and every later run of that monitor failed; `scan -w 0` and `cleanup --workers 0` refused them with "Invalid value for path". Every `--workers` and `--max-depth` is now a Click range checked where it is typed, so a bad count exits 2 naming its own option, before anything is stored or scanned.
 - **A closed stdout is an error, not a silent success** With fd 1 closed, `click.echo` no-ops, so `scan --json` produced nothing and still exited 0. Every command now refuses up front with "stdout is closed".
 - **Explorer options before a subcommand are refused, not dropped** `disktide -d 0 scan tree` used to scan with unlimited depth and exit 0; it now exits 2 and says to write the option after `scan`.
+- **A quoted `~` reaches the explorer** The router judged `~` a directory and then handed `open` the unexpanded token, which `click.Path` refused as "does not exist".
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**
