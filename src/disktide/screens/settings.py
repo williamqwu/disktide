@@ -300,6 +300,13 @@ class SettingsScreen(Screen):
                     id="exclude-pseudo-filesystems",
                 )
 
+            with Horizontal(classes="setting-row"):
+                yield Label("Exclude snapshot dirs", classes="setting-label")
+                yield Switch(
+                    value=self._config.scan.exclude_snapshot_dirs,
+                    id="exclude-snapshot-dirs",
+                )
+
             yield Static("")
             yield Static("UI Settings", classes="section-title")
             with Horizontal(classes="setting-row"):
@@ -827,6 +834,8 @@ class SettingsScreen(Screen):
             self._config.scan.one_file_system = event.value
         elif event.switch.id == "exclude-pseudo-filesystems":
             self._config.scan.exclude_pseudo_filesystems = event.value
+        elif event.switch.id == "exclude-snapshot-dirs":
+            self._config.scan.exclude_snapshot_dirs = event.value
         elif event.switch.id == "monitor-auto-start":
             self._config.monitor.auto_start_in_tui = event.value
         elif event.switch.id == "hostname-aware-paths":

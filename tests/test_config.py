@@ -18,6 +18,7 @@ class TestConfig:
         assert config.scan.max_depth is None
         assert config.scan.one_file_system is False
         assert config.scan.exclude_pseudo_filesystems is True
+        assert config.scan.exclude_snapshot_dirs is True
         assert config.monitor.default_interval == 21600
         assert config.monitor.database_soft_budget == 2 * 1024**3
         assert config.monitor.database_hard_budget == 3 * 1024**3
@@ -36,6 +37,7 @@ max_depth = 10
 workers = 2
 one_file_system = true
 exclude_pseudo_filesystems = false
+exclude_snapshot_dirs = false
 
 [monitor]
 default_interval = 3600
@@ -50,6 +52,7 @@ safe_rendering = true
         assert config.scan.workers == 2
         assert config.scan.one_file_system is True
         assert config.scan.exclude_pseudo_filesystems is False
+        assert config.scan.exclude_snapshot_dirs is False
         assert config.monitor.default_interval == 3600
         assert config.ui.color_theme == "cyberpunk"
         assert config.ui.default_viz == "sunburst"
@@ -166,6 +169,7 @@ show_hidden = true
         config.scan.max_depth = 5
         config.scan.one_file_system = True
         config.scan.exclude_pseudo_filesystems = False
+        config.scan.exclude_snapshot_dirs = False
         config.monitor.default_interval = 7200
         config.ui.color_theme = "cyberpunk"
         config.ui.default_viz = "sunburst"
@@ -179,6 +183,7 @@ show_hidden = true
         assert loaded.scan.max_depth == 5
         assert loaded.scan.one_file_system is True
         assert loaded.scan.exclude_pseudo_filesystems is False
+        assert loaded.scan.exclude_snapshot_dirs is False
         assert loaded.monitor.default_interval == 7200
         assert loaded.ui.color_theme == "cyberpunk"
         assert loaded.ui.default_viz == "sunburst"

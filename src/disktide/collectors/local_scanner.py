@@ -38,6 +38,7 @@ class LocalScanner:
             ),
             one_file_system=policy.one_file_system,
             exclude_pseudo_filesystems=policy.exclude_pseudo_filesystems,
+            exclude_snapshot_dirs=policy.exclude_snapshot_dirs,
             metric=request.metric,
             worker_selection=worker_selection,
             directory_observer=directory_observer,

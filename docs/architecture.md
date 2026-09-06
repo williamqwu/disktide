@@ -525,6 +525,10 @@ empty queue and no workers.
 - Missing `st_blocks` → unavailable, never zero.
 - One-filesystem mode stops at device boundaries, keeping an `xdev` node.
 - Descendant pseudo mounts excluded by default; explicit pseudo root allowed.
+- Descendant storage snapshot directories (`.snapshot`, `.zfs`, `.ckpt`,
+  `~snapshot`) excluded by default; decided from the name before the
+  directory is opened, because listing one is what triggers the per-snapshot
+  automounts. Explicit snapshot root allowed, as for pseudo mounts.
 - Max-depth and policy exclusions are separate from access errors.
 
 See ADR 0001 for the storage metric contract.

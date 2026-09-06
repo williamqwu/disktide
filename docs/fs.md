@@ -408,7 +408,17 @@ No symlink support (symlinks don't exist on FAT). Modification time resolution i
 
 ### ZFS
 
-Similar to Btrfs -- deduplication and compression mean apparent sizes may differ from physical usage. ZFS snapshots are not visible through the normal directory tree, so they don't affect scanning.
+Similar to Btrfs -- deduplication and compression mean apparent sizes may differ from physical usage. ZFS snapshots are hidden from the normal directory tree only while `snapdir=hidden`, which is the default; with `snapdir=visible` every snapshot appears under `.zfs/snapshot/<name>` as a full second copy of the dataset, and the snapshot-directory policy below is what keeps a scan from walking them.
+
+### Snapshot directories
+
+Storage systems publish read-only copies of a whole volume under a fixed directory name. NetApp exports `.snapshot` at the root of every NFS volume (`~snapshot` over CIFS), ZFS exposes `.zfs/snapshot` when `snapdir=visible`, and Veritas VxFS uses `.ckpt`. Each name below one of those is a complete copy of the tree, and on NetApp each is also an automatic NFS submount: `/proc/mounts` lists them as separate `nfs` mounts with `mountaddr=unspecified`, so a policy that crosses filesystems (the default) walks straight into them.
+
+The cost is proportional to how many snapshots are retained. A measured NetApp export held seven -- two `daily.*`, `weekly.*`, and `snapmirror.*` -- over a real tree of 1,173,122 directories, 4,931,204 files, and 10.02 TB, which took 368 s at 16 workers with the boundary honoured. Without the exclusion the same scan walks the volume eight times and reports roughly 80 TB on a 10 TB volume; `du` users hit the same thing.
+
+Descendant snapshot directories are therefore excluded by default and remain visible as policy-excluded boundary nodes with the reason `snapshot directory`, exactly as pseudo-filesystem mountpoints are. The name is enough to decide, so the directory is never opened -- listing `.snapshot` is what triggers the automounts. The scan root itself is never excluded, so `disktide scan /vol/.snapshot/daily.2026-09-06_0010` still measures that one snapshot. Use `--include-snapshots` or `scan.exclude_snapshot_dirs = false` to count them.
+
+Nothing found inside a snapshot is reclaimable -- a snapshot is read-only -- and its bytes are already charged to the volume as snapshot reserve rather than to the files the user sees, so for disk-usage accounting counting them twice is the error and skipping them is the measurement.
 
 ### procfs / sysfs / devfs
 

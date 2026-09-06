@@ -401,6 +401,7 @@ def _compare_policy(baseline, target, add) -> None:
     fields = (
         "one_file_system",
         "exclude_pseudo_filesystems",
+        "exclude_snapshot_dirs",
         "max_depth",
         "symlink_policy",
         "hardlink_policy",

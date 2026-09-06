@@ -173,6 +173,7 @@ def test_doctor_config_failure_falls_back_to_default_policy(tmp_path, monkeypatc
     assert report["config"]["status"] == "unavailable"
     assert report["scan_policy"]["one_file_system"] is False
     assert report["scan_policy"]["exclude_pseudo_filesystems"] is True
+    assert report["scan_policy"]["exclude_snapshot_dirs"] is True
 
 
 def test_cli_doctor_json_is_valid_and_contains_no_file_listing(tmp_path):

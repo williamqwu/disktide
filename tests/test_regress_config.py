@@ -57,6 +57,8 @@ def test_a_quoted_path_survives_a_config_round_trip(tmp_path, name):
          "default_interval"),
         ('[cleanup]\nmap_max_points = "80"\n', "cleanup", "map_max_points"),
         ('[scan]\none_file_system = "yes"\n', "scan", "one_file_system"),
+        ('[scan]\nexclude_snapshot_dirs = "no"\n', "scan",
+         "exclude_snapshot_dirs"),
         ('[ui]\nshow_cleanup = 1\n', "ui", "show_cleanup"),
         ('[ui]\ndefault_scan_path = 7\n', "ui", "default_scan_path"),
     ],
@@ -126,7 +128,7 @@ def test_a_good_config_still_loads_every_typed_key(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(
         "[scan]\nmax_depth = 3\nworkers = 2\none_file_system = true\n"
-        "exclude_pseudo_filesystems = false\n"
+        "exclude_pseudo_filesystems = false\nexclude_snapshot_dirs = false\n"
         "[monitor]\ndefault_interval = 600\nmax_watch_time = 60\n"
         "database_soft_budget = 5\ndatabase_hard_budget = 6\n"
         "auto_start_in_tui = true\n"
@@ -141,6 +143,7 @@ def test_a_good_config_still_loads_every_typed_key(tmp_path):
     assert (config.scan.max_depth, config.scan.workers) == (3, 2)
     assert config.scan.one_file_system is True
     assert config.scan.exclude_pseudo_filesystems is False
+    assert config.scan.exclude_snapshot_dirs is False
     assert config.monitor.default_interval == 600
     assert config.monitor.max_watch_time == 60
     assert config.monitor.database_soft_budget == 5

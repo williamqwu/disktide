@@ -11,6 +11,13 @@ class ScanPolicy:
 
     one_file_system: bool = False
     exclude_pseudo_filesystems: bool = True
+    #: Skip `.snapshot`-style directories below the scan root. Storage
+    #: systems publish read-only copies of the whole volume under a fixed
+    #: name (NetApp `.snapshot`, ZFS `.zfs`, VxFS `.ckpt`), so walking them
+    #: counts the same bytes once per snapshot -- eight times over on a
+    #: NetApp export with seven retained snapshots -- and none of what it
+    #: finds can be deleted. See `scanner.policy.SNAPSHOT_DIR_NAMES`.
+    exclude_snapshot_dirs: bool = True
     max_depth: int | None = None
     symlink_policy: str = "never-follow"
     hardlink_policy: str = "lexical-owner"
@@ -22,5 +29,13 @@ class ScanPolicy:
             if self.exclude_pseudo_filesystems
             else "include pseudo filesystems"
         )
+        snapshot_scope = (
+            "exclude snapshot directories"
+            if self.exclude_snapshot_dirs
+            else "include snapshot directories"
+        )
         depth = "unlimited depth" if self.max_depth is None else f"max depth {self.max_depth}"
-        return f"{filesystem_scope}; {pseudo_scope}; {depth}; symlinks {self.symlink_policy}"
+        return (
+            f"{filesystem_scope}; {pseudo_scope}; {snapshot_scope}; {depth}; "
+            f"symlinks {self.symlink_policy}"
+        )

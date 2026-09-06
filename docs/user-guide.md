@@ -301,6 +301,7 @@ disktide scan /path --snapshot          # save to database
 disktide scan /path -d 5 -w 4          # depth 5, 4 workers
 disktide scan /path --metric allocated
 disktide scan /path --one-file-system --exclude-pseudo
+disktide scan /path --include-snapshots  # count .snapshot/.zfs copies
 disktide scan /path --json
 ```
 
@@ -318,6 +319,22 @@ report.
 and the report counts the root itself as one depth-limited subtree
 (`Scoped out: 0 policy-excluded, 1 depth-limited`, `coverage.depth_limited_subtrees: 1`),
 so it is distinguishable from scanning an empty directory.
+
+Storage snapshot directories are skipped below the scan root by default.
+NetApp exports `.snapshot` at the root of every NFS volume (`~snapshot` over
+CIFS), ZFS exposes `.zfs/snapshot` when `snapdir=visible`, and VxFS uses
+`.ckpt`; each name below one of those is a complete read-only copy of the
+whole tree, so descending into them measures the same bytes once per retained
+snapshot — eight walks of the volume and roughly 80 TB reported on 10 TB of
+files on an export keeping seven. Nothing there is reclaimable and those bytes
+are already charged to the volume as snapshot reserve, so counting them is
+double counting. The directory stays in the report as a policy-excluded
+boundary node (`Scoped out: 1 policy-excluded`,
+`coverage.excluded_subtrees: 1`), the same way a pseudo-filesystem mountpoint
+does. `--include-snapshots`, or `scan.exclude_snapshot_dirs = false`, measures
+them anyway; the scan root itself is never excluded, so
+`disktide scan /vol/.snapshot/daily.2026-09-06_0010` still measures that one
+snapshot.
 
 A filename is bytes, and not every filename on a filesystem is valid UTF-8.
 The text report renders the undecodable ones as their raw bytes — a
@@ -475,6 +492,7 @@ max_depth = 10                           # omit for unlimited
 workers = 4                              # omit for auto-detect
 # one_file_system = true                 # default: false
 # exclude_pseudo_filesystems = false     # default: true
+# exclude_snapshot_dirs = false          # default: true (.snapshot, .zfs, .ckpt)
 
 [monitor]
 default_interval = 21600                 # 6 hours, in seconds

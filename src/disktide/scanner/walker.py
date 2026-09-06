@@ -9,7 +9,7 @@ from typing import Callable, Mapping
 
 from disktide.domain.metrics import sum_available
 from disktide.models.tree import FSNode, LeafNode
-from disktide.scanner.policy import lookup_excluded_mount
+from disktide.scanner.policy import is_snapshot_dir_name, lookup_excluded_mount
 
 
 #: An entry that was in the directory listing and is not there any more.
@@ -203,6 +203,7 @@ def scan_directory(
     one_file_system: bool = False,
     excluded_mounts: Mapping[str, str] | None = None,
     canonical_paths: bool = False,
+    exclude_snapshot_dirs: bool = True,
 ) -> FSNode:
     """Scan a directory and return an FSNode tree.
 
@@ -230,6 +231,20 @@ def scan_directory(
     )
 
     if cancel_event is not None and cancel_event.is_set():
+        node.allocated_size = 0
+        node.own_allocated_size = 0
+        return node
+
+    if exclude_snapshot_dirs and depth > 0 and is_snapshot_dir_name(name):
+        # Before the stat, for the same reason `scheduler.scan_directory_once`
+        # decides this before its open: a NetApp `.snapshot` is a directory of
+        # automatic submounts, one complete copy of the volume apiece, and the
+        # name is the whole question. Deciding it here also makes this walker
+        # and the scheduler produce the same node -- zero everywhere, no mtime,
+        # no device -- which is what `test_scheduler_wave04.py` compares the
+        # two walks on.
+        node.excluded = True
+        node.exclusion_reason = "snapshot directory"
         node.allocated_size = 0
         node.own_allocated_size = 0
         return node
@@ -374,6 +389,7 @@ def scan_directory(
                         entry.path, depth + 1, max_depth, cancel_event,
                         ancestors, on_dir_done, root_device,
                         one_file_system, excluded_mounts, canonical_paths,
+                        exclude_snapshot_dirs,
                     )
                     node.children.append(child)
                     dir_count += 1 + child.dir_count

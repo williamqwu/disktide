@@ -32,6 +32,7 @@ def policy_to_dict(policy: ScanPolicy | None) -> dict[str, object] | None:
     return {
         "one_file_system": policy.one_file_system,
         "exclude_pseudo_filesystems": policy.exclude_pseudo_filesystems,
+        "exclude_snapshot_dirs": policy.exclude_snapshot_dirs,
         "max_depth": policy.max_depth,
         "symlink_policy": policy.symlink_policy,
         "hardlink_policy": policy.hardlink_policy,
@@ -47,6 +48,12 @@ def policy_from_dict(value: dict[str, Any] | None) -> ScanPolicy | None:
         exclude_pseudo_filesystems=bool(
             value.get("exclude_pseudo_filesystems", True)
         ),
+        # Absent means a record written before snapshot directories were a
+        # policy at all, and those scans were taken with the walk that
+        # descended into them. The default is still the one the scanner
+        # applies today, so a restored policy describes what a re-scan would
+        # do rather than pretending the old run had opted out.
+        exclude_snapshot_dirs=bool(value.get("exclude_snapshot_dirs", True)),
         max_depth=value.get("max_depth"),
         symlink_policy=str(value.get("symlink_policy", "never-follow")),
         hardlink_policy=str(value.get("hardlink_policy", "lexical-owner")),

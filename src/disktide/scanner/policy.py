@@ -17,6 +17,23 @@ PSEUDO_FS_TYPES = frozenset({
 })
 
 
+#: Directory names under which a storage system publishes read-only copies
+#: of the whole volume. NetApp NFS exports `.snapshot` at the root of every
+#: volume (and `~snapshot` over CIFS), ZFS exposes `.zfs/snapshot` whenever
+#: `snapdir=visible`, and Veritas VxFS uses `.ckpt` for storage checkpoints.
+#: Each name below one of these is a complete second copy of the tree, so a
+#: walk that descends into them measures the same bytes once per retained
+#: snapshot -- and nothing it finds there can be deleted, because a snapshot
+#: is read-only and its bytes are already charged to the volume as snapshot
+#: reserve rather than to the files the user can see.
+SNAPSHOT_DIR_NAMES = frozenset({".snapshot", ".zfs", ".ckpt", "~snapshot"})
+
+
+def is_snapshot_dir_name(name: str) -> bool:
+    """Whether a directory entry name is a storage snapshot root."""
+    return name in SNAPSHOT_DIR_NAMES
+
+
 @dataclass(frozen=True, slots=True)
 class MountEntry:
     mountpoint: str

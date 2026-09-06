@@ -96,6 +96,7 @@ class ScanConfig:
     workers: int | None = None
     one_file_system: bool = False
     exclude_pseudo_filesystems: bool = True
+    exclude_snapshot_dirs: bool = True
 
 
 @dataclass
@@ -275,6 +276,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> None:
         lines.append("one_file_system = true")
     if not config.scan.exclude_pseudo_filesystems:
         lines.append("exclude_pseudo_filesystems = false")
+    if not config.scan.exclude_snapshot_dirs:
+        lines.append("exclude_snapshot_dirs = false")
     lines.append("")
 
     lines.append("[monitor]")
@@ -386,6 +389,7 @@ class ScanOverrides:
     workers: int | None = None
     one_file_system: bool | None = None
     exclude_pseudo_filesystems: bool | None = None
+    exclude_snapshot_dirs: bool | None = None
 
     def __bool__(self) -> bool:
         return any(
@@ -395,6 +399,7 @@ class ScanOverrides:
                 self.workers,
                 self.one_file_system,
                 self.exclude_pseudo_filesystems,
+                self.exclude_snapshot_dirs,
             )
         )
 
@@ -521,6 +526,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         )
         config.scan.exclude_pseudo_filesystems = _bool_value(
             scan, "scan", "exclude_pseudo_filesystems", True
+        )
+        config.scan.exclude_snapshot_dirs = _bool_value(
+            scan, "scan", "exclude_snapshot_dirs", True
         )
 
     monitor = _table(data, "monitor")

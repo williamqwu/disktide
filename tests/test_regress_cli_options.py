@@ -106,7 +106,13 @@ def test_scan_refuses_to_run_with_stdout_closed(tree):
 
 @pytest.mark.parametrize(
     "prefix",
-    [["-d", "0"], ["-w", "1"], ["--one-file-system"], ["--exclude-pseudo"]],
+    [
+        ["-d", "0"],
+        ["-w", "1"],
+        ["--one-file-system"],
+        ["--exclude-pseudo"],
+        ["--include-snapshots"],
+    ],
 )
 def test_explorer_options_before_a_subcommand_are_refused(prefix, tree):
     result = CliRunner().invoke(cli, [*prefix, "scan", str(tree)])

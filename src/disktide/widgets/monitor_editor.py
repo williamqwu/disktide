@@ -149,6 +149,7 @@ class MonitorEditor(ModalScreen[MonitorEditorResult | None]):
             exclude_pseudo_filesystems=(
                 self._config.scan.exclude_pseudo_filesystems
             ),
+            exclude_snapshot_dirs=self._config.scan.exclude_snapshot_dirs,
             max_depth=self._config.scan.max_depth,
         )
         with Vertical(id="monitor-editor-dialog"):
@@ -256,6 +257,12 @@ class MonitorEditor(ModalScreen[MonitorEditorResult | None]):
                         value=policy.exclude_pseudo_filesystems,
                         id="monitor-exclude-pseudo",
                     )
+                with Horizontal(classes="editor-row"):
+                    yield Label("Exclude snapshot dirs", classes="editor-label")
+                    yield Switch(
+                        value=policy.exclude_snapshot_dirs,
+                        id="monitor-exclude-snapshots",
+                    )
                 yield Static(
                     (
                         "Changing path, metric, or scan policy creates a new "
@@ -321,6 +328,9 @@ class MonitorEditor(ModalScreen[MonitorEditorResult | None]):
                 ).value,
                 exclude_pseudo_filesystems=self.query_one(
                     "#monitor-exclude-pseudo", Switch
+                ).value,
+                exclude_snapshot_dirs=self.query_one(
+                    "#monitor-exclude-snapshots", Switch
                 ).value,
                 max_depth=max_depth,
                 symlink_policy=(

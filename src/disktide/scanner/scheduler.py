@@ -21,7 +21,7 @@ from disktide.domain.policy import ScanPolicy
 from disktide.domain.scan import ScanTreeUpdate
 from disktide.models.tree import FSNode, LeafNode
 from disktide.scanner.accel import DT_DIR, scan_dir
-from disktide.scanner.policy import lookup_excluded_mount
+from disktide.scanner.policy import is_snapshot_dir_name, lookup_excluded_mount
 from disktide.scanner.walker import (
     VANISHED_ERRNOS,
     classify_symlink,
@@ -483,6 +483,31 @@ def scan_directory_once(
         # Zero, because a cancelled scan reports no totals at all: `scan()`
         # stops before the tree is finished and the caller is told it was
         # cancelled.
+        return DirectoryScanResult(job, node, frozenset(), 0, 0)
+
+    if (
+        policy.exclude_snapshot_dirs
+        and job.depth > 0
+        and is_snapshot_dir_name(node.name)
+    ):
+        # Above the open, and answered from the name alone. A NetApp
+        # `.snapshot` holds one automatic NFS submount per retained
+        # snapshot, and every one of them is a complete second copy of the
+        # volume: on the measured export, seven snapshots turned a
+        # 1,173,122-directory / 10.02 TB tree into eight walks of it and
+        # ~80 TB of double counting. Opening the directory would be
+        # harmless on its own, but nothing below needs the descriptor --
+        # the node is excluded whatever `fstat` says -- so the cheapest
+        # correct thing is to never name the path to the kernel at all,
+        # which is also the one form that cannot trigger the automounts.
+        #
+        # `job.depth > 0`: a user who explicitly scans
+        # `/vol/.snapshot/daily.2026-09-06_0010` is asking for that tree,
+        # exactly as `discover_pseudo_mounts` never excludes its own root.
+        node.excluded = True
+        node.exclusion_reason = "snapshot directory"
+        node.allocated_size = 0
+        node.own_allocated_size = 0
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
     # The open replaces the `os.stat(job.path)` that used to start this

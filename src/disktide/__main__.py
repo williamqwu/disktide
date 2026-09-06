@@ -159,6 +159,11 @@ _TUI_OPTIONS = (
         help="Exclude pseudo-filesystem mountpoints below the scan root",
     ),
     click.option(
+        "--exclude-snapshots/--include-snapshots",
+        default=None,
+        help="Exclude .snapshot/.zfs storage snapshot directories",
+    ),
+    click.option(
         "--no-mouse",
         is_flag=True,
         default=False,
@@ -168,7 +173,7 @@ _TUI_OPTIONS = (
 
 
 def _tui_options(command):
-    """Apply the five launch options the group and `open` both take."""
+    """Apply the six launch options the group and `open` both take."""
     for option in reversed(_TUI_OPTIONS):
         command = option(command)
     return command
@@ -272,6 +277,7 @@ def _launch_tui(
     workers: int | None,
     one_file_system: bool | None,
     exclude_pseudo: bool | None,
+    exclude_snapshots: bool | None,
     no_mouse: bool,
 ) -> None:
     """Run the TUI: on PATH when there is one, on the welcome screen when not.
@@ -301,7 +307,7 @@ def _launch_tui(
     from disktide.config import ScanOverrides
 
     config = _load_config_or_exit()
-    # Kept out of `config`, which the app writes back: these four are
+    # Kept out of `config`, which the app writes back: these five are
     # transient, as `-w`'s own help says, and the app scans with them
     # through `scan_overrides` instead.
     scan_overrides = ScanOverrides(
@@ -309,6 +315,7 @@ def _launch_tui(
         workers=workers,
         one_file_system=one_file_system,
         exclude_pseudo_filesystems=exclude_pseudo,
+        exclude_snapshot_dirs=exclude_snapshots,
     )
 
     _probe_terminal_if_unmeasured(config)
@@ -412,6 +419,7 @@ def cli(
     workers: int | None,
     one_file_system: bool | None,
     exclude_pseudo: bool | None,
+    exclude_snapshots: bool | None,
     no_mouse: bool,
 ):
     """Interactive terminal disk usage explorer.
@@ -425,7 +433,7 @@ def cli(
         raise click.ClickException(
             "stdout is closed; there is nowhere to write the report"
         )
-    # These four belong to the explorer alone: every subcommand declares its
+    # These five belong to the explorer alone: every subcommand declares its
     # own copies and reads them, so a value parked on the group would be
     # dropped in silence rather than applied.
     if ctx.invoked_subcommand not in (None, "open"):
@@ -434,6 +442,7 @@ def cli(
             ("--workers", workers, None),
             ("--one-file-system", one_file_system, None),
             ("--exclude-pseudo", exclude_pseudo, None),
+            ("--exclude-snapshots", exclude_snapshots, None),
             ("--no-mouse", no_mouse or None, None),
         ):
             if value is not default:
@@ -447,6 +456,7 @@ def cli(
     ctx.obj["workers"] = workers
     ctx.obj["one_file_system"] = one_file_system
     ctx.obj["exclude_pseudo"] = exclude_pseudo
+    ctx.obj["exclude_snapshots"] = exclude_snapshots
     ctx.obj["no_mouse"] = no_mouse
 
     if ctx.invoked_subcommand is None:
@@ -457,6 +467,7 @@ def cli(
             workers=workers,
             one_file_system=one_file_system,
             exclude_pseudo=exclude_pseudo,
+            exclude_snapshots=exclude_snapshots,
             no_mouse=no_mouse,
         )
 
@@ -476,6 +487,7 @@ def open_explorer(
     workers: int | None,
     one_file_system: bool | None,
     exclude_pseudo: bool | None,
+    exclude_snapshots: bool | None,
     no_mouse: bool,
 ):
     """Open the interactive explorer on PATH.
@@ -498,6 +510,7 @@ def open_explorer(
         workers=chosen("workers", workers),
         one_file_system=chosen("one_file_system", one_file_system),
         exclude_pseudo=chosen("exclude_pseudo", exclude_pseudo),
+        exclude_snapshots=chosen("exclude_snapshots", exclude_snapshots),
         no_mouse=no_mouse or bool(group.get("no_mouse")),
     )
 
@@ -674,6 +687,12 @@ def doctor(json_output: bool, show_paths: bool, check_integrity: bool) -> None:
     show_default=True,
     help="Exclude pseudo-filesystem mountpoints below the scan root",
 )
+@click.option(
+    "--exclude-snapshots/--include-snapshots",
+    default=True,
+    show_default=True,
+    help="Exclude .snapshot/.zfs storage snapshot directories",
+)
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 @click.pass_context
 def scan(
@@ -685,6 +704,7 @@ def scan(
     metric: str,
     one_file_system: bool,
     exclude_pseudo: bool,
+    exclude_snapshots: bool,
     json_output: bool,
 ):
     """Scan a directory and display results.
@@ -720,6 +740,7 @@ def scan(
     policy = ScanPolicy(
         one_file_system=one_file_system,
         exclude_pseudo_filesystems=exclude_pseudo,
+        exclude_snapshot_dirs=exclude_snapshots,
         max_depth=max_depth,
     )
     request = ScanRequest(
@@ -1318,6 +1339,7 @@ def monitor_list(include_archived: bool, json_output: bool) -> None:
 @click.option("--workers", type=click.IntRange(min=1), default=None)
 @click.option("--one-file-system/--cross-filesystems", default=None)
 @click.option("--exclude-pseudo/--include-pseudo", default=None)
+@click.option("--exclude-snapshots/--include-snapshots", default=None)
 @click.option("--max-depth", type=click.IntRange(min=0), default=None)
 @click.option("--capture-now", is_flag=True, help="Capture the first snapshot now")
 def monitor_add(
@@ -1328,6 +1350,7 @@ def monitor_add(
     workers: int | None,
     one_file_system: bool | None,
     exclude_pseudo: bool | None,
+    exclude_snapshots: bool | None,
     max_depth: int | None,
     capture_now: bool,
 ) -> None:
@@ -1353,6 +1376,11 @@ def monitor_add(
                 config.scan.exclude_pseudo_filesystems
                 if exclude_pseudo is None
                 else exclude_pseudo
+            ),
+            exclude_snapshot_dirs=(
+                config.scan.exclude_snapshot_dirs
+                if exclude_snapshots is None
+                else exclude_snapshots
             ),
             max_depth=(config.scan.max_depth if max_depth is None else max_depth),
         )
@@ -1415,6 +1443,7 @@ def monitor_add(
 @click.option("--workers", type=click.IntRange(min=1), default=None)
 @click.option("--one-file-system/--cross-filesystems", default=None)
 @click.option("--exclude-pseudo/--include-pseudo", default=None)
+@click.option("--exclude-snapshots/--include-snapshots", default=None)
 @click.option("--max-depth", type=click.IntRange(min=0), default=None)
 def monitor_edit(
     identifier: str,
@@ -1425,6 +1454,7 @@ def monitor_edit(
     workers: int | None,
     one_file_system: bool | None,
     exclude_pseudo: bool | None,
+    exclude_snapshots: bool | None,
     max_depth: int | None,
 ) -> None:
     """Edit a definition using optimistic revision control."""
@@ -1448,6 +1478,11 @@ def monitor_edit(
                 current.policy.exclude_pseudo_filesystems
                 if exclude_pseudo is None
                 else exclude_pseudo
+            ),
+            exclude_snapshot_dirs=(
+                current.policy.exclude_snapshot_dirs
+                if exclude_snapshots is None
+                else exclude_snapshots
             ),
             max_depth=(
                 current.policy.max_depth if max_depth is None else max_depth
@@ -2419,6 +2454,7 @@ def watch(
                 exclude_pseudo_filesystems=(
                     config.scan.exclude_pseudo_filesystems
                 ),
+                exclude_snapshot_dirs=config.scan.exclude_snapshot_dirs,
                 max_depth=config.scan.max_depth,
             ),
             workers=workers if workers is not None else config.scan.workers,
@@ -2625,6 +2661,7 @@ def cleanup_plan(
                     exclude_pseudo_filesystems=(
                         config.scan.exclude_pseudo_filesystems
                     ),
+                    exclude_snapshot_dirs=config.scan.exclude_snapshot_dirs,
                     max_depth=config.scan.max_depth,
                 ),
                 workers=workers,

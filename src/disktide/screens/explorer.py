@@ -412,6 +412,9 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             exclude_pseudo_filesystems=self._scan_setting(
                 "exclude_pseudo_filesystems", True
             ),
+            exclude_snapshot_dirs=self._scan_setting(
+                "exclude_snapshot_dirs", True
+            ),
             max_depth=max_depth,
         )
         request = ScanRequest(

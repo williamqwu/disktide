@@ -262,6 +262,7 @@ def build_doctor_report(
         scan_policy={
             "one_file_system": config.scan.one_file_system,
             "exclude_pseudo_filesystems": config.scan.exclude_pseudo_filesystems,
+            "exclude_snapshot_dirs": config.scan.exclude_snapshot_dirs,
             "max_depth": config.scan.max_depth,
             "symlinks": "never-follow",
             "hardlinks": "lexical-owner",
@@ -383,6 +384,7 @@ def render_doctor_report(report: DoctorReport) -> str:
         "Default scan policy",
         f"  One filesystem: {policy['one_file_system']}",
         f"  Exclude pseudo filesystems: {policy['exclude_pseudo_filesystems']}",
+        f"  Exclude snapshot directories: {policy['exclude_snapshot_dirs']}",
         f"  Max depth: {policy['max_depth'] if policy['max_depth'] is not None else 'unlimited'}",
         f"  Symlinks: {policy['symlinks']}",
         f"  Hardlinks: {policy['hardlinks']}",

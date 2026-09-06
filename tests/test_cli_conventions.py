@@ -388,6 +388,7 @@ def test_launch_options_do_not_end_up_in_the_config_file(tmp_path, monkeypatch):
         workers=2,
         one_file_system=True,
         exclude_pseudo=None,
+        exclude_snapshots=False,
         no_mouse=False,
     )
 
@@ -395,6 +396,7 @@ def test_launch_options_do_not_end_up_in_the_config_file(tmp_path, monkeypatch):
     assert saved.scan.workers is None
     assert saved.scan.max_depth is None
     assert saved.scan.one_file_system is False
+    assert saved.scan.exclude_snapshot_dirs is True
     # The path itself is still remembered, which is the one thing that
     # launch is meant to write.
     assert get_effective_paths(saved).last_visited_path == str(tree)
@@ -403,6 +405,7 @@ def test_launch_options_do_not_end_up_in_the_config_file(tmp_path, monkeypatch):
     assert app._scan_overrides.workers == 2
     assert app._scan_overrides.max_depth == 3
     assert app._scan_overrides.one_file_system is True
+    assert app._scan_overrides.exclude_snapshot_dirs is False
 
 
 def test_the_ring_shape_environment_override_is_not_written_back(

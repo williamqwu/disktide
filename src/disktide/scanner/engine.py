@@ -45,6 +45,7 @@ class ScanEngine:
         tree_callback_interval: float = 0.25,
         one_file_system: bool = False,
         exclude_pseudo_filesystems: bool = True,
+        exclude_snapshot_dirs: bool = True,
         scheduler_submission_limit: int | None = None,
         scheduler_queue_capacity: int | None = None,
         entry_chunk_size: int = 256,
@@ -71,6 +72,7 @@ class ScanEngine:
         self._policy = ScanPolicy(
             one_file_system=one_file_system,
             exclude_pseudo_filesystems=exclude_pseudo_filesystems,
+            exclude_snapshot_dirs=exclude_snapshot_dirs,
             max_depth=max_depth,
         )
         self._progress = ProgressThrottle(
