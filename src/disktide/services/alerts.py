@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -14,6 +15,53 @@ from disktide.repositories.alerts import AlertRepository
 from disktide.repositories.cleanup import CleanupRepository
 from disktide.repositories.monitors import RetentionRepository
 from disktide.repositories.snapshots import SnapshotRepository
+
+
+#: SQLite stores integers in 64 signed bits and raises `OverflowError`
+#: ("Python int too large to convert to SQLite INTEGER") on anything wider.
+MAX_ALERT_THRESHOLD = 2**63 - 1
+
+#: A growth threshold above a million percent is not a threshold anyone means.
+MAX_PERCENT_THRESHOLD = 1_000_000
+
+
+def validate_alert_threshold(kind: AlertKind, threshold: object) -> float:
+    """Return the threshold, or say what a usable one would look like.
+
+    Every entry point ends here, because each rejection is about what the
+    stored rule would then do rather than about the text that was typed. A
+    NaN reaches SQLite as NULL and reads back as 0.0, which makes a
+    percentage-growth rule fire on every evaluation; a zero byte threshold
+    fires on the first check; and anything past the 64-bit range fails at
+    the INSERT with a message about Python integers.
+    """
+    try:
+        number = float(threshold)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("threshold must be a number") from exc
+    if not math.isfinite(number):
+        raise ValueError("threshold must be a finite number, not nan or inf")
+    if kind is AlertKind.PERCENTAGE_GROWTH:
+        if not 0 < number <= MAX_PERCENT_THRESHOLD:
+            raise ValueError(
+                "percentage-growth threshold must be greater than zero and "
+                f"at most {MAX_PERCENT_THRESHOLD}"
+            )
+        return number
+    if kind is AlertKind.INODE_FREE:
+        # Zero is meaningful here: "no inodes left".
+        if not 0 <= number <= MAX_ALERT_THRESHOLD:
+            raise ValueError(
+                "inode-free threshold must be between 0 and "
+                f"{MAX_ALERT_THRESHOLD}"
+            )
+        return number
+    if not 0 < number <= MAX_ALERT_THRESHOLD:
+        raise ValueError(
+            f"{kind.value} threshold must be greater than zero and at most "
+            f"{MAX_ALERT_THRESHOLD} bytes"
+        )
+    return number
 
 
 def _utc_now() -> datetime:
@@ -55,9 +103,11 @@ class AlertService:
         self._statvfs = statvfs
 
     def create(self, rule: AlertRule) -> AlertRule:
+        validate_alert_threshold(rule.kind, rule.threshold)
         return self._repository.create_alert_rule(rule)
 
     def update(self, rule: AlertRule) -> AlertRule:
+        validate_alert_threshold(rule.kind, rule.threshold)
         return self._repository.update_alert_rule(rule)
 
     def get(self, rule_id: int) -> AlertRule | None:

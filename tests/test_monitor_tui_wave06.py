@@ -537,3 +537,65 @@ def test_run_now_on_a_paused_monitor_stays_off_the_ui_thread(tmp_path):
     assert toasts
     assert toasts[0].startswith("Run ")
     assert "queued" not in toasts[0]
+
+
+def test_the_alert_editor_refuses_a_threshold_the_cli_would_refuse(tmp_path):
+    """`nan` used to be saved, read back as 0.0, and fire on every check."""
+    from textual.widgets import Input, Select, Static
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "editor.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    monitor = bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+
+            await pilot.press("a")
+            await _settle(pilot, lambda: isinstance(app.screen, AlertEditor))
+            editor = app.screen
+            editor.query_one("#alert-kind", Select).value = "percentage-growth"
+            editor.query_one("#alert-threshold", Input).value = "nan"
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+            assert app.screen is editor
+            message = str(editor.query_one("#alert-editor-error", Static).render())
+            assert "finite" in message
+            assert app._monitor_service.list_alert_rules(monitor.id) == []
+
+            editor.query_one("#alert-threshold", Input).value = "25"
+            await pilot.press("ctrl+s")
+            await _settle(
+                pilot,
+                lambda: len(app._monitor_service.list_alert_rules(monitor.id)) == 1,
+            )
+            rules = app._monitor_service.list_alert_rules(monitor.id)
+            assert [rule.threshold for rule in rules] == [25.0]
+            await _drain_monitor_loads(pilot, app)
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()

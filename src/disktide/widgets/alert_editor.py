@@ -13,6 +13,7 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 from disktide.config import format_duration, parse_duration, parse_size
 from disktide.domain.alerts import AlertKind, AlertRule, AlertSeverity
 from disktide.domain.metrics import MetricId
+from disktide.services.alerts import validate_alert_threshold
 
 
 _SIZE_KINDS = {
@@ -239,8 +240,10 @@ class AlertEditor(ModalScreen[AlertRule | None]):
                 threshold = float(parse_size(threshold_text))
             else:
                 threshold = float(threshold_text)
-            if threshold < 0:
-                raise ValueError("Threshold cannot be negative")
+            # The same rule the CLI and the service use: an editor that
+            # accepted nan, inf or zero stored a rule the CLI would refuse,
+            # and a nan reached SQLite as NULL and read back as 0.0.
+            threshold = validate_alert_threshold(kind, threshold)
             window_text = self.query_one("#alert-window", Input).value.strip()
             window = parse_duration(window_text) if window_text else None
             cooldown_text = self.query_one(

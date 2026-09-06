@@ -262,3 +262,62 @@ def test_removing_rule_keeps_prior_event_audit(repository, tmp_path):
     assert repository.get_alert_rule(rule.id) is None
     assert repository.list_alert_rules(monitor.id) == []
     assert repository.list_alert_events(monitor.id)[0].rule_id == rule.id
+
+
+@pytest.mark.parametrize(
+    "kind, threshold",
+    [
+        (AlertKind.PERCENTAGE_GROWTH, float("nan")),
+        (AlertKind.PERCENTAGE_GROWTH, float("inf")),
+        (AlertKind.PERCENTAGE_GROWTH, 0.0),
+        (AlertKind.PERCENTAGE_GROWTH, 1e300),
+        (AlertKind.ABSOLUTE_SIZE, 0),
+        (AlertKind.ABSOLUTE_SIZE, float(2**70)),
+        (AlertKind.ABSOLUTE_GROWTH, float("nan")),
+        (AlertKind.INODE_FREE, float("nan")),
+        (AlertKind.INODE_FREE, -1),
+    ],
+)
+def test_a_threshold_no_rule_could_use_is_refused(repository, kind, threshold):
+    """The CLI checked these; the service and the TUI editor did not.
+
+    A NaN reached SQLite as NULL and read back as 0.0, which made a
+    percentage-growth rule fire on every evaluation with the editor's
+    default cooldown of zero.
+    """
+    service = AlertService(repository, repository, repository)
+
+    with pytest.raises(ValueError):
+        service.create(AlertRule(path="/r", kind=kind, threshold=threshold))
+
+    assert service.list_rules() == []
+
+
+def test_editing_a_rule_to_a_threshold_no_rule_could_use_is_refused(
+    repository, tmp_path
+):
+    from dataclasses import replace
+
+    service = AlertService(repository, repository, repository)
+    rule = service.create(
+        AlertRule(
+            path=str(tmp_path), kind=AlertKind.PERCENTAGE_GROWTH, threshold=10
+        )
+    )
+
+    with pytest.raises(ValueError):
+        service.update(replace(rule, threshold=float("nan")))
+
+    assert service.get(rule.id).threshold == 10
+
+
+def test_a_free_inode_floor_of_zero_is_still_allowed(repository, tmp_path):
+    """"No inodes left" is a real threshold, unlike zero bytes."""
+    service = AlertService(repository, repository, repository)
+
+    rule = service.create(
+        AlertRule(path=str(tmp_path), kind=AlertKind.INODE_FREE, threshold=0)
+    )
+
+    assert rule.id is not None
+    assert service.get(rule.id).threshold == 0
