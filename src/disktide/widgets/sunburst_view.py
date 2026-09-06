@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 from rich.segment import Segment
 from rich.style import Style
 from textual.events import Click, Leave, MouseMove, Resize
@@ -32,6 +30,7 @@ from disktide.viz.sunburst import (
     DEFAULT_PANEL_BG,
     ArcSegment,
     SunburstLayout,
+    _layout_value,
     compute_sunburst,
     render_sunburst_line,
 )
@@ -196,9 +195,19 @@ class SunburstView(OpaqueStripMixin, Widget):
         node = arc.node
         if is_aggregate_path(node.path):
             return node.name
-        # Angles are laid out from the chart root's total, so an arc's span
-        # is its share of the whole disc at any depth.
-        share = arc.angle_span / (2.0 * math.pi)
+        # Every ring is normalised by its own level's children, so an arc's
+        # span over-reports whenever a directory's own blocks (allocated) or
+        # a diff floor sit outside the children's sum -- a lone child fills
+        # 360 degrees at half its parent's bytes. Quote the metric share the
+        # size tree and the info panel show for the same node instead.
+        weights = self._diff.weights if self._diff is not None else None
+        metric = self._diff.metric.value if self._diff is not None else self._metric
+        total = (
+            _layout_value(self._node, metric, weights)
+            if self._node is not None
+            else 0
+        )
+        share = _layout_value(node, metric, weights) / total if total > 0 else 0.0
         return f"{node.name}\n{metric_text(node, self._metric)} · {share:.0%}"
 
     def _panel_bg(self) -> tuple[int, int, int]:
