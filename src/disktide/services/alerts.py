@@ -224,6 +224,11 @@ class AlertService:
                 return None
             message = f"{rule.path} grew {observed:.1f}%"
         elif rule.kind is AlertKind.NEW_LARGE_ITEM:
+            if old_snapshot is None:
+                # With no baseline every existing path reads as new, so the
+                # first evaluation would report the whole tree. The growth
+                # kinds already bail out here for the same reason.
+                return None
             candidates: list[tuple[str, int]] = []
             prefix = rule.path.rstrip(os.sep) + os.sep
             for path, measurement in new_measurements.items():
