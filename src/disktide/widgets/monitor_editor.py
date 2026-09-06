@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 
 from textual.app import ComposeResult
@@ -291,6 +292,10 @@ class MonitorEditor(ModalScreen[MonitorEditorResult | None]):
             root_path = self.query_one("#monitor-path", Input).value.strip()
             if not root_path:
                 raise ValueError("Path is required")
+            if not os.path.isdir(os.path.expanduser(root_path)):
+                raise ValueError(
+                    f"Path is not an existing directory: {root_path}"
+                )
             interval = parse_duration(
                 self.query_one("#monitor-interval", Input).value
             )

@@ -104,6 +104,7 @@
 - **An unknown `default_viz` no longer takes the app down** A hand-typed or cross-version `[ui] default_viz` was copied verbatim into the Settings `Select`, which Textual makes fatal inside `compose`, so the first press of `,` exited with return code 1.
 - **Config strings are escaped when they are written** Visiting a directory whose name held a quote or a backslash produced a `config.toml` that `tomllib` refused, and every later `disktide` command died with a decode traceback until the file was hand-edited.
 - **Editing a rule no longer invents a 24h window** The editor's Window box pre-filled "24h" for a rule whose `window_seconds` was None, so changing only the severity silently switched it from snapshot-to-snapshot growth to a day-old baseline.
+- **The monitor editor checks the root path** A typo saved a monitor that listed as enabled and failed every run, while `monitor add` exited 2 for the same input; editing an existing monitor's path this way also bumped the revision and severed trusted compare.
 ## v0.2.30
 
 **The seconds after the last directory: a finalisation that admits it is running, a clone that stops copying every file, and a suite that can be shaped like the runner it fails on**
