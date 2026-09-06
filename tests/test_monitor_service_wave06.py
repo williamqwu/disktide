@@ -22,6 +22,7 @@ from disktide.services.monitor import (
     MonitorEventKind,
     MonitorLeaseUnavailable,
     MonitorService,
+    MonitorServiceError,
 )
 from disktide.services.scan import ScanService
 from disktide.storage.migrations import migrate
@@ -554,3 +555,113 @@ def test_a_finish_in_flight_cannot_outlive_the_stop(
     assert status.host_id is None
     assert status.host_type is None
     assert status.lease_expires_at is None
+
+
+class _UnreleasingCollector(_BlockingCollector):
+    """A scan whose cancellation does not end it, the way a real one may not.
+
+    `stop_session(wait=False)` cancels the active run and returns; the loop
+    only exits once the scan it is inside actually returns. That window is
+    what these tests are about, so it has to be held open on purpose.
+    """
+
+    def cancel(self):
+        self._cancelled = True
+
+
+def _drain_window(repository, tmp_path, count=3):
+    """A service whose session is mid-drain, plus its scan release events."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    starts = [threading.Event() for _ in range(count)]
+    releases = [threading.Event() for _ in range(count)]
+    created = 0
+    lock = threading.Lock()
+
+    def factory(request, progress_callback, tree_callback):
+        nonlocal created
+        with lock:
+            index = created
+            created += 1
+        return _UnreleasingCollector(request, starts[index], releases[index])
+
+    service = MonitorService(
+        repository,
+        scan_service=ScanService(scanner_factory=factory),
+        lease_seconds=6,
+    )
+    monitor = service.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    service.start_session(host_type="drain-test")
+    assert starts[0].wait(2)
+    service.stop_session(wait=False)
+    assert service.session_running
+    return service, monitor, starts, releases
+
+
+def test_start_session_during_a_stop_drain_starts_a_real_session(
+    repository, tmp_path
+):
+    """It used to return the old host id and create nothing."""
+    service, _monitor, starts, releases = _drain_window(repository, tmp_path)
+    previous = service._session_thread
+    try:
+        releases[0].set()
+
+        host_id = service.start_session(host_type="drain-test")
+
+        assert host_id == service.host_id
+        assert service.session_running
+        assert service._session_thread is not previous
+        assert starts[1].wait(2), "the restarted session never scanned"
+    finally:
+        for event in releases:
+            event.set()
+        service.stop_session(wait=True)
+
+
+def test_a_run_requested_during_a_stop_drain_is_not_left_queued(
+    repository, tmp_path
+):
+    """The dying loop never serves what is queued for it in this window."""
+    service, _monitor, _starts, releases = _drain_window(repository, tmp_path)
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    (other_root / "payload").write_text("y")
+    other = service.create_monitor(
+        MonitorDefinition(root_path=str(other_root), interval_seconds=3600)
+    )
+    releases[1].set()
+    try:
+        result = service.run_monitor_now(other.id)
+
+        assert result is not None, "the run was queued into a session that is stopping"
+        assert result.run is not None and result.run.succeeded
+        status = repository.get_monitor_status(other.id)
+        assert status.activity is not MonitorActivityState.QUEUED
+    finally:
+        for event in releases:
+            event.set()
+        service.stop_session(wait=True)
+
+
+def test_start_session_refuses_while_the_old_one_is_still_scanning(
+    repository, tmp_path, monkeypatch
+):
+    """Better a refusal than a success that started nothing."""
+    from disktide.services import monitor as monitor_module
+
+    monkeypatch.setattr(monitor_module, "_SESSION_JOIN_TIMEOUT", 0.05)
+    monkeypatch.setattr(monitor_module, "_HEARTBEAT_JOIN_TIMEOUT", 0.05)
+    service, _monitor, _starts, releases = _drain_window(repository, tmp_path)
+    try:
+        with pytest.raises(MonitorServiceError) as caught:
+            service.start_session(host_type="drain-test")
+
+        assert "still stopping" in str(caught.value)
+    finally:
+        for event in releases:
+            event.set()
+        service.stop_session(wait=True)

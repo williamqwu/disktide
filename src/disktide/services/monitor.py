@@ -112,6 +112,10 @@ _SESSION_STOP_CANCELLATION_REASON = "monitor session stopping"
 #: Floor on how long a failed event backend stays down before a restart.
 _EVENT_BACKEND_RETRY_SECONDS = 5.0
 
+#: How long a caller waits for each session thread to notice the stop flag.
+_SESSION_JOIN_TIMEOUT = 10.0
+_HEARTBEAT_JOIN_TIMEOUT = 3.0
+
 
 class MonitorEventKind(StrEnum):
     DEFINITION_CHANGED = "definition-changed"
@@ -257,6 +261,17 @@ class MonitorService:
     def session_running(self) -> bool:
         threads = (self._session_thread, self._heartbeat_thread)
         return any(thread is not None and thread.is_alive() for thread in threads)
+
+    @property
+    def _session_accepting(self) -> bool:
+        """Whether the session loop will still serve anything queued for it.
+
+        `session_running` is "a thread is alive", which stays true for the
+        whole of a `stop_session(wait=False)` drain -- a cancelled scan can
+        hold it for minutes. The loop exits the moment it sees the flag, so
+        anything queued in that window is never run.
+        """
+        return self.session_running and not self._session_stop.is_set()
 
     @property
     def repository(self) -> MonitorStore:
@@ -568,6 +583,7 @@ class MonitorService:
         self._require_writable()
         if self._event_mode is MonitorEventMode.EVENTS:
             self._require_event_backend()
+        self._await_stopping_session()
         with self._condition:
             if self.session_running:
                 return self._host_id
@@ -594,6 +610,48 @@ class MonitorService:
         )
         return self._host_id
 
+    def _await_stopping_session(self) -> None:
+        """Finish a `stop_session(wait=False)` drain before starting again.
+
+        Without this, `start_session` saw a thread that was still alive,
+        returned the old host id, and created nothing: the Stop-then-Start
+        pair in the Monitor Center reported success and left the service
+        dead, and a monitor queued in the window kept a QUEUED status row
+        against a host that never came back.
+        """
+        with self._condition:
+            if not self._session_stop.is_set():
+                return
+            thread = self._session_thread
+            heartbeat = self._heartbeat_thread
+            self._condition.notify_all()
+        current = threading.current_thread()
+        for item, timeout in (
+            (thread, _SESSION_JOIN_TIMEOUT),
+            (heartbeat, _HEARTBEAT_JOIN_TIMEOUT),
+        ):
+            if item is not None and item is not current:
+                item.join(timeout=timeout)
+        if any(
+            item is not None and item.is_alive()
+            for item in (thread, heartbeat)
+        ):
+            raise MonitorServiceError(
+                "the previous monitor session is still stopping; try again "
+                "once its cancelled scan has finished"
+            )
+        with self._condition:
+            if self._session_thread is thread:
+                self._session_thread = None
+            if self._heartbeat_thread is heartbeat:
+                self._heartbeat_thread = None
+            self._session_monitor_ids = None
+            self._active_monitor_id = None
+            self._active_run_id = None
+            self._pending_monitor_ids.clear()
+            self._pending_reconcile_ids.clear()
+            self._event_backend_fallbacks.clear()
+
     def stop_session(self, *, wait: bool = True) -> None:
         with self._condition:
             thread = self._session_thread
@@ -610,9 +668,9 @@ class MonitorService:
             )
         if wait:
             if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=10)
+                thread.join(timeout=_SESSION_JOIN_TIMEOUT)
             if heartbeat is not None and heartbeat is not threading.current_thread():
-                heartbeat.join(timeout=3)
+                heartbeat.join(timeout=_HEARTBEAT_JOIN_TIMEOUT)
         self._release_all_leases()
         with self._condition:
             self._pending_monitor_ids.clear()
@@ -647,7 +705,7 @@ class MonitorService:
         with self._status_lock:
             with self._condition:
                 hosted_here = (
-                    self.session_running
+                    self._session_accepting
                     and self._session_includes(monitor.id)
                     and monitor.desired_state is MonitorDesiredState.ENABLED
                 )
@@ -689,7 +747,7 @@ class MonitorService:
         with self._status_lock:
             with self._condition:
                 hosted_here = (
-                    self.session_running
+                    self._session_accepting
                     and self._session_includes(monitor.id)
                     and monitor.desired_state is MonitorDesiredState.ENABLED
                 )
