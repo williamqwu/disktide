@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,7 +36,7 @@ from disktide.storage.migrations import (
 )
 
 
-DOCTOR_SCHEMA_VERSION = 8
+DOCTOR_SCHEMA_VERSION = 9
 
 #: Above this, `doctor` reports the integrity check as skipped rather than
 #: spending minutes on it unasked. `PRAGMA quick_check` reads every page: on
@@ -52,6 +53,7 @@ class DoctorReport:
     platform: dict[str, object]
     terminal: dict[str, object]
     colour: dict[str, object]
+    clipboard: dict[str, object]
     paths: dict[str, object]
     config: dict[str, object]
     database: dict[str, object]
@@ -70,6 +72,7 @@ class DoctorReport:
             "platform": self.platform,
             "terminal": self.terminal,
             "colour": self.colour,
+            "clipboard": self.clipboard,
             "paths": self.paths,
             "config": self.config,
             "database": self.database,
@@ -249,6 +252,7 @@ def build_doctor_report(
         },
         terminal=_terminal_report(),
         colour=_colour_report(config.ui.color_depth),
+        clipboard=_clipboard_report(),
         paths=application_paths,
         config={
             "status": config_status,
@@ -307,6 +311,8 @@ def render_doctor_report(report: DoctorReport) -> str:
     lines.extend(_render_terminal_block(payload["terminal"]))
     lines.append("")
     lines.extend(_render_colour_block(payload["colour"]))
+    lines.append("")
+    lines.extend(_render_clipboard_block(payload["clipboard"]))
     lines.extend([
         "",
         "Application paths",
@@ -629,6 +635,113 @@ def _render_colour_block(colour: object) -> list[str]:
     suggestion = colour.get("suggestion")
     if suggestion:
         lines.append(f"  Suggestion: {suggestion}")
+    return lines
+
+
+def _clipboard_report(
+    environ: dict[str, str] | None = None,
+    *,
+    runner=None,
+    which: Callable[[str], str | None] = shutil.which,
+    platform: str = sys.platform,
+) -> dict[str, object]:
+    """Where `y` sends a path, and which of those routes can prove it.
+
+    The same shape of problem as the colour block, and the same reason for
+    printing all the evidence rather than a verdict: a copy that went
+    nowhere looks exactly like a copy that worked. Under tmux it usually
+    *had* gone nowhere -- `input_osc_52` discards an application's OSC 52
+    unless `set-clipboard` is `on`, and the default is `external` -- and
+    the only way a user could find that out was to try pasting.
+
+    So the block names the multiplexer and its version, the
+    `set-clipboard` value, what clipboard tools are installed, and every
+    route with whether it has an exit status behind it. Injected the same
+    way `_colour_report` is, so tmux 2.7, tmux 3.2a, a browser terminal
+    and a desktop with `xclip` are each a test rather than a screenshot.
+    """
+    from disktide.clipboard import plan_clipboard
+
+    plan = plan_clipboard(
+        os.environ if environ is None else environ,
+        runner=runner,
+        which=which,
+        platform=platform,
+    )
+    env = os.environ if environ is None else environ
+    version = plan.tmux_version
+    return {
+        "multiplexer": plan.multiplexer,
+        "tmux_version": plan.tmux_release or (
+            None if version is None else f"{version[0]}.{version[1]}"
+        ),
+        "tmux_set_clipboard": plan.tmux_set_clipboard,
+        "ssh": bool(env.get("SSH_TTY") or env.get("SSH_CONNECTION")),
+        "display": env.get("WAYLAND_DISPLAY") or env.get("DISPLAY") or None,
+        "tools": dict(plan.tools),
+        "routes": [
+            {
+                "name": route.name,
+                "confirmable": route.confirmable,
+                "detail": route.detail,
+            }
+            for route in plan.routes
+        ],
+        "suggestion": plan.suggestion,
+    }
+
+
+def _render_clipboard_block(clipboard: object) -> list[str]:
+    """Render the Clipboard block: where `y` goes and what can be proven.
+
+    Environment first, then one line per route saying whether an exit
+    status stands behind it, then the tools, then the advice. The last
+    line is unconditional: every route in this list can fail silently
+    except the ones with a status, so the reader always needs to know
+    that `Y` will put the path on screen instead.
+    """
+    if not isinstance(clipboard, dict):
+        return []
+
+    environment: list[str] = []
+    multiplexer = clipboard.get("multiplexer")
+    if multiplexer == "tmux":
+        version = clipboard.get("tmux_version") or "version unknown"
+        setting = clipboard.get("tmux_set_clipboard") or "unknown"
+        environment.append(f"tmux {version} · set-clipboard {setting}")
+    elif multiplexer:
+        environment.append(str(multiplexer))
+    else:
+        environment.append("no multiplexer")
+    environment.append(f"ssh: {'yes' if clipboard.get('ssh') else 'no'}")
+    environment.append(f"display: {clipboard.get('display') or 'none'}")
+    lines = ["Clipboard", "  " + " · ".join(environment)]
+
+    routes = clipboard.get("routes")
+    if isinstance(routes, list) and routes:
+        for index, route in enumerate(routes):
+            proof = (
+                "verified by exit status"
+                if route.get("confirmable")
+                else "cannot be verified"
+            )
+            label = "  y: " if index == 0 else "     "
+            lines.append(f"{label}{route.get('detail')} ({proof})")
+    else:
+        lines.append("  y: no route available")
+
+    tools = clipboard.get("tools")
+    if isinstance(tools, dict):
+        present = sorted(name for name, found in tools.items() if found)
+        lines.append(f"  Tools: {', '.join(present) if present else 'none installed'}")
+
+    suggestion = clipboard.get("suggestion")
+    if suggestion:
+        lines.append(f"  Suggestion: {suggestion}")
+    lines.append(
+        "  Y in the explorer shows the path with mouse reporting off, "
+        "for hand selection."
+    )
     return lines
 
 

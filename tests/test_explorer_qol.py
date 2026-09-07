@@ -159,8 +159,25 @@ def _make_tree_dir(tmp_path) -> None:
         (many / f"f{i}.txt").write_text("hi")
 
 
-def test_press_y_copies_highlighted_path(tmp_path):
+def test_press_y_copies_highlighted_path(tmp_path, monkeypatch):
+    """`App.clipboard` still holds the path, whichever route was taken.
+
+    The plan is pinned to the bare-sequence one rather than resolved from
+    the environment, because the real plan on a developer's machine runs
+    `tmux load-buffer` -- which would write into whatever tmux server the
+    suite happens to be running under.
+    """
+    from disktide.clipboard import plan_clipboard
+
     _make_tree_dir(tmp_path)
+    _clipboard_recorder(
+        monkeypatch,
+        plan_clipboard(
+            {"TERM": "xterm-256color"},
+            which=lambda name: None,
+            platform="linux",
+        ),
+    )
 
     async def go():
         app = DiskTideApp(
@@ -177,6 +194,181 @@ def test_press_y_copies_highlighted_path(tmp_path):
             assert app.clipboard == expected
 
     asyncio.run(go())
+
+
+# --- `y` routes the copy, and says only what it can prove ------------------
+#
+# The bug: `y` called Textual's `copy_to_clipboard`, which writes OSC 52
+# and stops, and tmux drops an application's OSC 52 unless `set-clipboard`
+# is `on` (default `external`) -- so on a login node the key did nothing
+# and the toast claimed it had. Both halves are tested: the route that is
+# actually taken, and the toast that now distinguishes a confirmed copy
+# from an unverifiable one.
+
+
+def _toasts(app) -> list[tuple[str, str]]:
+    return [(n.title, n.message) for n in app._notifications]
+
+
+def _clipboard_recorder(monkeypatch, plan, statuses=(0,)):
+    """Pin the plan and record the commands its execution would run."""
+    from disktide import app as app_module
+    from disktide.clipboard import copy_text as real_copy_text
+
+    calls: list[tuple[str, ...]] = []
+    remaining = list(statuses)
+
+    def run(command, payload, timeout, env=None):
+        calls.append(tuple(command))
+        return remaining.pop(0) if remaining else 0
+
+    monkeypatch.setattr(app_module, "plan_clipboard", lambda: plan)
+    monkeypatch.setattr(
+        app_module,
+        "route_copy_text",
+        lambda text, plan_, **kwargs: real_copy_text(
+            text, plan_, run=run, **kwargs
+        ),
+    )
+    return calls
+
+
+def _tmux_plan(version="tmux 3.2a", set_clipboard="external"):
+    from disktide.clipboard import plan_clipboard
+
+    def runner(args):
+        if args == ["-V"]:
+            return version
+        return set_clipboard
+
+    return plan_clipboard(
+        {"TMUX": "/tmp/tmux-1/default,1,0"},
+        runner=runner,
+        which=lambda name: None,
+        platform="linux",
+    )
+
+
+def test_press_y_under_tmux_fills_the_named_buffer(tmp_path, monkeypatch):
+    """The route that has an exit status is the one that gets taken."""
+    _make_tree_dir(tmp_path)
+    calls = _clipboard_recorder(monkeypatch, _tmux_plan())
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            tree = app.screen.query_one("#size-tree", SizeTree)
+            await pilot.press("down")
+            await pilot.pause()
+            expected = tree.cursor_node.data.path
+            await pilot.press("y")
+            await pilot.pause()
+
+            assert calls == [
+                ("tmux", "load-buffer", "-b", "disktide", "-w", "-")
+            ]
+            assert app.clipboard == expected
+            titles = [title for title, _ in _toasts(app)]
+            assert "Copied path" in titles
+            message = next(m for t, m in _toasts(app) if t == "Copied path")
+            assert expected in message
+            assert "prefix ]" in message
+
+    asyncio.run(go())
+
+
+def test_press_y_without_a_confirmable_route_says_so(tmp_path, monkeypatch):
+    """OSC 52 has no reply, so the toast must not claim one.
+
+    The old toast said "Copied path" in exactly the sessions where the
+    sequence had been discarded, which is the failure mode this replaces.
+    """
+    from disktide.clipboard import plan_clipboard
+
+    _make_tree_dir(tmp_path)
+    plan = plan_clipboard(
+        {"TERM": "xterm-256color"},
+        which=lambda name: None,
+        platform="linux",
+    )
+    _clipboard_recorder(monkeypatch, plan)
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            tree = app.screen.query_one("#size-tree", SizeTree)
+            await pilot.press("down")
+            await pilot.pause()
+            expected = tree.cursor_node.data.path
+            await pilot.press("y")
+            await pilot.pause()
+
+            assert app.clipboard == expected
+            titles = [title for title, _ in _toasts(app)]
+            assert any("unverifiable" in title for title in titles)
+            message = next(
+                m for t, m in _toasts(app) if "unverifiable" in t
+            )
+            assert expected in message
+            assert "press Y" in message
+
+    asyncio.run(go())
+
+
+def test_shift_y_shows_the_path_for_hand_selection(tmp_path):
+    """`Y` is the escape hatch for every route that cannot report back."""
+    from textual.widgets import Static
+
+    from disktide.widgets.path_modal import PathModal
+
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            tree = app.screen.query_one("#size-tree", SizeTree)
+            await pilot.press("down")
+            await pilot.pause()
+            expected = tree.cursor_node.data.path
+
+            # The capital letter, because that is what a terminal delivers
+            # for Shift+Y -- Textual has no `shift+<letter>` key event.
+            await pilot.press("Y")
+            modal = await _await_screen(pilot, app, PathModal)
+            shown = "\n".join(
+                str(static.render()) for static in modal.query(Static)
+            )
+            assert expected in shown
+            assert "copy with your terminal" in shown
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, PathModal)
+
+    asyncio.run(go())
+
+
+def test_the_mouse_reporting_toggle_is_still_on_the_linux_driver():
+    """`PathModal` reaches into private Textual API, so pin the names.
+
+    There is no public way to turn mouse reporting off at runtime, and the
+    alternative to these two methods is telling a user to restart with
+    `--no-mouse` in order to read one path. If Textual renames them the
+    modal silently stops working, and this is the only thing that notices.
+    """
+    from textual.drivers.linux_driver import LinuxDriver
+
+    for name in ("_disable_mouse_support", "_enable_mouse_support"):
+        assert callable(getattr(LinuxDriver, name, None)), name
 
 
 def test_press_t_cycles_bar_metric(tmp_path):

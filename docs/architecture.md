@@ -1255,7 +1255,7 @@ distinguishability.
 
 ### Web-Shell Glyph Set
 
-A browser terminal (xterm.js: Open OnDemand, JupyterLab) defaults to
+A browser terminal (hterm in Open OnDemand, xterm.js in JupyterLab) defaults to
 `courier-new, courier, monospace`, and Courier New decides this policy. It has
 no glyph for the eighth blocks or the quadrants, so the browser falls back to a
 proportional face and draws them at *that* font's advance — a border row built
@@ -1314,6 +1314,40 @@ overlay's bar); `tool/capture_glyphs.py` checks real panes under tmux at 307×71
 and 120×32, walking every screen plus a running scan (`--slow-tree`).
 `ui.safe_rendering` is a separate, orthogonal switch: the mode for a terminal
 that has no background colours to spend either.
+
+### Clipboard Routes
+
+`disktide/clipboard.py` plans where a copied path goes; `DiskTideApp.copy_text`
+executes the plan and `copy_to_clipboard` is overridden onto it, so Textual's
+own selection copy (`ctrl+c`) takes the same routes as `y`.
+
+The policy is verifiable-first, because nothing ever replies to a clipboard
+escape sequence. A local tool (`pbcopy` on darwin, then `wl-copy` with
+`WAYLAND_DISPLAY`, then `xclip`/`xsel` with `DISPLAY`) comes first: it has an
+exit status, and over `ssh -X` it lands the text on the *local* X clipboard.
+Under tmux the route is `tmux load-buffer -b disktide -w -`, and there is
+deliberately **no raw OSC 52 route at all** — tmux 3.2a's `input_osc_52`
+returns before parsing unless `set-clipboard` is `on`, whose default is
+`external`, so the sequence the app used to write was discarded whole.
+`load-buffer` has an exit status and creates the buffer whatever
+`set-clipboard` says (`prefix ]` pastes it anywhere in tmux, browser
+included), and `-w` asks *tmux* to do the OSC 52 write through
+`tty_set_selection`, which honours `on|external` and needs `Ms` — supplied by
+the default `terminal-features` for every `xterm*` client. `-w` is a 3.2
+feature, so below that it is dropped and a DCS `\ePtmux;`-passthrough route is
+added instead; a failed `-w` retries once without the flag so the buffer
+survives. GNU screen gets its own `\eP`-passthrough in 76-byte chunks, and a
+plain terminal gets the bare sequence.
+
+Timeouts are `TMUX_TIMEOUT` (0.5 s, shared with `viz/colordepth`) for tmux and
+1 s for the tools, and every tool runs with `stdout`/`stderr` on `DEVNULL`:
+`xclip` and `wl-copy` fork a selection owner that inherits the pipes and holds
+them open until the next copy, so a captured pipe does not return when the
+command exits. Nothing in the module raises — a failed route is a route that
+could not be confirmed, and `ClipboardResult.verified` is what decides whether
+the explorer's toast says "Copied path" or names `Y`, the modal that shows the
+path with mouse reporting off for hand selection. `doctor`'s Clipboard block
+prints the same plan.
 
 ## Screen Architecture
 

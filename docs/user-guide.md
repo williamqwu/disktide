@@ -63,7 +63,8 @@ visualizations on the right:
 | `d` | Toggle Current / Diff view |
 | `[` / `]` | Browse newer / older snapshot pairs |
 | `M` | Set up monitoring for the highlighted directory |
-| `y` | Copy highlighted path to clipboard (works over SSH via OSC 52) |
+| `y` | Copy highlighted path (tmux buffer, OSC 52, or a local clipboard tool — see *Copying paths*) |
+| `Y` | Show the path for hand selection (mouse reporting off while open) |
 | `t` | Cycle metric: Logical, Allocated, Unique, Files |
 | `g` | Cycle sunburst shape: tiles / disc / fill |
 
@@ -200,7 +201,7 @@ On by default. Disable with `--no-mouse` or `mouse = false` under `[ui]`.
 | Click sunburst centre | Go up one level |
 | Wheel | Scroll tree and Details panel |
 | Hover chart shape | Tooltip: name, size, share |
-| Shift+drag | Terminal's own text selection |
+| Shift+drag | Terminal's own text selection (Alt+drag in Open OnDemand's hterm; `Y` in Explorer turns reporting off outright) |
 
 ### Key Binding Reference
 
@@ -221,7 +222,8 @@ Press `?` in the app for a live, screen-specific version of this table.
 | `s` | Explorer | Cycle sort order |
 | `d` | Explorer | Toggle Current / Diff |
 | `t` | Explorer | Cycle metric |
-| `y` | Explorer | Copy path to clipboard |
+| `y` | Explorer | Copy path — tmux buffer, OSC 52, or a local tool |
+| `Y` | Explorer | Show the path for hand selection |
 | `M` | Explorer | Set up monitoring |
 | `[` / `]` | Explorer | Older / newer snapshot pair |
 | `g` | Explorer | Cycle ring shape |
@@ -292,6 +294,11 @@ is safe to delete once the new version has been used successfully.
 The Colour block prints `TERM`, `COLORTERM`, `TEXTUAL_COLOR_SYSTEM`, the tmux
 clients attached to your session, and the depth that was resolved from them —
 plus, when there is colour left on the table, the one line to change.
+
+The Clipboard block does the same for `y`: the multiplexer and its version,
+tmux's `set-clipboard` value, which clipboard tools are installed, and every
+route the copy takes with whether an exit status stands behind it. See
+*Copying paths* below.
 
 ### scan
 
@@ -693,8 +700,8 @@ terminals (kitty, Alacritty, GNOME Terminal, iTerm2, WezTerm, etc.).
 Terminals that report no pixel size — xterm.js web shells, VS Code, Windows
 Terminal, mosh, screen — fall back to 2.0, which makes circles slightly oval.
 A web shell always lands here and there is nothing to fix in it: node-pty
-fills in no pixel winsize, and xterm.js does not answer `CSI 14 t` either, so
-every automatic layer comes up empty. Set the value manually:
+fills in no pixel winsize, and neither hterm nor xterm.js answers `CSI 14 t`
+either, so every automatic layer comes up empty. Set the value manually:
 
 - **Settings** (`,`) → Cell aspect — type a number or blank for auto-detect.
 - **Config** — `cell_aspect` under `[ui]`.
@@ -736,8 +743,10 @@ at sixteen colors:
 | VS Code terminal | `xterm-256color` + `COLORTERM=truecolor` | 24-bit |
 | ssh + tmux, local terminal | `tmux-256color` | 256, or 24-bit if the tmux client reports `RGB` |
 
-Both web shells are xterm.js, which can in fact do 256 colors and RGB — it is
-the `TERM` their pty is spawned with that says otherwise. Inside tmux the
+Neither web shell is limited to sixteen colors. Open OnDemand's shell app is
+hterm (`hterm_all_1.92.1.mod_1.js`) and JupyterLab's is xterm.js; both do 256
+colors and RGB, and it is the `TERM` their pty is spawned with that says
+otherwise. Inside tmux the
 reading is worse than conservative, it is stale: `TERM` describes the pty tmux
 handed you, not the client on the other end, so an app that trusts it writes
 256-color codes that tmux then quantises through a fixed table before the
@@ -835,6 +844,61 @@ Two consequences worth knowing:
 only for a terminal whose font stops at ASCII or that cannot be trusted with
 background colours at all: it draws the tree's bar with `#`, the theme
 swatches with `##`, and the access markers as `[!]`/`[~]`.
+
+## Copying paths
+
+`y` copies the highlighted path. What that means depends on where you are
+running, because a terminal never replies to a clipboard write — so DiskTide
+takes every route the environment offers and the toast tells you which of
+them could actually be confirmed.
+
+| Environment | What `y` does | Verifiable? |
+|-------------|---------------|-------------|
+| tmux 3.2+ | Fills tmux buffer `disktide` with `load-buffer -w`; tmux forwards it to the terminal clipboard itself | Yes — exit status |
+| tmux < 3.2 | Fills the buffer (no `-w` on that version) and sends OSC 52 by DCS passthrough | The buffer, yes; the passthrough, no |
+| Native terminal, ssh | OSC 52 | No |
+| Open OnDemand shell | OSC 52 — hterm honours it and shows its own "Selection Copied" overlay | No |
+| JupyterLab terminal | OSC 52, which its xterm.js drops | No — use `Y` |
+| Local desktop | `pbcopy`, `wl-copy`, `xclip` or `xsel`, whichever fits | Yes — exit status |
+
+**Under tmux this used to do nothing at all.** tmux discards an application's
+OSC 52 unless `set-clipboard` is `on`, and the default is `external` — the
+check is the first line of its handler, before the sequence is even parsed.
+So the app no longer writes that sequence under tmux. It puts the path in a
+named tmux buffer and asks tmux to forward it (`-w`), which respects your
+`set-clipboard` instead of being silently eaten by it. Either way the buffer
+is there:
+
+```tmux
+prefix ]      # paste buffer `disktide` into any pane, in any terminal
+```
+
+That is the one route that works in a browser terminal, and the one that can
+report success. If you have set `set-clipboard off`, the buffer is still
+filled — only the forwarding is off.
+
+**OSC 52 outside tmux** works in kitty, WezTerm, Alacritty, foot, Ghostty,
+iTerm2, Windows Terminal, VS Code, xterm with `allowWindowOps`, and in Open
+OnDemand's hterm. It does *not* work in macOS Terminal.app, in older
+VTE/GNOME Terminal, or in JupyterLab, whose xterm.js 6 ships without the
+clipboard addon. Nothing reports back in any of these cases, which is why the
+toast says "unverifiable" rather than "copied".
+
+**`Y` shows the path for hand selection.** It opens the path in a dialog with
+mouse reporting turned off for as long as the dialog is up, so a drag is your
+terminal's own selection rather than an event the app eats. Copy it with your
+terminal's shortcut (Ctrl+Shift+C, ⌘C); Esc closes.
+
+Outside that dialog, selecting text with the mouse while DiskTide is running
+needs the modifier that defeats mouse reporting: **Shift+drag** in most
+terminals and in xterm.js (JupyterLab), **Alt+drag** in hterm (Open OnDemand).
+`--no-mouse` or `mouse = false` under `[ui]` turns reporting off for the whole
+session.
+
+`disktide doctor` prints a Clipboard block with the routes it planned for your
+environment, the tmux version and `set-clipboard` value it found, which
+clipboard tools are installed, and the one setting worth changing when there
+is one.
 
 ## File-Type Categories
 

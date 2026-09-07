@@ -13,7 +13,9 @@ from disktide.collectors.events.base import EventBackendInfo
 from disktide.extensions.capabilities import CapabilityStatus
 from disktide.services.doctor import (
     DOCTOR_SCHEMA_VERSION,
+    _clipboard_report,
     _colour_report,
+    _render_clipboard_block,
     _render_colour_block,
     build_doctor_report,
     render_doctor_report,
@@ -44,6 +46,7 @@ def test_doctor_json_has_versioned_schema_and_expected_sections(tmp_path, monkey
         "platform",
         "terminal",
         "colour",
+        "clipboard",
         "paths",
         "config",
         "database",
@@ -113,8 +116,8 @@ def test_doctor_reports_watch_backend_version_and_configured_mode(
     payload = report.to_dict()
     watch = payload["optional_extras"]["watch"]
 
-    # 8 since `database.integrity` and `database.backup` were added.
-    assert payload["schema_version"] == 8
+    # 9 since the `clipboard` section was added.
+    assert payload["schema_version"] == 9
     assert payload["config"]["monitor_event_mode"] == "auto"
     assert watch["available"] is True
     assert watch["version"] == "2.0.1"
@@ -423,6 +426,116 @@ def test_an_rgb_tmux_client_needs_no_advice_at_all():
     )
     assert (report["depth"], report["source"]) == ("truecolor", "tmux-client")
     assert report["suggestion"] is None
+
+
+# ---------------------------------------------------------------------------
+# The Clipboard block
+#
+# `y` wrote OSC 52 and claimed success, and under tmux the sequence had
+# been discarded before it was parsed -- `input_osc_52` returns unless
+# `set-clipboard` is `on`, and the default is `external`. Nothing replies
+# to an escape sequence, so the block's job is to print which routes exist
+# and which of them has an exit status behind it, rather than a verdict.
+# ---------------------------------------------------------------------------
+
+
+def _tmux_clipboard(version: str = "tmux 3.2a", set_clipboard: str = "external"):
+    def run(args):
+        if args == ["-V"]:
+            return version
+        return set_clipboard
+
+    return run
+
+
+def _clipboard_lines(environ, **kwargs) -> str:
+    kwargs.setdefault("which", lambda name: None)
+    kwargs.setdefault("platform", "linux")
+    return "\n".join(
+        _render_clipboard_block(_clipboard_report(environ, **kwargs))
+    )
+
+
+def test_the_clipboard_block_names_the_buffer_under_tmux():
+    """The login-node case: the buffer is the one route with a status."""
+    report = _clipboard_report(
+        {"TMUX": "/tmp/tmux-1/default,1,0", "SSH_TTY": "/dev/pts/3"},
+        runner=_tmux_clipboard(),
+        which=lambda name: None,
+        platform="linux",
+    )
+    assert report["multiplexer"] == "tmux"
+    assert report["tmux_version"] == "3.2a"
+    assert report["tmux_set_clipboard"] == "external"
+    assert [route["name"] for route in report["routes"]] == ["tmux-buffer"]
+    assert report["routes"][0]["confirmable"] is True
+
+    text = "\n".join(_render_clipboard_block(report))
+    assert "tmux 3.2a · set-clipboard external" in text
+    assert "ssh: yes" in text
+    assert "tmux buffer disktide" in text
+    assert "prefix ]" in text
+    assert "verified by exit status" in text
+    assert "Tools: none installed" in text
+    assert "Y in the explorer shows the path" in text
+
+
+def test_the_clipboard_block_explains_set_clipboard_off():
+    """`off` is the one value that stops tmux forwarding its own buffer,
+    so the block has to say the buffer is still there and how to reach it."""
+    text = _clipboard_lines(
+        {"TMUX": "x"}, runner=_tmux_clipboard(set_clipboard="off")
+    )
+    assert "set-clipboard off" in text
+    assert "Suggestion:" in text
+    assert "prefix ]" in text
+
+
+def test_the_clipboard_block_says_an_old_tmux_cannot_forward():
+    """RHEL 8 ships 2.7, which has no `load-buffer -w` at all."""
+    text = _clipboard_lines(
+        {"TMUX": "x"}, runner=_tmux_clipboard(version="tmux 2.7")
+    )
+    assert "tmux 2.7" in text
+    assert "load-buffer -w needs 3.2" in text
+    assert "cannot be verified" in text  # the passthrough route
+
+
+def test_the_clipboard_block_outside_tmux_lists_the_tools_and_the_doubt():
+    """A plain terminal: OSC 52 with no reply, and whichever tools exist."""
+    report = _clipboard_report(
+        {"TERM": "xterm-256color", "DISPLAY": ":0"},
+        which=lambda name: f"/usr/bin/{name}" if name == "xclip" else None,
+        platform="linux",
+    )
+    assert [route["name"] for route in report["routes"]] == ["xclip", "osc52"]
+    text = "\n".join(_render_clipboard_block(report))
+    assert "no multiplexer" in text
+    assert "display: :0" in text
+    assert "Tools: xclip" in text
+    assert "cannot be verified" in text
+
+
+def test_the_clipboard_block_is_in_the_human_report(tmp_path, monkeypatch):
+    _set_xdg(monkeypatch, tmp_path)
+    output = render_doctor_report(
+        build_doctor_report(adapter=PortablePlatformAdapter("Linux"))
+    )
+    assert "\nClipboard\n" in output
+    assert "Y in the explorer shows the path" in output
+
+
+def test_the_clipboard_section_is_in_the_json(tmp_path, monkeypatch):
+    _set_xdg(monkeypatch, tmp_path)
+    payload = build_doctor_report(
+        adapter=PortablePlatformAdapter("Linux")
+    ).to_dict()
+    clipboard = payload["clipboard"]
+    assert isinstance(clipboard["routes"], list) and clipboard["routes"]
+    assert set(clipboard["routes"][0]) == {"name", "confirmable", "detail"}
+    assert set(clipboard["tools"]) == {"pbcopy", "wl-copy", "xclip", "xsel"}
+    # JSON-safe: no tuples, no dataclasses.
+    json.dumps(clipboard)
 
 
 def _database_from_the_future(tmp_path) -> Path:

@@ -12,6 +12,12 @@ from textual.app import App
 from textual.binding import Binding
 
 from disktide import APP_NAME
+from disktide.clipboard import (
+    ClipboardPlan,
+    ClipboardResult,
+    copy_text as route_copy_text,
+    plan_clipboard,
+)
 from disktide.config import (
     AppConfig, ScanOverrides, cleanup_rule_directory, load_config, save_config,
     get_effective_paths, set_effective_paths,
@@ -293,6 +299,10 @@ class DiskTideApp(App):
         # Ensures the "running without persistence" warning is only shown
         # once per session, no matter how many times we check.
         self._warned_degraded = False
+        # Resolved on the first copy and kept: nothing the plan reads --
+        # TMUX, DISPLAY, the tmux version, what is on PATH -- changes
+        # while the app runs, and resolving it costs two subprocesses.
+        self._clipboard_plan: ClipboardPlan | None = None
 
     # Services build themselves on first touch. The attribute names are
     # unchanged, so screens and tests still reach them as `_scan_service`
@@ -626,6 +636,53 @@ class DiskTideApp(App):
         ):
             return False
         return True
+
+    def copy_text(self, text: str) -> ClipboardResult:
+        """Copy *text* by every route this environment offers, and report.
+
+        `App.copy_to_clipboard` writes OSC 52 to the driver and stops.
+        That is the right sequence, and inside tmux it reaches nobody:
+        tmux 3.2a's `input_osc_52` returns before parsing unless
+        `set-clipboard` is `on`, and the default is `external`. So the
+        routing lives in `disktide.clipboard`, which prefers what can
+        report an exit status -- a local clipboard tool, then `tmux
+        load-buffer -b disktide -w -` -- and falls back to the raw
+        sequence only where there is no multiplexer eating it.
+
+        `App.clipboard` is kept in step, because it is the public record
+        of what the app last copied. `App.copy_to_clipboard` does exactly
+        two things -- `self._clipboard = text` and one driver write -- and
+        the write is the half the plan has already made a decision about,
+        so only the bookkeeping half is repeated here. Calling the base
+        method instead would emit a second OSC 52 on top of the one the
+        `osc52` route just wrote, and emit the sequence tmux drops in the
+        sessions where the plan deliberately left it out.
+        `tests/test_explorer_qol.py::test_press_y_copies_highlighted_path`
+        is the guard if Textual ever renames that attribute.
+        """
+        if self._clipboard_plan is None:
+            self._clipboard_plan = plan_clipboard()
+        plan = self._clipboard_plan
+
+        driver = self._driver
+
+        def write(sequence: str) -> None:
+            if driver is not None:
+                driver.write(sequence)
+
+        result = route_copy_text(text, plan, write=write)
+        self._clipboard = text
+        return result
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Route Textual's own clipboard writes the same way `y` goes.
+
+        `Screen.action_copy_text` (ctrl+c / super+c on a text selection)
+        calls this, so overriding it means a mouse selection inside the
+        app takes the tmux buffer and the local tools too, rather than the
+        one sequence tmux is configured to drop.
+        """
+        self.copy_text(text)
 
     def open_monitor_setup(
         self,

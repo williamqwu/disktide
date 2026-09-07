@@ -111,6 +111,17 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         Binding("d", "toggle_diff", "Diff", show=True, id="explorer.diff"),
         Binding("t", "toggle_metric", "Bar", show=True, id="explorer.metric"),
         Binding("y", "copy_path", "Yank", show=True, id="explorer.yank"),
+        # The fallback under `y`: half the copy routes have no reply, so
+        # there has to be a way to put the path on screen and let the
+        # terminal's own selection take it.
+        Binding(
+            "Y",
+            "show_path",
+            "Show path",
+            show=False,
+            key_display="Y",
+            id="explorer.show_path",
+        ),
         # `r` is spine: it means rescan/refresh on every screen, so it is in
         # the key map and the palette rather than costing a footer slot.
         Binding("r", "rescan", "Rescan", show=False, id="explorer.rescan"),
@@ -1716,31 +1727,69 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._request_space_time_context()
 
     def action_copy_path(self) -> None:
-        """Copy the highlighted node's absolute path to the system clipboard.
+        """Copy the highlighted node's absolute path, by whatever route works.
 
-        Uses Textual's OSC 52 clipboard write, so it also works over SSH
-        and in web-based shells where there is no local clipboard tool.
+        This used to be one call to Textual's `copy_to_clipboard`, which
+        writes OSC 52 and nothing else, and under tmux that reaches
+        nobody: tmux 3.2a's `input_osc_52` starts with `if (state != 2)
+        return;` on `set-clipboard`, whose default is `external`, so the
+        sequence was discarded before it was parsed. Verified against a
+        private server -- under `external` a pane emitting the sequence
+        created no buffer and forwarded nothing; under `on` it did.
 
-        The toast is not a confirmation, it is the fallback. OSC 52 is
-        swallowed silently in two places a user is quite likely to be at
-        once: a tmux client whose terminfo has no `Ms` (`xterm-16color`,
-        which is what Open OnDemand hands out) and an xterm.js terminal
-        built without the clipboard addon. There is no reply to read, so
-        nothing can tell whether it landed — printing the path where it
-        can be selected with the mouse is what makes the key useful
-        anyway, and it costs a reader in a working terminal nothing.
+        So `disktide.clipboard` plans the routes instead and the toast
+        reports what actually happened. Under tmux the path goes into
+        buffer `disktide` via `load-buffer -w`, which has an **exit
+        status** -- the only confirmable route in a multiplexed session --
+        and which tmux then forwards itself, honouring the user's
+        `set-clipboard` rather than being silently eaten by it. `prefix ]`
+        pastes it in any pane, in any terminal, browser included.
+
+        Outside tmux the raw sequence is still right and still
+        unverifiable. Open OnDemand's shell is hterm, not xterm.js
+        (`hterm_all_1.92.1.mod_1.js`), and hterm honours OSC 52 natively
+        through `navigator.clipboard.writeText`, overlay and all; the
+        earlier claim here that its `xterm-16color` lacks `Ms` was wrong,
+        since tmux's default `terminal-features` gives every `xterm*`
+        client that capability. JupyterLab's xterm.js 6 really does drop
+        it -- no `@xterm/addon-clipboard` in its build -- as does macOS
+        Terminal.app. Nothing replies either way, so where nothing could
+        be confirmed the toast says so and points at `Y`.
         """
         tree = self.query_one("#size-tree", SizeTree)
         node = tree.cursor_node
         if node is None or node.data is None:
             return
         path = node.data.path
-        self.app.copy_to_clipboard(path)
+        result = self.app.copy_text(path)
+        if result.verified:
+            self.app.notify(
+                f"{path}\n{result.hint}",
+                title="Copied path",
+                timeout=5,
+            )
+            return
         self.app.notify(
-            path,
-            title="Copied path (select to copy by hand)",
+            f"{path}\nIf nothing pastes, press Y to show it for hand selection.",
+            title="Sent to the terminal clipboard (unverifiable)",
+            severity="information",
             timeout=8,
         )
+
+    def action_show_path(self) -> None:
+        """Show the highlighted path for hand selection.
+
+        The escape hatch for every route that cannot report back. Mouse
+        reporting goes off while the modal is up, so a drag is the
+        terminal's own selection rather than an event this app eats.
+        """
+        tree = self.query_one("#size-tree", SizeTree)
+        node = tree.cursor_node
+        if node is None or node.data is None:
+            return
+        from disktide.widgets.path_modal import PathModal
+
+        self.app.push_screen(PathModal(node.data.path))
 
     def action_setup_monitor(self) -> None:
         """Create a persistent monitor for the highlighted directory."""

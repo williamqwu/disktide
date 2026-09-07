@@ -1,7 +1,7 @@
 """Binding identity, footer grouping, and the named key presets.
 
 Three things live here, and they exist because the footer, the key map and
-``config.toml`` all need to agree about the same 88 bindings.
+``config.toml`` all need to agree about the same 93 bindings.
 
 **Ids are a public contract.** Every ``Binding`` in the app carries an ``id=``
 from :data:`ALL_IDS`. Those ids are what a user writes into the ``[keys]``
@@ -103,6 +103,7 @@ EXPLORER_IDS = (
     "explorer.ring_shape",
     "explorer.setup_monitor",
     "explorer.yank",
+    "explorer.show_path",
     "explorer.metric",
     "explorer.scroll_down",
     "explorer.scroll_up",
@@ -179,6 +180,9 @@ MODAL_IDS = (
     "map.previous",
     "map.previous_up",
     "map.select",
+    "modal.path_close",
+    "modal.path_close_enter",
+    "modal.path_close_q",
     "settings.back",
     "settings.field_next",
     "settings.field_previous",
@@ -291,6 +295,7 @@ SECTIONS: dict[str, str] = {
     "explorer.snapshot_newer": COMPARE,
     "explorer.snapshot_older": COMPARE,
     "explorer.yank": OTHER,
+    "explorer.show_path": OTHER,
     "explorer.rescan": OTHER,
     "explorer.setup_monitor": OTHER,
     # Cleanup
