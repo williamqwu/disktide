@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 import types
 
 import pytest
@@ -148,12 +149,125 @@ def test_the_three_consequence_mismatches_are_gone():
     assert by_id["explorer.diff"] == "d"
     assert by_id["explorer.up"] == "u"
     assert by_id["explorer.sort"] == "s"
-    # Starting a background sampling host takes the shift form.
-    assert by_id["monitor.sampling"] == "shift+s"
+    # Starting a background sampling host takes the shift form, which is
+    # declared as the capital letter -- see the shifted-letter test below.
+    assert by_id["monitor.sampling"] == "S"
     # Benchmarking writes to the disk under test.
-    assert by_id["fs.benchmark"] == "shift+b"
+    assert by_id["fs.benchmark"] == "B"
     # Archiving a monitor kept no key at all; it is palette-only.
     assert "monitor.archive" not in by_id
+
+
+def _declared_confirm_keys() -> list[tuple[str, str]]:
+    """Every string in a `confirm_keys=(...)` argument, as (file, key).
+
+    `ConfirmModal.on_key` compares these against `event.key`, so they are
+    key names in exactly the same sense a `Binding` key is and they can go
+    wrong in exactly the same way.
+    """
+    found: list[tuple[str, str]] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "confirm_keys":
+                    continue
+                if not isinstance(keyword.value, (ast.Tuple, ast.List)):
+                    continue
+                for element in keyword.value.elts:
+                    if isinstance(element, ast.Constant) and isinstance(
+                        element.value, str
+                    ):
+                        found.append(
+                            (str(path.relative_to(_SRC)), element.value)
+                        )
+    return found
+
+
+_SHIFT_LETTER_KEY = re.compile(r"^shift\+[a-z]$", re.IGNORECASE)
+
+
+def test_no_binding_is_declared_as_shift_plus_a_letter():
+    """`shift+m` is a key nothing can press, and nothing says so.
+
+    A terminal has no way to send "shift and m"; it sends a capital `M`,
+    and Textual's parser turns that into `Key(key="M", character="M")`
+    with `aliases == ["M"]`. The only branch in `_xterm_parser` that ever
+    emits `shift+<letter>` is the one for Alt+Shift+letter. So a binding
+    declared as `shift+m` matches nothing a user can type.
+
+    What made this survive is the test harness: `Pilot.press("shift+m")`
+    posts that key name directly, so a suite that presses what the binding
+    declares agrees with itself and never touches the code path a terminal
+    exercises. Six bindings -- `M`, `R`, `A`, `S`, `B` and `Y` -- shipped
+    dead behind four passing tests. This is the gate; the run_test cases
+    that press the capital letter are the other half.
+
+    Non-letter shifted keys (`shift+left`, `shift+home`) and chords with
+    another modifier (`ctrl+shift+m`) are untouched: Textual really does
+    report those with the `shift+` prefix.
+    """
+    offenders = [
+        (where, key, binding_id)
+        for where, key, binding_id in _declared_bindings()
+        if key
+        for key in [part.strip() for part in key.split(",")]
+        if _SHIFT_LETTER_KEY.match(key)
+    ]
+    offenders += [
+        (where, key, "confirm_keys")
+        for where, key in _declared_confirm_keys()
+        if _SHIFT_LETTER_KEY.match(key.strip())
+    ]
+    assert not offenders, (
+        "these keys can never be pressed: Textual reports Shift+letter as "
+        'the capital letter (Key("M"), aliases ["M"]) and never as '
+        '"shift+m", so such a binding only fires under Pilot.press and is '
+        f"dead in every real terminal. Declare the capital letter: {offenders}"
+    )
+
+
+class TestNormalizingAKeyFromTheConfig:
+    """A user writing `shift+m` in `[keys]` means the capital letter.
+
+    They cannot be expected to know that Textual has no such key event,
+    and the failure mode -- a binding that resolves, reports no problem
+    and never fires -- gives them nothing to go on. So both spellings are
+    accepted and mean the same thing.
+    """
+
+    @pytest.mark.parametrize(
+        "written,expected",
+        [
+            ("shift+m", "M"),
+            ("shift+M", "M"),
+            ("SHIFT+m", "M"),
+            ("a,shift+b", "a,B"),
+            ("shift+b,shift+c", "B,C"),
+            # Another modifier in the chord: Textual spells this one with
+            # `shift+` and it is left exactly as written.
+            ("ctrl+shift+m", "ctrl+shift+m"),
+            # Not a letter: `shift+home` and `shift+left` are real Textual
+            # key names.
+            ("shift+home", "shift+home"),
+            ("shift+left", "shift+left"),
+            # Everything else passes through, trimmed.
+            ("M", "M"),
+            (" y ", "y"),
+            ("question_mark", "question_mark"),
+        ],
+    )
+    def test_normalize_key(self, written, expected):
+        from disktide.keys import normalize_key
+
+        assert normalize_key(written) == expected
+
+    def test_an_override_written_with_shift_is_the_capital_letter(self):
+        keymap, problems = resolve_keymap(None, {"explorer.setup_monitor": "shift+m"})
+        assert not problems
+        assert keymap["explorer.setup_monitor"] == "M"
 
 
 def test_every_binding_has_an_explicit_section():

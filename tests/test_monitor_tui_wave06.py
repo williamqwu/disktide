@@ -367,7 +367,9 @@ def test_narrow_monitor_uses_list_detail_and_session_continues_off_screen(
             await _settle(pilot, lambda: not screen.has_class("detail"))
             assert not screen.has_class("detail")
 
-            await pilot.press("shift+s")
+            # The capital letter, because that is what a terminal delivers
+            # for Shift+S -- Textual has no `shift+<letter>` key event.
+            await pilot.press("S")
             await _settle(pilot, lambda: app._monitor_service.session_running)
             assert app._monitor_service.session_running
             await pilot.press("1")
@@ -416,7 +418,7 @@ def test_explorer_sets_up_monitor_for_highlighted_directory(tmp_path):
             )
             assert tree.cursor_node.data.path == str(selected)
 
-            await pilot.press("shift+m")
+            await pilot.press("M")
             await _settle(pilot, lambda: isinstance(app.screen, MonitorEditor))
             assert isinstance(app.screen, MonitorEditor)
             assert app.screen.query_one("#monitor-path").value == str(selected)

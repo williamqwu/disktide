@@ -67,7 +67,7 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
         Binding("n", "new_monitor", "New", show=True, id="monitor.new"),
         Binding("e", "edit_monitor", "Edit", show=True, id="monitor.edit"),
         Binding("p", "pause_resume", "Pause", show=True, id="monitor.pause"),
-        Binding("shift+r", "run_now", "Run", show=True, key_display="R", id="monitor.run_now"),
+        Binding("R", "run_now", "Run", show=True, key_display="R", id="monitor.run_now"),
         # Baseline and target are one control — which pair of snapshots the
         # diff map is built from — so they share a footer group.
         Binding("b", "set_diff_baseline", "Set baseline", show=True, group=DIFF, id="monitor.baseline"),
@@ -75,9 +75,10 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
         Binding("l", "use_latest_pair", "Latest/previous", show=False, id="monitor.latest_pair"),
         # `s` started a background sampling host while Explorer's `s` only
         # cycled a sort. Shift, per the rule: a key that is consequential in
-        # any mode is consequential in every mode.
+        # any mode is consequential in every mode. Shifted letters are
+        # declared as the capital, which is the key event a terminal sends.
         Binding(
-            "shift+s", "toggle_session", "Start/Stop sampling",
+            "S", "toggle_session", "Start/Stop sampling",
             show=False, key_display="S", id="monitor.sampling",
         ),
         Binding("g", "reconcile", "Reconcile", show=False, id="monitor.reconcile"),
@@ -88,7 +89,7 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
         # why it carries no key here.
         Binding("i", "pin_snapshot", "Pin/Unpin", show=False, id="monitor.pin"),
         Binding("a", "add_alert", "Add alert", show=False, group=ALERT, id="monitor.alert_add"),
-        Binding("shift+a", "edit_alert", "Edit alert", show=False, group=ALERT, id="monitor.alert_edit"),
+        Binding("A", "edit_alert", "Edit alert", show=False, group=ALERT, id="monitor.alert_edit"),
         Binding("x", "toggle_alert", "Toggle alert", show=False, group=ALERT, id="monitor.alert_toggle"),
         Binding(
             "backspace", "remove_alert", "Remove alert",

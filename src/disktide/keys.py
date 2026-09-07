@@ -27,6 +27,8 @@ themselves in terms of what they move back.
 
 from __future__ import annotations
 
+import re
+
 from textual.binding import Binding
 
 __all__ = [
@@ -46,6 +48,7 @@ __all__ = [
     "SECTIONS",
     "SECTION_ORDER",
     "canonical_id",
+    "normalize_key",
     "section_for",
     "resolve_keymap",
 ]
@@ -349,6 +352,38 @@ def canonical_id(binding_id: str) -> str:
     return _ID_ALIASES.get(binding_id, binding_id)
 
 
+# `shift+m` and friends, with nothing else in the chord. `ctrl+shift+m` is
+# deliberately not matched: that one really is how Textual spells it.
+_SHIFT_LETTER = re.compile(r"^shift\+([a-z])$", re.IGNORECASE)
+
+
+def normalize_key(key: str) -> str:
+    """Rewrite ``shift+<letter>`` to the capital letter Textual reports.
+
+    There is no ``shift+m`` key event. A terminal sends a capital ``M`` for
+    Shift+M and Textual's parser turns that into ``Key(key="M",
+    character="M")`` with ``aliases == ["M"]``; the only place
+    ``shift+<letter>`` is ever produced is the Alt+Shift+letter branch of
+    ``_xterm_parser``. So a binding declared as ``shift+m`` matches nothing
+    a user can type -- it fires under ``Pilot.press("shift+m")``, which
+    posts a key name no terminal sends, and nowhere else.
+
+    That is a trap with no error attached to it, and ``[keys]`` in
+    ``config.toml`` is exactly where a user would fall into it: ``shift+m``
+    is the obvious way to write the key and would silently produce a dead
+    binding. Both spellings are therefore accepted and mean the same thing.
+    Chords with another modifier (``ctrl+shift+m``) and non-letter keys
+    (``shift+home``, ``shift+left``) are left alone, because Textual does
+    report those with the ``shift+`` prefix.
+    """
+    pieces: list[str] = []
+    for piece in key.split(","):
+        part = piece.strip()
+        match = _SHIFT_LETTER.match(part)
+        pieces.append(match.group(1).upper() if match else part)
+    return ",".join(pieces)
+
+
 def resolve_keymap(
     preset: str | None = None,
     overrides: dict[str, str] | None = None,
@@ -357,6 +392,11 @@ def resolve_keymap(
 
     A user's own ``[keys]`` entries are applied on top of the preset, so
     ``preset = "classic"`` plus one override is a coherent thing to write.
+
+    Every key is put through :func:`normalize_key` on the way in, so a user
+    who writes ``"shift+m"`` -- the obvious spelling, and one that matches
+    no key event Textual ever produces -- gets the binding they meant
+    rather than a dead one with nothing to say so.
 
     Returns the keymap and a list of human-readable problems (an unknown
     preset name, an id that no longer exists). Problems are returned rather
@@ -383,6 +423,6 @@ def resolve_keymap(
         if not isinstance(key, str) or not key.strip():
             problems.append(f"[keys] {raw_id!r} has an empty key; ignored.")
             continue
-        keymap[binding_id] = key.strip()
+        keymap[binding_id] = normalize_key(key)
 
     return keymap, problems

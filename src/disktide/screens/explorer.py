@@ -148,7 +148,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # The action itself is still there for the palette and for tests.
         Binding("g", "cycle_ring_shape", "Ring shape", show=False, id="explorer.ring_shape"),
         Binding(
-            "shift+m",
+            "M",
             "setup_monitor",
             "Setup monitor",
             show=False,

@@ -52,7 +52,9 @@ def test_single_b_opens_confirm(tmp_path):
         app = _new_app(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             screen = await _wait_for_overview(pilot, app)
-            await pilot.press("shift+b")
+            # The capital letter, because that is what a terminal delivers
+            # for Shift+B -- Textual has no `shift+<letter>` key event.
+            await pilot.press("B")
             await pilot.pause()
             assert isinstance(app.screen, ConfirmModal)
             assert screen._benchmarks == {}  # nothing ran yet
@@ -72,10 +74,10 @@ def test_double_b_confirms_records_and_displays(tmp_path):
                 screen = await _wait_for_overview(pilot, app)
                 mount = screen._entries[0].mountpoint
 
-                await pilot.press("shift+b")        # arm
+                await pilot.press("B")              # arm
                 await pilot.pause()
                 assert isinstance(app.screen, ConfirmModal)
-                await pilot.press("shift+b")        # confirm (double-press)
+                await pilot.press("B")              # confirm (double-press)
 
                 for _ in range(40):           # wait for worker + callback
                     await pilot.pause(delay=0.1)
@@ -103,7 +105,7 @@ def test_n_cancels_no_benchmark(tmp_path):
         ) as mocked:
             async with app.run_test(size=(120, 40)) as pilot:
                 screen = await _wait_for_overview(pilot, app)
-                await pilot.press("shift+b")
+                await pilot.press("B")
                 await pilot.pause()
                 await pilot.press("n")
                 await pilot.pause()

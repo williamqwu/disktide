@@ -260,6 +260,12 @@ Three presets:
 | `safe` | v0.2.30 layout with three consequence mismatches fixed (`d`, `u`, `s`) |
 | `classic` | v0.2.30 layout exactly |
 
+A shifted letter is written as the capital letter — `"explorer.setup_monitor"
+= "M"` — because that is what a terminal sends and what Textual reports.
+`"shift+m"` is accepted and means the same thing; `shift+` with anything that
+is not a single letter (`shift+left`, `ctrl+shift+m`) is passed through as
+written, since Textual really does name those that way.
+
 The key map (`?`) always reflects your bindings. An id that no longer exists
 costs that one binding and a warning toast, not the session.
 

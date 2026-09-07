@@ -357,6 +357,58 @@ def test_shift_y_shows_the_path_for_hand_selection(tmp_path):
     asyncio.run(go())
 
 
+def test_shift_m_reaches_the_monitor_editor(tmp_path):
+    """The other half of the shifted-key fix, pressed the way a terminal
+    sends it.
+
+    `explorer.setup_monitor` was declared `shift+m` and had a passing test
+    that pressed `"shift+m"` -- a key name `Pilot.press` posts directly and
+    no terminal ever sends. Pressing the capital letter is what a user's
+    Shift+M actually produces, so this is the assertion the old one only
+    looked like.
+    """
+    from disktide.config import AppConfig
+    from disktide.repositories.sqlite import SQLiteSnapshotRepository
+    from disktide.widgets.monitor_editor import MonitorEditor
+
+    root = tmp_path / "root"
+    selected = root / "selected"
+    selected.mkdir(parents=True)
+    (selected / "payload").write_text("x")
+    config = AppConfig()
+    config.scan.workers = 1
+    config.ui.live_scan_render = "off"
+    repository = SQLiteSnapshotRepository(path=str(tmp_path / "explorer.db"))
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=config,
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            tree = app.screen.query_one("#size-tree", SizeTree)
+            await pilot.press("down")
+            await pilot.pause()
+            assert tree.cursor_node.data.path == str(selected)
+
+            await pilot.press("M")
+            editor = await _await_screen(pilot, app, MonitorEditor)
+            assert editor.query_one("#monitor-path").value == str(selected)
+
+            await pilot.press("escape")
+            await _await_screen(pilot, app, type(app._explorer))
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(go())
+    finally:
+        repository.close()
+
+
 def test_the_mouse_reporting_toggle_is_still_on_the_linux_driver():
     """`PathModal` reaches into private Textual API, so pin the names.
 

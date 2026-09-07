@@ -706,9 +706,11 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
 
     BINDINGS = [
         # Benchmarking writes to the disk under test, so it takes the shift
-        # form and frees `b` for "baseline" elsewhere in the app.
+        # form and frees `b` for "baseline" elsewhere in the app. Declared as
+        # the capital letter, which is what a terminal sends: there is no
+        # `shift+<letter>` key event, and `tests/test_keymap.py` gates it.
         Binding(
-            "shift+b", "benchmark", "Benchmark mount",
+            "B", "benchmark", "Benchmark mount",
             show=True, key_display="B", id="fs.benchmark",
         ),
         Binding("r", "refresh", "Refresh", show=False, id="fs.refresh"),
@@ -939,7 +941,7 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
                     "This writes a temporary file to measure throughput."
                 ),
                 title="Benchmark mount",
-                confirm_keys=("shift+b",),
+                confirm_keys=("B",),
             ),
             callback=_on_confirm,
         )
