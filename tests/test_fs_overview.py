@@ -185,3 +185,125 @@ class TestBlockTreeRendering:
         text = _build_block_summary(self._tree()).plain
         assert "1 disk(s) with no mounted filesystem" in text
         assert "total capacity" in text
+
+
+class TestReadOnlyImageMounts:
+    """Seventeen snaps must not be half the table and all of the red.
+
+    A snap is one read-only squashfs per package on a loop device: 100%
+    full by construction, never actionable, and on an ordinary Ubuntu box
+    seventeen of thirty-one mounts.
+    """
+
+    @staticmethod
+    def _snap(index: int):
+        return _entry(
+            mount=f"/snap/bare/{index}",
+            device=f"/dev/loop{index}",
+            fs_type="squashfs",
+            mount_options="ro,nodev,relatime",
+            total=64 * 2 ** 20,
+            used=64 * 2 ** 20,
+            free=0,
+            reserved=0,
+        )
+
+    def test_a_squashfs_on_a_loop_device_is_an_image_mount(self):
+        assert self._snap(0).is_image_mount is True
+        assert self._snap(0).is_read_only is True
+        assert self._snap(0).alarms_on_usage is False
+
+    def test_ordinary_storage_is_neither(self):
+        e = _entry()
+        assert e.is_image_mount is False
+        assert e.is_read_only is False
+        assert e.alarms_on_usage is True
+
+    def test_the_option_test_is_not_a_substring_match(self):
+        # "rows" and "errors=remount-ro" both contain "ro".
+        assert _entry(mount_options="rw,errors=remount-ro").is_read_only is False
+        assert _entry(mount_options="ro").is_read_only is True
+
+    def test_a_full_read_only_bar_is_not_painted_as_an_alarm(self):
+        alarming = _usage_bar(100.0, alarming=True)
+        calm = _usage_bar(100.0, alarming=False)
+        assert alarming.plain == calm.plain
+        assert alarming.spans != calm.spans
+
+    def test_the_summary_names_how_many_were_folded(self):
+        entries = [_entry(mount="/", device="/dev/nvme0n1p2",
+                          total=500 * 2 ** 30, used=275 * 2 ** 30,
+                          free=225 * 2 ** 30, reserved=0)]
+        entries.extend(self._snap(i) for i in range(17))
+        text = _build_summary(entries).plain
+        assert "17 read-only image mount(s) folded" in text
+
+    def test_the_proportional_bar_stays_within_its_width(self):
+        entries = [_entry(mount="/", device="/dev/nvme0n1p2",
+                          total=500 * 2 ** 30, used=275 * 2 ** 30,
+                          free=225 * 2 ** 30, reserved=0)]
+        entries.extend(self._snap(i) for i in range(17))
+        # The bar is the second line of the summary.
+        bar_line = _build_summary(entries).plain.split("\n")[1]
+        # Two leading spaces of indent, then at most 50 cells of bar plus
+        # one "others" cell. Seventeen 64 MiB snaps used to take one cell
+        # each and push it to 70-odd, which then wrapped.
+        assert len(bar_line) <= 2 + 50 + 1
+
+    def test_a_folded_mount_is_still_summed_into_the_legend(self):
+        entries = [_entry(mount="/", device="/dev/nvme0n1p2",
+                          total=500 * 2 ** 30, used=275 * 2 ** 30,
+                          free=225 * 2 ** 30, reserved=0)]
+        entries.extend(self._snap(i) for i in range(17))
+        legend = _build_summary(entries).plain.split("\n")[2]
+        assert "others" in legend
+
+    def test_the_legend_names_the_mount_not_a_revision_number(self):
+        # `/snap/bare/5` basenamed to "5", which named nothing.
+        entries = [
+            _entry(mount="/", device="/dev/a", total=100, used=50, free=50,
+                   reserved=0),
+            _entry(mount="/var/lib/docker", device="/dev/b", total=100,
+                   used=50, free=50, reserved=0),
+        ]
+        legend = _build_summary(entries).plain.split("\n")[2]
+        assert "/var/lib/docker" in legend
+
+
+class TestBlockDeviceOrder:
+    """Real disks before loopback images.
+
+    lsblk sorts `loop0..loop16` first, which put seventeen synthetic
+    devices above the machine's actual disks.
+    """
+
+    def test_disks_come_before_loops(self):
+        devices = [
+            BlockDevice(name=f"loop{i}", dev_type="loop", fstype="squashfs",
+                        size_bytes=64 * 2 ** 20, mountpoint=f"/snap/bare/{i}",
+                        model=None, is_rotational=False)
+            for i in range(3)
+        ]
+        devices.append(
+            BlockDevice(name="nvme0n1", dev_type="disk", fstype=None,
+                        size_bytes=512 * 2 ** 30, mountpoint=None,
+                        model="Samsung", is_rotational=False)
+        )
+        names = [name for _dev, name in _block_tree_rows(devices)]
+        assert names[0] == "nvme0n1"
+        assert all(name.startswith("loop") for name in names[1:])
+
+    def test_partitions_stay_under_their_disk(self):
+        part = BlockDevice(name="nvme0n1p1", dev_type="part", fstype="ext4",
+                           size_bytes=2 ** 30, mountpoint="/boot",
+                           model=None, is_rotational=False)
+        disk = BlockDevice(name="nvme0n1", dev_type="disk", fstype=None,
+                           size_bytes=512 * 2 ** 30, mountpoint=None,
+                           model=None, is_rotational=False, children=[part])
+        loop = BlockDevice(name="loop0", dev_type="loop", fstype="squashfs",
+                           size_bytes=2 ** 26, mountpoint="/snap/bare/0",
+                           model=None, is_rotational=False)
+        names = [name for _dev, name in _block_tree_rows([loop, disk])]
+        assert names[0] == "nvme0n1"
+        assert "nvme0n1p1" in names[1]
+        assert names[2] == "loop0"

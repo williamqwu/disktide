@@ -154,6 +154,7 @@ MONITOR_IDS = (
 FS_IDS = (
     "fs.refresh",
     "fs.benchmark",
+    "fs.image_mounts",
 )
 
 MODAL_IDS = (
@@ -339,6 +340,7 @@ SECTIONS: dict[str, str] = {
     # FS Overview
     "fs.benchmark": OTHER,
     "fs.refresh": OTHER,
+    "fs.image_mounts": OTHER,
 }
 
 

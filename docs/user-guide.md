@@ -167,11 +167,20 @@ available.
 | Key | Action |
 |-----|--------|
 | Enter | Open filesystem or block-device details |
+| `i` | Expand / fold the read-only image mounts |
 | `B` | Benchmark the highlighted mount (writes a temp file after confirmation) |
 | `r` | Refresh |
 
 Pseudo-filesystems are filtered out. Unavailable probes show their reason
 instead of an empty panel.
+
+Read-only package images — one squashfs per snap, on a loop device — are
+folded into a single row, and their usage bars are drawn without the colour
+ramp: a read-only image is 100% full because that is what read-only means.
+Press `i` to list them individually. The proportional bar in the header gives
+a cell only to mounts holding at least 1% of the total and sums the rest into
+one "others" cell, so a machine with seventeen 64 MiB snaps still gets a bar
+that is 50 cells wide.
 
 ### Cleanup (4)
 

@@ -28,12 +28,33 @@ from disktide.scanner.sysinfo import (
     facet_labels,
     storage_class,
 )
+from disktide.pathdisplay import elide_path
 from disktide.scanner.blockdev import idle_summary
 from disktide.scanner.benchmark import benchmark_mount, BenchmarkResult
 from disktide.scanner.policy import PSEUDO_FS_TYPES
 from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
 from disktide.viz.colors import FILL_ROLES, ink, ink_fill
 from disktide.widgets.confirm_modal import ConfirmModal
+
+
+#: Filesystems that are a packaged read-only image rather than storage a
+#: user can fill or free. `snap` mounts one squashfs per installed package.
+IMAGE_FS_TYPES: frozenset[str] = frozenset({"squashfs", "erofs", "iso9660"})
+
+#: A mount smaller than this share of the total gets no cell of its own in
+#: the proportional bar; it is summed into a single "others" cell instead.
+#: Without a floor, `max(1, ...)` gave seventeen 64 MiB snaps one cell each
+#: and pushed a 50-cell bar to 70-odd cells, which then wrapped.
+_BAR_MIN_SHARE = 0.01
+
+#: Block-device rows read top-down as "real disks, their partitions, then
+#: the loopback images" -- lsblk sorts `loop0..loop16` first, which put
+#: seventeen synthetic devices above the machine's actual disks.
+_BLOCK_TYPE_ORDER: dict[str, int] = {"disk": 0, "raid": 1, "lvm": 1, "loop": 9}
+
+
+def _block_sort_key(dev: BlockDevice) -> tuple[int, str]:
+    return (_BLOCK_TYPE_ORDER.get(dev.dev_type, 5), dev.name)
 
 
 @dataclass
@@ -58,6 +79,37 @@ class FSEntry:
     quota_used_bytes: int | None = None
     quota_soft_bytes: int | None = None
     quota_hard_bytes: int | None = None
+
+    @property
+    def is_read_only(self) -> bool:
+        """Whether the mount was mounted `ro`.
+
+        The first option `/proc/mounts` lists is `ro` or `rw`, so a prefix
+        test is enough and no relation named `rows` can be mistaken for it.
+        """
+        options = self.mount_options.split(",")
+        return "ro" in options
+
+    @property
+    def is_image_mount(self) -> bool:
+        """A read-only image the OS mounted for itself, not user storage.
+
+        A snap is one squashfs per package on a loop device: seventeen of
+        them on an ordinary Ubuntu box, every one of them 100 % full by
+        construction because a read-only image is written exactly to its
+        own size. Listed one per row they were half the table, and their
+        full bars were half the red on the screen.
+        """
+        return self.fs_type in IMAGE_FS_TYPES or self.device.startswith("/dev/loop")
+
+    @property
+    def alarms_on_usage(self) -> bool:
+        """Whether a high `usage_pct` on this mount means anything.
+
+        A read-only filesystem cannot grow and cannot be freed, so 100 %
+        is its normal state rather than a problem to colour red.
+        """
+        return not self.is_read_only
 
     @property
     def has_quota(self) -> bool:
@@ -336,24 +388,32 @@ def _load_fs_entries(
     return probe_fs_entries(adapter).value or []
 
 
-def _usage_bar(pct: float, width: int = 12) -> Text:
+def _usage_bar(pct: float, width: int = 12, *, alarming: bool = True) -> Text:
     """A `width`-cell bar, drawn as background colour on spaces.
 
     `█`/`░` said the same thing in fewer bytes and said it wrong in a
     browser terminal: Courier New's ink for both is narrower than the cell
     and taller than the row, so a column of these bars bled into the rows
     above and below it. Nothing DiskTide fills is a block element now.
+
+    `alarming=False` keeps the measurement and drops the colour ramp: a
+    read-only image is 100 % full because that is what read-only means,
+    and a screen of red bars that all mean "working as intended" costs red
+    its meaning on the one row where it is a real warning.
     """
     # Clamp: an over-quota pct (>100, shown with a '*' by the quota tool) would
     # otherwise produce a bar longer than `width` and a negative empty count.
     filled = max(0, min(width, int(pct / 100 * width)))
-    role = "error" if pct >= 90 else "warning" if pct >= 70 else "bar"
+    if not alarming:
+        role = "bar_track"
+    else:
+        role = "error" if pct >= 90 else "warning" if pct >= 70 else "bar"
     t = Text()
     if filled:
         t.append(" " * filled, style=ink_fill(role))
     if width > filled:
         t.append(" " * (width - filled), style=ink_fill("bar_track"))
-    t.append(f"  {pct:.1f}%", style=ink(role))
+    t.append(f"  {pct:.1f}%", style=ink("muted" if not alarming else role))
     return t
 
 
@@ -419,24 +479,53 @@ def _build_summary(entries: list[FSEntry]) -> Text:
     total_used = sum(e.used_bytes for e in unique)
     usable_space = sum(e.used_bytes + e.free_bytes for e in unique)
     used_pct = total_used / usable_space * 100 if usable_space > 0 else 0.0
+    image_count = sum(1 for e in entries if e.is_image_mount)
 
     t = Text()
     t.append(f"  {len(entries)} filesystem(s) mounted  |  ")
     t.append(f"Total: {humanize.naturalsize(total_space, binary=True)}  |  ")
-    t.append(f"Used: {humanize.naturalsize(total_used, binary=True)} ({used_pct:.0f}%)\n  ")
+    t.append(f"Used: {humanize.naturalsize(total_used, binary=True)} ({used_pct:.0f}%)")
+    if image_count:
+        t.append(
+            f"  |  {image_count} read-only image mount(s) folded",
+            style=ink("muted"),
+        )
+    t.append("\n  ")
 
     # Proportional bar — each FS contributes width proportional to its total
     # size, painted as a background so no cell of it is a block element.
+    # Everything under `_BAR_MIN_SHARE` shares one cell at the end: giving
+    # each of them the old `max(1, ...)` floor made a 50-cell bar 70 cells
+    # long, which is not proportional to anything.
     bar_width = 50
-    for e in unique:
+    shown = [
+        e for e in unique
+        if total_space > 0 and e.total_bytes / total_space >= _BAR_MIN_SHARE
+    ]
+    kept = {id(e) for e in shown}
+    folded = [e for e in unique if id(e) not in kept]
+    for e in shown:
         w = max(1, int(e.total_bytes / total_space * bar_width)) if total_space > 0 else 1
         t.append(" " * w, style=e.speed_fill)
+    if folded:
+        t.append(" ", style=ink_fill("bar_track"))
 
     t.append("\n  ")
-    for e in unique:
-        label = os.path.basename(e.mountpoint) or "/"
+    for e in shown:
+        # The mountpoint, not its basename: `5(128.0K)` for
+        # `/snap/bare/5` named a revision number and nothing else.
+        label = e.mountpoint if len(e.mountpoint) <= 18 else elide_path(
+            e.mountpoint, 18
+        )
         size_str = humanize.naturalsize(e.total_bytes, binary=True, gnu=True)
         t.append(f"■ {label}({size_str}) ", style=e.speed_style)
+    if folded:
+        folded_bytes = sum(e.total_bytes for e in folded)
+        t.append(
+            f"■ {len(folded)} others"
+            f"({humanize.naturalsize(folded_bytes, binary=True, gnu=True)})",
+            style=ink("muted"),
+        )
 
     return t
 
@@ -475,7 +564,7 @@ def _block_tree_rows(devices: list[BlockDevice]) -> list[tuple[BlockDevice, str]
         for i, child in enumerate(dev.children):
             _walk(child, child_prefix, i == len(dev.children) - 1, top=False)
 
-    for dev in devices:
+    for dev in sorted(devices, key=_block_sort_key):
         _walk(dev, "", True, top=True)
     return rows
 
@@ -646,8 +735,13 @@ class BlockDeviceModal(ModalScreen):
         Binding("q", "dismiss", "Close", show=False, id="fs.device_close_q"),
     ]
 
-    DEFAULT_CSS = FSDetailModal.DEFAULT_CSS.replace(
-        "#fs-detail-dialog", "#block-detail-dialog"
+    # Both selectors, not only the id one: `FSDetailModal { align: center
+    # middle; }` came through with the *other* modal's type name on it, so
+    # nothing centred this dialog and it sat in the top-left corner.
+    DEFAULT_CSS = (
+        FSDetailModal.DEFAULT_CSS
+        .replace("FSDetailModal", "BlockDeviceModal")
+        .replace("#fs-detail-dialog", "#block-detail-dialog")
     )
 
     def __init__(self, dev: BlockDevice, **kwargs):
@@ -714,6 +808,10 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
             show=True, key_display="B", id="fs.benchmark",
         ),
         Binding("r", "refresh", "Refresh", show=False, id="fs.refresh"),
+        Binding(
+            "i", "toggle_image_mounts", "Image mounts",
+            show=True, id="fs.image_mounts",
+        ),
     ]
 
     DEFAULT_CSS = """
@@ -760,6 +858,12 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
         super().__init__(**kwargs)
         self._adapter = adapter or get_platform_adapter()
         self._entries: list[FSEntry] = []
+        #: Rows the table currently shows, which is `_entries` minus the
+        #: folded image mounts. The table's cursor indexes into this.
+        self._visible_entries: list[FSEntry] = []
+        #: Read-only package images (snap and friends) are folded into one
+        #: summary row by default; `i` unfolds them.
+        self._show_image_mounts = False
         self._block_devices: list[BlockDevice] = []
         self._block_rows: list[BlockDevice] = []
         self._filesystem_probe: ProbeResult[list[FSEntry]] = (
@@ -855,9 +959,28 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
         else:
             summary.update(_probe_message("Filesystems", filesystem_probe))
 
+        self._populate_fs_table()
+        self._populate_block_table()
+
+    def _populate_fs_table(self) -> None:
+        """Fill the mount table, folding read-only images unless asked.
+
+        On an ordinary Ubuntu box seventeen of thirty-one mounts are one
+        squashfs per snap package: 100 % full by construction, never
+        actionable, and between them more than half the table. They are
+        one summary row until `i` says otherwise.
+        """
         table = self.query_one("#fs-overview-table", DataTable)
         table.clear()
-        for e in entries:
+        entries = self._entries
+        images = [e for e in entries if e.is_image_mount]
+        shown = (
+            list(entries)
+            if self._show_image_mounts or not images
+            else [e for e in entries if not e.is_image_mount]
+        )
+        self._visible_entries = shown
+        for e in shown:
             table.add_row(
                 e.mountpoint,
                 e.fs_type,
@@ -865,12 +988,36 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
                 humanize.naturalsize(e.total_bytes, binary=True),
                 humanize.naturalsize(e.used_bytes, binary=True),
                 humanize.naturalsize(e.free_bytes, binary=True),
-                _usage_bar(e.usage_pct),
+                _usage_bar(e.usage_pct, alarming=e.alarms_on_usage),
                 _quota_cell(e),
                 key=e.mountpoint,
             )
+        if images and not self._show_image_mounts:
+            total = sum(e.total_bytes for e in images)
+            table.add_row(
+                Text(f"{len(images)} read-only image mounts", style=ink("muted")),
+                Text("squashfs/loop", style=ink("muted")),
+                Text("press i to expand", style=ink("muted")),
+                humanize.naturalsize(total, binary=True),
+                Text("—", style=ink("muted")),
+                Text("—", style=ink("muted")),
+                Text("", style=ink("muted")),
+                Text(""),
+                key="__image_mounts__",
+            )
 
-        self._populate_block_table()
+    def action_toggle_image_mounts(self) -> None:
+        """Show or fold the read-only package-image mounts."""
+        self._show_image_mounts = not self._show_image_mounts
+        if not self._entries:
+            return
+        self._populate_fs_table()
+        self.app.notify(
+            "Showing read-only image mounts"
+            if self._show_image_mounts
+            else "Read-only image mounts folded into one row",
+            timeout=3,
+        )
 
     def _populate_block_table(self) -> None:
         label = self.query_one("#fs-overview-block-label", Static)
@@ -896,8 +1043,8 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
 
     @on(DataTable.RowSelected, "#fs-overview-table")
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
-        if 0 <= event.cursor_row < len(self._entries):
-            entry = self._entries[event.cursor_row]
+        if 0 <= event.cursor_row < len(self._visible_entries):
+            entry = self._visible_entries[event.cursor_row]
             self.app.push_screen(
                 FSDetailModal(entry, benchmark=self._benchmarks.get(entry.mountpoint))
             )
@@ -922,9 +1069,9 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
         """
         table = self.query_one("#fs-overview-table", DataTable)
         row = table.cursor_row
-        if not (0 <= row < len(self._entries)):
+        if not (0 <= row < len(self._visible_entries)):
             return
-        mountpoint = self._entries[row].mountpoint
+        mountpoint = self._visible_entries[row].mountpoint
 
         def _on_confirm(confirmed: bool | None) -> None:
             if confirmed:
