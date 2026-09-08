@@ -38,6 +38,30 @@ def _pick_date_form(dates: list[datetime]) -> str:
     return "Y-m-d"
 
 
+#: Markers this chart draws on top of a line, and what each one means.
+#: Exposed so the screen hosting the chart can spell them out in a summary
+#: row -- five punctuation marks with no key at all were unreadable.
+MARKER_MEANINGS: tuple[tuple[str, str], ...] = (
+    ("*", "alert/anomaly"),
+    ("c", "cleanup"),
+    ("~", "partial"),
+    ("o", "pinned"),
+    (".", "sampled"),
+)
+
+#: One fixed colour per series slot. plotext otherwise rotates its palette
+#: once per `plot()` call, and a series is drawn once per gap-free segment
+#: -- so a path whose history had one hole changed colour when the zoom
+#: window moved over it, and two series could land on the same hue.
+#: ANSI names, because a browser terminal collapses 256 to 16.
+SERIES_COLORS: tuple[str, ...] = ("cyan", "magenta", "green", "yellow")
+
+
+def marker_legend_text() -> str:
+    """One-line key for the point markers, for a host screen's summary row."""
+    return "  ".join(f"{glyph} {meaning}" for glyph, meaning in MARKER_MEANINGS)
+
+
 class TrendChart(Widget):
     """Widget showing typed root/subtree trends without bridging data gaps."""
 
@@ -45,15 +69,31 @@ class TrendChart(Widget):
     TrendChart {
         width: 1fr;
         height: 1fr;
+        layout: vertical;
+    }
+
+    TrendChart PlotextPlot {
+        height: 1fr;
+    }
+
+    TrendChart .trend-legend {
+        height: 1;
+        color: $text-muted;
     }
     """
 
     _ZOOM_LEVELS = (1.0, 0.5, 0.25)
 
+    #: Below this the plot itself is two or three rows and a legend costs
+    #: more than it explains; the host screen's summary row carries the
+    #: same information.
+    _LEGEND_MIN_HEIGHT = 8
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._model: TrendModel | None = None
         self._plot: PlotextPlot | None = None
+        self._legend: Static | None = None
         self._zoom_index = 0
         self._pan = 0
 
@@ -61,8 +101,40 @@ class TrendChart(Widget):
         if HAS_PLOTEXT:
             self._plot = PlotextPlot()
             yield self._plot
+            self._legend = Static("", classes="trend-legend", markup=True)
+            yield self._legend
         else:
             yield Static("Install textual-plotext for trend charts")
+
+    def on_resize(self) -> None:
+        self._fit_legend()
+
+    def _fit_legend(self) -> None:
+        if self._legend is None:
+            return
+        self._legend.display = self.size.height >= self._LEGEND_MIN_HEIGHT
+
+    def series_color(self, index: int) -> str:
+        """The colour series `index` is drawn in, whatever its gaps."""
+        return SERIES_COLORS[index % len(SERIES_COLORS)]
+
+    def _update_legend(self, visible: tuple[TrendSeries, ...]) -> None:
+        """Name the series under the plot, in the colours they are drawn in.
+
+        plotext draws its own legend box in the top-left *of the canvas*,
+        which is where the tallest line is; it sat on the data it was
+        explaining. This is the same information one row below the plot,
+        where nothing is hidden by it.
+        """
+        if self._legend is None:
+            return
+        parts = []
+        for index, series in enumerate(visible):
+            label = series.path.rstrip("/").rsplit("/", 1)[-1] or series.path
+            colour = self.series_color(index)
+            parts.append(f"[{colour}]\u2022 {label}[/{colour}]")
+        self._legend.update("  ".join(parts))
+        self._fit_legend()
 
     def set_model(self, model: TrendModel | None) -> None:
         self._model = model
@@ -181,6 +253,7 @@ class TrendChart(Widget):
         model = self._model
         if model is None or not model.series:
             plt.title("Size Trends · no history")
+            self._update_legend(())
             self._plot.refresh()
             return
 
@@ -193,12 +266,17 @@ class TrendChart(Widget):
             + (f" · pan {self._pan}" if self._pan else "")
         )
         plt.xlabel("Time")
-        plt.ylabel("Files" if model.metric is MetricId.FILES else "Size (MB)")
+        # MiB, not MB: `_plot_value` divides by 1024**2.
+        plt.ylabel("Files" if model.metric is MetricId.FILES else "Size (MiB)")
 
         segments = self.prepared_segments()
-        for series in visible:
-            label = series.path.rstrip("/").rsplit("/", 1)[-1] or series.path
-            first = True
+        for index, series in enumerate(visible):
+            # An explicit colour per *series*, not per plot() call. plotext
+            # advances its palette on every call and a series is drawn once
+            # per gap-free segment, so a path with one hole in its history
+            # changed colour whenever the zoom window crossed the hole --
+            # and two series could land on the same hue.
+            colour = self.series_color(index)
             for segment in segments.get(series.path, ()):
                 dates = [point.timestamp for point in segment]
                 x_values = plotext.datetimes_to_string(dates, output_form=date_form)
@@ -213,9 +291,11 @@ class TrendChart(Widget):
                 # default font has no glyph for a quadrant at all and
                 # draws the halves at the wrong ink box. One dot per cell
                 # is the resolution a line has here; see `disktide.glyphs`.
-                kwargs = {"label": label} if first else {}
-                plt.plot(x_values, y_values, marker="dot", **kwargs)
-                first = False
+                #
+                # No `label=`: plotext's legend box is drawn inside the
+                # canvas at top-left, over the data. `_update_legend` puts
+                # the same names in a row of their own below the plot.
+                plt.plot(x_values, y_values, marker="dot", color=colour)
 
             for point in series.points:
                 marker = self._marker(point)
@@ -225,8 +305,9 @@ class TrendChart(Widget):
                     [point.timestamp], output_form=date_form
                 )
                 y_value = [self._plot_value(point.value, model.metric)]
-                plt.scatter(x_value, y_value, marker=marker)
+                plt.scatter(x_value, y_value, marker=marker, color=colour)
 
+        self._update_legend(visible)
         self._plot.refresh()
 
     @staticmethod

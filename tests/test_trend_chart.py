@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 
 import pytest
+from disktide.domain.metrics import MetricId
 from disktide.widgets.trend_chart import _pick_date_form
 
 try:
@@ -134,3 +135,76 @@ def test_the_plotted_line_is_not_drawn_out_of_block_elements():
             assert frame, "no axes were drawn"
 
     asyncio.run(go())
+
+
+class TestSeriesColorStability:
+    """A series' colour must not depend on how many segments it has.
+
+    plotext advances its palette once per `plot()` call, and a series is
+    drawn once per gap-free segment -- so a path whose history had one hole
+    changed colour whenever the zoom window crossed the hole, and two
+    series could land on the same hue.
+    """
+
+    def test_each_slot_has_its_own_colour(self):
+        from disktide.widgets.trend_chart import SERIES_COLORS
+
+        assert len(set(SERIES_COLORS)) == len(SERIES_COLORS)
+
+    def test_the_colour_follows_the_series_index_only(self):
+        from disktide.widgets.trend_chart import TrendChart
+
+        chart = TrendChart()
+        assert chart.series_color(0) != chart.series_color(1)
+        # Same slot, same colour, however many times it is asked.
+        assert chart.series_color(0) == chart.series_color(0)
+
+    def test_every_marker_is_documented(self):
+        from disktide.widgets.trend_chart import (
+            MARKER_MEANINGS,
+            TrendChart,
+            marker_legend_text,
+        )
+        from disktide.domain.visualization import TrendPoint, VisualState
+
+        documented = {glyph for glyph, _meaning in MARKER_MEANINGS}
+        base = dict(
+            snapshot_id=1,
+            timestamp=datetime(2026, 3, 25, 10, 0),
+            value=10,
+            state=VisualState.UNCHANGED,
+        )
+        drawn = set()
+        for field, value in (
+            ("cleanup", True),
+            ("alert", True),
+            ("anomaly", True),
+            ("pinned", True),
+            ("rollup_kind", "daily"),
+        ):
+            marker = TrendChart._marker(TrendPoint(**{**base, field: value}))
+            if marker is not None:
+                drawn.add(marker)
+        partial = TrendChart._marker(
+            TrendPoint(**{**base, "state": VisualState.PARTIAL})
+        )
+        if partial is not None:
+            drawn.add(partial)
+        assert drawn <= documented, drawn - documented
+        legend = marker_legend_text()
+        for glyph in drawn:
+            assert glyph in legend
+
+
+@pytest.mark.skipif(not HAS_PLOTEXT, reason="plotext not installed")
+class TestAxisUnits:
+    def test_the_y_axis_names_the_unit_it_divides_by(self):
+        """`_plot_value` divides by 1024**2, so the label is MiB."""
+        import inspect
+
+        from disktide.widgets.trend_chart import TrendChart
+
+        source = inspect.getsource(TrendChart._update_plot)
+        assert "Size (MiB)" in source
+        assert "Size (MB)" not in source
+        assert TrendChart._plot_value(1024 * 1024, MetricId.LOGICAL) == 1.0

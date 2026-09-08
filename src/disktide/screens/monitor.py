@@ -37,7 +37,8 @@ from disktide.domain.monitor import (
     RetentionPreview,
 )
 from disktide.domain.visualization import MonitorSpaceTime
-from disktide.pathdisplay import elide_path, relative_label
+from disktide.glyphs import visible_width
+from disktide.pathdisplay import elide_path, elide_text, relative_label
 from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
 from disktide.services.monitor import (
     MonitorEvent,
@@ -51,7 +52,7 @@ from disktide.widgets.monitor_editor import MonitorEditor, MonitorEditorResult
 from disktide.widgets.growth_heatmap import GrowthHeatmap
 from disktide.widgets.sunburst_view import SunburstView
 from disktide.widgets.treemap_view import TreemapView
-from disktide.widgets.trend_chart import TrendChart
+from disktide.widgets.trend_chart import TrendChart, marker_legend_text
 from disktide.presentation.tui.viewmodels.visualization import legend_text
 
 
@@ -244,6 +245,23 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
     MonitorScreen.narrow #monitor-session-help {
         display: none;
     }
+
+    /* Below 90 columns the detail panel is not on screen at all, so the
+       only way to it -- Enter -- has to be written down somewhere. */
+    #monitor-list-hint {
+        display: none;
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+
+    MonitorScreen.narrow #monitor-list-hint {
+        display: block;
+    }
+
+    MonitorScreen.narrow.detail #monitor-list-hint {
+        display: none;
+    }
     """ + scrollbar_css(
         "#monitor-list",
         "#monitor-history-table",
@@ -293,6 +311,9 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
                 monitor_table.cursor_type = "row"
                 monitor_table.add_columns("Monitor", "State", "Next")
                 yield monitor_table
+                yield Static(
+                    "Enter opens details · ? keys", id="monitor-list-hint"
+                )
             with Vertical(id="monitor-detail-panel"):
                 yield Static("Select a monitor", id="monitor-detail-title")
                 with Horizontal(id="monitor-sampling-controls"):
@@ -502,10 +523,17 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
         if summary is None:
             self._render_empty()
             return
-        self.query_one("#monitor-detail-title", Static).update(
-            f"{summary.definition.label} · {summary.definition.root_path}"
+        # Two rows, one fact each. Joined with " · " the pair wrapped
+        # wherever it happened to run out of width, leaving the separator
+        # hanging off the end of row one and cropping row two -- and the
+        # crop took the tail of the path, which is the half that says which
+        # directory this is.
+        title = self.query_one("#monitor-detail-title", Static)
+        title.update(
+            f"{summary.definition.label}\n"
+            f"{elide_path(summary.definition.root_path, title.size.width)}"
         )
-        self._render_overview(summary)
+        self._render_overview(summary, history)
         self._render_history(summary, history, space_time)
         self._render_alerts(rules, alert_events)
         self._render_retention(summary, history, retention)
@@ -629,7 +657,7 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
             "Saved definitions need this TUI session or disktide watch --all."
         )
 
-    def _render_overview(self, summary) -> None:
+    def _render_overview(self, summary, history: MonitorHistory | None = None) -> None:
         definition = summary.definition
         status = summary.status
         current = status.provisional
@@ -642,11 +670,20 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
             definition.metric.value,
         )
         next_due = status.next_due_at.isoformat() if status.next_due_at else "not scheduled"
-        last_success = (
-            status.last_success_at.isoformat()
-            if status.last_success_at
-            else "never"
-        )
+        # `last_success_at` is a fact about *sampling*: when a host last
+        # completed a run. Snapshots imported by the CLI, or taken by an
+        # earlier session, leave it unset while the history is full of
+        # points -- and "never" next to thirty-one of them reads as a bug.
+        latest_point = self._latest_history_timestamp(history)
+        if status.last_success_at is not None:
+            last_success = status.last_success_at.isoformat()
+        elif latest_point is not None:
+            last_success = (
+                f"not in this session · latest snapshot "
+                f"{latest_point.astimezone().strftime('%Y-%m-%d %H:%M')}"
+            )
+        else:
+            last_success = "never"
         host = (
             f"{status.host_type} · {status.host_id}"
             if status.host_id
@@ -770,9 +807,10 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
                 f" · {space_time.diff_error}" if space_time.diff_error else ""
             )
             self.query_one("#monitor-history-summary", Static).update(
-                f"{collection}\n"
-                f"Pair {pair} · {confidence}{problem}\n"
-                f"{legend_text()} · b/v set pair · l latest · z zoom · Shift+←/→ pan"
+                self._history_summary(
+                    collection,
+                    f"Pair {pair} · {confidence}{problem}",
+                )
             )
         else:
             chart_data: dict[str, list[tuple[str, int]]] = {}
@@ -824,16 +862,92 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
                 )
 
     @staticmethod
-    def _history_collection_line(summary: MonitorSummary) -> str:
+    def _latest_history_timestamp(history: MonitorHistory | None):
+        if history is None or not history.root_points:
+            return None
+        return max(point.timestamp for point in history.root_points)
+
+    def _history_summary(self, collection: str, pair: str) -> str:
+        """Four rows of context, trimmed to the width actually available.
+
+        The panel is 34 columns narrower than the screen, so at 100 columns
+        the legend row alone is half again as long as the box it is in and
+        Textual folded three rows into five -- pushing the chart down to two
+        rows of plot. Each row is assembled from clauses and drops the ones
+        that do not fit, so the row count is fixed however narrow it gets.
+        """
+        width = self.query_one("#monitor-history-summary", Static).size.width
+        lines = [
+            self._fit_clauses([collection], width),
+            self._fit_clauses([pair], width),
+        ]
+        keys = self._fit_clauses(
+            [
+                legend_text(),
+                "b/v set pair",
+                "l latest",
+                "z zoom",
+                "Shift+←/→ pan",
+            ],
+            width,
+        )
+        marks = self._fit_clauses(
+            [f"Trend marks: {marker_legend_text()}"], width
+        )
+        if width <= 0 or visible_width(legend_text()) <= width:
+            lines.extend([keys, marks])
+        else:
+            # Not even the state legend fits; both rows would only wrap.
+            lines.append("? for the legend, chart marks and keys")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _fit_clauses(clauses: list[str], width: int, sep: str = " · ") -> str:
+        """Join `clauses` while they fit, dropping the tail that does not.
+
+        The first clause is always kept: a row that says something too long
+        is still better than an empty one.
+        """
+        if width <= 0 or not clauses:
+            return sep.join(clauses)
+        kept = [clauses[0]]
+        for clause in clauses[1:]:
+            candidate = sep.join(kept + [clause])
+            if visible_width(candidate) > width:
+                break
+            kept.append(clause)
+        joined = sep.join(kept)
+        return joined if visible_width(joined) <= width else elide_text(joined, width)
+
+    @classmethod
+    def _key_display(cls, binding_id: str, fallback: str) -> str:
+        """The key a hint should name, read from the binding that owns it.
+
+        Prose used to spell keys by hand, which is how "press s" outlived
+        the move of sampling onto Shift+S -- `s` does nothing on this
+        screen. Reading `key_display` (falling back to the key itself)
+        means a rebind cannot leave the sentence behind.
+        """
+        for binding in cls.BINDINGS:
+            if getattr(binding, "id", None) == binding_id:
+                return binding.key_display or binding.key
+        return fallback
+
+    def _history_collection_line(self, summary: MonitorSummary) -> str:
         definition = summary.definition
         status = summary.status
         points = f"{summary.snapshot_count} canonical point(s)"
         if definition.desired_state is MonitorDesiredState.PAUSED:
             return f"Collection paused · {points} · press p to resume"
         if status.activity is MonitorActivityState.NO_HOST:
+            # `press S`, from the binding itself. Sampling moved onto Shift
+            # (a key that is consequential in any mode is consequential in
+            # every mode) and this sentence was left telling people to
+            # press `s`, which does nothing on this screen.
             return (
                 f"Collection stopped · {points} · no active host; "
-                "press s or run disktide watch --all"
+                f"press {self._key_display('monitor.sampling', 'S')} "
+                "or run disktide watch --all"
             )
         next_due = (
             status.next_due_at.astimezone().strftime("%m-%d %H:%M")

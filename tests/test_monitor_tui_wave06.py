@@ -601,3 +601,110 @@ def test_the_alert_editor_refuses_a_threshold_the_cli_would_refuse(tmp_path):
         asyncio.run(exercise())
     finally:
         repository.close()
+
+
+def test_the_no_host_hint_names_the_key_the_binding_declares(tmp_path):
+    """"press s" outlived the move of sampling onto Shift+S.
+
+    `s` does nothing on this screen. The sentence now reads the key off
+    the binding that owns the action, so a rebind cannot leave it behind.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "hint.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(160, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot,
+                lambda: "no active host"
+                in str(screen.query_one("#monitor-history-summary").render()),
+            )
+            summary = str(screen.query_one("#monitor-history-summary").render())
+            assert "press S" in summary
+            assert "press s " not in summary
+            # And S is really the key that starts sampling.
+            assert screen._key_display("monitor.sampling", "?") == "S"
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
+
+
+def test_the_history_summary_keeps_its_row_count_when_narrow():
+    """Four rows of context in a four-row box, however narrow it gets.
+
+    The panel is 34 columns narrower than the screen, so at 100 columns the
+    legend row alone was half again as long as its box: Textual folded three
+    rows into five and pushed the trend chart down to two rows of plot.
+    """
+    fit = MonitorScreen._fit_clauses
+    clauses = ["Collection active", "31 canonical point(s)", "next full 09-08"]
+    assert fit(clauses, 0) == " · ".join(clauses)
+    assert fit(clauses, 200) == " · ".join(clauses)
+    narrow = fit(clauses, 24)
+    assert len(narrow) <= 24
+    # The first clause is never dropped.
+    assert narrow.startswith("Collection active")
+
+
+def test_the_narrow_list_says_how_to_reach_the_detail_panel(tmp_path):
+    """Below 90 columns the detail panel is not on screen at all."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "narrow-hint.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            await _wait_for_monitor_load(pilot, screen)
+            assert screen.has_class("narrow")
+            hint = screen.query_one("#monitor-list-hint")
+            assert hint.display is True
+            assert "Enter opens details" in str(hint.render())
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
