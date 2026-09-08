@@ -208,6 +208,15 @@ class SunburstView(OpaqueStripMixin, Widget):
             else 0
         )
         share = _layout_value(node, metric, weights) / total if total > 0 else 0.0
+        if self._node is not None and node.path == self._node.path:
+            # The innermost ring is the chart's own root, so it is always
+            # 100% of itself. Saying so, and saying what clicking it does,
+            # is cheaper than the alternative -- rebuilding the geometry so
+            # the root is the hole -- and answers the same question.
+            return (
+                f"{node.name} (this root)\n"
+                f"{metric_text(node, self._metric)} · click to go up"
+            )
         return f"{node.name}\n{metric_text(node, self._metric)} · {share:.0%}"
 
     def _panel_bg(self) -> tuple[int, int, int]:

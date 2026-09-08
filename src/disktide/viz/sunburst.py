@@ -68,10 +68,9 @@ from disktide.rendering import (
 from disktide.viz.categories import CategoryIndex
 from disktide.viz.cellgeom import DEFAULT_CELL_ASPECT
 from disktide.viz.colors import (
-    ANSI_INDEX,
     ANSI_SELECTED_ARC,
-    ANSI_STANDARD_RGB,
     CATEGORIES,
+    ZEBRA_GAIN,
     alternate_neutral_dir_color,
     category_dir_tint,
     category_file_color,
@@ -81,6 +80,8 @@ from disktide.viz.colors import (
     file_category,
     get_color_scheme,
     neutral_dir_color,
+    parse_rgb,
+    scale_rgb,
 )
 from disktide.viz.ringshape import (
     DEFAULT_HOLE_RADIUS,
@@ -138,7 +139,7 @@ _FOOTPRINT_HALF = _SAMPLE_FOOTPRINT / 2.0
 # a run of them merges into one blob.  Odd siblings get a nudge in
 # luminance; seams carry the structure wherever they fit, this carries it
 # where they don't.
-_DIR_ZEBRA_GAIN = 1.06
+_DIR_ZEBRA_GAIN = ZEBRA_GAIN
 
 # Selection in current mode is a lift towards white: the arc keeps the hue
 # that says what it holds, and diff mode keeps its own selection encoding.
@@ -147,6 +148,10 @@ _SELECTED_WEIGHT = 0.22
 
 # Three rows of two, below which the legend starts crowding the disc.
 _LEGEND_MAX_ENTRIES = 6
+
+#: The legend heading is a caption, not a category: it takes the ANSI
+#: name every scheme resolves to its own dim neutral.
+_LEGEND_HEADING_COLOR = "bright_black"
 
 _HALF_TOP = "▀"  # ▀ upper half block
 _HALF_BOTTOM = "▄"  # ▄ lower half block
@@ -470,38 +475,10 @@ def _arc_color(
     return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
 
 
-def _parse_rgb(color: str) -> RGB:
-    """Resolve a colour string to a triple, once per arc.
-
-    ANSI names are carried at their `STANDARD_PALETTE` coordinates rather
-    than at the values Rich's terminal theme gives them, because that is
-    the table `_cell_color` snaps the blended result back onto: at Rich's
-    terminal-theme values, `bright_blue` would go in as (0,0,255) and come
-    back out as plain `blue`, which is `docs`.
-    """
-    index = ANSI_INDEX.get(color)
-    if index is not None:
-        return ANSI_STANDARD_RGB[index]
-    if color.startswith("rgb(") and color.endswith(")"):
-        parts = color[4:-1].split(",")
-        if len(parts) == 3:
-            try:
-                return (int(parts[0]), int(parts[1]), int(parts[2]))
-            except ValueError:
-                pass
-    try:
-        triplet = Color.parse(color).get_truecolor()
-    except Exception:
-        return (128, 128, 128)
-    return (triplet.red, triplet.green, triplet.blue)
-
-
-def _scale_rgb(color: RGB, factor: float) -> RGB:
-    return (
-        min(255, int(color[0] * factor)),
-        min(255, int(color[1] * factor)),
-        min(255, int(color[2] * factor)),
-    )
+#: `viz.colors` owns both, so the treemap's leaf zebra is the same step as
+#: this module's directory zebra rather than a second constant that drifts.
+_parse_rgb = parse_rgb
+_scale_rgb = scale_rgb
 
 
 def _mix_rgb(color: RGB, target: RGB, weight: float) -> RGB:
@@ -1416,13 +1393,27 @@ def _compute_legend(
     # The swatch is a geometric shape (U+25A0), which is the kind of glyph
     # safe rendering exists to avoid.
     swatch = "#" if is_safe_rendering() else "■"
+    heading: str | None = None
     if category_index is not None:
         # Shares are already sorted largest first, so the cap keeps the
         # categories that actually account for the disc.
+        shares = category_index.shares(root.path)
+        # Everything under one percent into one entry. `docs 0%` is not a
+        # measurement anybody can act on, and six of them crowded out the
+        # categories that do account for the disc.
+        major = [(cat, share) for cat, share in shares if share >= 0.01]
+        minor = [(cat, share) for cat, share in shares if share < 0.01]
         entries = [
             (f"{swatch} {cat} {share:.0%}", cat)
-            for cat, share in category_index.shares(root.path)
+            for cat, share in major
         ][:_LEGEND_MAX_ENTRIES]
+        if minor and len(entries) < _LEGEND_MAX_ENTRIES:
+            entries.append((f"{swatch} {len(minor)} more <1%", "other"))
+        # The index is a *byte* histogram and stays one whatever `t` is
+        # switched to -- four of them per directory is memory a scan of a
+        # million nodes cannot spend. So the legend says which measure it
+        # is quoting rather than silently disagreeing with the arcs.
+        heading = "by bytes"
     else:
         categories = {
             file_category(arc.node.name)
@@ -1446,6 +1437,11 @@ def _compute_legend(
             (text.ljust(column), category_legend_color(cat))
             for text, cat in entries[index : index + 2]
         ])
+    # One caption row, above the swatches. The chart-height floor at the
+    # top of this function is what protects the disc; six categories never
+    # fill more than three rows, so the caption is the fourth at worst.
+    if heading is not None:
+        lines.insert(0, [(heading.ljust(column), _LEGEND_HEADING_COLOR)])
 
     layout.legend_lines = lines
     layout.legend_start_y = layout.char_height - len(lines)

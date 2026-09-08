@@ -23,6 +23,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from rich.color import Color
+
 from disktide.domain.visualization import VisualState
 from disktide.rendering import bump_render_epoch
 from disktide.themes import THEME_KEYS, resolve_theme
@@ -660,6 +662,60 @@ _TINT_RANGE = 0.55
 # text better than white.
 _INK_CROSSOVER = 0.179
 _DARK_INK = "rgb(20,20,20)"
+
+
+#: The lift one shape takes so a neighbour painted the same colour parts
+#: from it. Small on purpose -- it has to read as "another one of these",
+#: never as a different category. Both the sunburst's directory arcs and
+#: the treemap's leaf rects use it, so it is defined once.
+ZEBRA_GAIN = 1.06
+
+
+def parse_rgb(color: str) -> tuple[int, int, int]:
+    """Resolve a colour string to a triple.
+
+    ANSI names are carried at their `STANDARD_PALETTE` coordinates rather
+    than at the values Rich's terminal theme gives them, because that is
+    the table the renderers snap a blended result back onto: at Rich's
+    terminal-theme values, `bright_blue` would go in as (0,0,255) and come
+    back out as plain `blue`, which is `docs`.
+    """
+    index = ANSI_INDEX.get(color)
+    if index is not None:
+        return ANSI_STANDARD_RGB[index]
+    if color.startswith("rgb(") and color.endswith(")"):
+        parts = color[4:-1].split(",")
+        if len(parts) == 3:
+            try:
+                return (int(parts[0]), int(parts[1]), int(parts[2]))
+            except ValueError:
+                pass
+    try:
+        triplet = Color.parse(color).get_truecolor()
+    except Exception:
+        return (128, 128, 128)
+    return (triplet.red, triplet.green, triplet.blue)
+
+
+def scale_rgb(color: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
+    return (
+        min(255, int(color[0] * factor)),
+        min(255, int(color[1] * factor)),
+        min(255, int(color[2] * factor)),
+    )
+
+
+def zebra_shade(color: str) -> str:
+    """Lift a fill by the zebra step so two adjacent ones part.
+
+    Under `ansi` there is no 6 % of a colour *name* and no spare index to
+    substitute for an arbitrary file category, so sixteen-colour terminals
+    keep the flat fill; the treemap's own gaps and labels carry the
+    boundary there.
+    """
+    if _active.ansi:
+        return color
+    return _rgb_text(scale_rgb(parse_rgb(color), ZEBRA_GAIN))
 
 
 def _rgb_text(color: tuple[int, int, int]) -> str:

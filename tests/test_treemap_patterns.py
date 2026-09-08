@@ -1125,3 +1125,108 @@ class TestIntegerCoordinates:
             assert rect.y == int(rect.y), f"rect.y={rect.y} is not integer"
             assert rect.w == int(rect.w), f"rect.w={rect.w} is not integer"
             assert rect.h == int(rect.h), f"rect.h={rect.h} is not integer"
+
+
+class TestNestedContainerLabels:
+    """A container two levels down must be able to say what it is.
+
+    `dir_label` was gated on `depth <= 1`, and the deepest container level
+    gets no frame at all, so `photos/2024`, `.cache/pip` and
+    `webapp/node_modules` were unnamed fields around labelled children --
+    the one word that said what the block *was* was the one word missing.
+    """
+
+    @staticmethod
+    def _tree():
+        def leaf(parent, name, size, depth):
+            return _make_file(name, size, parent, depth)
+
+        y2024 = _make_dir(
+            "2024",
+            [leaf("/home/photos/2024", f"p{i}.jpg", 900, 3) for i in range(8)],
+            "/home/photos",
+            2,
+        )
+        y2025 = _make_dir(
+            "2025",
+            [leaf("/home/photos/2025", f"q{i}.jpg", 700, 3) for i in range(8)],
+            "/home/photos",
+            2,
+        )
+        photos = _make_dir("photos", [y2024, y2025], "/home", 1)
+        pip = _make_dir(
+            "pip",
+            [leaf("/home/.cache/pip", f"w{i}.whl", 400, 3) for i in range(6)],
+            "/home/.cache",
+            2,
+        )
+        cache = _make_dir(".cache", [pip], "/home", 1)
+        return _wrap_root([photos, cache], name="home")
+
+    def test_depth_two_directories_are_named(self):
+        layout = compute_layout(self._tree(), 100, 30, max_depth=3)
+        named = {
+            rect.node.path
+            for rect in layout.rects
+            if not rect.is_leaf and rect.label
+        }
+        assert "/home/photos/2024" in named
+        assert "/home/photos/2025" in named
+        assert "/home/.cache/pip" in named
+
+    def test_a_rect_too_small_for_a_name_does_not_get_one(self):
+        layout = compute_layout(self._tree(), 24, 8, max_depth=3)
+        for rect in layout.rects:
+            if not rect.is_leaf and rect.label:
+                assert rect.w >= len(rect.label) + 2
+
+
+class TestAdjacentLeafZebra:
+    """Same-category siblings must not tile into one flat field.
+
+    69 `.csv` files under one directory were drawn in one colour with no
+    gap between them, so their size labels ran together into
+    "2.7 MiB2.7 MiB" with nothing saying where one file ended.
+    """
+
+    @staticmethod
+    def _tree():
+        return _wrap_root([
+            _make_dir(
+                "climate",
+                [
+                    _make_file(f"r{i:02d}.csv", 1000, "/root/climate", 2)
+                    for i in range(12)
+                ],
+                "/root",
+                1,
+            )
+        ])
+
+    def test_adjacent_siblings_alternate_their_fill(self):
+        from disktide.viz.treemap import _rect_bg
+
+        layout = compute_layout(self._tree(), 90, 26, max_depth=3)
+        leaves = [
+            rect for rect in layout.rects
+            if rect.is_leaf and rect.node.name.endswith(".csv")
+        ]
+        assert len(leaves) >= 4
+        by_ordinal = {}
+        for rect in leaves:
+            by_ordinal[rect.ordinal] = _rect_bg(
+                rect.node, rect.depth, True, None, None, rect.ordinal
+            )
+        assert by_ordinal.get(0) != by_ordinal.get(1)
+        # ...and the step repeats rather than drifting away from the hue.
+        assert by_ordinal.get(0) == by_ordinal.get(2)
+
+    def test_the_zebra_step_never_changes_the_category(self):
+        from disktide.viz.colors import parse_rgb, ZEBRA_GAIN, zebra_shade
+
+        base = "rgb(120,140,160)"
+        lifted = parse_rgb(zebra_shade(base))
+        original = parse_rgb(base)
+        for channel in range(3):
+            assert lifted[channel] >= original[channel]
+            assert lifted[channel] <= int(original[channel] * ZEBRA_GAIN) + 1

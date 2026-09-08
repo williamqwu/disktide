@@ -445,7 +445,30 @@ class TestSunburstUsesTheIndex:
             tree, 100, 46, panel_bg=PANEL_BG, category_index=index,
         )
         entries = [text.strip() for row in layout.legend_lines for text, _c in row]
-        assert entries == ["■ code 50%", "■ media 50%"]
+        # The index is a *byte* histogram whatever `t` is set to, so the
+        # legend says which measure it is quoting rather than silently
+        # disagreeing with arcs drawn from Files or Allocated.
+        assert entries == ["by bytes", "■ code 50%", "■ media 50%"]
+
+    def test_the_heading_is_only_on_the_share_legend(self):
+        """Without an index the legend quotes no measure, so it captions none."""
+        layout = compute_sunburst(self._tree(), 100, 46, panel_bg=PANEL_BG)
+        entries = [text.strip() for row in layout.legend_lines for text, _c in row]
+        assert "by bytes" not in entries
+
+    def test_categories_under_one_percent_collapse_into_one_entry(self):
+        """`docs 0%` is not a measurement anybody can act on."""
+        children = [_file("big.py", 1_000_000, "/r", 1)]
+        for name in ("tiny.md", "tiny.png", "tiny.zip"):
+            children.append(_file(name, 100, "/r", 1))
+        tree = _dir("r", "", 0, children)
+        layout = compute_sunburst(
+            tree, 100, 46, panel_bg=PANEL_BG,
+            category_index=build_category_index(tree),
+        )
+        entries = [text.strip() for row in layout.legend_lines for text, _c in row]
+        assert "■ 3 more <1%" in entries
+        assert not any(entry.endswith(" 0%") for entry in entries)
 
     def test_legend_falls_back_to_presence_without_an_index(self):
         layout = compute_sunburst(self._tree(), 100, 46, panel_bg=PANEL_BG)
@@ -464,8 +487,9 @@ class TestSunburstUsesTheIndex:
             tree, 100, 46, panel_bg=PANEL_BG,
             category_index=build_category_index(tree),
         )
-        assert len(layout.legend_lines) == 3
-        assert sum(len(row) for row in layout.legend_lines) == 6
+        # Three rows of two entries, plus the one-line "by bytes" heading.
+        assert len(layout.legend_lines) == 4
+        assert sum(len(row) for row in layout.legend_lines) == 7
 
 
 class TestTreemapUsesTheIndex:

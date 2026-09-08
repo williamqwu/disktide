@@ -29,6 +29,7 @@ from disktide.viz.colors import (
     file_category,
     get_color_scheme,
     label_ink,
+    zebra_shade,
 )
 from disktide.viz.layout import LayoutNode, aggregate_children, bounded_children
 
@@ -39,6 +40,7 @@ def _rect_bg(
     is_leaf: bool,
     visual: VisualDelta | None = None,
     category_index: CategoryIndex | None = None,
+    ordinal: int = 0,
 ) -> str:
     """Background color based on file-type category and depth."""
     if visual is not None:
@@ -50,14 +52,27 @@ def _rect_bg(
             dominant = category_index.dominant(node.path)
             # "other"-dominated is exactly what the neutral already says.
             if dominant is not None and dominant[0] != "other":
-                return category_dir_tint(dominant[0], dominant[1], depth)
-        return get_color_scheme().dir_leaf_bg
+                return _zebra(
+                    category_dir_tint(dominant[0], dominant[1], depth), ordinal
+                )
+        return _zebra(get_color_scheme().dir_leaf_bg, ordinal)
     if category_index is not None and category_index.file_is_ephemeral(node.path):
         # Inside a venv or a cache the extension describes what the tool
         # wrote, not whether keeping it is a choice; the container reads as
         # one reclaimable block only if its leaves agree with it.
-        return category_file_color("ephemeral", depth)
-    return category_file_color(file_category(node.name), depth)
+        return _zebra(category_file_color("ephemeral", depth), ordinal)
+    return _zebra(category_file_color(file_category(node.name), depth), ordinal)
+
+
+def _zebra(color: str, ordinal: int) -> str:
+    """Alternate the fill of adjacent siblings by the shared zebra step.
+
+    The sunburst already parts its directory arcs this way; a treemap has
+    the same problem one level down, where a directory of same-extension
+    files tiles into one uninterrupted field of colour and the only clue
+    that it is many rectangles is that two size labels sit side by side.
+    """
+    return zebra_shade(color) if ordinal % 2 else color
 
 
 def _access_glyph(node: FSNode) -> str:
@@ -83,6 +98,11 @@ class TreemapRect:
     is_leaf: bool = False
     visual: VisualDelta | None = None
     selected: bool = False
+    #: Index among this node's siblings. Adjacent leaves alternate a small
+    #: brightness step off it, which is the only thing separating a run of
+    #: same-category files -- 69 `.csv` under one directory tiled into a
+    #: single flat block with the size labels of two of them abutting.
+    ordinal: int = 0
 
 
 @dataclass
@@ -544,6 +564,7 @@ def _layout_node(
     visuals: Mapping[str, VisualDelta] | None,
     selected_path: str | None,
     vscale: float = DEFAULT_CELL_ASPECT,
+    ordinal: int = 0,
 ) -> None:
     """Recursively lay out a node and its children."""
     visual = visuals.get(node.path) if visuals is not None else None
@@ -554,7 +575,7 @@ def _layout_node(
         rects.append(TreemapRect(
             x=x, y=y, w=w, h=h, node=node,
             depth=depth, label="", size_label="",
-            is_leaf=True, visual=visual, selected=selected,
+            is_leaf=True, visual=visual, selected=selected, ordinal=ordinal,
         ))
         return
 
@@ -577,7 +598,7 @@ def _layout_node(
         rects.append(TreemapRect(
             x=x, y=y, w=w, h=h, node=node,
             depth=depth, label=label, size_label=size_label,
-            is_leaf=True, visual=visual, selected=selected,
+            is_leaf=True, visual=visual, selected=selected, ordinal=ordinal,
         ))
         return
 
@@ -586,12 +607,34 @@ def _layout_node(
     # Without this, nested padding compounds and eats all content at small
     # viewports (e.g. 69% border at 15x8, 87% at 11x5).
     pad = 1 if depth < max_depth - 1 and w >= 6 and h >= 5 else 0
+    # The deepest container level gets no frame -- there is nothing below
+    # it to frame away from -- and so used to get no name either: `2024`,
+    # `huggingface`, `node_modules` were unlabelled fields around labelled
+    # children, and the one word that said what the block *was* was the
+    # one word missing. A title row is a quarter of the cost of a frame
+    # and buys the same thing, so a rect wide enough for the name and
+    # tall enough to spare a row takes one.
+    title_row = (
+        pad == 0
+        and depth >= 1
+        and w >= max(10, visible_width(node.name) + 2)
+        and h >= 4
+    )
+    pad_top = pad or (1 if title_row else 0)
     inner_w = w - 2 * pad
-    inner_h = h - 2 * pad
+    inner_h = h - pad_top - pad
 
     # Add parent rect first (for background / border)
-    # Only show dir label when there is actually a visible border row.
-    dir_label = node.name if depth <= 1 and pad > 0 and w >= len(node.name) + 2 else ""
+    # Only show dir label when there is actually a visible border row --
+    # and at every depth that has one, not only the first two. A nested
+    # container (`photos/2024`, `.cache/pip`, `webapp/node_modules`) used
+    # to be an unnamed frame around labelled children, so the one word
+    # that said what the block *was* was the one word missing.
+    dir_label = (
+        node.name
+        if pad_top > 0 and w >= visible_width(node.name) + 2
+        else ""
+    )
     glyph = _access_glyph(node)
     if dir_label and glyph and w >= visible_width(dir_label) + 4:
         dir_label = f"{dir_label} {glyph}"
@@ -602,7 +645,7 @@ def _layout_node(
     rects.append(TreemapRect(
         x=x, y=y, w=w, h=h, node=node,
         depth=depth, label=dir_label, is_leaf=False,
-        visual=visual, selected=selected,
+        visual=visual, selected=selected, ordinal=ordinal,
     ))
 
     sized = bounded_children(
@@ -656,9 +699,9 @@ def _layout_node(
         }
         for local, _child in pieces
     ]
-    sub_rects = _snap_rects(float_rects, x + pad, y + pad, inner_w, inner_h)
+    sub_rects = _snap_rects(float_rects, x + pad, y + pad_top, inner_w, inner_h)
 
-    for sr, (_local, child) in zip(sub_rects, pieces):
+    for index, (sr, (_local, child)) in enumerate(zip(sub_rects, pieces)):
         sw, sh = sr["dx"], sr["dy"]
         # Skip children whose rect collapsed to zero area after snapping
         if sw <= 0 or sh <= 0:
@@ -674,6 +717,7 @@ def _layout_node(
             visuals,
             selected_path,
             vscale,
+            index,
         )
 
 
@@ -699,7 +743,7 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
 
         bg = _rect_bg(
             rect.node, rect.depth, rect.is_leaf, rect.visual,
-            layout.category_index,
+            layout.category_index, rect.ordinal,
         )
         # The ink is measured against the fill rather than fixed: the
         # colorblind and cyberpunk tables reach OKLab L 0.93, and a white

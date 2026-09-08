@@ -592,3 +592,67 @@ def test_settings_switch_updates_the_mouse_preference(tmp_path):
             assert config.ui.mouse is switch.value
 
     asyncio.run(go())
+
+
+def test_the_two_charts_quote_the_same_share_for_one_node(tmp_path):
+    """A treemap tooltip must agree with the sunburst and the size tree.
+
+    `area_share` reads the *picture* -- borders, title rows and folded
+    sub-cell rects all eat area -- so it reported 30% for a file the tree
+    and the sunburst both called 36.6%. Two numbers for one node on one
+    screen. The share is now the metric share both of the others compute.
+    """
+    _make_tree_dir(tmp_path)
+    target = str(tmp_path / "alpha")
+
+    async def go():
+        app = _explorer_app(tmp_path, viz="sunburst")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            sunburst = app.screen.query_one("#sunburst-view", SunburstView)
+            await wait_for_layout(pilot, sunburst)
+            arc = _arc_for(sunburst._layout, target)
+            await pilot.hover(sunburst, offset=_cell_of(sunburst._layout, arc))
+            await pilot.pause()
+            arc_tooltip = sunburst.tooltip
+
+            await pilot.press("f2")
+            await pilot.pause()
+            treemap = app.screen.query_one("#treemap-view", TreemapView)
+            await wait_for_layout(pilot, treemap)
+            cell = _treemap_cell(treemap._layout, target)
+            assert cell is not None
+            await pilot.hover(treemap, offset=cell)
+            await pilot.pause()
+            rect_tooltip = treemap.tooltip
+
+            assert arc_tooltip is not None and rect_tooltip is not None
+            assert arc_tooltip == rect_tooltip
+
+    asyncio.run(go())
+
+
+def test_the_innermost_ring_says_it_is_the_root(tmp_path):
+    """`home · 100%` was a true statement that explained nothing.
+
+    The innermost ring is the chart's own root, so it is always all of
+    itself; the tooltip says so, and says what clicking it does.
+    """
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        app = _explorer_app(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            view = app.screen.query_one("#sunburst-view", SunburstView)
+            await wait_for_layout(pilot, view)
+
+            arc = _arc_for(view._layout, str(tmp_path))
+            await pilot.hover(view, offset=_cell_of(view._layout, arc))
+            await pilot.pause()
+
+            assert view.tooltip is not None
+            assert "this root" in view.tooltip
+            assert "click to go up" in view.tooltip
+
+    asyncio.run(go())

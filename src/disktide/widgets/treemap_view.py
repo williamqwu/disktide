@@ -28,6 +28,7 @@ from disktide.viz.layout import is_aggregate_path
 from disktide.viz.treemap import (
     TreemapLayout,
     TreemapRect,
+    _layout_value,
     compute_layout,
     render_line,
 )
@@ -170,7 +171,19 @@ class TreemapView(OpaqueStripMixin, Widget):
         node = rect.node
         if is_aggregate_path(node.path):
             return node.name
-        share = self._layout.area_share(rect) if self._layout else 0.0
+        # The *metric* share, not the area share, and the same arithmetic
+        # SunburstView and the size tree do: node value over root value.
+        # Borders, title rows and folded sub-cell rects all eat area, so
+        # `area_share` reported 30% for a file the tree called 36.6% --
+        # two numbers for one node on one screen.
+        weights = self._diff.weights if self._diff is not None else None
+        metric = self._diff.metric.value if self._diff is not None else self._metric
+        total = (
+            _layout_value(self._node, metric, weights)
+            if self._node is not None
+            else 0
+        )
+        share = _layout_value(node, metric, weights) / total if total > 0 else 0.0
         return f"{node.name}\n{metric_text(node, self._metric)} · {share:.0%}"
 
     def _fits_current_size(self) -> bool:
