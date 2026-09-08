@@ -102,11 +102,11 @@ class TestSizeTreeLabel:
 class TestIndicatorFitsNarrowRows:
     """The longer "N hidden" tail must still leave the percent whole.
 
-    `_make_label` reserves `cell_len(indicator)` before `_append_share`
-    lays out the bar, so widening the indicator has to come out of the
-    bar, never out of the row. The campaign geometries are checked here
-    cheaply rather than through a full app, because the arithmetic lives
-    entirely in `_tail_room`.
+    `_make_label` appends the indicator before `_append_share` lays out
+    the bar, so widening the indicator has to come out of the bar, never
+    out of the row. The campaign geometries are checked here cheaply
+    rather than through a full app, because the arithmetic lives entirely
+    in `_tail_room`.
     """
 
     GEOMETRIES = (20, 40, 80, 300)
@@ -267,3 +267,39 @@ class TestVizGlyphs:
             if PARTIAL in lbl.text:
                 assert 0 <= lbl.char_x
                 assert lbl.char_x + visible_width(lbl.text) <= layout.char_width
+
+
+class TestPercentIsAColumn:
+    """A badge must not shift its row's percent left of every other row's.
+
+    The indicator used to be appended *after* the bar, and its cells were
+    reserved out of the bar's budget -- so a row carrying `◐ N hidden` got
+    a shorter bar and a percent that no longer lined up with the rows
+    above and below it.
+    """
+
+    def test_rows_with_and_without_a_badge_end_together(self, monkeypatch):
+        root = _node("root", size=1000)
+        plain = FSNode(
+            name="plain", path="/root/plain", size=500, own_size=500,
+            is_dir=True, depth=1,
+        )
+        badged = FSNode(
+            name="badged", path="/root/badged", size=500, own_size=500,
+            is_dir=True, depth=1,
+            inaccessible_count=1, inaccessible_subtree_count=12,
+        )
+        root.children.extend([plain, badged])
+        tree = SizeTree(root)
+        monkeypatch.setattr(
+            type(tree), "scrollable_content_region",
+            property(lambda self: Region(0, 0, 80, 24)),
+        )
+        widths = set()
+        for node in (plain, badged):
+            text = tree._make_label(node)
+            assert re.search(r"\d+\.\d%$", text.plain), text.plain
+            indent = (node.depth - root.depth) * tree.guide_depth
+            glyph = max(cell_len(tree.ICON_NODE), cell_len(tree.ICON_NODE_EXPANDED))
+            widths.add(text.cell_len + indent + glyph)
+        assert len(widths) == 1, widths

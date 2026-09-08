@@ -84,6 +84,13 @@ outgrow the inode — so Allocated and Unique include them. On a tree with
 hardlinks `du -s` matches Unique, not Allocated: `du` deduplicates by inode
 too.
 
+Under Unique, an inode's bytes are charged to whichever of its paths sorts
+first lexically — deterministic, and independent of scan order, but not
+always the path you would have picked. A hardlink mirror at
+`backup/photos-2024/` therefore keeps the bytes and `photos/` is the
+directory that shrinks, because `backup` sorts before `photos`. Details
+names the owner on every duplicate row (`[hardlink → …]`).
+
 Platforms without `st_blocks` show Allocated/Unique as "Unavailable," never
 zero — and that is the only thing "Unavailable" means. A directory you are
 not allowed to read still contributes its own blocks and is reported on the

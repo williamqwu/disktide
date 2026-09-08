@@ -150,9 +150,29 @@ class WelcomeScreen(Screen[tuple[str, bool]]):
     """Welcome screen with single path input and suggestion cycling."""
 
     DEFAULT_CSS = """
+    WelcomeScreen {
+        align: center top;
+    }
+
     #welcome-dialog {
         padding: 2 4;
-        max-width: 80;
+        width: 80;
+        max-width: 100%;
+    }
+
+    /* Textual draws an unchecked toggle as `$panel-darken-2` on `$panel`:
+       a dark X inside the button, which reads as a *checked* box rather
+       than an empty one. Off is nothing at all here; on is the success
+       tick the theme already defines. */
+    #welcome-save-default > .toggle--button {
+        color: $panel;
+        background: $panel;
+    }
+
+    #welcome-save-default.-on > .toggle--button {
+        color: $text-success;
+        background: $panel;
+        text-style: bold;
     }
 
     #welcome-title {

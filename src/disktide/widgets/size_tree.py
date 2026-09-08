@@ -527,27 +527,25 @@ class SizeTree(Tree[FSNode]):
                 ink("warning_strong"),
             )
 
+        # The access indicator goes on *before* the bar, so the bar and
+        # the percent stay one right-aligned block. Appended after it, a
+        # `◐ 12 hidden` badge shortened the bar and shifted the percent of
+        # that row left of every other row's -- the percent column was a
+        # column only on the rows with nothing to report.
+        if indicator is not None:
+            text.append(indicator[0], style=indicator[1])
+
         # Proportional bar for directories (share of the scan root total).
         # A vanished directory has nothing to show a share of, and a 0.0%
         # bar reads as a measurement rather than as an absence.
         if node.is_dir and not node.vanished:
             ratio = self._metric_ratio(node)
             if ratio is not None:
-                reserved = cell_len(indicator[0]) if indicator else 0
-                self._append_share(text, node, ratio, reserved)
-
-        if indicator is not None:
-            text.append(indicator[0], style=indicator[1])
+                self._append_share(text, node, ratio)
 
         return text
 
-    def _append_share(
-        self,
-        text: Text,
-        node: FSNode,
-        ratio: float,
-        reserved: int,
-    ) -> None:
+    def _append_share(self, text: Text, node: FSNode, ratio: float) -> None:
         """Append the bar and percent, degrading to whatever the row fits.
 
         The percent is the payload and is never truncated: the bar gives up
@@ -557,13 +555,24 @@ class SizeTree(Tree[FSNode]):
         like "16." with the digits and sign shorn off.
         """
         percent = f"{ratio * 100:.1f}%"
-        room = self._tail_room(node, text, reserved)
+        room = self._tail_room(node, text)
 
         if room is None:
             bar_width = self.BAR_WIDTH
         else:
             # "  " + bar + " " + percent
             bar_width = min(self.BAR_WIDTH, room - 3 - len(percent))
+            # Right-align the whole block against the panel edge so the
+            # percent lands in the same column on every row, whatever the
+            # name, the delta or an access badge did to the row before it.
+            used = (
+                3 + bar_width + len(percent)
+                if bar_width >= self.MIN_BAR_WIDTH
+                else 2 + len(percent)
+            )
+            lead = max(0, room - used)
+            if lead:
+                text.append(" " * lead)
 
         if bar_width >= self.MIN_BAR_WIDTH:
             filled = int(ratio * bar_width)
@@ -589,13 +598,14 @@ class SizeTree(Tree[FSNode]):
         elif room is None or room >= 2 + len(percent):
             text.append(f"  {percent}", style=ink("bar"))
 
-    def _tail_room(self, node: FSNode, text: Text, reserved: int) -> int | None:
+    def _tail_room(self, node: FSNode, text: Text) -> int | None:
         """Cells left on `node`'s row for the bar and percent.
 
         The rendered row is the tree's guide indentation, plus the
         expand glyph `Tree.render_label` prepends to expandable nodes,
-        plus the label built so far — and the trailing access indicator
-        still to come, passed in as `reserved`.
+        plus the label built so far, access indicator included: that
+        badge is appended before this runs, so its cells are already
+        in `text` rather than having to be reserved out of band.
 
         Returns None when the widget has no usable width yet (before the
         first layout), so the caller emits the full-width tail and the
@@ -614,7 +624,7 @@ class SizeTree(Tree[FSNode]):
             if node.is_dir
             else 0
         )
-        return width - indent - glyph - text.cell_len - reserved
+        return width - indent - glyph - text.cell_len
 
     def on_resize(self, event: events.Resize) -> None:
         """Re-fit labels whenever the usable width changes.
