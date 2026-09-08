@@ -37,6 +37,7 @@ from disktide.domain.monitor import (
     RetentionPreview,
 )
 from disktide.domain.visualization import MonitorSpaceTime
+from disktide.pathdisplay import elide_path, relative_label
 from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
 from disktide.services.monitor import (
     MonitorEvent,
@@ -799,6 +800,10 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
         paths = [(history.root_path, history.root_points)]
         if history.selected_path and history.selected_points:
             paths.append((history.selected_path, history.selected_points))
+        # Every row of this table is under the monitor root, so the root
+        # prefix is the same 24 of the 34 cells on every one of them. The
+        # root itself is `.`.
+        root_path = history.root_path
         for path, points in paths:
             for point in reversed(points):
                 flags = []
@@ -810,7 +815,7 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
                     flags.append(point.rollup_kind)
                 table.add_row(
                     point.timestamp.astimezone().strftime("%Y-%m-%d %H:%M"),
-                    self._short_path(path),
+                    self._short_path(relative_label(path, root_path)),
                     self._history_value(point.value, history.monitor.metric.value),
                     point.state.value,
                     str(point.monitor_revision or "—"),
@@ -1460,9 +1465,7 @@ class MonitorScreen(RenderEpochRefreshMixin, Screen):
 
     @staticmethod
     def _short_path(path: str, max_length: int = 42) -> str:
-        if len(path) <= max_length:
-            return path
-        return "…" + path[-(max_length - 1):]
+        return elide_path(path, max_length)
 
     @staticmethod
     def _history_value(value: int | None, metric: str) -> str:

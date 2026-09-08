@@ -12,6 +12,7 @@ from disktide.widgets import OpaqueStripMixin
 from textual.widget import Widget
 
 from disktide.domain.visualization import GrowthHeatmapModel, HeatmapCell, VisualState
+from disktide.pathdisplay import elide_path, relative_label
 from disktide.presentation.tui.viewmodels.visualization import legend_text, visual_token
 from disktide.viz.colors import delta_background
 
@@ -41,6 +42,25 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
         super().__init__(**kwargs)
         self._model: GrowthHeatmapModel | None = None
         self._cursor = 0
+
+    def _row_label(self, path: str) -> str:
+        """A row's path as it reads inside a matrix about one root.
+
+        Every row is under the monitored root, so the absolute form spends
+        the column on the prefix they all share -- 24 of 34 cells were
+        `…/scratchpad/stage/home` on the tree this was measured against --
+        and crops away the part that tells the rows apart.
+        """
+        model = self._model
+        root = next(
+            (
+                interval.root_path
+                for interval in (model.intervals if model else ())
+                if interval.root_path
+            ),
+            None,
+        )
+        return relative_label(path, root)
 
     @property
     def selected_path(self) -> str | None:
@@ -106,7 +126,7 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
             token = visual_token(VisualState.GROWTH)
             marker = ">" if index == self._cursor else " "
             text = (
-                f"{marker}{token.glyph} {row.path}  "
+                f"{marker}{token.glyph} {self._row_label(row.path)}  "
                 f"{row.consistency:.0%} · streak {row.longest_streak}"
             )
             return Strip(
@@ -143,7 +163,9 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
             row = model.rows[row_index]
             selected = row_index == self._cursor
             marker = ">" if selected else " "
-            label = (marker + row.path)[-path_width:].ljust(path_width)
+            label = (
+                marker + elide_path(self._row_label(row.path), path_width - 1)
+            ).ljust(path_width)
             segments = [
                 Segment(label + "  ", Style(reverse=selected, bold=selected))
             ]

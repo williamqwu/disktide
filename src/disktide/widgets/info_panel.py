@@ -63,7 +63,11 @@ class InfoPanel(Widget):
 
         table = Table(show_header=False, box=None, padding=(0, 2))
         table.add_column("Property", style="bold")
-        table.add_column("Value")
+        # `fold`, not the default ellipsis: the one row here that routinely
+        # outruns the panel is `Path`, and cropping a path at the right
+        # drops the directory it names in favour of the mount prefix every
+        # other path on the machine shares. Wrapping keeps all of it.
+        table.add_column("Value", overflow="fold")
 
         table.add_row("Name", node.name)
         table.add_row("Path", node.path)
