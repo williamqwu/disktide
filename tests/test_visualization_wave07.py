@@ -701,6 +701,73 @@ async def _wait_until(pilot, predicate, attempts: int = 160) -> None:
     assert predicate()
 
 
+def test_toggling_diff_does_not_re_root_the_screen(tmp_path):
+    """`d` twice must leave the tree, breadcrumb and chart where they were.
+
+    Reloading the tree restored the cursor with `select_node`, which posts
+    `NodeSelected`; the Explorer answers that by drilling in. So parking
+    the cursor on a directory and pressing `d` twice silently re-rooted the
+    whole screen one level down, and `u` afterwards moved only the chart.
+    """
+    root = tmp_path / "root"
+    (root / "growing").mkdir(parents=True)
+    (root / "spike").mkdir()
+    (root / "growing" / "payload").write_bytes(b"x" * 10)
+    (root / "spike" / "payload").write_bytes(b"x" * 10)
+    database_path = tmp_path / "wave07-reroot.db"
+    _bootstrap_monitor_history(database_path, str(root))
+    repository = SQLiteSnapshotRepository(str(database_path))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_app_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: getattr(app.screen, "_scan_in_progress", True) is False,
+            )
+            await _wait_until(
+                pilot,
+                lambda: getattr(app.screen, "_space_time", None) is not None,
+            )
+            screen = app.screen
+            tree = screen.query_one("#size-tree")
+            # Park the cursor on a directory without selecting it.
+            await pilot.press("down")
+            await pilot.pause()
+            assert tree.cursor_node.data.is_dir
+            parked = tree.cursor_node.data.path
+            assert parked != str(root)
+
+            for _ in range(2):
+                await pilot.press("d")
+                await pilot.pause()
+
+            assert screen._diff_mode is False
+            assert screen._current.path == str(root)
+            assert tree.root_path == str(root)
+            assert tree.cursor_node.data.path == parked
+
+            # And when the user does drill in, the tree follows the
+            # breadcrumb instead of being left a level behind.
+            await pilot.press("enter")
+            await pilot.pause()
+            assert screen._current.path == parked
+            assert tree.root_path == parked
+
+            await pilot.press("u")
+            await pilot.pause()
+            assert screen._current.path == str(root)
+            assert tree.root_path == str(root)
+
+    asyncio.run(exercise())
+    repository.close()
+
+
 def test_tui_diff_and_monitor_views_keep_highlighted_path(tmp_path):
     root = tmp_path / "root"
     (root / "growing").mkdir(parents=True)

@@ -154,7 +154,19 @@ class SizeTree(Tree[FSNode]):
         # screen after a scan completes; see ExplorerScreen._on_scan_complete.)
         self.cursor_line = 0
         if restore_path and restore_path != root_node.path:
-            self.select_path(restore_path)
+            # `notify=False`: restoring a cursor is not the user selecting
+            # a row. `select_node` posts `Tree.NodeSelected`, which the
+            # Explorer reads as "Enter on a directory" and answers by
+            # drilling into it -- so every reload that happened to have a
+            # directory under the cursor (a Diff toggle, a metric switch)
+            # silently re-rooted the whole screen one level down.
+            self.select_path(restore_path, notify=False)
+
+    @property
+    def root_path(self) -> str | None:
+        """The path this tree is currently rooted at, if it has been loaded."""
+        root = self._fs_root
+        return None if root is None else root.path
 
     @property
     def selected_path(self) -> str | None:
@@ -188,13 +200,19 @@ class SizeTree(Tree[FSNode]):
             tree_node.set_label(self._make_label(tree_node.data))
             self.refresh()
 
-    def select_path(self, path: str) -> bool:
-        """Expand the path ancestry and restore the cursor by stable identity."""
+    def select_path(self, path: str, *, notify: bool = True) -> bool:
+        """Expand the path ancestry and restore the cursor by stable identity.
+
+        `notify` decides whether landing on the row also *selects* it. A
+        click on a chart shape is a selection and wants the message; a
+        cursor being put back where it was after a reload is not.
+        """
         root = self._fs_root
         if root is None or root.find(path) is None:
             return False
+        land = self.select_node if notify else self.move_cursor
         if path == root.path:
-            self.select_node(self.root)
+            land(self.root)
             return True
 
         current_fs = root
@@ -230,7 +248,7 @@ class SizeTree(Tree[FSNode]):
         # `validate_cursor_line` would clamp straight back to the root.
         if self.last_line < 0:
             return False
-        self.select_node(current_tree)
+        land(current_tree)
         return True
 
     @property

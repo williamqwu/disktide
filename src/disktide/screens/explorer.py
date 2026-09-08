@@ -44,7 +44,11 @@ from disktide.domain.scan import (
     ScanStarted,
     ScanStatus,
 )
-from disktide.domain.visualization import ExplorerSpaceTime, VisualizationBlocked
+from disktide.domain.visualization import (
+    DiffFrame,
+    ExplorerSpaceTime,
+    VisualizationBlocked,
+)
 from disktide.metrics import METRIC_EXPLANATIONS, METRIC_NAMES, metric_text
 from disktide.rendering import (
     bump_render_epoch,
@@ -1114,7 +1118,14 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         if self._diff_mode and context is not None:
             frame = replace(context.frame, selected_path=selected_path)
             self._space_time = replace(context, frame=frame)
-            tree.reload(frame.visual_root, selected_path=selected_path)
+            # The diff frame is rooted at the snapshot root; the screen is
+            # rooted wherever the user drilled to. Reloading the tree from
+            # the frame root re-rooted the screen behind the breadcrumb's
+            # back, which is how `d` twice used to leave the tree showing a
+            # different directory than the chart.
+            tree.reload(
+                self._diff_tree_root(frame), selected_path=selected_path
+            )
             tree.set_visual_context(
                 dict(frame.visuals),
                 dict(context.mini_trends),
@@ -1131,6 +1142,54 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             )
         self._update_active_viz(self._current or self._root)
         self._update_tree_indicator()
+
+    def _narrowed_diff_frame(self) -> DiffFrame | None:
+        """This screen's diff frame, re-rooted at the current directory."""
+        context = self._space_time
+        if context is None:
+            return None
+        frame = context.frame
+        node = self._diff_tree_root(frame)
+        if node is frame.visual_root:
+            return frame
+        return replace(frame, visual_root=node)
+
+    def _diff_tree_root(self, frame: DiffFrame) -> FSNode:
+        """The node in a diff frame that stands for the drilled-to directory.
+
+        Falls back to the frame root when the current directory is not in
+        the target snapshot at all -- a folder created since it was taken.
+        """
+        current = self._current or self._root
+        if current is None:
+            return frame.visual_root
+        return frame.visual_root.find(current.path) or frame.visual_root
+
+    def _sync_tree_root(self) -> None:
+        """Point the tree at `_current`, keeping the cursor where it was.
+
+        Navigation used to move the breadcrumb and the chart and leave the
+        tree behind; the next reload for any other reason then re-rooted it
+        without warning. One place decides what the tree is rooted at now,
+        and it is the same node the breadcrumb names.
+        """
+        if not self.is_mounted or self._root is None:
+            return
+        if not self.query("#size-tree"):
+            return
+        tree = self.query_one("#size-tree", SizeTree)
+        current = self._current or self._root
+        context = self._space_time
+        if self._diff_mode and context is not None:
+            root_node = self._diff_tree_root(context.frame)
+        else:
+            root_node = current
+        if tree.root_path == root_node.path:
+            return
+        selected = tree.selected_path
+        if selected is None or not _path_is_within(selected, root_node.path):
+            selected = root_node.path
+        tree.reload(root_node, selected_path=selected)
 
     def _on_scan_cancelled(self, event: ScanCancelled) -> None:
         """Reset live UI state without presenting a partial tree as final."""
@@ -1229,16 +1288,25 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         active = tabs.active
 
         selected_visual = visual_node or node
+        # The chart draws the directory the breadcrumb names, in Diff as in
+        # Current: the frame is rooted at the snapshot root, so drilling in
+        # narrows it to the matching subtree rather than redrawing the whole
+        # snapshot under a breadcrumb that says otherwise.
+        diff_frame = (
+            self._narrowed_diff_frame()
+            if self._diff_mode and self._space_time is not None
+            else None
+        )
         if active == "tab-treemap":
             view = self.query_one("#treemap-view", TreemapView)
-            if self._diff_mode and self._space_time is not None:
-                view.set_diff(self._space_time.frame)
+            if diff_frame is not None:
+                view.set_diff(diff_frame)
             else:
                 view.set_node(selected_visual)
         elif active == "tab-sunburst":
             view = self.query_one("#sunburst-view", SunburstView)
-            if self._diff_mode and self._space_time is not None:
-                view.set_diff(self._space_time.frame)
+            if diff_frame is not None:
+                view.set_diff(diff_frame)
             else:
                 view.set_node(selected_visual)
         elif active == "tab-details":
@@ -1596,10 +1664,11 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         )
 
     def _drill_into(self, node: FSNode) -> None:
-        """Drill into a directory node."""
+        """Drill into a directory node, taking the whole screen with it."""
         self._current = node
         breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
         breadcrumb.update_path(node.path, access=self._access_state(node))
+        self._sync_tree_root()
         self._update_active_viz(node)
 
     @staticmethod
