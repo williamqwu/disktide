@@ -116,8 +116,8 @@ def test_doctor_reports_watch_backend_version_and_configured_mode(
     payload = report.to_dict()
     watch = payload["optional_extras"]["watch"]
 
-    # 9 since the `clipboard` section was added.
-    assert payload["schema_version"] == 9
+    # 10 since the unwritten cache and log paths were dropped.
+    assert payload["schema_version"] == 10
     assert payload["config"]["monitor_event_mode"] == "auto"
     assert watch["available"] is True
     assert watch["version"] == "2.0.1"

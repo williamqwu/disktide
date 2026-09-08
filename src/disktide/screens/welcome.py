@@ -14,7 +14,7 @@ from textual.screen import Screen
 from textual.suggester import Suggester
 from textual.widgets import Static, Input, Button, Checkbox
 
-from disktide import APP_NAME, __version__
+from disktide import APP_NAME, CLI_NAME, __version__
 
 # Limit scandir iterations to avoid blocking on huge directories (e.g. /home).
 _MAX_SCANDIR_ENTRIES = 200
@@ -230,14 +230,17 @@ class WelcomeScreen(Screen[tuple[str, bool]]):
             )
             yield Static(
                 "[dim]TUI keys:[/dim]  "
-                "[bold]E[/bold] Explorer  "
-                "[bold]M[/bold] Monitor  "
-                "[bold]F[/bold] FS Overview  "
-                "[bold]?[/bold] Settings  "
-                "[bold]Q[/bold] Quit\n"
+                "[bold]1[/bold] Explorer  "
+                "[bold]2[/bold] Monitor  "
+                "[bold]3[/bold] FS Overview  "
+                "[bold]4[/bold] Cleanup\n"
+                "           "
+                "[bold]?[/bold] Keys  "
+                "[bold],[/bold] Settings  "
+                "[bold]q[/bold] Quit\n"
                 "[dim]CLI:[/dim]       "
-                f"{APP_NAME} [bold]scan[/bold] | [bold]watch[/bold] | "
-                "[bold]cleanup[/bold] <path>  "
+                f"{CLI_NAME} [bold]scan[/bold] | [bold]watch[/bold] | "
+                "[bold]cleanup[/bold] <path>, [bold]doctor[/bold]  "
                 "[dim](outside TUI)[/dim]",
                 id="welcome-commands",
             )

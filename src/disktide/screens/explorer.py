@@ -157,11 +157,11 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         ),
         # Quarter-screen jumps in the tree — fast scanning of huge lists.
         Binding(
-            "ctrl+d", "scroll_quarter('down')", "Half page down",
+            "ctrl+d", "scroll_quarter('down')", "Quarter page down",
             show=False, id="explorer.scroll_down",
         ),
         Binding(
-            "ctrl+u", "scroll_quarter('up')", "Half page up",
+            "ctrl+u", "scroll_quarter('up')", "Quarter page up",
             show=False, id="explorer.scroll_up",
         ),
     ]

@@ -1382,7 +1382,7 @@ This dropped the pre-welcome import path from 563 modules to 406 and from
 
 Four mode screens (Explorer, Cleanup, Monitor, FS Overview) plus Settings
 are installed (not pushed) after welcome, so they persist when switching with
-`1`/`2`/`3`/`c`.
+`1`/`2`/`3`/`4`.
 
 - `switch_screen()` swaps at the same stack level.
 - `push_screen()` adds on top (used for settings).

@@ -25,7 +25,7 @@ from disktide.extensions.capabilities import (
     CapabilityId,
     CapabilityStatus,
 )
-from disktide.paths import cache_root, config_file, data_root, state_log_file
+from disktide.paths import config_file, data_root
 from disktide.scanner.accel import ACCEL_BACKEND, ACCEL_REASON, NATIVE_AVAILABLE
 from disktide.scanner.sysinfo import detect_cpu_count, detect_cpu_quota
 from disktide.storage.database import Database
@@ -36,7 +36,7 @@ from disktide.storage.migrations import (
 )
 
 
-DOCTOR_SCHEMA_VERSION = 9
+DOCTOR_SCHEMA_VERSION = 10
 
 #: Above this, `doctor` reports the integrity check as skipped rather than
 #: spending minutes on it unasked. `PRAGMA quick_check` reads every page: on
@@ -318,8 +318,6 @@ def render_doctor_report(report: DoctorReport) -> str:
         "Application paths",
         f"  Config: {paths['config']}",
         f"  Database: {paths['database']}",
-        f"  Cache: {paths['cache']}",
-        f"  Log: {paths['log']}",
         "  Paths: raw" if not paths["redacted"] else "  Paths: redacted (use --show-paths)",
         "",
         "Configuration",
@@ -872,8 +870,9 @@ def _render_terminal_block(terminal: object) -> list[str]:
     )
     if source not in measured_labels and source not in ("env", "config"):
         lines.append(
-            "  Suggestion: set Settings > Cell aspect, or press , / . in "
-            "the explorer, or export DISKTIDE_CELL_ASPECT"
+            "  Suggestion: set Settings (,) > Cell aspect, or use the "
+            "command palette (^p) entries \"Cell aspect: rounder/taller\", "
+            "or export DISKTIDE_CELL_ASPECT"
         )
     return lines
 
@@ -1242,7 +1241,7 @@ def _optional_extras(configured_mode: str) -> dict[str, object]:
             "install": "uv tool install 'disktide[watch]'",
         }
     )
-    reason = "not shipped by the 0.2 core installation"
+    reason = "not shipped by the core installation"
     suggestion = "No action required; this integration is reserved for a later wave."
     reserved = {
         name: {
@@ -1272,8 +1271,6 @@ def _application_paths(show_paths: bool) -> dict[str, object]:
     return {
         "config": _redact_path(config_file(), show_paths),
         "database": _redact_path(data_root() / "data.db", show_paths),
-        "cache": _redact_path(cache_root(), show_paths),
-        "log": _redact_path(state_log_file(), show_paths),
         "redacted": not show_paths,
     }
 

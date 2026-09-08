@@ -5,24 +5,26 @@ cleanup opportunities, and tracking how directory sizes change over time.
 
 ## Getting Started
 
-Install and launch:
+DiskTide is not on PyPI yet, so install from a checkout:
 
 ```bash
-uv tool install disktide
+git clone https://github.com/williamqwu/disktide && cd disktide
+uv tool install .   # isolated environment, disktide on your PATH
 disktide            # welcome screen
 disktide ~/projects # straight into the explorer on that path
 ```
 
-`uvx disktide`, `pipx install disktide`, and `pip install disktide` also work.
+pip works too (`python -m venv .venv && . .venv/bin/activate && pip install .`),
+and `pipx install .` gives you a global command as well; see the README for the
+details and [why-uv.md](why-uv.md) for what uv is and how to install it.
+
 The installed command is always `disktide`; `sizetrail`, `fsmonitor`, and
 `fsmonitor-cli` remain compatibility aliases.
 
-The dependency list is unchanged by any of them. On Linux and macOS the
-install picks up a prebuilt wheel carrying one small optional C extension
-that makes scanning several times faster on multiple workers — nothing to
-choose, nothing to add. Anywhere without a prebuilt wheel, pip falls back to
-the source distribution, which compiles the same extension if a C compiler
-is around and quietly does without it if not. See *Scanner backend* below.
+Installing from the checkout compiles the small optional C extension when a C
+compiler is present. Without one the install still succeeds and DiskTide uses
+the slower pure-Python reader instead. `disktide doctor` shows which one is
+active. See *Scanner backend* below.
 
 The welcome screen shows a path input with suggested starting directories
 (current directory, saved default, last visited, recent scan/watch paths).
@@ -39,7 +41,7 @@ names both possibilities.
 
 ## TUI
 
-The TUI uses `1`, `2`, `3` for Explorer, Monitor, and FS Overview; `c` for
+The TUI uses `1`, `2`, `3` for Explorer, Monitor, and FS Overview; `4` for
 Cleanup (disabled by default). Press `?` for the key map and `,` for Settings.
 
 ### Explorer (1)
@@ -166,13 +168,13 @@ available.
 Pseudo-filesystems are filtered out. Unavailable probes show their reason
 instead of an empty panel.
 
-### Cleanup (c)
+### Cleanup (4)
 
 Detects reclaimable artifacts through versioned rule packs for Python, Node,
 Rust, general logs/temp, IDE metadata, and container caches.
 
 **Disabled by default.** Enable it in Settings (`,`) under "Cleanup Settings,"
-then press `c`.
+then press `4`.
 
 | Key | Action |
 |-----|--------|
@@ -210,7 +212,7 @@ Press `?` in the app for a live, screen-specific version of this table.
 
 | Key | Scope | Action |
 |-----|-------|--------|
-| `1` `2` `3` `c` | Global | Explorer / Monitor / FS Overview / Cleanup |
+| `1` `2` `3` `4` | Global | Explorer / Monitor / FS Overview / Cleanup |
 | `?` | Global | Key map for the current screen |
 | `,` | Global | Settings |
 | Ctrl+P | Global | Command palette |
@@ -225,7 +227,7 @@ Press `?` in the app for a live, screen-specific version of this table.
 | `y` | Explorer | Copy path — tmux buffer, OSC 52, or a local tool |
 | `Y` | Explorer | Show the path for hand selection |
 | `M` | Explorer | Set up monitoring |
-| `[` / `]` | Explorer | Older / newer snapshot pair |
+| `[` / `]` | Explorer | Newer / older snapshot pair |
 | `g` | Explorer | Cycle ring shape |
 | Ctrl+U / Ctrl+D | Explorer | Jump tree cursor ¼ screen |
 | `n` / `e` / `p` | Monitor | New / edit / pause-resume |
@@ -685,12 +687,12 @@ DISKTIDE_ACCEL=0 disktide scan /path
 The two produce identical trees, so this is for comparing speeds or ruling
 the extension out of a bug, not for changing what a scan reports.
 
-**If the fallback is what you have.** A wheel for your platform and Python
-version carries the extension; a source install builds it when a C compiler
-is present. So on a platform PyPI has no wheel for, `pip install disktide`
-needs `cc`/`gcc`/`clang` and your Python's development headers
-(`python3-dev` / `python3-devel`) to reach the fast path — and it installs
-successfully either way, because a missing compiler is not an error.
+**If the fallback is what you have.** Installing from the checkout builds
+the extension when a C compiler is present, so the fast path needs
+`cc`/`gcc`/`clang` and your Python's development headers (`python3-dev` /
+`python3-devel`). The install succeeds either way, because a missing compiler
+is not an error. Once DiskTide ships prebuilt wheels, a platform that has one
+will not need a compiler at all.
 
 One thing to know about the fast path: a single directory read is not
 interruptible, so cancelling a scan inside one enormous directory (hundreds

@@ -36,56 +36,52 @@
 
 ## What it does
 
-- **General** — measures every tree four ways (logical bytes, allocated blocks, unique on-disk, file count) so sparse files, hardlinks, and many-tiny-file directories each show up for what they are.
-  - Filesystem boundaries, pseudo-mounts, policy exclusions, and unreadable subtrees are reported as coverage, never silently dropped.
-  - Five validated color themes, mouse support, and XDG-compliant stored state.
+- **General.** DiskTide measures every directory four ways: logical bytes, allocated blocks, unique on-disk bytes after hardlink dedup, and file count. Sparse files, hardlinks and piles of tiny files all show up for what they are. Anything the scan could not cover (other filesystems, pseudo mounts, excluded paths, unreadable directories) is reported as coverage instead of being silently dropped.
+  - Six color themes, one of which follows your terminal's own 16 colors. The mouse works. Config and data live in standard XDG paths.
 
-- **Explorer** — sorted file tree with three synchronized visualizations: sunburst, treemap, and details panel.
-  - `t` cycles the size metric across every view at once; `g` cycles the sunburst shape (tiles / disc / fill).
+- **Explorer.** A sorted file tree next to a sunburst, a treemap, or a details panel. `t` switches the size metric everywhere at once, `g` switches the sunburst shape (tiles, disc, fill), and `d` shows the difference against an earlier snapshot.
 
-- **Monitor** — snapshot-based growth tracking with versioned retention, pinned snapshots, and audited alerts.
-  - Four history views share one baseline/target pair: Trend, Diff Treemap, growth-overlay Sunburst, and persistent-growth Heatmap.
-  - No daemon: scans run only while a TUI session or `disktide watch` foreground host is alive.
+- **Monitor.** Takes a snapshot of a directory on a schedule (every 6 hours by default) and shows you how it grew: a trend chart, a diff treemap, a growth sunburst, and a heatmap of what keeps growing. Snapshots can be pinned, retention thins out the old ones, and alerts fire on thresholds you set.
+  - There is no daemon. Scans run only while the TUI or `disktide watch` is running.
 
-- **Cleanup** — versioned rule packs (Python, Node, Rust, general, IDE, container) with a review-before-apply workflow.
-  - Every apply goes through a persisted plan, moves to Trash or quarantine, and stays undoable. Permanent deletion is a separate typed-confirmation path.
+- **Cleanup.** Finds reclaimable build and cache artifacts using six rule packs (Python, Node, Rust, general, IDE, containers). You review a plan before anything moves. Files go to the system Trash or to a quarantine directory, and the plan can be undone. Permanent deletion is a separate step that asks you to type a confirmation.
+
+Scanning is metadata only: DiskTide never opens or reads file contents. A small optional C extension makes multi-worker scans several times faster.
 
 ## Installation
 
-Python 3.10–3.14, five runtime dependencies, nothing to configure. The
-scanner carries one small optional C extension, prebuilt in the Linux and
-macOS wheels; where there is no wheel for your platform the source
-distribution builds it if a compiler is present and runs a pure-Python
-fallback if not, so the install never fails for the want of one. Editable
-installs (`pip install -e .`, `uv sync`) build it too, in place, so a
-development checkout gets the same reader a release does — see
-[contributing.md](docs/contributing.md#scanner-extension-in-a-development-checkout)
-for rebuilding it after editing the C. `disktide doctor` says which is live.
+Python 3.10 to 3.14, Linux or macOS, five runtime dependencies. DiskTide is not on PyPI yet, so start with a clone:
 
 ```bash
 git clone https://github.com/williamqwu/disktide && cd disktide
 ```
 
-**With uv** (recommended):
+**With uv** (recommended) [(Why uv?)](docs/why-uv.md):
 
 ```bash
-uv sync --locked                 # editable venv with dev tools
-uv run disktide                  # or: . .venv/bin/activate && disktide
+uv tool install .      # isolated environment, `disktide` on your PATH
+disktide
 ```
+
+After a `git pull`, run `uv tool install --reinstall .` to pick up the new version. `uv tool uninstall disktide` removes it. If your shell cannot find `disktide` afterwards, run `uv tool update-shell` (it adds uv's bin directory, normally `~/.local/bin`, to your PATH) and open a new shell.
 
 **With pip:**
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install .                    # -e for editable
+pip install .
 disktide
 ```
+
+`pipx install .` is a one-line alternative that also gives you a global `disktide` command.
+
+The scanner has a small optional C extension. Installing from this checkout compiles it when a C compiler is present. Without one the install still succeeds and DiskTide uses a slower pure-Python reader instead. `disktide doctor` shows which one is active. See [contributing.md](docs/contributing.md#scanner-extension-in-a-development-checkout) for rebuilding it after editing the C.
 
 ### Optional extras
 
 | Extra | Install | Effect |
 |---|---|---|
-| `watch` | `pip install '.[watch]'` / `uv sync --locked --extra watch` | Linux only. `inotify-simple` for filesystem-event acceleration; without it, monitors work in periodic mode. |
+| `watch` | `uv tool install '.[watch]'` / `pip install '.[watch]'` | Linux only. Installs `inotify-simple` so monitors react to filesystem events. Without it, monitors run on a timer. |
 
 `disktide doctor` reports the active watch backend and its status.
 
@@ -100,28 +96,29 @@ disktide compare <monitor>       # growth report
 disktide cleanup ~/projects      # review cleanup candidates
 ```
 
-Press `?` for settings and the full keymap. `--help` works at every level.
-See the [User Guide](docs/user-guide.md) for details.
+`?` opens the key map for the current screen, `,` opens Settings, and Ctrl+P searches every command by name. `--help` works at every level. See the [User Guide](docs/user-guide.md) for details.
 
 ## Stored data
 
-| Location | Contents |
-|----------|----------|
-| `~/.config/disktide/config.toml` | User settings |
-| `~/.config/disktide/cleanup-rules/*.toml` | Declarative cleanup rule packs |
-| `~/.local/share/disktide/data.db` | Monitors, snapshots, retention/alert history, cleanup plans |
+| Location | Contents | Size |
+|---|---|---|
+| `~/.config/disktide/config.toml` | Your settings and recent paths. | Under 1 KiB (a few hundred bytes). |
+| `~/.config/disktide/cleanup-rules/*.toml` | Your own cleanup rule packs. The six built-in packs ship inside the package and are not copied here. | Nothing unless you add one. A pack is a few KiB. |
+| `~/.local/share/disktide/data.db` | Monitors, snapshots, retention and alert history, cleanup plans (SQLite). | About 210 KiB empty. The first snapshot of a tree costs roughly 200 to 500 bytes per file or directory, mostly the path text: 11 MiB for a tree of 23,000 entries with long paths, and a few hundred MiB for a million entries. Later snapshots of the same tree store only what changed, about 100 bytes per changed entry, plus a full re-baseline of about 55 bytes per entry every 50th snapshot. |
+| `~/.local/share/disktide/data.db.pre-vN.bak` | A one-time backup taken before a schema migration. `disktide doctor` names it. | Whatever the database weighed at that moment. Safe to delete once the new version has run. |
+| `.disktide-quarantine/` next to a cleaned path | Where cleanup moves files when the system Trash is not available on that filesystem. Normal cleanups go to the standard XDG Trash at `~/.local/share/Trash`. | Whatever was moved. Kept 7 days and capped at 10 GiB by default (`quarantine_retention_days` and `quarantine_max_bytes` under `[cleanup]`). |
 
 Paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. Legacy `sizetrail` and
 `fsmonitor-cli` directories are picked up automatically on first run.
 
 ## Documentation
 
-- **[User Guide](docs/user-guide.md)** — usage, configuration, key bindings
-- **[CLI Reference](docs/user-guide.md#cli-commands)** — subcommands, flags, JSON output, exit codes
-- **[Architecture](docs/architecture.md)** — scanner threading, database schema, visualization algorithms
-- **[Filesystem Compatibility](docs/fs.md)** — supported filesystems and platform behavior
-- **[Release Process](docs/release-process.md)** — locked builds, checksums, SBOM, provenance
-- **[Contributing](docs/contributing.md)** — dev setup, testing, extending
+- **[User Guide](docs/user-guide.md)**: usage, configuration, key bindings
+- **[CLI Reference](docs/user-guide.md#cli-commands)**: subcommands, flags, JSON output, exit codes
+- **[Architecture](docs/architecture.md)**: scanner threading, database schema, visualization algorithms
+- **[Filesystem Compatibility](docs/fs.md)**: supported filesystems and platform behavior
+- **[Release Process](docs/release-process.md)**: locked builds, checksums, SBOM, provenance
+- **[Contributing](docs/contributing.md)**: dev setup, testing, extending
 
 ## License
 
