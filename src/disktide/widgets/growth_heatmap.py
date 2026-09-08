@@ -175,5 +175,11 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
             Style(
                 color="white",
                 bgcolor=delta_background(cell.state, max(1, cell.intensity)),
+                # A cell whose snapshot pair was not read in full keeps the
+                # direction it measured and is drawn desaturated. It used
+                # to be repainted as PARTIAL outright, which cost a whole
+                # monitored tree its growth information the moment one
+                # directory under the root was unreadable.
+                dim=cell.partial,
             ),
         )

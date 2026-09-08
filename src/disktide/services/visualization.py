@@ -408,18 +408,19 @@ class VisualizationService:
                     old_value = 0
                 if is_removed and old_value is not None:
                     new_value = 0
-                partial = bool(
-                    baseline_point.partial
-                    or target_point.partial
-                    or (old is not None and old.error)
+                unreadable = bool(
+                    (old is not None and old.error)
                     or (new is not None and new.error)
+                )
+                partial = bool(
+                    baseline_point.partial or target_point.partial or unreadable
                 )
                 state = classify_delta(
                     old_value=old_value,
                     new_value=new_value,
                     is_new=is_new,
                     is_removed=is_removed,
-                    partial=partial,
+                    unreadable=unreadable,
                 )
                 if state is VisualState.UNCHANGED and not partial:
                     continue

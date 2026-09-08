@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+**One unreadable directory no longer costs a whole diff its direction, the tree stops re-rooting itself behind the breadcrumb's back, and a path that will not fit loses its prefix instead of its name**
+- **one `chmod 000` directory anywhere under the root flattened Diff, the diff map, the growth rings and the heatmap** `classify_delta` returned `PARTIAL` for any path whose snapshot was `partial`, and a snapshot is `partial` if *anything* under its root was refused. On a home directory that never fires; on a shared project tree or an NFS export -- which is where monitoring is worth having -- it fires always, and every path in every one of the four views came out the same yellow with no growth, shrink, new or removed anywhere in the picture, every heatmap row reading 0% consistency because a partial interval discarded its own cells. Partial is a confidence statement now, not a state: `VisualDelta.partial` rides alongside a direction the path keeps, a refused path (or one under a refused ancestor -- inherited down the tree, since a `SizeDelta` only knows about its own node) is the only thing still drawn as `PARTIAL`, a hedged delta carries a leading `≈` on its label, a hedged heatmap cell is drawn desaturated in its own direction's colour, and consistency counts the sign of the change.
+
 ## v0.3.0
 
 **A scanner that reads a whole directory in one GIL release, a scan that stopped spending a quarter of itself in the garbage collector, a scheduler that applies each directory once instead of twice, a live scan paced by what the screen actually draws, a progress overlay that stopped repainting for the whole of a scan, a key map that exists, a command palette that was switched off, a footer that fits the terminal it is drawn in, nine keys that stopped meaning two things, and a UI a browser terminal can measure**

@@ -31,7 +31,11 @@ from disktide.domain.visualization import (
     build_trend_model,
 )
 from disktide.models.tree import FSNode
-from disktide.presentation.tui.viewmodels.visualization import sparkline, visual_token
+from disktide.presentation.tui.viewmodels.visualization import (
+    format_visual_delta,
+    sparkline,
+    visual_token,
+)
 from disktide.rendering import set_safe_rendering
 from disktide.repositories.sqlite import SQLiteSnapshotRepository
 from disktide.services.visualization import VisualizationService
@@ -232,7 +236,15 @@ def test_removed_path_uses_visible_bounded_tombstone(repository):
     assert frame.weights["/data/gone.bin"] <= max(1, target.total_size // 20)
 
 
-def test_partial_and_incompatible_pairs_are_never_drawn_as_trusted_delta(repository):
+def test_partial_snapshot_hedges_a_delta_without_erasing_its_direction(repository):
+    """One refused directory must not blank the whole picture.
+
+    A snapshot is `partial` if *anything* under its root was unreadable,
+    which on a shared project tree or an NFS export is the normal state.
+    That is a confidence statement about the pair, so it rides along as
+    `VisualDelta.partial` and as a hedge on the label; the state still
+    says which way the path moved.
+    """
     now = datetime(2026, 8, 21, 12, tzinfo=timezone.utc)
     baseline = _save(repository, _tree("/data", {"item": 100}), now)
     partial = _save(
@@ -242,7 +254,14 @@ def test_partial_and_incompatible_pairs_are_never_drawn_as_trusted_delta(reposit
         partial=True,
     )
     partial_frame = VisualizationService(repository).diff(baseline, partial)
-    assert partial_frame.visuals["/data/item"].state is VisualState.PARTIAL
+    grown = partial_frame.visuals["/data/item"]
+    assert grown.state is VisualState.GROWTH
+    assert grown.partial is True
+    assert partial_frame.partial is True
+    # The hedge is visible without costing the delta its sign.
+    assert format_visual_delta(grown, partial_frame.metric).startswith(
+        visual_token(VisualState.PARTIAL).glyph
+    )
 
     incompatible = _save(
         repository,
@@ -252,6 +271,82 @@ def test_partial_and_incompatible_pairs_are_never_drawn_as_trusted_delta(reposit
     )
     with pytest.raises(VisualizationBlocked, match="Incompatible snapshots"):
         VisualizationService(repository).diff(partial, incompatible)
+
+
+def test_only_the_unreadable_subtree_loses_its_direction(repository):
+    """PARTIAL is a path's own state, inherited only downwards."""
+    now = datetime(2026, 8, 21, 12, tzinfo=timezone.utc)
+
+    def _with_denied(entries, secret_size):
+        root = _tree("/data", entries)
+        denied = FSNode(
+            name="secret",
+            path="/data/secret",
+            is_dir=True,
+            depth=1,
+            device_id=77,
+            error="PermissionError",
+            size=secret_size,
+            own_size=secret_size,
+        )
+        denied.children.append(
+            FSNode(
+                name="inner.bin",
+                path="/data/secret/inner.bin",
+                size=secret_size,
+                own_size=secret_size,
+                is_dir=False,
+                depth=2,
+                device_id=77,
+            )
+        )
+        root.children.append(denied)
+        return root
+
+    baseline = _save(repository, _with_denied({"grow.bin": 100}, 10), now)
+    target = _save(
+        repository,
+        _with_denied({"grow.bin": 180}, 20),
+        now + timedelta(hours=1),
+        partial=True,
+    )
+    frame = VisualizationService(repository).diff(baseline, target)
+
+    assert frame.visuals["/data/grow.bin"].state is VisualState.GROWTH
+    assert frame.visuals["/data/secret"].state is VisualState.PARTIAL
+    assert frame.visuals["/data/secret/inner.bin"].state is VisualState.PARTIAL
+    # Everything in a partial snapshot is hedged; only the refused subtree
+    # forfeits its direction.
+    assert frame.visuals["/data/grow.bin"].partial is True
+
+
+def test_growth_heatmap_keeps_direction_across_a_partial_interval():
+    """A partial interval hedges its cells; it no longer flattens them."""
+    intervals = []
+    for index in range(3):
+        intervals.append(
+            HeatmapInterval(
+                baseline_id=index,
+                target_id=index + 1,
+                timestamp=datetime(2026, 8, 21, 12, tzinfo=timezone.utc)
+                + timedelta(hours=index),
+                visuals={
+                    "/data/grow.bin": _visual(
+                        "/data/grow.bin", VisualState.GROWTH, 50
+                    )
+                },
+                root_path="/data",
+                # The middle interval's pair was incompletely read.
+                partial=index == 1,
+            )
+        )
+    model = build_growth_heatmap(intervals)
+    row = next(row for row in model.rows if row.path == "/data/grow.bin")
+    assert [cell.state for cell in row.cells] == [VisualState.GROWTH] * 3
+    assert [cell.partial for cell in row.cells] == [False, True, False]
+    # Three growth intervals out of three, none of them discarded.
+    assert row.consistency == 1.0
+    assert row.longest_streak == 3
 
 
 def _visual(path: str, state: VisualState, delta: int) -> VisualDelta:

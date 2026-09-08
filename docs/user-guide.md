@@ -94,6 +94,11 @@ for the whole scan.
 Diff view. Color and glyphs show growth, shrink, new, and removed paths.
 Tree rows add a delta and a sparkline. `[`/`]` step through adjacent pairs.
 
+A path that was unreadable in either snapshot is drawn as `≈ partial` and has
+no direction. Everything else keeps its direction, and carries a leading `≈`
+when the snapshot as a whole was incomplete — one refused directory hedges the
+picture, it no longer flattens it.
+
 **Symlinks** — shown as `name → target`, never traversed, never counted
 toward folder sizes. `i` on a symlinked directory resolves and rescans from
 the real location.

@@ -43,10 +43,23 @@ def visual_token(state: VisualState) -> VisualToken:
     return token
 
 
+def confidence_prefix(visual: VisualDelta) -> str:
+    """The hedge a path carries when its snapshot was not read in full.
+
+    `PARTIAL` is its own state only for a path that was itself refused.
+    Everything else keeps the direction it measured and says "about" --
+    the same `≈` the partial token uses, so the two read as one idea.
+    """
+    if not visual.partial or visual.state is VisualState.PARTIAL:
+        return ""
+    return visual_token(VisualState.PARTIAL).glyph + " "
+
+
 def format_visual_delta(visual: VisualDelta, metric: MetricId | str) -> str:
     token = visual_token(visual.state)
+    hedge = confidence_prefix(visual)
     if visual.delta is None:
-        return f"{token.glyph} {token.label}"
+        return f"{hedge}{token.glyph} {token.label}"
     selected = MetricId.parse(metric)
     if selected is MetricId.FILES:
         value = f"{visual.delta:+,}"
@@ -54,7 +67,7 @@ def format_visual_delta(visual: VisualDelta, metric: MetricId | str) -> str:
         sign = "+" if visual.delta > 0 else "-" if visual.delta < 0 else ""
         value = sign + humanize.naturalsize(abs(visual.delta), binary=True)
     percent = "" if visual.percent is None else f" ({visual.percent:+.1f}%)"
-    return f"{token.glyph} {value}{percent}"
+    return f"{hedge}{token.glyph} {value}{percent}"
 
 
 def sparkline(values: tuple[int | None, ...] | list[int | None]) -> str:

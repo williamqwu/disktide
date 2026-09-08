@@ -130,6 +130,9 @@ class HeatmapCell:
     state: VisualState
     delta: int | None
     intensity: int = 0
+    #: The snapshot pair, or this path within it, was incompletely read.
+    #: A hedge on a cell that still carries its own direction.
+    partial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,12 +204,24 @@ def classify_delta(
     new_value: int | None,
     is_new: bool = False,
     is_removed: bool = False,
-    partial: bool = False,
+    unreadable: bool = False,
     incompatible: bool = False,
 ) -> VisualState:
+    """Classify one path's change.
+
+    `unreadable` -- and only `unreadable` -- costs a path its direction.
+    A snapshot is `partial` as a whole whenever *any* directory under its
+    root was refused, which on a shared project tree or an NFS export is
+    the normal state of affairs; folding that into the state painted every
+    path in the picture the same yellow and left Diff, the diff map, the
+    growth rings and the heatmap with no direction information at all.
+    Confidence is carried alongside the direction instead, as
+    `VisualDelta.partial`, and drawn as a hedge on the label rather than
+    as a colour of its own.
+    """
     if incompatible:
         return VisualState.INCOMPATIBLE
-    if partial:
+    if unreadable:
         return VisualState.PARTIAL
     if old_value is None or new_value is None:
         return VisualState.MISSING
@@ -242,7 +257,18 @@ def build_diff_frame(
         )
 
     uncertain = result.baseline.partial or result.target.partial
-    visuals = build_delta_visuals(result, selected_metric)
+    # An error is inherited: what a refused directory hides is everything
+    # under it, so a descendant that did make it into the tree is as
+    # unmeasured as its parent. Nothing outside that subtree is. A
+    # `SizeDelta` carries only its own node's error, so the ancestry has
+    # to come from the trees -- both of them, since a directory readable
+    # in one snapshot and refused in the other is unmeasured either way.
+    unreadable_paths = _unreadable_paths(target_root) | _unreadable_paths(
+        baseline_root
+    )
+    visuals = build_delta_visuals(
+        result, selected_metric, unreadable_paths=unreadable_paths
+    )
 
     visual_root = deepcopy(target_root)
     target_nodes = {node.path: node for node in walk_nodes(visual_root)}
@@ -250,13 +276,14 @@ def build_diff_frame(
         if node.path in visuals:
             continue
         value = node_metric_value(node, selected_metric)
-        partial = uncertain or bool(node.error)
+        unreadable = node.path in unreadable_paths
+        partial = uncertain or unreadable
         visuals[node.path] = VisualDelta(
             path=node.path,
             state=classify_delta(
                 old_value=value,
                 new_value=value,
-                partial=partial,
+                unreadable=unreadable,
             ),
             old_value=value,
             new_value=value,
@@ -287,9 +314,17 @@ def build_diff_frame(
 
 
 def build_delta_visuals(
-    result: CompareResult, metric: MetricId | str
+    result: CompareResult,
+    metric: MetricId | str,
+    *,
+    unreadable_paths: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, VisualDelta]:
-    """Classify changed paths without loading or cloning snapshot trees."""
+    """Classify changed paths without loading or cloning snapshot trees.
+
+    `unreadable_paths` is how a caller that *does* hold the trees passes
+    down the refusals a `SizeDelta` cannot see: a delta knows only whether
+    its own node carried an error, not whether an ancestor did.
+    """
     if result.blocked:
         raise VisualizationBlocked(
             f"Incompatible snapshots: {result.compatibility.summary}"
@@ -299,13 +334,16 @@ def build_delta_visuals(
     visuals: dict[str, VisualDelta] = {}
     for delta in result.deltas:
         old_value, new_value = delta_metric_values(delta, selected_metric)
-        partial = uncertain or bool(delta.old_error or delta.new_error)
+        unreadable = bool(delta.old_error or delta.new_error) or (
+            delta.path in unreadable_paths
+        )
+        partial = uncertain or unreadable
         state = classify_delta(
             old_value=old_value,
             new_value=new_value,
             is_new=delta.is_new,
             is_removed=delta.is_removed,
-            partial=partial,
+            unreadable=unreadable,
         )
         change = (
             new_value - old_value
@@ -401,32 +439,41 @@ def build_growth_heatmap(
         total_growth = 0
         peak_change = 0
         for interval, visual in zip(intervals, explicit):
+            # `interval.partial` is a property of the *snapshot pair*, not
+            # of this path: one refused directory anywhere under the root
+            # sets it. It hedges the cell (drawn dim) and never replaces
+            # the direction the delta actually has -- a heatmap whose
+            # every row read "partial, 0% consistency" was the single
+            # reason a monitored project tree said nothing at all.
+            hedged = interval.partial or (visual is not None and visual.partial)
             if interval.incompatible:
                 cell = HeatmapCell(VisualState.INCOMPATIBLE, None)
-            elif interval.partial:
-                cell = HeatmapCell(
-                    VisualState.PARTIAL,
-                    visual.delta if visual is not None else None,
-                )
             else:
                 if visual is None:
                     state = VisualState.UNCHANGED if exists else VisualState.MISSING
-                    cell = HeatmapCell(state, 0 if exists else None)
+                    cell = HeatmapCell(
+                        state, 0 if exists else None, partial=hedged
+                    )
                     if exists:
                         valid_count += 1
                         streak = 0
                 else:
-                    cell = HeatmapCell(visual.state, visual.delta)
+                    cell = HeatmapCell(
+                        visual.state, visual.delta, partial=hedged
+                    )
                     if visual.state not in {
                         VisualState.MISSING,
                         VisualState.INCOMPATIBLE,
                         VisualState.PARTIAL,
                     }:
                         valid_count += 1
-                        growing = visual.state in {
-                            VisualState.GROWTH,
-                            VisualState.NEW,
-                        }
+                        # Consistency is "how often did this path grow",
+                        # so it follows the sign of the change; NEW has no
+                        # previous value to be larger than but is growth.
+                        growing = (
+                            visual.state is VisualState.NEW
+                            or (visual.delta or 0) > 0
+                        )
                         if growing:
                             growth_count += 1
                             streak += 1
@@ -496,6 +543,27 @@ def build_growth_heatmap(
         rows=tuple(rows),
         truncated_paths=max(0, len(provisional) - len(rows)),
     )
+
+
+def _unreadable_paths(root: FSNode) -> set[str]:
+    """Every path whose own node, or an ancestor of it, could not be read.
+
+    A refused directory hides its whole subtree, so anything under it that
+    still reached the tree is as unmeasured as the directory itself. The
+    walk carries the flag down rather than re-deriving it from string
+    prefixes, which would be wrong for a name that merely starts with
+    another one.
+    """
+    marked: set[str] = set()
+    stack: list[tuple[FSNode, bool]] = [(root, bool(root.error))]
+    while stack:
+        node, inherited = stack.pop()
+        blocked = inherited or bool(node.error)
+        if blocked:
+            marked.add(node.path)
+        for child in node.children:
+            stack.append((child, blocked))
+    return marked
 
 
 def walk_nodes(root: FSNode) -> tuple[FSNode, ...]:

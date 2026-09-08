@@ -2,6 +2,7 @@
 
 from disktide.visualization_formatting import (
     VisualToken,
+    confidence_prefix,
     format_visual_delta,
     legend_text,
     sparkline,
@@ -10,6 +11,7 @@ from disktide.visualization_formatting import (
 
 __all__ = [
     "VisualToken",
+    "confidence_prefix",
     "format_visual_delta",
     "legend_text",
     "sparkline",
