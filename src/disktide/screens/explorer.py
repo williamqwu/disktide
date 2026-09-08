@@ -113,7 +113,10 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         Binding("i", "go_into", "Into directory", show=True, group=NAV, id="explorer.into"),
         Binding("s", "cycle_sort", "Sort", show=True, id="explorer.sort"),
         Binding("d", "toggle_diff", "Diff", show=True, id="explorer.diff"),
-        Binding("t", "toggle_metric", "Bar", show=True, id="explorer.metric"),
+        # "Metric", not "Bar": the settings screen, the docs, the toast and
+        # `METRIC_NAMES` all call it a metric, and `t` changes what every
+        # view measures rather than only what the tree's bar is drawn from.
+        Binding("t", "toggle_metric", "Metric", show=True, id="explorer.metric"),
         Binding("y", "copy_path", "Yank", show=True, id="explorer.yank"),
         # The fallback under `y`: half the copy routes have no reply, so
         # there has to be a way to put the path on screen and let the
@@ -349,7 +352,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         yield Breadcrumb(self._scan_path, id="breadcrumb")
         with Horizontal(id="explorer-main"):
             with Vertical(id="tree-panel"):
-                yield Static("Sort: Logical  Bar: Logical", id="sort-indicator")
+                yield Static("Sort: Logical  Metric: Logical", id="sort-indicator")
                 yield SizeTree(id="size-tree")
                 # Progress-only mode swaps this panel; live mode docks a
                 # compact progress surface above the incremental tree.
@@ -1448,7 +1451,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._build_category_index(root)
 
     def _update_tree_indicator(self) -> None:
-        """Refresh the indicator above the tree (sort order and bar metric)."""
+        """Refresh the indicator above the tree (sort order and metric)."""
         tree = self.query_one("#size-tree", SizeTree)
         metric_label = METRIC_NAMES.get(tree.metric, tree.metric)
         # The quantitative sort follows the active metric, so label it with
@@ -1458,12 +1461,16 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         else:
             sort_label = self._SORT_DISPLAY.get(tree.sort_key, tree.sort_key)
         self.query_one("#sort-indicator", Static).update(
-            f"Sort: {sort_label}  Bar: {metric_label}  {self._visual_mode_label()}"
+            f"Sort: {sort_label}  Metric: {metric_label}  "
+            f"{self._visual_mode_label()}"
         )
 
     def _visual_mode_label(self) -> str:
         if self._diff_mode and self._space_time is not None:
-            return f"Diff {self._space_time.frame.title}  [ / ] pairs"
+            # "snapshots", spelled out: `d` reads as "what changed since I
+            # last looked", and what it actually draws is the delta between
+            # two *saved* snapshots. The live scan is neither of them.
+            return f"Diff snapshots {self._space_time.frame.title}  [ / ] pairs"
         if self._space_time_error:
             return "Current · diff unavailable"
         return "Current"
@@ -1764,7 +1771,15 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         self._update_tree_indicator()
 
     def action_toggle_diff(self) -> None:
-        """Toggle current scan and latest compatible snapshot delta views."""
+        """Switch between this scan's sizes and a saved snapshot delta.
+
+        Diff draws the change between two *saved* snapshots -- by default
+        the two most recent, `[`/`]` steps to older pairs -- and never
+        between the scan on screen and anything. Sizes in the tree change
+        when it is turned on because they become the target snapshot's,
+        which is worth saying out loud: the natural reading of `d` is "what
+        has changed since I last looked", and that is not this.
+        """
         if self._space_time is None:
             self.app.notify(
                 self._space_time_error or "Take at least two snapshots to use Diff view.",
@@ -1782,6 +1797,12 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             ):
                 self._request_space_time_context()
                 return
+            self.app.notify(
+                f"Diff: saved snapshots {self._space_time.frame.title} — "
+                "values are the target snapshot's, not this scan's. "
+                "[ / ] step through pairs.",
+                timeout=6,
+            )
         self._apply_visual_mode()
 
     def action_browse_snapshot_pair(self, direction: int) -> None:
@@ -1899,7 +1920,19 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         explanation = METRIC_EXPLANATIONS.get(metric, "")
         if metric == "unique" and self._scan_in_progress:
             explanation = "available after global hardlink accounting completes"
-        self.app.notify(f"{label}: {explanation}", timeout=3)
+        self._notify_replacing(f"{label}: {explanation}")
+
+    def _notify_replacing(self, message: str, *, timeout: float = 2.0) -> None:
+        """Post a toast that supersedes the last one from the same key.
+
+        The two view toggles are pressed in runs, and Textual stacks
+        notifications: the picture they describe ends up behind them.
+        Clearing first keeps exactly one card on screen, and a shorter
+        timeout keeps it there only as long as the change needs narrating
+        -- the indicator row above the tree carries the state permanently.
+        """
+        self.app.clear_notifications()
+        self.app.notify(message, timeout=timeout)
 
     def action_nudge_cell_aspect(self, direction: int) -> None:
         """Calibrate the cell aspect by eye, one step at a time.
@@ -1979,9 +2012,13 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         # screen checks on the way back in. This one is on screen, and
         # nothing here dirtied a row, so it repaints itself.
         repaint_widgets(self)
-        self.app.notify(
-            f"Ring shape: {landed} — `g` cycles {' / '.join(shapes)}",
-            timeout=3,
+        # One toast, not a stack of them. `g` and `t` are meant to be
+        # pressed repeatedly to compare, and three seconds of overlap put
+        # two or three cards over the chart's legend -- the part of the
+        # picture the toast was explaining. The backticks went with it:
+        # `notify` does not read Markdown, so they were printed literally.
+        self._notify_replacing(
+            f"Ring shape: {landed} — g cycles {' / '.join(shapes)}"
         )
 
     def action_scroll_quarter(self, direction: str) -> None:

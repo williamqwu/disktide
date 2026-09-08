@@ -67,7 +67,7 @@ _SCREEN_NAMES = {
 SPINE_HEADING = "Always available"
 
 # Space between packed columns. Two would read as one wide column on the
-# sections whose descriptions are short ("Sort", "Bar").
+# sections whose descriptions are short ("Sort", "Yank").
 COLUMN_GAP = 3
 
 # What to pack against before the widget has a width of its own: the

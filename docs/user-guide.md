@@ -94,6 +94,12 @@ for the whole scan.
 Diff view. Color and glyphs show growth, shrink, new, and removed paths.
 Tree rows add a delta and a sparkline. `[`/`]` step through adjacent pairs.
 
+Diff compares **two saved snapshots** — the two most recent by default, named
+in the indicator as `Diff snapshots #30 → #31` — and never the scan currently
+on screen against anything. The sizes in the tree become the *target*
+snapshot's while Diff is on, so they can differ from the ones `d` was pressed
+over; press `d` again to return to this scan's numbers.
+
 A path that was unreadable in either snapshot is drawn as `≈ partial` and has
 no direction. Everything else keeps its direction, and carries a leading `≈`
 when the snapshot as a whole was incomplete — one refused directory hedges the
