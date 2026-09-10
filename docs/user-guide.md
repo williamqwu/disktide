@@ -60,9 +60,9 @@ visualizations on the right:
 | Left / Right | Collapse / expand tree nodes |
 | Enter | Expand or collapse the highlighted directory in place |
 | `u` | Go up to the parent directory |
-| `i` | Drill in: the highlighted directory becomes the scan root and is rescanned (for a symlink, its target does) |
+| `i` | Go into the highlighted directory. Uses the tree already scanned, and rescans from it only where that cannot answer: a symlink's target, a directory the scan policy skipped, or a subtree `max_depth` cut short |
 | `s` | Cycle sort order: size, name, modified |
-| `r` | Rescan (prompts y/n) |
+| `r` | Rescan (prompts y/n). Rescans the root the scan started from, which is not always where `i` has taken you; the prompt names the path |
 | `d` | Toggle Current / Diff view |
 | `[` / `]` | Browse newer / older snapshot pairs |
 | `M` | Set up monitoring for the highlighted directory |

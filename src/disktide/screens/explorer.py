@@ -1717,6 +1717,47 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
                 return True
         return False
 
+    def _drill_into_scanned(self, path: str) -> bool:
+        """Move the view into `path` if the scanned tree holds all of it.
+
+        The downward half of `_go_up_one_level`, with the same contract:
+        True means the tree answered and nothing needs scanning.
+
+        "Holds all of it" is a narrower question than
+        `has_policy_omissions`, because the only thing that decides it is
+        whether a scan rooted here would find something this tree does not:
+
+        * `excluded` on the node itself -- a mount `one_file_system`
+          stopped at, a pseudo filesystem, a snapshot directory -- was
+          never descended into, and re-rooting the scan there re-anchors
+          the policy against that directory, so a rescan does find more.
+        * `depth_limited`, here or anywhere below, means `max_depth` cut
+          the walk short. The limit counts from the root, so moving the
+          root down buys real depth.
+        * An `excluded` node *deeper inside* is not a reason: the same
+          policy excludes it again from the new root, so the rescan returns
+          the same picture. `has_policy_omissions` counts those, which is
+          exactly why it is the wrong test here.
+
+        The path is resolved against `_root` rather than trusting the
+        cursor's own node: in Diff mode the tree carries the snapshot
+        frame's nodes, whose flags describe the snapshot rather than what
+        is on disk now. A path the live tree does not have falls through to
+        the caller's rescan, which is what happened before this branch
+        existed.
+        """
+        if self._root is None:
+            return False
+        node = self._root.find(path)
+        if node is None or not node.is_dir:
+            return False
+        if node.excluded or node.depth_limited:
+            return False
+        if node.depth_limited_subtree_count:
+            return False
+        self._drill_into(node)
+        return True
+
     def action_go_up(self) -> None:
         """Navigate up one directory level, rescanning from parent if at scan root."""
         if self._scan_in_progress:
@@ -1735,11 +1776,24 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             self._start_scan()
 
     def action_go_into(self) -> None:
-        """Rescan from the highlighted directory, or from a symlink's target.
+        """Move into the highlighted directory, rescanning only when it must.
+
+        `u` has always preferred the tree it already has and rescanned only
+        when the target lay outside it. `i` rescanned every time -- right
+        for the case it was written for, a symlink whose target is in no
+        tree, and a whole scan spent on the ordinary one, which the mouse
+        had been doing for free through `NodeSelected` all along. It takes
+        the same two branches as `u` now; `_drill_into_scanned` says which.
 
         For a symlink whose target is a directory, the resolved real path
         becomes the new scan root, so `i` reads as "enter the linked
         folder" even though the scan never recurses through the link.
+
+        Only the rescanning branch moves `_scan_path`, so `r` after a cheap
+        `i` still offers the root the scan started from. That divergence is
+        not new -- a click on a tree row or a chart shape has always
+        drilled without moving `_scan_path` -- and `r` names the path it is
+        about to scan in its own prompt.
         """
         if self._scan_in_progress:
             self.app.notify(
@@ -1754,6 +1808,8 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             return
         data = node.data
         if data.is_dir:
+            if self._drill_into_scanned(data.path):
+                return
             new_root = data.path
         elif data.is_symlink:
             # Deeper symlinks deferred classification; resolve now so we

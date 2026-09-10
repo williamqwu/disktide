@@ -70,6 +70,263 @@ def test_enter_expands_the_directory_rather_than_drilling_into_it(tmp_path):
     asyncio.run(go())
 
 
+# -- `i`: reuse the scanned tree, rescan only when a rescan buys something ---
+#
+# Every fixture below is built under pytest's `tmp_path`, which is on /tmp
+# (`TMPDIR` is unset on this box, so `tempfile.gettempdir()` is /tmp). None of
+# these tests writes into the home directory.
+
+
+def _explorer(tmp_path, config=None):
+    return DiskTideApp(
+        scan_path=str(tmp_path),
+        show_welcome=False,
+        config=config if config is not None else load_config(),
+    )
+
+
+def _count_scans(screen):
+    """Replace `_start_scan` with a counter, and return the list it fills.
+
+    A rescan is the thing under test, so it is asserted on directly rather
+    than inferred from a second scan finishing. `_scan_path` is assigned
+    before `_start_scan` is called, so it is still the real value afterwards.
+    """
+    started: list[tuple] = []
+    screen._start_scan = lambda *args, **kwargs: started.append((args, kwargs))
+    return started
+
+
+def test_i_reuses_the_scanned_tree_for_a_complete_directory(tmp_path):
+    """The ordinary case: the tree already holds it, so nothing is scanned.
+
+    `u` has always preferred the tree it has; `i` rescanned every time, and
+    the mouse drilled for free through `NodeSelected`. Keyboard and mouse
+    now cost the same for the same move.
+    """
+    inner = tmp_path / "outer" / "inner"
+    inner.mkdir(parents=True)
+    (inner / "payload.txt").write_text("x" * 64)
+    (tmp_path / "outer" / "sibling.txt").write_text("y" * 32)
+
+    async def go():
+        app = _explorer(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            screen = app.screen
+            tree = screen.query_one("#size-tree")
+            tree.focus()
+            await pilot.pause()
+            started = _count_scans(screen)
+
+            await pilot.press("down")
+            await pilot.pause()
+            target = str(tmp_path / "outer")
+            assert tree.cursor_node.data.path == target
+
+            await pilot.press("i")
+            await pilot.pause()
+
+            assert not started, "`i` rescanned a directory the tree already held"
+            assert screen._current.path == target
+            assert tree.root_path == target
+            # Only the rescanning branch moves the scan root, so `r` still
+            # offers the root the scan started from.
+            assert screen._scan_path == str(tmp_path)
+
+            # And back up the same cheap way.
+            await pilot.press("u")
+            await pilot.pause()
+            assert not started
+            assert screen._current.path == str(tmp_path)
+            assert tree.root_path == str(tmp_path)
+
+    asyncio.run(go())
+
+
+def test_i_reuses_the_tree_when_only_a_deeper_node_was_excluded(tmp_path):
+    """An excluded node *inside* the target is not a reason to rescan.
+
+    This is the case that makes `has_policy_omissions` the wrong test: it
+    is True for `outer` here, because `.snapshot` under it was skipped --
+    and a scan rooted at `outer` would skip `.snapshot` again, under the
+    same policy, and return the same picture. Rescanning would buy nothing.
+    """
+    snap = tmp_path / "outer" / ".snapshot"
+    snap.mkdir(parents=True)
+    (snap / "old.txt").write_text("y" * 32)
+    (tmp_path / "outer" / "payload.txt").write_text("x" * 64)
+
+    async def go():
+        app = _explorer(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            screen = app.screen
+            tree = screen.query_one("#size-tree")
+            tree.focus()
+            await pilot.pause()
+
+            outer = screen._root.find(str(tmp_path / "outer"))
+            assert outer.excluded_subtree_count > 0
+            assert outer.has_policy_omissions, (
+                "fixture no longer exercises the broad-test trap"
+            )
+            assert not outer.depth_limited
+            assert not outer.depth_limited_subtree_count
+
+            started = _count_scans(screen)
+            await pilot.press("down")
+            await pilot.pause()
+            assert tree.cursor_node.data.path == str(tmp_path / "outer")
+
+            await pilot.press("i")
+            await pilot.pause()
+
+            assert not started, (
+                "`i` rescanned for an omission the rescan would repeat"
+            )
+            assert screen._current.path == str(tmp_path / "outer")
+
+    asyncio.run(go())
+
+
+def test_i_rescans_when_max_depth_cut_the_walk_short(tmp_path):
+    """`max_depth` counts from the root, so moving the root down buys depth."""
+    deep = tmp_path / "outer" / "inner" / "deeper"
+    deep.mkdir(parents=True)
+    (deep / "payload.txt").write_text("x" * 64)
+
+    config = load_config()
+    config.scan.max_depth = 2
+
+    async def go():
+        app = _explorer(tmp_path, config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            screen = app.screen
+            tree = screen.query_one("#size-tree")
+            tree.focus()
+            await pilot.pause()
+
+            outer = screen._root.find(str(tmp_path / "outer"))
+            assert outer.depth_limited_subtree_count > 0, (
+                "fixture did not truncate: max_depth is not reaching the scan"
+            )
+
+            started = _count_scans(screen)
+            await pilot.press("down")
+            await pilot.pause()
+            assert tree.cursor_node.data.path == str(tmp_path / "outer")
+
+            await pilot.press("i")
+            await pilot.pause()
+
+            assert started, "`i` reused a tree that max_depth had truncated"
+            assert screen._scan_path == str(tmp_path / "outer")
+
+    asyncio.run(go())
+
+
+def test_i_rescans_into_a_directory_the_policy_skipped(tmp_path):
+    """A skipped directory has no contents in the tree at all.
+
+    Re-rooting the scan on it re-anchors the policy -- a snapshot directory
+    is only excluded below the root (`walker.py` gates on `depth > 0`), and
+    `one_file_system` re-anchors on the new root's device -- so the rescan
+    is the only way to see inside.
+    """
+    snap = tmp_path / "outer" / ".snapshot"
+    snap.mkdir(parents=True)
+    (snap / "old.txt").write_text("y" * 32)
+    (tmp_path / "outer" / "payload.txt").write_text("x" * 64)
+
+    async def go():
+        app = _explorer(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            screen = app.screen
+            tree = screen.query_one("#size-tree")
+            tree.focus()
+            await pilot.pause()
+
+            node = screen._root.find(str(snap))
+            assert node.excluded and node.exclusion_reason == "snapshot directory"
+            assert not node.children, "the tree should hold nothing under it"
+
+            started = _count_scans(screen)
+            # `notify=False` parks the cursor without posting `NodeSelected`,
+            # which is the mouse's route and would drill on its own.
+            assert tree.select_path(str(snap), notify=False)
+            await pilot.pause()
+            assert tree.cursor_node.data.path == str(snap)
+
+            await pilot.press("i")
+            await pilot.pause()
+
+            assert started, "`i` reused a tree that never went inside"
+            assert screen._scan_path == str(snap)
+
+    asyncio.run(go())
+
+
+def test_i_still_rescans_a_symlinked_directory(tmp_path):
+    """The case `i` was written for: the target is in no tree."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "payload.txt").write_text("x" * 64)
+    (tmp_path / "link").symlink_to(real)
+
+    async def go():
+        app = _explorer(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            screen = app.screen
+            tree = screen.query_one("#size-tree")
+            tree.focus()
+            await pilot.pause()
+
+            started = _count_scans(screen)
+            assert tree.select_path(str(tmp_path / "link"), notify=False)
+            await pilot.pause()
+            node = tree.cursor_node.data
+            assert node.is_symlink and not node.is_dir
+
+            await pilot.press("i")
+            await pilot.pause()
+
+            assert started, "`i` stopped following a symlinked directory"
+            assert screen._scan_path == str(real.resolve())
+
+    asyncio.run(go())
+
+
+def test_i_on_a_file_neither_scans_nor_moves(tmp_path):
+    (tmp_path / "payload.txt").write_text("x" * 64)
+
+    async def go():
+        app = _explorer(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            screen = app.screen
+            tree = screen.query_one("#size-tree")
+            tree.focus()
+            await pilot.pause()
+
+            started = _count_scans(screen)
+            await pilot.press("down")
+            await pilot.pause()
+            assert not tree.cursor_node.data.is_dir
+
+            await pilot.press("i")
+            await pilot.pause()
+
+            assert not started
+            assert screen._current.path == str(tmp_path)
+            assert tree.root_path == str(tmp_path)
+
+    asyncio.run(go())
+
+
 def test_quarter_screen_jump_moves_cursor_down(tmp_path):
     _make_flat_tree(tmp_path, 200)
 
