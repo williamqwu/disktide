@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual import events
+from textual.binding import Binding
 from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 from rich.cells import cell_len
@@ -45,6 +46,30 @@ class SizeTree(Tree[FSNode]):
         height: 1fr;
     }
     """
+
+    BINDINGS = [
+        # Textual binds `enter` to `select_cursor`, which posts
+        # `Tree.NodeSelected` -- and `ExplorerScreen.on_tree_node_selected`
+        # answers that by re-rooting the whole screen on the selected
+        # directory. So `enter` was a second `i`, and the one thing a tree
+        # is expected to do with the key -- open this row where it stands
+        # -- was only ever on `space` and `right`, which is not where
+        # anyone looks for it. Re-rooting stays on `i`; `enter` expands.
+        #
+        # This has to be declared on the widget rather than on the screen:
+        # the tree holds focus, Textual resolves the focused widget's
+        # bindings first, and a screen-level `enter` would never be
+        # reached. A subclass entry replaces the base class's binding for
+        # the same key -- `DOMNode._merge_bindings` walks the MRO
+        # base-first and assigns rather than appending.
+        Binding(
+            "enter",
+            "expand_or_collapse",
+            "Expand/collapse",
+            show=False,
+            id="explorer.expand",
+        ),
+    ]
 
     BAR_WIDTH = 15
     """Cells the proportional bar uses when the row has room for it."""
@@ -312,6 +337,21 @@ class SizeTree(Tree[FSNode]):
 
         self._live_update_count += 1
         self.refresh()
+
+    def action_expand_or_collapse(self) -> None:
+        """Open or close the directory under the cursor, in place.
+
+        Not `Tree.action_toggle_node`, which reads
+        `_tree_lines[self.cursor_line]` -- and `cursor_line` is -1 when
+        there is no cursor, which indexes the *last* row rather than
+        raising. `enter` on a tree with no cursor would have toggled
+        whatever happened to sit at the bottom. `cursor_node` is `None` in
+        that state, which is the answer this wants.
+        """
+        node = self.cursor_node
+        if node is None or not node.allow_expand:
+            return
+        node.toggle()
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded[FSNode]) -> None:
         """Lazily load children when a node is expanded."""

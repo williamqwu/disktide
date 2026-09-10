@@ -58,8 +58,9 @@ visualizations on the right:
 | Up / Down | Move through the tree |
 | Ctrl+U / Ctrl+D | Jump up / down by a quarter of the visible tree |
 | Left / Right | Collapse / expand tree nodes |
+| Enter | Expand or collapse the highlighted directory in place |
 | `u` | Go up to the parent directory |
-| `i` | Drill into the selected directory (rescans symlinked directories) |
+| `i` | Drill in: the highlighted directory becomes the scan root and is rescanned (for a symlink, its target does) |
 | `s` | Cycle sort order: size, name, modified |
 | `r` | Rescan (prompts y/n) |
 | `d` | Toggle Current / Diff view |

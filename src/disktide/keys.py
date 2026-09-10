@@ -98,6 +98,8 @@ EXPLORER_IDS = (
     "explorer.viz_details",
     "explorer.up",
     "explorer.into",
+    # Declared on SizeTree rather than on the screen; see its BINDINGS.
+    "explorer.expand",
     "explorer.sort",
     "explorer.rescan",
     "explorer.diff",
@@ -287,6 +289,7 @@ SECTIONS: dict[str, str] = {
     # Explorer
     "explorer.up": MOVE,
     "explorer.into": MOVE,
+    "explorer.expand": MOVE,
     "explorer.scroll_down": MOVE,
     "explorer.scroll_up": MOVE,
     "explorer.viz_sunburst": VIEW_SECTION,

@@ -1,4 +1,4 @@
-"""Tests for quarter-screen jumps (explorer) and arrow-key field nav (settings)."""
+"""Explorer key navigation -- quarter-screen jumps, `enter` -- and Settings field nav."""
 
 from __future__ import annotations
 
@@ -16,6 +16,58 @@ def _make_flat_tree(tmp_path, count: int) -> None:
     """Build a flat directory with many same-level files for cursor testing."""
     for i in range(count):
         (tmp_path / f"file_{i:03d}.txt").write_text(f"x" * (count - i))
+
+
+def test_enter_expands_the_directory_rather_than_drilling_into_it(tmp_path):
+    """`enter` opens the row where it stands. Re-rooting is `i`'s job.
+
+    Textual binds `enter` to `select_cursor`, which posts `NodeSelected`,
+    and the Explorer answers that by re-rooting the screen on the selected
+    directory -- so `enter` silently duplicated `i`, and the one thing a
+    tree is expected to do with the key was only on `space` and `right`.
+    """
+    inner = tmp_path / "outer" / "inner"
+    inner.mkdir(parents=True)
+    (inner / "payload.txt").write_text("x" * 64)
+    (tmp_path / "outer" / "sibling.txt").write_text("y" * 32)
+
+    async def go():
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=load_config()
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            screen = app.screen
+            tree = screen.query_one("#size-tree")
+            tree.focus()
+            await pilot.pause()
+
+            await pilot.press("down")
+            await pilot.pause()
+            node = tree.cursor_node
+            assert node.data.is_dir
+            target = node.data.path
+            assert not node.is_expanded
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # The row opened, and opening it loaded the children the tree
+            # had not built yet.
+            assert node.is_expanded, "`enter` did not expand the directory"
+            assert node.children, "expanding it loaded no children"
+            # And the screen stayed exactly where it was: no re-root, no
+            # breadcrumb move, cursor still on the row that was pressed.
+            assert tree.root_path == str(tmp_path)
+            assert screen._current.path == str(tmp_path)
+            assert tree.cursor_node.data.path == target
+
+            # It is a toggle, not a one-way door.
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not node.is_expanded
+
+    asyncio.run(go())
 
 
 def test_quarter_screen_jump_moves_cursor_down(tmp_path):

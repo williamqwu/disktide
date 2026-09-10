@@ -753,8 +753,11 @@ def test_toggling_diff_does_not_re_root_the_screen(tmp_path):
             assert tree.cursor_node.data.path == parked
 
             # And when the user does drill in, the tree follows the
-            # breadcrumb instead of being left a level behind.
-            await pilot.press("enter")
+            # breadcrumb instead of being left a level behind. `enter`
+            # expands in place now, so this takes the route a click on the
+            # row or on the chart shape takes: a `NodeSelected` the screen
+            # answers by re-rooting.
+            tree.select_path(parked)
             await pilot.pause()
             assert screen._current.path == parked
             assert tree.root_path == parked

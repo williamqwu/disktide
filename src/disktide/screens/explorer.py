@@ -163,12 +163,16 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
             id="explorer.setup_monitor",
         ),
         # Quarter-screen jumps in the tree — fast scanning of huge lists.
+        # These descriptions are key-map-only (`show=False`) and are kept
+        # under 16 characters on purpose: "Move around" packs into three
+        # columns at the dialog's 68 cells only while its widest row does,
+        # and `tests/test_keymap.py` fails the section the moment it stops.
         Binding(
-            "ctrl+d", "scroll_quarter('down')", "Quarter page down",
+            "ctrl+d", "scroll_quarter('down')", "Down a quarter",
             show=False, id="explorer.scroll_down",
         ),
         Binding(
-            "ctrl+u", "scroll_quarter('up')", "Quarter page up",
+            "ctrl+u", "scroll_quarter('up')", "Up a quarter",
             show=False, id="explorer.scroll_up",
         ),
     ]
@@ -1599,7 +1603,15 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
 
     @on(Tree.NodeSelected)
     def on_tree_node_selected(self, event: Tree.NodeSelected[FSNode]) -> None:
-        """Drill into directory on select."""
+        """Drill into a directory that was *selected* rather than opened.
+
+        `enter` no longer arrives here: it expands the row where it stands
+        (`SizeTree.action_expand_or_collapse`), which is what the key means
+        in every other tree. What still posts `NodeSelected` is a click on
+        a tree row, and `SizeTree.select_path`, which is the route a click
+        on a sunburst arc or a treemap rectangle takes -- both of those are
+        documented as drilling in, and both keep doing it.
+        """
         if event.node.data is None or not event.node.data.is_dir:
             return
         if self._scan_in_progress:
