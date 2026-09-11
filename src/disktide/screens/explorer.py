@@ -24,7 +24,7 @@ from disktide.config import (
     resolve_live_scan_render,
     save_config,
 )
-from disktide.keys import NAV, SNAPSHOT
+from disktide.keys import SNAPSHOT
 from disktide.domain.live_view import LiveViewNode, build_live_view
 from disktide.domain.metrics import MetricId
 from disktide.domain.policy import ScanPolicy
@@ -105,12 +105,19 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
         Binding("f1", "switch_viz('sunburst')", "Sunburst", show=False, id="explorer.viz_sunburst"),
         Binding("f2", "switch_viz('treemap')", "Treemap", show=False, id="explorer.viz_treemap"),
         Binding("f3", "switch_viz('details')", "Details", show=False, id="explorer.viz_details"),
-        # Footer tier. `u` and `i` are declared adjacently on purpose: the
-        # Footer groups with itertools.groupby, so a run of same-group
-        # bindings has to be consecutive or it renders as two groups. This
-        # pair is what the old "[U]p [I]nto" description drew by hand.
-        Binding("u", "go_up", "Up a level", show=True, group=NAV, id="explorer.up"),
-        Binding("i", "go_into", "Into directory", show=True, group=NAV, id="explorer.into"),
+        # Footer tier.
+        #
+        # `u` and `i` are not on it. They shared a compact footer group,
+        # which prints its keys bare and runs them together, so the
+        # footer read `ui Nav` -- one token, and the chord it looks like
+        # is not a key any terminal can send. Of everything competing for
+        # the row these two are the pair that can live in `?` alone:
+        # re-rooting is a move a user makes deliberately, after they have
+        # already found the tree, while `s`/`d`/`t`/`y` are the verbs
+        # that have to advertise themselves. Both keys still work, and
+        # both are listed under "Move around".
+        Binding("u", "go_up", "Up a level", show=False, id="explorer.up"),
+        Binding("i", "go_into", "Into directory", show=False, id="explorer.into"),
         Binding("s", "cycle_sort", "Sort", show=True, id="explorer.sort"),
         Binding("d", "toggle_diff", "Diff", show=True, id="explorer.diff"),
         # "Metric", not "Bar": the settings screen, the docs, the toast and

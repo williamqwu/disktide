@@ -734,10 +734,12 @@ def main() -> None:
         # The file-type legend only lands once the scan has finished and the
         # sunburst has drawn its last ring; "ephemeral" additionally proves
         # the seeded tree, not a bare export, is what was measured. The
-        # footer marker is `ui Nav`, the grouped form the key map redesign
-        # left behind -- it was `Nav [U]p` when this script was written and
-        # nothing noticed, because a stale needle here reads as a timeout.
-        wait_for("Sunburst [F1]", "ui Nav", ".gitignore",
+        # footer marker is `t Metric`, an ungrouped verb: it was `Nav [U]p`
+        # when this script was written, then `ui Nav` when `u`/`i` were
+        # grouped, then nothing at all when they left the footer for `?`
+        # -- and none of those moves was noticed here, because a stale
+        # needle reads as a timeout rather than as a rename.
+        wait_for("Sunburst [F1]", "t Metric", ".gitignore",
                  "ephemeral ", "code ")
         capture(captures / "sunburst.ans")
 
