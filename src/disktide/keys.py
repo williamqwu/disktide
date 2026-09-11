@@ -57,21 +57,32 @@ __all__ = [
 # --------------------------------------------------------------------------
 # Footer groups
 #
-# `compact=True` drops the inter-key spacing, which is what you want for a run
-# of single-character keys that read as one control (mode digits, navigation).
-# Leave it False where the keys are wide enough to need the air.
+# `compact=True` drops the inter-key spacing, so the group's keys are printed
+# with nothing at all between them. That is right for a *range* -- `1234 Mode`
+# reads as "one through four" -- and wrong for everything else, because a run
+# of letters with no space in it is how a terminal writes a chord. The footer
+# shipped `ui Nav`, `spacea Select`, `pz Plan` and `bv Diff`; every one of
+# those names a key combination that does not exist and cannot be typed.
+#
+# Only the digits stay compact. `SELECT`, `PLAN` and `DIFF` are two separate
+# keys each and are spelled that way -- `space a Select`, `p z Plan`,
+# `b v Diff` -- which costs one painted cell per group;
+# `tests/test_footer_width.py` gates what that costs at 80 columns.
+#
+# `NAV`, `VIEW` and `ACTION` are declared by nothing today. They are kept
+# because they are the vocabulary a new grouped binding picks a label from.
 # --------------------------------------------------------------------------
 
 MODE = Binding.Group("Mode", compact=True)
-NAV = Binding.Group("Nav", compact=True)
-VIEW = Binding.Group("View", compact=True)
-ACTION = Binding.Group("Action", compact=True)
-PLAN = Binding.Group("Plan", compact=True)
-SELECT = Binding.Group("Select", compact=True)
-ALERT = Binding.Group("Alert", compact=True)
-SNAPSHOT = Binding.Group("Snapshot", compact=True)
-TREND = Binding.Group("Trend", compact=True)
-DIFF = Binding.Group("Diff", compact=True)
+NAV = Binding.Group("Nav", compact=False)
+VIEW = Binding.Group("View", compact=False)
+ACTION = Binding.Group("Action", compact=False)
+PLAN = Binding.Group("Plan", compact=False)
+SELECT = Binding.Group("Select", compact=False)
+ALERT = Binding.Group("Alert", compact=False)
+SNAPSHOT = Binding.Group("Snapshot", compact=False)
+TREND = Binding.Group("Trend", compact=False)
+DIFF = Binding.Group("Diff", compact=False)
 
 
 # --------------------------------------------------------------------------

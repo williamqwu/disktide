@@ -6,18 +6,24 @@ Monitor 153, FS Overview 94 — and because Textual drops whatever does not
 fit off the end, and the app-level bindings are declared last, the two keys
 every user needs first (`?` and `q`) were the two that were never on screen.
 
-This gate **measures the real widget** rather than modelling it. Composing
-the shown bindings by hand and adding up string lengths is what the original
-investigation did, and it came out 2 cells low on all four screens: the
-model missed the description padding on the trailing key. Textual's own
-layout is the only thing that knows the answer, and it is right here in the
-test harness already.
+**This gate reads the painted row.** Two earlier versions of it modelled the
+footer instead and both were wrong in the safe-looking direction. Composing
+the shown bindings by hand and adding up string lengths came out 2 cells low
+on all four screens (it missed the description padding on the trailing key).
+Summing `child.outer_size.width` came out 5 cells low on Cleanup — 75 where
+the screen really paints 80 — because `outer_size` excludes margin and
+`FooterKey.-grouped` carries `margin: 0 1`. A gate with five cells of phantom
+headroom is worse than no gate: it passes the change that clips a key.
 
-The measurement runs on a *wide* terminal on purpose. `virtual_size` is
-clamped to the container when content fits, so measuring at 80 reports 80
-for anything that overflows and anything that just fits alike. Summing the
-children's outer widths at 200 columns gives the intrinsic width, which is
-the number the gate is actually about.
+What the composited strip says has been checked against `tmux capture-pane`
+at 80 columns and agrees cell for cell, so it is used here as ground truth.
+The check is not a width comparison at all: it renders wide, where nothing
+can be clipped, and then renders at 80 and asserts the same ink is still
+there. That is the failure stated directly, and it needs no constant.
+
+The measured widths are reported in the failure message because the number
+is what tells you how much room a new key has: at the time of writing
+Explorer paints 73, FS Overview 74, Cleanup 76 and Monitor 80 of 80.
 """
 
 from __future__ import annotations
@@ -37,7 +43,8 @@ from tests.waiting import wait_for_explorer
 # again, silently, on the narrowest terminal anyone still uses.
 MAX_FOOTER_COLUMNS = 80
 
-# Wide enough that no screen's footer is clamped by its container.
+# Wide enough that no screen's footer is clamped by its container, so the
+# strip rendered here is the whole footer and nothing has been dropped.
 _MEASURE_WIDTH = 200
 
 
@@ -47,10 +54,27 @@ def _tree(tmp_path: pathlib.Path) -> str:
     return str(tmp_path)
 
 
-async def _footer_width(pilot, app) -> int:
-    """Intrinsic width of the active screen's footer, in cells."""
+def _footer_runs(app) -> tuple[str, str]:
+    """The footer's two painted runs: the keys, and the docked palette key.
+
+    They are returned separately because the gap between them is whatever
+    the terminal width leaves over, and that is the one part of the row
+    that is *supposed* to change when the terminal narrows.
+    """
     footer = app.screen.query_one(Footer)
-    return sum(child.outer_size.width for child in footer.children)
+    # The composited strip, not the widget's own render: a widget renders
+    # its own content and the compositor is what puts the children on the
+    # row. `tests/test_theme_apply.py` reaches for it the same way.
+    text = app.screen._compositor.render_strips()[footer.region.y].text
+    docked = [c for c in footer.children if c.styles.dock == "right"]
+    split = min((c.region.x for c in docked), default=len(text))
+    return text[:split].rstrip(), text[split:].rstrip()
+
+
+def _painted_width(app) -> int:
+    """Cells the footer needs before the terminal starts eating it."""
+    keys, palette = _footer_runs(app)
+    return len(keys) + len(palette)
 
 
 @pytest.mark.parametrize(
@@ -85,24 +109,62 @@ def test_footer_fits_eighty_columns(tmp_path, mode_key, screen_name):
                 f"{type(app.screen).__name__} — the mode key may have moved"
             )
 
-            width = await _footer_width(pilot, app)
+            wide_keys, wide_palette = _footer_runs(app)
+            width = len(wide_keys) + len(wide_palette)
+
+            await pilot.resize_terminal(MAX_FOOTER_COLUMNS, 30)
+            await pilot.pause()
+            narrow_keys, narrow_palette = _footer_runs(app)
+
+            assert (narrow_keys, narrow_palette) == (wide_keys, wide_palette), (
+                f"{screen_name}'s footer needs {width} columns and loses ink "
+                f"at {MAX_FOOTER_COLUMNS}.\n"
+                f"  wide:   {wide_keys!r} … {wide_palette!r}\n"
+                f"  at {MAX_FOOTER_COLUMNS}: {narrow_keys!r} … {narrow_palette!r}\n"
+                "Give a pair of related bindings a shared `group=` (Textual "
+                "renders the group's keys bare plus one label) or drop one to "
+                "`show=False` — it stays in `?` and the command palette either "
+                "way."
+            )
             assert width <= MAX_FOOTER_COLUMNS, (
-                f"{screen_name} footer needs {width} columns, "
-                f"{width - MAX_FOOTER_COLUMNS} more than the {MAX_FOOTER_COLUMNS}"
-                " a terminal is allowed to be. Give a pair of related bindings a "
-                "shared `group=` (Textual renders the group's keys bare plus one "
-                "label) or drop one to `show=False` — it stays in `?` and the "
-                "command palette either way."
+                f"{screen_name} footer paints {width} columns, "
+                f"{width - MAX_FOOTER_COLUMNS} more than the "
+                f"{MAX_FOOTER_COLUMNS} a terminal is allowed to be."
             )
 
     asyncio.run(go())
+
+
+def test_a_compact_group_is_only_for_the_mode_digits(tmp_path):
+    """No footer group may print its keys with nothing between them.
+
+    `compact=True` is how `1234 Mode` is drawn, and it reads as a range
+    because digits do. Letters do not: the same setting shipped `ui Nav`,
+    `spacea Select`, `pz Plan` and `bv Diff`, four tokens that each name a
+    chord no terminal can send. The digits are the exception and they are
+    the only one.
+    """
+    from disktide import keys as keys_module
+    from textual.binding import Binding
+
+    compact = {
+        name: value
+        for name, value in vars(keys_module).items()
+        if isinstance(value, Binding.Group) and value.compact
+    }
+    assert set(compact) == {"MODE"}, (
+        "these footer groups run their keys together, which reads as a key "
+        f"combination: {sorted(set(compact) - {'MODE'})}"
+    )
 
 
 def test_quit_and_keymap_survive_a_narrow_terminal(tmp_path):
     """The two keys a new user needs first must be in the footer.
 
     This is the failure the gate exists to prevent, stated directly: these
-    two are declared last, so they are the first to fall off the end.
+    two are declared last, so they are the first to fall off the end. The
+    assertion is on the painted row, because a `FooterKey` whose ink was
+    overwritten by the docked palette key is still a child of the footer.
     """
     scan_path = _tree(tmp_path)
 
@@ -112,13 +174,8 @@ def test_quit_and_keymap_survive_a_narrow_terminal(tmp_path):
         )
         async with app.run_test(size=(MAX_FOOTER_COLUMNS, 30)) as pilot:
             await wait_for_explorer(pilot, app)
-            footer = app.screen.query_one(Footer)
-            shown = {
-                child.key
-                for child in footer.children
-                if getattr(child, "key", None)
-            }
-            assert "q" in shown, "quit fell off the footer"
-            assert "question_mark" in shown, "the key map fell off the footer"
+            keys, _palette = _footer_runs(app)
+            assert "q Quit" in keys, f"quit fell off the footer: {keys!r}"
+            assert "? Keys" in keys, f"the key map fell off the footer: {keys!r}"
 
     asyncio.run(go())

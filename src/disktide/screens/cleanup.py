@@ -43,13 +43,22 @@ class CleanupScreen(RenderEpochRefreshMixin, Screen):
         #
         # Selection and plan are two controls, not four verbs, so each pair
         # shares a footer group. Ungrouped this screen needs 92 columns; the
-        # two groups bring it to 77.
+        # two groups and the demotion below bring it to 76.
+        #
+        # `m` is not on the footer. This is the screen with the least room --
+        # it carries four of its own verbs where Explorer and FS Overview
+        # carry two -- and spelling the two groups as the separate keys they
+        # are (`space a`, not `spacea`) had to be paid for out of it. `m` is
+        # the one of the four that moves the cursor rather than doing
+        # something to the plan, and the map it focuses is on screen and
+        # reachable with `tab`; the other three have nothing else that offers
+        # them. It is still in `?` and in the command palette.
         Binding("space", "toggle_select", "Toggle candidate", show=True, group=SELECT, id="cleanup.toggle"),
         Binding("a", "select_all", "Select all", show=True, group=SELECT, id="cleanup.select_all"),
         Binding("p", "delete_selected", "Review delete plan", show=True, group=PLAN, id="cleanup.review_plan"),
         Binding("z", "undo_last", "Undo last plan", show=True, group=PLAN, id="cleanup.undo"),
         Binding("h", "show_history", "History", show=True, id="cleanup.history"),
-        Binding("m", "focus_map", "Map", show=True, id="cleanup.map"),
+        Binding("m", "focus_map", "Map", show=False, id="cleanup.map"),
         Binding("r", "refresh_targets", "Refresh", show=False, id="cleanup.refresh"),
     ]
 
