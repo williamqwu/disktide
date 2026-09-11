@@ -1015,3 +1015,61 @@ def test_settings_still_takes_an_ordinary_worker_count_and_depth(
             assert config.scan.max_depth == 0
 
     asyncio.run(go())
+
+
+def test_cleanup_settings_open_with_the_experimental_caveat(tmp_path):
+    """Cleanup says what it is before it offers to be switched on.
+
+    The caveat is one row tall (`.fold-caveat` is `height: 1`, like every
+    other note in the folds), so a sentence that does not fit an
+    80-column terminal is not a sentence that wraps -- it is one that
+    gets cut off mid-word. The width is checked here rather than left to
+    whoever next edits the wording.
+    """
+    from textual.widgets import Collapsible, Static
+
+    from disktide.screens.settings import SettingsScreen
+
+    _make_tree_dir(tmp_path)
+
+    async def go():
+        config = load_config()
+        config.ui.show_cleanup = True
+        app = DiskTideApp(
+            scan_path=str(tmp_path), show_welcome=False, config=config
+        )
+        async with app.run_test(size=(80, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("comma")
+            settings = await _await_screen(pilot, app, SettingsScreen)
+
+            fold = next(
+                collapsible
+                for collapsible in settings.query(Collapsible)
+                if collapsible.title == "Cleanup Settings"
+            )
+            fold.collapsed = False
+            await pilot.pause(delay=0.2)
+
+            caveats = list(settings.query(".fold-caveat"))
+            assert len(caveats) == 1, f"expected one caveat, got {caveats}"
+            caveat = caveats[0]
+            painted = caveat.render_line(0).text.strip()
+            assert painted.lower().startswith("experimental"), painted
+            assert caveat.size.height == 1, (
+                f"the caveat grew to {caveat.size.height} rows; the row is "
+                "one cell tall, so the rest of it is simply gone"
+            )
+            # `render_line` crops to the widget, so a sentence too long for
+            # an 80-column terminal comes back shorn of its tail.
+            assert painted.endswith("."), (
+                f"the caveat is too long for 80 columns: {painted!r}"
+            )
+
+            # Above the switch it is a caveat about, not below it.
+            switch = settings.query_one("#show-cleanup")
+            assert caveat.region.y < switch.region.y, (
+                "the caveat reads after the switch it qualifies"
+            )
+
+    asyncio.run(go())

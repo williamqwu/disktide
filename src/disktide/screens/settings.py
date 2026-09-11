@@ -225,6 +225,16 @@ class SettingsScreen(Screen):
         padding: 0 2;
         height: 1;
     }
+
+    /* The one line in a fold that is a caveat rather than a value. Same
+       geometry as `.sysinfo-value` so it sits in the same column as the
+       notes under it, and the theme's warning colour so it is read
+       before the switches rather than after them. */
+    .fold-caveat {
+        padding: 0 2;
+        height: 1;
+        color: $warning;
+    }
     """
 
     def __init__(
@@ -412,6 +422,14 @@ class SettingsScreen(Screen):
                 collapsed=True,
                 classes="section-fold",
             ):
+                # Said here, above the switch that turns the mode on,
+                # because this is the last screen before a user goes
+                # looking for things to delete.
+                yield Static(
+                    "  Experimental: rule detection, estimates and undo "
+                    "can be wrong.",
+                    classes="fold-caveat",
+                )
                 with Horizontal(classes="setting-row"):
                     yield Label("Show Cleanup mode", classes="setting-label")
                     yield Switch(value=self._config.ui.show_cleanup, id="show-cleanup")
