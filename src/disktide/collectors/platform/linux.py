@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import replace
 
 from disktide.collectors.platform.base import PlatformAdapter
 from disktide.collectors.platform.models import (
@@ -65,6 +66,7 @@ class LinuxPlatformAdapter(PlatformAdapter):
             try:
                 with open(source) as mount_file:
                     records = _parse_mount_lines(mount_file)
+                records = _with_mount_roots(records, self._procfs_root)
                 return ProbeResult.available(
                     records,
                     f"read {len(records)} mount entries from {source}",
@@ -403,6 +405,54 @@ def _parse_mount_lines(lines) -> list[MountRecord]:
             options=parts[3] if len(parts) > 3 else "",
         ))
     return records
+
+
+def _parse_mountinfo_roots(lines) -> dict[str, str]:
+    """``{mountpoint: root}`` from a `mountinfo`-shaped table.
+
+    A row is ``id parent major:minor root mountpoint options [optional
+    fields...] - fstype source super-options``. The optional fields are a
+    variable-length list, which is why the separator exists and why nothing
+    after field six can be read by index.
+
+    The last row claiming a mountpoint wins, for the same reason the last
+    `/proc/mounts` record does: mount order is stacking order, and what a
+    path serves is whatever was mounted over it most recently.
+    """
+    roots: dict[str, str] = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        roots[unescape_mount_path(parts[4])] = unescape_mount_path(parts[3])
+    return roots
+
+
+def _with_mount_roots(
+    records: list[MountRecord], procfs_root: str
+) -> list[MountRecord]:
+    """Fill in each record's `root` from `mountinfo`, where it can be read.
+
+    `/proc/mounts` is the table with the device names and the merged option
+    string everything else here already reads, and it is the one table that
+    does not say *which part* of a filesystem is mounted where. Rather than
+    move the whole probe onto `mountinfo` -- whose device column, option
+    split and escaping all differ -- this joins the one missing column on by
+    mountpoint. A host without `mountinfo` keeps every record's default `/`,
+    which reads as "not a bind mount" and costs only the row-folding in the
+    FS overview.
+    """
+    try:
+        with open(os.path.join(procfs_root, "self", "mountinfo")) as table:
+            roots = _parse_mountinfo_roots(table)
+    except OSError:
+        return records
+    if not roots:
+        return records
+    return [
+        replace(record, root=roots.get(record.mountpoint, record.root))
+        for record in records
+    ]
 
 
 def _parse_mountstats_getattr(

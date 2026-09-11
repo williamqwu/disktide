@@ -60,10 +60,22 @@ class MountRecord:
     mountpoint: str
     filesystem_type: str
     options: str = ""
+    #: Which directory *of the filesystem* is mounted here. `/` is the whole
+    #: filesystem, which is what an ordinary mount does; anything else means
+    #: a subtree has been grafted in, which is what `mount --bind`, a btrfs
+    #: subvolume and a container runtime all do. Only `/proc/self/mountinfo`
+    #: carries it, so it stays `/` wherever that table is not readable and
+    #: `is_bind` is then conservatively False.
+    root: str = "/"
 
     @property
     def is_network(self) -> bool:
         return self.filesystem_type in NETWORK_FS_TYPES
+
+    @property
+    def is_bind(self) -> bool:
+        """Whether this mount is a window onto part of a filesystem."""
+        return self.root not in ("", "/")
 
 
 @dataclass(frozen=True, slots=True)

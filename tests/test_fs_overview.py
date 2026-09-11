@@ -8,6 +8,8 @@ from rich.style import Style
 from disktide.screens.fs_overview import (
     FSEntry,
     _usage_bar,
+    _canonical_rank,
+    _duplicate_views,
     _build_summary,
     _dedup_by_device,
     _load_fs_entries,
@@ -29,6 +31,82 @@ def _entry(mount="/", device="/dev/sda1", total=1000, used=500, free=400,
     )
     base.update(kw)
     return FSEntry(**base)
+
+
+class TestDuplicateViews:
+    """Rows that are a second window onto a filesystem already listed.
+
+    A container runtime binds a host directory onto itself for every path
+    it needs writable, and `statvfs` answers for the whole filesystem
+    however small the bound subtree is. The login node this was written on
+    lists seventy real mounts of which fifty-six are `/etc/pam.d`,
+    `/var/log`, `/usr/bin/turbostat` and fifty-three more like them, each
+    reporting the same 15.6 GiB as `/var/lib/stateless/writable`.
+    """
+
+    @staticmethod
+    def _bind(mount, device="/dev/mapper/vg0-lv_rw", root=None):
+        return _entry(mount=mount, device=device, mount_root=root or mount)
+
+    def test_a_bind_of_a_listed_device_is_a_duplicate(self):
+        real = _entry(mount="/var/lib/stateless/writable",
+                      device="/dev/mapper/vg0-lv_rw")
+        bind = self._bind("/var/log")
+        assert _duplicate_views([real, bind]) == [bind]
+
+    def test_a_bind_of_a_device_mounted_nowhere_else_is_kept(self):
+        """`/tmp` is a bind mount on the host this was written on and is
+        the only writable storage on it. "Is it a bind" is the wrong
+        question; "is its filesystem already on screen" is the right one."""
+        lone = self._bind("/tmp", device="/dev/mapper/vg_tmp-lv_tmp",
+                          root="/7164938/.7164938/_tmp")
+        assert _duplicate_views([lone]) == []
+
+    def test_a_second_real_mount_of_a_device_is_kept(self):
+        """Only a bind folds. Two ordinary mounts of one device are two
+        filesystems as far as anything here can tell."""
+        a = _entry(mount="/a", device="/dev/sdb1")
+        b = _entry(mount="/b", device="/dev/sdb1")
+        assert _duplicate_views([a, b]) == []
+
+    def test_the_real_mount_is_the_one_kept_however_deep_it_is(self):
+        """Sorted by path alone the winner would be `/etc/cdi`, a
+        two-component bind of the root filesystem, over
+        `/var/lib/stateless/writable`, which is where it is really mounted."""
+        real = _entry(mount="/var/lib/stateless/writable",
+                      device="/dev/mapper/vg0-lv_rw")
+        binds = [self._bind(m) for m in ("/etc/cdi", "/var/log", "/etc/fstab")]
+        folded = _duplicate_views([*binds, real])
+        assert folded == binds
+        assert real not in folded
+
+    def test_all_binds_of_one_device_keep_the_shallowest(self):
+        deep = self._bind("/var/lib/one/two/three")
+        shallow = self._bind("/srv")
+        folded = _duplicate_views([deep, shallow])
+        assert folded == [deep]
+
+    def test_the_rank_puts_a_real_mount_before_a_bind(self):
+        real = _entry(mount="/a/b/c/d", device="/dev/sdb1")
+        bind = self._bind("/x", device="/dev/sdb1")
+        assert _canonical_rank(real) < _canonical_rank(bind)
+
+    def test_the_summary_counts_them(self):
+        real = _entry(mount="/var/lib/stateless/writable",
+                      device="/dev/mapper/vg0-lv_rw",
+                      total=16 * 2 ** 30, used=8 * 2 ** 30,
+                      free=8 * 2 ** 30, reserved=0)
+        binds = [self._bind(f"/etc/d{i}") for i in range(5)]
+        text = _build_summary([real, *binds]).plain
+        assert "5 mount(s) of a listed filesystem folded" in text
+
+    def test_a_host_without_mountinfo_folds_nothing(self):
+        """`mount_root` stays `/` where the table cannot be read, which
+        reads as "not a bind" and costs only the folding."""
+        entries = [_entry(mount=f"/etc/d{i}", device="/dev/sdb1")
+                   for i in range(5)]
+        assert all(not e.is_bind_mount for e in entries)
+        assert _duplicate_views(entries) == []
 
 
 class TestUsagePct:
@@ -307,3 +385,111 @@ class TestBlockDeviceOrder:
         assert names[0] == "nvme0n1"
         assert "nvme0n1p1" in names[1]
         assert names[2] == "loop0"
+
+
+class TestTheTableFoldsWhatRepeats:
+    """The screen-level half of `_duplicate_views`: two summary rows, one key.
+
+    Snap images and bind mounts are folded for the same reason and by the
+    same keypress, but they get a row each: "seventeen read-only image
+    mounts" and "fifty-six mounts of a listed filesystem" are different
+    facts about the machine and a user who unfolds wants to know which
+    they are looking at.
+    """
+
+    @staticmethod
+    def _entries():
+        real = _entry(
+            mount="/var/lib/stateless/writable",
+            device="/dev/mapper/vg0-lv_rw",
+            total=16 * 2 ** 30, used=8 * 2 ** 30, free=8 * 2 ** 30, reserved=0,
+        )
+        binds = [
+            _entry(mount=f"/etc/d{i}", device="/dev/mapper/vg0-lv_rw",
+                   mount_root=f"/etc/d{i}", total=16 * 2 ** 30,
+                   used=8 * 2 ** 30, free=8 * 2 ** 30, reserved=0)
+            for i in range(5)
+        ]
+        snaps = [
+            _entry(mount=f"/snap/bare/{i}", device=f"/dev/loop{i}",
+                   fs_type="squashfs", mount_options="ro",
+                   total=64 * 2 ** 20, used=64 * 2 ** 20, free=0, reserved=0)
+            for i in range(3)
+        ]
+        return sorted([real, *binds, *snaps], key=lambda e: e.mountpoint)
+
+    def _run(self, tmp_path, keys=()):
+        import asyncio
+        from disktide.app import DiskTideApp
+        from disktide.config import load_config
+        from disktide.collectors.platform.models import ProbeResult
+        from disktide.screens.fs_overview import FSOverviewScreen
+        from textual.widgets import DataTable
+
+        entries = self._entries()
+
+        async def go():
+            app = DiskTideApp(
+                scan_path=str(tmp_path), show_welcome=False, config=load_config()
+            )
+            with patch(
+                "disktide.screens.fs_overview.probe_fs_entries",
+                return_value=ProbeResult.available(entries, "test"),
+            ):
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.press("3")
+                    for _ in range(40):
+                        await pilot.pause(delay=0.1)
+                        if (isinstance(app.screen, FSOverviewScreen)
+                                and app.screen._entries):
+                            break
+                    for key in keys:
+                        await pilot.press(key)
+                        await pilot.pause()
+                    table = app.screen.query_one("#fs-overview-table", DataTable)
+                    return (
+                        [str(app.screen._visible_entries[i].mountpoint)
+                         for i in range(len(app.screen._visible_entries))],
+                        [str(k.value) for k in table.rows],
+                    )
+
+        return asyncio.run(go())
+
+    def test_folded_by_default_with_a_row_for_each_kind(self, tmp_path):
+        visible, keys = self._run(tmp_path)
+        assert visible == ["/var/lib/stateless/writable"]
+        assert keys[-2:] == ["__image_mounts__", "__duplicate_mounts__"]
+        assert len(keys) == 3
+
+    def test_i_unfolds_every_row_and_drops_the_summaries(self, tmp_path):
+        visible, keys = self._run(tmp_path, keys=("i",))
+        assert len(visible) == 9
+        assert "__image_mounts__" not in keys
+        assert "__duplicate_mounts__" not in keys
+
+    def test_i_folds_them_again(self, tmp_path):
+        visible, _keys = self._run(tmp_path, keys=("i", "i"))
+        assert visible == ["/var/lib/stateless/writable"]
+
+
+def test_the_header_bar_legend_names_the_real_mount(tmp_path):
+    """The legend writes the chosen view's mountpoint, so the choice shows.
+
+    Taking whichever device came first labelled a 15.6 GiB segment
+    `/etc/cdi` — a two-component bind of the root filesystem — instead of
+    `/var/lib/stateless/writable`, where it is actually mounted.
+    """
+    real = _entry(mount="/var/lib/stateless/writable",
+                  device="/dev/mapper/vg0-lv_rw",
+                  total=16 * 2 ** 30, used=8 * 2 ** 30,
+                  free=8 * 2 ** 30, reserved=0)
+    bind = _entry(mount="/etc/cdi", device="/dev/mapper/vg0-lv_rw",
+                  mount_root="/etc/cdi",
+                  total=16 * 2 ** 30, used=8 * 2 ** 30,
+                  free=8 * 2 ** 30, reserved=0)
+    legend = _build_summary(sorted([real, bind], key=lambda e: e.mountpoint))
+    # The legend elides a long mountpoint to 18 cells, so the tail is what
+    # survives -- which is the half that identifies the mount.
+    assert "/writable(16.0G)" in legend.plain
+    assert "/etc/cdi(" not in legend.plain
+    assert _dedup_by_device([bind, real]) == [real]

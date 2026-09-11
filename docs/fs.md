@@ -315,7 +315,15 @@ adapter.enumerate_mounts()      # structured mount capability + records
 os.statvfs(mountpoint)          # blocks, available space, inode counts
 subprocess.run(["quota", ...]) # optional current-user quota data
 adapter.list_block_devices()    # structured lsblk capability + device tree
+open("/proc/self/mountinfo")    # which directory of the fs is mounted here
 ```
+
+`MountRecord.root` comes from field 4 of `mountinfo` and is the only way to
+tell a filesystem from a bind mount of one; `/proc/mounts` does not carry it.
+It is joined onto the `/proc/mounts` records by mountpoint rather than
+replacing them, because `mountinfo`'s device column, option split and
+escaping all differ. A host without the table leaves every record at `/`,
+which reads as "not a bind mount".
 
 `statvfs` for network mounts runs in a worker with a 3-second timeout so a stale NFS/CIFS mount cannot block the screen indefinitely. Local mounts are queried directly. Pseudo-filesystems and zero-capacity mounts are filtered from the table.
 

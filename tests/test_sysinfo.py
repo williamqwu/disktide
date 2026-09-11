@@ -171,6 +171,62 @@ class TestUnescapeMountPath:
         assert unescape_mount_path(r"/mnt/café\040x") == "/mnt/café x"
 
 
+class TestMountinfoRoots:
+    """Which *part* of a filesystem is mounted where.
+
+    `/proc/mounts` does not say, which is why nothing in the FS overview
+    could tell a filesystem from a second window onto one. `mountinfo`
+    says, and it is the only table that does.
+    """
+
+    @staticmethod
+    def _parse(text):
+        from disktide.collectors.platform.linux import _parse_mountinfo_roots
+        return _parse_mountinfo_roots(text.splitlines())
+
+    def test_a_whole_filesystem_has_root_slash(self):
+        line = "25 1 8:1 / /var rw,relatime shared:1 - ext4 /dev/sda1 rw"
+        assert self._parse(line) == {"/var": "/"}
+
+    def test_a_bind_mount_names_the_subtree(self):
+        line = "26 25 8:1 /var/log /var/log rw - ext4 /dev/sda1 rw"
+        assert self._parse(line) == {"/var/log": "/var/log"}
+
+    def test_optional_fields_are_skipped_by_the_separator(self):
+        """The count of optional fields varies per row, so nothing after
+        field six can be read by index. Only fields 4 and 5 are."""
+        line = (
+            "31 25 0:29 /sub /mnt rw shared:2 master:3 propagate_from:4"
+            " unbindable - btrfs /dev/sdb1 rw,subvol=/sub"
+        )
+        assert self._parse(line) == {"/mnt": "/sub"}
+
+    def test_octal_escapes_are_decoded_in_both_paths(self):
+        line = r"40 1 8:1 /a\040b /mnt/c\040d rw - ext4 /dev/sda1 rw"
+        assert self._parse(line) == {"/mnt/c d": "/a b"}
+
+    def test_the_last_row_for_a_mountpoint_wins(self):
+        """Mount order is stacking order: what a path serves is whatever
+        was mounted over it most recently."""
+        text = (
+            "25 1 8:1 / /mnt rw - ext4 /dev/sda1 rw\n"
+            "26 1 8:2 /sub /mnt rw - ext4 /dev/sdb1 rw\n"
+        )
+        assert self._parse(text) == {"/mnt": "/sub"}
+
+    def test_short_rows_are_ignored(self):
+        assert self._parse("garbage\n25 1 8:1 /\n") == {}
+
+    def test_records_keep_the_default_when_mountinfo_is_unreadable(self):
+        """A host without the table reads as "no bind mounts", which costs
+        the row folding and nothing else."""
+        from disktide.collectors.platform.linux import _with_mount_roots
+        from disktide.collectors.platform.models import MountRecord
+        records = [MountRecord("/dev/sda1", "/", "ext4", "rw")]
+        assert _with_mount_roots(records, "/no/such/procfs") == records
+        assert records[0].is_bind is False
+
+
 class TestFindBlockDevicePartitionStripping:
     def _check(self, devnode, expected):
         mounts = f"{devnode} / ext4 rw 0 0\n"

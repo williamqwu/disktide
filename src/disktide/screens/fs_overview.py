@@ -72,6 +72,10 @@ class FSEntry:
     inode_total: int
     inode_free: int
     block_size: int
+    #: Which directory of the filesystem is mounted here; `/` is all of it.
+    #: See `MountRecord.root` -- it is what tells a second window onto a
+    #: filesystem apart from a filesystem of its own.
+    mount_root: str = "/"
     # Stacked transforms (RAID / Encrypted / CoW / Compressed); cheap to detect
     # at load, so computed once rather than re-derived on every render.
     transforms: list[str] = field(default_factory=list)
@@ -79,6 +83,11 @@ class FSEntry:
     quota_used_bytes: int | None = None
     quota_soft_bytes: int | None = None
     quota_hard_bytes: int | None = None
+
+    @property
+    def is_bind_mount(self) -> bool:
+        """Whether this row shows part of a filesystem rather than one."""
+        return self.mount_root not in ("", "/")
 
     @property
     def is_read_only(self) -> bool:
@@ -354,6 +363,7 @@ def probe_fs_entries(
             inode_total=stat.f_files,
             inode_free=stat.f_ffree,
             block_size=stat.f_bsize,
+            mount_root=record.root,
             transforms=transforms,
         ))
 
@@ -454,6 +464,23 @@ def _probe_message(label: str, result: ProbeResult) -> Text:
     return text
 
 
+def _canonical_rank(entry: FSEntry) -> tuple[int, int, int, str]:
+    """Sort key picking which of several views of a device is *the* one.
+
+    A real mount before a bind of one, then the shallowest mountpoint. The
+    first half is what matters: sorted by path alone the winner on the host
+    this was measured on would have been `/etc/cdi`, a two-component path
+    that is a bind of the root filesystem, over `/var/lib/stateless/writable`,
+    which is where that filesystem is actually mounted.
+    """
+    return (
+        int(entry.is_bind_mount),
+        entry.mountpoint.count("/"),
+        len(entry.mountpoint),
+        entry.mountpoint,
+    )
+
+
 def _dedup_by_device(entries: list[FSEntry]) -> list[FSEntry]:
     """Keep one entry per backing device for aggregate stats.
 
@@ -462,15 +489,69 @@ def _dedup_by_device(entries: list[FSEntry]) -> list[FSEntry]:
     entries double-counts capacity. The device string is shared across all of
     them, so it's the right key. Real distinct filesystems have distinct
     device nodes.
+
+    *Which* of the views represents the device matters to the header bar,
+    whose legend writes the chosen one's mountpoint: taking whichever came
+    first named a 15.6 GiB segment `/etc/cdi`. `_canonical_rank` picks the
+    same view the row folding keeps, so the bar and the table agree.
     """
-    seen: set[str] = set()
-    unique: list[FSEntry] = []
+    best: dict[str, FSEntry] = {}
     for e in entries:
-        if e.device in seen:
+        current = best.get(e.device)
+        if current is None or _canonical_rank(e) < _canonical_rank(current):
+            best[e.device] = e
+    chosen = {id(e) for e in best.values()}
+    return [e for e in entries if id(e) in chosen]
+
+
+def _duplicate_views(entries: list[FSEntry]) -> list[FSEntry]:
+    """Rows that are a second window onto a filesystem already in the table.
+
+    A container runtime binds a host directory onto itself for every path
+    it wants to keep writable, and `statvfs` answers for the whole
+    filesystem however small the bound subtree is. The login node this was
+    written on lists seventy real mounts, of which fifty-six are
+    `/etc/pam.d`, `/var/log`, `/usr/bin/turbostat` and fifty-three more like
+    them, each reporting the same 15.6 GiB as `/var/lib/stateless/writable`
+    and none of them a filesystem you can do anything about. It is the same
+    complaint as the seventeen snap images, in a different costume: rows
+    that are 100 % of the table's height and 0 % of its information.
+
+    The test is not "is it a bind mount" -- `/tmp` is one on this host and
+    is the only writable storage on it -- but "is its filesystem already
+    on screen somewhere else". A bind of a device mounted nowhere else is
+    the only place that device appears, so it stays.
+    """
+    by_device: dict[str, list[FSEntry]] = {}
+    for entry in entries:
+        by_device.setdefault(entry.device, []).append(entry)
+    duplicates: list[FSEntry] = []
+    for group in by_device.values():
+        if len(group) < 2:
             continue
-        seen.add(e.device)
-        unique.append(e)
-    return unique
+        keeper = min(group, key=_canonical_rank)
+        duplicates.extend(
+            entry for entry in group
+            if entry is not keeper and entry.is_bind_mount
+        )
+    return duplicates
+
+
+def _folded_rows(entries: list[FSEntry]) -> tuple[list[FSEntry], list[FSEntry]]:
+    """``(image mounts, second views)`` -- the rows that fold, in two piles.
+
+    Two piles rather than one because a user who presses `i` is owed the
+    reason: "seventeen read-only image mounts" and "fifty-six mounts of a
+    filesystem already listed" are different facts about the machine. A
+    snap image is on a loop device of its own so the piles cannot overlap
+    in practice, but the image test wins where they would.
+    """
+    images = [e for e in entries if e.is_image_mount]
+    image_ids = {id(e) for e in images}
+    duplicates = [
+        e for e in _duplicate_views(entries) if id(e) not in image_ids
+    ]
+    return images, duplicates
 
 
 def _build_summary(entries: list[FSEntry]) -> Text:
@@ -479,17 +560,21 @@ def _build_summary(entries: list[FSEntry]) -> Text:
     total_used = sum(e.used_bytes for e in unique)
     usable_space = sum(e.used_bytes + e.free_bytes for e in unique)
     used_pct = total_used / usable_space * 100 if usable_space > 0 else 0.0
-    image_count = sum(1 for e in entries if e.is_image_mount)
+    images, duplicates = _folded_rows(entries)
+    image_count, duplicate_count = len(images), len(duplicates)
 
     t = Text()
     t.append(f"  {len(entries)} filesystem(s) mounted  |  ")
     t.append(f"Total: {humanize.naturalsize(total_space, binary=True)}  |  ")
     t.append(f"Used: {humanize.naturalsize(total_used, binary=True)} ({used_pct:.0f}%)")
-    if image_count:
-        t.append(
-            f"  |  {image_count} read-only image mount(s) folded",
-            style=ink("muted"),
-        )
+    folded_note = "  |  ".join(
+        note for note, count in (
+            (f"{image_count} read-only image mount(s)", image_count),
+            (f"{duplicate_count} mount(s) of a listed filesystem", duplicate_count),
+        ) if count
+    )
+    if folded_note:
+        t.append(f"  |  {folded_note} folded", style=ink("muted"))
     t.append("\n  ")
 
     # Proportional bar — each FS contributes width proportional to its total
@@ -808,8 +893,12 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
             show=True, key_display="B", id="fs.benchmark",
         ),
         Binding("r", "refresh", "Refresh", show=False, id="fs.refresh"),
+        # Still `fs.image_mounts`: a binding id is what a user's config.toml
+        # names, so it outlives the label. What it unfolds grew -- the
+        # read-only package images were never the only rows that are the
+        # same answer repeated.
         Binding(
-            "i", "toggle_image_mounts", "Image mounts",
+            "i", "toggle_folded_mounts", "All mounts",
             show=True, id="fs.image_mounts",
         ),
     ]
@@ -858,12 +947,14 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
         super().__init__(**kwargs)
         self._adapter = adapter or get_platform_adapter()
         self._entries: list[FSEntry] = []
-        #: Rows the table currently shows, which is `_entries` minus the
-        #: folded image mounts. The table's cursor indexes into this.
+        #: Rows the table currently shows, which is `_entries` minus
+        #: whatever is folded. The table's cursor indexes into this.
         self._visible_entries: list[FSEntry] = []
-        #: Read-only package images (snap and friends) are folded into one
-        #: summary row by default; `i` unfolds them.
-        self._show_image_mounts = False
+        #: Rows that say nothing a row above them has not already said --
+        #: read-only package images, and second views of a filesystem the
+        #: table already lists -- are each folded into one summary row by
+        #: default; `i` unfolds them all.
+        self._show_folded_mounts = False
         self._block_devices: list[BlockDevice] = []
         self._block_rows: list[BlockDevice] = []
         self._filesystem_probe: ProbeResult[list[FSEntry]] = (
@@ -963,21 +1054,25 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
         self._populate_block_table()
 
     def _populate_fs_table(self) -> None:
-        """Fill the mount table, folding read-only images unless asked.
+        """Fill the mount table, folding the rows that repeat, unless asked.
 
-        On an ordinary Ubuntu box seventeen of thirty-one mounts are one
-        squashfs per snap package: 100 % full by construction, never
-        actionable, and between them more than half the table. They are
-        one summary row until `i` says otherwise.
+        Two kinds repeat. On an ordinary Ubuntu box seventeen of thirty-one
+        mounts are one squashfs per snap package: 100 % full by
+        construction, never actionable, and between them more than half the
+        table. On a cluster login node fifty-six of seventy are a container
+        runtime's bind mounts, every one of them reporting the root
+        filesystem's size again. Each kind gets one summary row, saying how
+        many and why, until `i` says otherwise.
         """
         table = self.query_one("#fs-overview-table", DataTable)
         table.clear()
         entries = self._entries
-        images = [e for e in entries if e.is_image_mount]
+        images, duplicates = _folded_rows(entries)
+        folded_ids = {id(e) for e in (*images, *duplicates)}
         shown = (
             list(entries)
-            if self._show_image_mounts or not images
-            else [e for e in entries if not e.is_image_mount]
+            if self._show_folded_mounts or not folded_ids
+            else [e for e in entries if id(e) not in folded_ids]
         )
         self._visible_entries = shown
         for e in shown:
@@ -992,30 +1087,55 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
                 _quota_cell(e),
                 key=e.mountpoint,
             )
-        if images and not self._show_image_mounts:
-            total = sum(e.total_bytes for e in images)
+        if self._show_folded_mounts:
+            return
+        dash = Text("—", style=ink("muted"))
+        # The duplicates row carries no total: their bytes are the bytes of
+        # a row above, and summing them would be the double-count the fold
+        # exists to stop. The images have storage of their own.
+        piles = (
+            (
+                images,
+                "read-only image mounts",
+                "squashfs/loop",
+                "__image_mounts__",
+                humanize.naturalsize(
+                    sum(e.total_bytes for e in images), binary=True
+                ),
+            ),
+            (
+                duplicates,
+                "mounts of a listed filesystem",
+                "bind",
+                "__duplicate_mounts__",
+                dash,
+            ),
+        )
+        for folded, label, kind, key, total in piles:
+            if not folded:
+                continue
             table.add_row(
-                Text(f"{len(images)} read-only image mounts", style=ink("muted")),
-                Text("squashfs/loop", style=ink("muted")),
+                Text(f"{len(folded)} {label}", style=ink("muted")),
+                Text(kind, style=ink("muted")),
                 Text("press i to expand", style=ink("muted")),
-                humanize.naturalsize(total, binary=True),
-                Text("—", style=ink("muted")),
-                Text("—", style=ink("muted")),
+                total,
+                dash,
+                dash,
                 Text("", style=ink("muted")),
                 Text(""),
-                key="__image_mounts__",
+                key=key,
             )
 
-    def action_toggle_image_mounts(self) -> None:
-        """Show or fold the read-only package-image mounts."""
-        self._show_image_mounts = not self._show_image_mounts
+    def action_toggle_folded_mounts(self) -> None:
+        """Show or fold the rows that repeat what the table already says."""
+        self._show_folded_mounts = not self._show_folded_mounts
         if not self._entries:
             return
         self._populate_fs_table()
         self.app.notify(
-            "Showing read-only image mounts"
-            if self._show_image_mounts
-            else "Read-only image mounts folded into one row",
+            "Showing every mount"
+            if self._show_folded_mounts
+            else "Image mounts and repeat views folded into one row each",
             timeout=3,
         )
 

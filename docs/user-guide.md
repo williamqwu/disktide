@@ -181,20 +181,32 @@ available.
 | Key | Action |
 |-----|--------|
 | Enter | Open filesystem or block-device details |
-| `i` | Expand / fold the read-only image mounts |
+| `i` | Expand / fold the rows that repeat (image mounts, second views of a listed filesystem) |
 | `B` | Benchmark the highlighted mount (writes a temp file after confirmation) |
 | `r` | Refresh |
 
 Pseudo-filesystems are filtered out. Unavailable probes show their reason
 instead of an empty panel.
 
-Read-only package images — one squashfs per snap, on a loop device — are
-folded into a single row, and their usage bars are drawn without the colour
-ramp: a read-only image is 100% full because that is what read-only means.
-Press `i` to list them individually. The proportional bar in the header gives
-a cell only to mounts holding at least 1% of the total and sums the rest into
-one "others" cell, so a machine with seventeen 64 MiB snaps still gets a bar
-that is 50 cells wide.
+Two kinds of row are folded away, each into one summary row, and `i` lists
+them individually.
+
+**Read-only package images** — one squashfs per snap, on a loop device — get
+their usage bars drawn without the colour ramp as well: a read-only image is
+100% full because that is what read-only means.
+
+**Second views of a filesystem already in the table.** A container runtime
+binds a host directory onto itself for every path it needs writable, and each
+one reports the whole filesystem's capacity again: a cluster login node lists
+seventy mounts of which fifty-six are `/etc/pam.d`, `/var/log`,
+`/usr/bin/turbostat` and more like them, all repeating the 15.6 GiB of
+`/var/lib/stateless/writable`. A bind mount whose filesystem is mounted
+nowhere else is *not* folded — on that same host `/tmp` is a bind mount and
+is the only local storage on it.
+
+The proportional bar in the header gives a cell only to mounts holding at
+least 1% of the total and sums the rest into one "others" cell, so a machine
+with seventeen 64 MiB snaps still gets a bar that is 50 cells wide.
 
 ### Cleanup (4)
 
@@ -271,6 +283,7 @@ Press `?` in the app for a live, screen-specific version of this table.
 | `z` | Cleanup | Undo latest plan |
 | `h` | Cleanup | Savings history |
 | `m` | Cleanup | Focus Age/Size Map |
+| `i` | FS Overview | Expand / fold repeated rows |
 
 ### Remapping keys
 
