@@ -11,10 +11,14 @@ from __future__ import annotations
 import asyncio
 import re
 
+import pytest
+from rich.cells import cell_len
 from rich.style import Style
+from textual.geometry import Region
 
 from disktide.app import DiskTideApp
 from disktide.config import load_config
+from disktide.models.tree import FSNode
 from disktide.viz.colors import ink_fill
 from disktide.widgets.size_tree import SizeTree
 from tests.waiting import wait_for_explorer
@@ -258,3 +262,177 @@ def test_the_bar_survives_the_cursor_row(tmp_path, monkeypatch):
 
     asyncio.run(go(False))
     asyncio.run(go(True))
+
+
+class TestTheBarIsAColumn:
+    """Every bar drawn on the panel occupies the same two columns.
+
+    Two things used to move it. The tail is right-aligned as one block,
+    so an unpadded percent pulled the bar along with it and `100.0%`,
+    `40.8%` and `0.2%` put their bars in three different columns down a
+    single tree. And the bar was sized from whatever each row had left
+    over, so a long name bought a shorter bar: on a 51-cell panel `src/`
+    drew fifteen cells where `.pytest_cache/` drew thirteen, which is the
+    one thing a proportional bar cannot do and stay readable.
+
+    Checked on the labels rather than through a running app because the
+    arithmetic is all in `_append_share`, and it is the arithmetic that
+    has to hold at every width.
+    """
+
+    WIDTHS = (52, 64, 80, 140, 300)
+
+    @staticmethod
+    def _tree(width: int, monkeypatch) -> tuple[SizeTree, FSNode]:
+        """A root whose children span 4-, 5- and 6-cell percents."""
+        root = FSNode(
+            name="root", path="/root", size=1_000_000, own_size=0,
+            is_dir=True, depth=0,
+        )
+        # 100.0%, 40.0%, 9.0%, 0.5% -- one child per percent width, and
+        # names of three different lengths so a row's own content cannot
+        # be what decides where its bar goes.
+        for name, size in (
+            ("a", 400_000),
+            ("a-longer-name", 90_000),
+            ("mid", 5_000),
+        ):
+            root.children.append(
+                FSNode(
+                    name=name, path=f"/root/{name}", size=size, own_size=size,
+                    is_dir=True, depth=1,
+                )
+            )
+        tree = SizeTree(root)
+        monkeypatch.setattr(
+            type(tree), "scrollable_content_region",
+            property(lambda self: Region(0, 0, width, 24)),
+        )
+        return tree, root
+
+    @staticmethod
+    def _bar_span(tree: SizeTree, root: FSNode, node: FSNode):
+        """Columns the row's bar covers, or None when it has none.
+
+        The bar is the only thing in a label carrying a background
+        colour, and `Tree.render_label` prints the guides and the expand
+        glyph in front of the label, so the row's own columns are the
+        label's offsets plus that prefix.
+        """
+        text = tree._make_label(node)
+        indent = (node.depth - root.depth) * tree.guide_depth
+        glyph = max(cell_len(tree.ICON_NODE), cell_len(tree.ICON_NODE_EXPANDED))
+        fills = [
+            (span.start, span.end)
+            for span in text.spans
+            if Style.parse(span.style).bgcolor is not None
+        ]
+        if not fills:
+            return None
+        return (
+            indent + glyph + min(start for start, _ in fills),
+            indent + glyph + max(end for _, end in fills),
+        )
+
+    @pytest.mark.parametrize("width", WIDTHS)
+    def test_every_bar_starts_and_ends_in_the_same_column(self, width, monkeypatch):
+        tree, root = self._tree(width, monkeypatch)
+        spans = {
+            node.name: self._bar_span(tree, root, node)
+            for node in (root, *root.children)
+        }
+        drawn = {name: span for name, span in spans.items() if span is not None}
+        assert len(drawn) >= 2, (
+            f"expected several bars to compare at width {width}: {spans}"
+        )
+        assert len(set(drawn.values())) == 1, (
+            f"at width {width} the bars land in different columns: {drawn}"
+        )
+
+    @pytest.mark.parametrize("width", WIDTHS)
+    def test_the_percent_column_survives_the_padding(self, width, monkeypatch):
+        """Padding the percent must not push a row past the panel edge."""
+        tree, root = self._tree(width, monkeypatch)
+        ends = set()
+        for node in (root, *root.children):
+            text = tree._make_label(node)
+            indent = (node.depth - root.depth) * tree.guide_depth
+            glyph = max(cell_len(tree.ICON_NODE), cell_len(tree.ICON_NODE_EXPANDED))
+            end = text.cell_len + indent + glyph
+            assert end <= width, f"row overflows {width}: {text.plain!r}"
+            if "%" in text.plain:
+                ends.add(end)
+        assert len(ends) == 1, f"percents no longer share a column: {ends}"
+
+
+    def test_rows_carrying_a_sparkline_keep_their_bars(self, monkeypatch):
+        """The bar has to survive the widest row a real tree draws.
+
+        A tree with snapshot history puts a six-cell sparkline between the
+        value and the tail, which is what the README hero shot shows: at
+        its 52-cell panel those rows run to 32 cells before the tail can
+        start. A shared bar sized against a bare `name  size` row drops
+        off two thirds of them -- worse than the misalignment that sharing
+        one width is there to fix -- so `LABEL_RESERVE` is measured
+        against this row set. The names below are the hero's own.
+        """
+        total = 8_912_896
+        root = FSNode(
+            name="disktide", path="/tmp/disktide", size=total, own_size=0,
+            is_dir=True, depth=0,
+        )
+        for name, size in (
+            (".venv", 4_027_629),
+            ("src", 2_237_137),
+            ("tests", 1_506_279),
+            ("docs", 436_700),
+            ("tool", 267_386),
+            (".pytest_cache", 106_086),
+            (".github", 19_558),
+            ("assets", 2_355),
+        ):
+            root.children.append(
+                FSNode(
+                    name=name, path=f"/tmp/disktide/{name}", size=size,
+                    own_size=size, is_dir=True, depth=1,
+                )
+            )
+        tree = SizeTree(root)
+        monkeypatch.setattr(
+            type(tree), "scrollable_content_region",
+            property(lambda self: Region(0, 0, 52, 40)),
+        )
+        # `.venv/` and `.pytest_cache/` are untracked in the hero, so they
+        # are in no snapshot and get no sparkline -- which is what keeps
+        # the two longest names off the widest rows.
+        tree._mini_trends = {
+            node.path: (1, 2, 3, 4, 5, 6)
+            for node in (root, *root.children)
+            if node.name not in (".venv", ".pytest_cache")
+        }
+
+        spans = {
+            node.name: self._bar_span(tree, root, node)
+            for node in (root, *root.children)
+        }
+        missing = sorted(name for name, span in spans.items() if span is None)
+        assert not missing, (
+            f"rows lost their bar at the hero's 52-cell panel: {missing}"
+        )
+        assert len(set(spans.values())) == 1, spans
+
+    def test_a_row_too_long_for_the_bar_keeps_its_percent(self, monkeypatch):
+        """The bar goes before the percent does, and never shrinks."""
+        tree, root = self._tree(64, monkeypatch)
+        crowded = FSNode(
+            name="a-considerably-longer-directory-name",
+            path="/root/long", size=5_000, own_size=5_000,
+            is_dir=True, depth=1,
+        )
+        root.children.append(crowded)
+        assert self._bar_span(tree, root, crowded) is None, (
+            "a row with no room for the shared bar drew one anyway"
+        )
+        assert tree._make_label(crowded).plain.endswith("%"), (
+            "the row gave up its percent instead of its bar"
+        )

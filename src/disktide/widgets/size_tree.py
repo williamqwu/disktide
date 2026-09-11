@@ -72,10 +72,42 @@ class SizeTree(Tree[FSNode]):
     ]
 
     BAR_WIDTH = 15
-    """Cells the proportional bar uses when the row has room for it."""
+    """Cells the proportional bar uses when the panel has room for it."""
 
     MIN_BAR_WIDTH = 6
     """Narrowest bar still worth drawing; below this the bar is dropped."""
+
+    PERCENT_WIDTH = 6
+    """Cells the percent always takes, `100.0%` being the widest it gets.
+
+    Padded rather than measured, because the tail is right-aligned as a
+    block: a row whose percent is one digit shorter used to pull the bar
+    one cell right with it, so the bars stepped across three columns
+    (`100.0%`, `40.8%`, `0.2%`) down a single tree.
+    """
+
+    LABEL_RESERVE = 32
+    """Cells the shared bar tries to leave in front of itself.
+
+    This is what makes the bar a property of the panel instead of the
+    row. It is a budget, not a promise: a row longer than this drops its
+    bar rather than shrinking one, and a row shorter than it does not get
+    a longer bar for being short. Thirty-two is measured, not chosen --
+    it is roughly the longest row a real tree draws once the guides, the
+    expand glyph, the name, the value and a diff sparkline are all on it,
+    and a reserve under that loses the bar on the deeper half of the rows
+    while leaving it on the shallow half.
+    """
+
+    NARROW_BAR_SHARE = (2, 5)
+    """Least of a narrow panel the bar may take, as (numerator, divisor).
+
+    `LABEL_RESERVE` is an absolute number of cells because names are an
+    absolute number of cells -- they do not shrink with the terminal. But
+    below about sixty columns of panel that reserve is the whole panel,
+    and a tree that used to show a short bar on every row would show none
+    at all. Two fifths is what keeps a chart on a 100-column terminal.
+    """
 
     def __init__(
         self,
@@ -585,36 +617,81 @@ class SizeTree(Tree[FSNode]):
 
         return text
 
-    def _append_share(self, text: Text, node: FSNode, ratio: float) -> None:
-        """Append the bar and percent, degrading to whatever the row fits.
+    def _bar_cells(self, width: int) -> int:
+        """Bar width shared by every row of the panel, or 0 for no bar.
 
-        The percent is the payload and is never truncated: the bar gives up
-        cells first (down to `MIN_BAR_WIDTH`), then disappears, and only
-        then does the percent itself go. Textual crops a label at the panel
-        edge, so an over-wide tail would otherwise render as a fragment
-        like "16." with the digits and sign shorn off.
+        Sized from the panel and nothing else. The bar used to take
+        whatever each row had left over, which made its length a function
+        of the name printed in front of it: on a 51-cell panel `src/` drew
+        fifteen cells and `.pytest_cache/` drew thirteen, so the same
+        share came out a different length on the two rows. A proportional
+        bar is only worth drawing if every bar on screen is drawn to one
+        scale.
+
+        Returns the full width before the first layout, when there is no
+        panel to size against yet (`width <= 0`); `on_resize` re-fits
+        every label once there is.
         """
-        percent = f"{ratio * 100:.1f}%"
-        room = self._tail_room(node, text)
+        if width <= 0:
+            return self.BAR_WIDTH
+        numerator, divisor = self.NARROW_BAR_SHARE
+        tail = max(width - self.LABEL_RESERVE, width * numerator // divisor)
+        # "  " + bar + " " + percent is what the tail has to pay for.
+        budget = tail - 3 - self.PERCENT_WIDTH
+        if budget < self.MIN_BAR_WIDTH:
+            return 0
+        return min(self.BAR_WIDTH, budget)
 
-        if room is None:
-            bar_width = self.BAR_WIDTH
-        else:
-            # "  " + bar + " " + percent
-            bar_width = min(self.BAR_WIDTH, room - 3 - len(percent))
-            # Right-align the whole block against the panel edge so the
-            # percent lands in the same column on every row, whatever the
-            # name, the delta or an access badge did to the row before it.
-            used = (
-                3 + bar_width + len(percent)
-                if bar_width >= self.MIN_BAR_WIDTH
-                else 2 + len(percent)
-            )
-            lead = max(0, room - used)
-            if lead:
-                text.append(" " * lead)
+    def _append_share(self, text: Text, node: FSNode, ratio: float) -> None:
+        """Append the bar and percent as one fixed-width right-hand column.
 
-        if bar_width >= self.MIN_BAR_WIDTH:
+        Every row's tail is the same width -- two spaces, the shared bar,
+        a space, and the percent padded to `PERCENT_WIDTH` -- so
+        right-aligning it against the panel edge lands the bar in the same
+        columns on every row instead of sliding it sideways each time the
+        percent gains or loses a digit.
+
+        The percent is the payload and is never truncated: a row without
+        the cells for the shared bar drops the bar and keeps its percent
+        in the column the other rows put theirs in, and only a row that
+        cannot fit even that loses the tail. Textual crops a label at the
+        panel edge, so an over-wide tail would otherwise render as a
+        fragment like "16." with the digits and sign shorn off.
+        """
+        value = f"{ratio * 100:.1f}%"
+        # One lookup, handed to both: `scrollable_content_region` goes
+        # through the compositor's widget map, and this runs once per row
+        # of a tree that can be repainted a hundred times during a scan.
+        width = self.scrollable_content_region.width
+        bar_width = self._bar_cells(width)
+        room = self._tail_room(node, text, width)
+
+        # `max`, not `PERCENT_WIDTH`: a share that somehow reads past 100%
+        # is wider than the column, and the fit has to be measured against
+        # what will actually be printed or the tail overruns the panel.
+        column = max(self.PERCENT_WIDTH, len(value))
+        if room is not None and bar_width and room < 3 + bar_width + column:
+            # Too long a row for the shared bar. Fitting a shorter one here
+            # is what made the scale row-dependent in the first place, so
+            # the bar goes and the percent stays in its column.
+            bar_width = 0
+
+        # Padded only behind a bar. Right-aligned against the panel edge
+        # the percent lands in the same column either way, but the bar in
+        # front of it does not: unpadded, `0.2%` pushes its bar a cell to
+        # the right of the one on the `100.0%` row above it. On a row with
+        # no bar the padding would buy nothing and cost two cells that
+        # might be the difference between a percent and no percent.
+        percent = value.rjust(column) if bar_width else value
+
+        if room is not None:
+            used = (3 + bar_width if bar_width else 2) + len(percent)
+            if room < used:
+                return
+            if room > used:
+                text.append(" " * (room - used))
+
+        if bar_width:
             filled = int(ratio * bar_width)
             if is_safe_rendering():
                 filled_ch, empty_ch = bar_chars()
@@ -635,10 +712,10 @@ class SizeTree(Tree[FSNode]):
                         " " * (bar_width - filled), style=ink_fill("bar_track")
                     )
                 text.append(f" {percent}", style=ink("bar"))
-        elif room is None or room >= 2 + len(percent):
+        else:
             text.append(f"  {percent}", style=ink("bar"))
 
-    def _tail_room(self, node: FSNode, text: Text) -> int | None:
+    def _tail_room(self, node: FSNode, text: Text, width: int) -> int | None:
         """Cells left on `node`'s row for the bar and percent.
 
         The rendered row is the tree's guide indentation, plus the
@@ -651,7 +728,6 @@ class SizeTree(Tree[FSNode]):
         first layout), so the caller emits the full-width tail and the
         resize handler re-fits it once a real width is known.
         """
-        width = self.scrollable_content_region.width
         if width <= 0:
             return None
         root = self._fs_root
