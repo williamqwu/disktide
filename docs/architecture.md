@@ -1396,8 +1396,9 @@ Uses platform adapter probes for mounts and block devices, `statvfs` for
 capacity, optional `quota` output, and `/proc/self/mountinfo` for the one
 column `/proc/mounts` lacks -- which directory of a filesystem is mounted
 where, and so which rows are a second view of a filesystem already listed.
-Network `statvfs` calls run behind a 3-second watchdog. The `b` benchmark is
-the only write path (bounded temp file, confirmed before writing).
+Network `statvfs` calls run behind a 3-second watchdog. The `B` benchmark is
+the only write path (bounded temp file, in a directory named in the prompt,
+confirmed before writing, one at a time).
 
 ## Dependencies
 

@@ -208,6 +208,31 @@ The proportional bar in the header gives a cell only to mounts holding at
 least 1% of the total and sums the rest into one "others" cell, so a machine
 with seventeen 64 MiB snaps still gets a bar that is 50 cells wide.
 
+#### Benchmarking a mount
+
+`B`, then `B` again to confirm, writes a temporary file and reads it back.
+The prompt names **the directory it will write in**, which is not always the
+mountpoint: on a shared machine the mount root is usually the one directory
+you cannot write, so the probe falls back to your own directory on that same
+filesystem (`/users/PRJ0042` is probed in `/users/PRJ0042/alice`). A mount with
+nowhere writable on it says so instead of prompting.
+
+It writes at most 256 MiB of incompressible data, never more than a quarter
+of the space you actually have left — your quota where one is enforced,
+because `statvfs` reports the filesystem's free space and not your share of
+it. The probe file is removed however the call ends, and a run first sweeps
+away any probe file an earlier run was killed before it could clean up.
+
+`max_seconds` is a budget rather than a guarantee: the write phase and the
+read-back each stop on the clock and say so ("stopped at the time budget"),
+but a buffered write is not on disk until `fsync` returns and nothing can
+bound that call. The read figure is marked `~` because `posix_fadvise` is
+advisory — NFS ignores it, so a read number there is the client page cache
+rather than the network.
+
+One probe runs at a time. A second is refused rather than queued: they are
+threads blocked in `write`, so two of them would be measuring each other.
+
 ### Cleanup (4)
 
 Detects reclaimable artifacts through versioned rule packs for Python, Node,

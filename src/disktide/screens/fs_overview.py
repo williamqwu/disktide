@@ -30,7 +30,11 @@ from disktide.scanner.sysinfo import (
 )
 from disktide.pathdisplay import elide_path
 from disktide.scanner.blockdev import idle_summary
-from disktide.scanner.benchmark import benchmark_mount, BenchmarkResult
+from disktide.scanner.benchmark import (
+    benchmark_mount,
+    writable_probe_dir,
+    BenchmarkResult,
+)
 from disktide.scanner.policy import PSEUDO_FS_TYPES
 from disktide.screens import RenderEpochRefreshMixin, scrollbar_css
 from disktide.viz.colors import FILL_ROLES, ink, ink_fill
@@ -123,6 +127,20 @@ class FSEntry:
     @property
     def has_quota(self) -> bool:
         return self.quota_hard_bytes is not None and self.quota_hard_bytes > 0
+
+    @property
+    def quota_headroom_bytes(self) -> int | None:
+        """Bytes this *user* may still write here, or None if unlimited.
+
+        Not what `statvfs` says. On the NFS home this was written against
+        `statvfs` reported thousands of GiB free against a quota that left hundreds of GiB
+        -- so anything sized as a fraction of "free space" is sized against
+        a number tens of times too large. Where a quota is enforced, this is the real
+        one, and it is what the benchmark probe is capped by.
+        """
+        if not self.has_quota or self.quota_used_bytes is None:
+            return None
+        return max(0, self.quota_hard_bytes - self.quota_used_bytes)
 
     @property
     def quota_pct(self) -> float:
@@ -440,13 +458,24 @@ def _quota_cell(entry: FSEntry) -> Text:
     return t
 
 
-def _format_benchmark(res: BenchmarkResult) -> str:
-    """One-line summary of a throughput probe, shared by toast and detail view."""
-    return (
-        f"write {humanize.naturalsize(res.write_bps)}/s · "
+def _format_benchmark(res: BenchmarkResult, mountpoint: str = "") -> str:
+    """One-line summary of a throughput probe, shared by toast and detail view.
+
+    Says where it wrote when that is not the mountpoint, because on a shared
+    machine it usually is not, and "/users/PRJ0042 does 700 MB/s" and
+    "/users/PRJ0042/alice does 700 MB/s" are claims about the same filesystem
+    made with different amounts of honesty.
+    """
+    parts = [
+        f"write {humanize.naturalsize(res.write_bps)}/s",
         f"read ~{humanize.naturalsize(res.read_bps)}/s "
-        f"({humanize.naturalsize(res.bytes_io, binary=True)} probed)"
-    )
+        f"({humanize.naturalsize(res.bytes_io, binary=True)} probed)",
+    ]
+    if res.probe_dir and res.probe_dir != mountpoint:
+        parts.append(f"in {res.probe_dir}")
+    if res.truncated:
+        parts.append("stopped at the time budget")
+    return " · ".join(parts)
 
 
 def _probe_message(label: str, result: ProbeResult) -> Text:
@@ -732,10 +761,11 @@ class FSDetailModal(ModalScreen):
             attrs.append_text(e.badges)
             yield Static(attrs, classes="detail-row")
             # Measured throughput, if this mount has been benchmarked this
-            # session (press 'b' in the overview). Latest run wins.
+            # session (press 'B' in the overview). Latest run wins.
             if self._benchmark is not None:
                 measured = Text(
-                    f"  Measured:      {_format_benchmark(self._benchmark)}",
+                    "  Measured:      "
+                    f"{_format_benchmark(self._benchmark, e.mountpoint)}",
                     style=ink("link"),
                 )
                 yield Static(measured, classes="detail-row")
@@ -966,6 +996,13 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
         # Measured throughput per mountpoint, kept for the life of the screen so
         # reopening a row shows its last result. Later runs overwrite earlier.
         self._benchmarks: dict[str, BenchmarkResult] = {}
+        #: The mountpoint a probe is writing to right now, or None. A probe
+        #: is a thread blocked in `os.write`; Textual can mark that worker
+        #: cancelled but it cannot take the syscall back, so two of them
+        #: overlap for real and the second one's numbers are measuring the
+        #: first one's I/O. Refusing to start the second is the only
+        #: mechanism that actually works.
+        self._benchmark_running: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -994,7 +1031,12 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
             self._show_loading(True)
             self._load_data()
 
-    @work(thread=True, exclusive=True)
+    # `exclusive=True` cancels other workers *in the same group*, and the
+    # default group is one shared name. Without these two labels, arming a
+    # benchmark cancelled the loader and refreshing the table cancelled the
+    # benchmark -- or would have, if a thread blocked in `os.write` could be
+    # cancelled at all.
+    @work(thread=True, exclusive=True, group="fs-overview-load")
     def _load_data(self) -> None:
         try:
             filesystem_probe = probe_fs_entries(self._adapter)
@@ -1183,29 +1225,63 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
 
         Storage-class badges are heuristics; this is the explicit, on-demand
         way to get a measured number. Because it writes a temp file, it is
-        gated behind a confirm prompt (press 'b' again to commit) so a stray
-        keystroke never kicks off disk I/O. The result is recorded per mount
-        and shown when that row is reopened.
+        gated behind a confirm prompt (press 'B' again to commit) so a stray
+        keystroke never kicks off disk I/O, and the prompt names the
+        directory the file will go in rather than the mount -- on a shared
+        machine those differ, and the one the user is consenting to is the
+        directory. The result is recorded per mount and shown when that row
+        is reopened.
         """
+        if self._benchmark_running is not None:
+            self.notify(
+                f"Already benchmarking {self._benchmark_running}. "
+                "One probe at a time, or they measure each other.",
+                severity="warning",
+                timeout=5,
+            )
+            return
         table = self.query_one("#fs-overview-table", DataTable)
         row = table.cursor_row
         if not (0 <= row < len(self._visible_entries)):
             return
-        mountpoint = self._visible_entries[row].mountpoint
+        entry = self._visible_entries[row]
+        mountpoint = entry.mountpoint
+
+        # Resolved before the prompt, not inside the worker, because it is
+        # what the prompt has to say. A handful of stat calls.
+        probe_dir = writable_probe_dir(mountpoint)
+        if probe_dir is None:
+            self.notify(
+                f"{mountpoint}: nothing writable on it to probe — "
+                "the mount root and this user's usual directories under it "
+                "are all read-only.",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        headroom = entry.quota_headroom_bytes
+
+        where = (
+            f"a temporary file in {probe_dir}"
+            if probe_dir != mountpoint
+            else "a temporary file"
+        )
 
         def _on_confirm(confirmed: bool | None) -> None:
-            if confirmed:
-                self.notify(
-                    f"Benchmarking {mountpoint} (writing a temp file)…",
-                    timeout=4,
-                )
-                self._run_benchmark(mountpoint)
+            if not confirmed:
+                return
+            self._benchmark_running = mountpoint
+            self.notify(
+                f"Benchmarking {mountpoint} (writing {where})…",
+                timeout=4,
+            )
+            self._run_benchmark(mountpoint, probe_dir, headroom)
 
         self.app.push_screen(
             ConfirmModal(
                 message=(
                     f"Benchmark {mountpoint}?\n"
-                    "This writes a temporary file to measure throughput."
+                    f"This writes {where} to measure throughput."
                 ),
                 title="Benchmark mount",
                 confirm_keys=("B",),
@@ -1213,26 +1289,42 @@ class FSOverviewScreen(RenderEpochRefreshMixin, Screen):
             callback=_on_confirm,
         )
 
-    @work(thread=True, exclusive=True)
-    def _run_benchmark(self, mountpoint: str) -> None:
+    @work(thread=True, exclusive=True, group="fs-overview-benchmark")
+    def _run_benchmark(
+        self, mountpoint: str, probe_dir: str, headroom: int | None
+    ) -> None:
+        # One exit, so the in-flight flag is cleared on both paths and the
+        # screen can never be left refusing every further keypress.
         try:
-            res = benchmark_mount(mountpoint)
-        except Exception as e:
-            self.app.call_from_thread(
-                self.notify,
-                f"{mountpoint}: benchmark failed — {e}",
+            result: BenchmarkResult | None = benchmark_mount(
+                mountpoint, probe_dir=probe_dir, headroom_bytes=headroom
+            )
+            error: Exception | None = None
+        except Exception as exc:
+            result, error = None, exc
+        self.app.call_from_thread(
+            self._on_benchmark_done, mountpoint, result, error
+        )
+
+    def _on_benchmark_done(
+        self,
+        mountpoint: str,
+        res: BenchmarkResult | None,
+        error: Exception | None,
+    ) -> None:
+        self._benchmark_running = None
+        if res is None:
+            self.notify(
+                f"{mountpoint}: benchmark failed — {error}",
                 severity="warning",
                 timeout=8,
             )
             return
-        self.app.call_from_thread(self._on_benchmark_done, mountpoint, res)
-
-    def _on_benchmark_done(self, mountpoint: str, res: BenchmarkResult) -> None:
         # Record so reopening the row shows the measured number; a later run on
         # the same mount overwrites this one.
         self._benchmarks[mountpoint] = res
         self.notify(
-            f"{mountpoint}  {_format_benchmark(res)}",
+            f"{mountpoint}  {_format_benchmark(res, mountpoint)}",
             severity="information",
             timeout=10,
         )
