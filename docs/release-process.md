@@ -35,9 +35,15 @@ uv sync --locked
 uv sync --locked --python 3.13 --extra watch
 .venv/bin/python -m pytest -q
 uv sync --locked
-uv build
+uv build --python 3.13
 .venv/bin/python tool/verify_distribution.py
 ```
+
+`--python 3.13` matches the smoke environments below; a plain `uv build` in a
+3.12 checkout makes a `cp312` wheel they refuse. On a machine whose module
+system exports `CC=icc`, build with `CC=gcc`: the build hook tries `$CC`
+first, and an `icc` object links Intel's runtime, which the published
+wheels never do.
 
 Refresh the developer's installed checkout after every source version change.
 Do not hard-code the expected version; derive it through the compatibility
@@ -104,8 +110,8 @@ CPython 3.10 through 3.14 on:
 |--------|--------|
 | `ubuntu-latest` | `manylinux_x86_64`, `musllinux_x86_64` |
 | `ubuntu-latest` + QEMU | `manylinux_aarch64`, `musllinux_aarch64` |
-| `macos-14` | `macosx_arm64` |
-| `macos-13` | `macosx_x86_64` |
+| `macos-15` | `macosx_arm64` |
+| `macos-15-intel` | `macosx_x86_64` |
 
 Every wheel is tested inside the job by importing
 `disktide.scanner.accel.ACCEL_BACKEND` and asserting `native`: the build hook
@@ -132,19 +138,21 @@ step.
 
 Pushing a `v*` tag runs the release workflow. It:
 
-1. builds the platform wheels (the matrix above), each tested for the native
+1. checks that the tag names the version in `pyproject.toml` (`v0.3.0` for
+   0.3.0) and stops before building anything if it does not;
+2. builds the platform wheels (the matrix above), each tested for the native
    backend, and the sdist;
-2. verifies every wheel and the sdist with `tool/verify_distribution.py`;
-3. performs a clean-install doctor and dependency-budget smoke test, and
+3. verifies every wheel and the sdist with `tool/verify_distribution.py`;
+4. performs a clean-install doctor and dependency-budget smoke test, and
    asserts the scanner backend of three installs: the platform wheel, the
    sdist with a compiler, the sdist without one;
-4. generates SHA-256 checksums and a CycloneDX SBOM;
-5. creates GitHub build-provenance attestations, on a public repository
+5. generates SHA-256 checksums and a CycloneDX SBOM;
+6. creates GitHub build-provenance attestations, on a public repository
    only -- attestations require Enterprise Cloud on a private one, so the
    step is guarded by repository visibility and skips itself rather than
    failing the release;
-6. uploads immutable workflow artifacts;
-7. publishes every wheel and the sdist through the protected `pypi`
+7. uploads immutable workflow artifacts;
+8. publishes every wheel and the sdist through the protected `pypi`
    environment.
 
 The repository must configure PyPI Trusted Publishing for the `release.yml`

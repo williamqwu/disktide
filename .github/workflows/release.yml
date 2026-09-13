@@ -9,6 +9,26 @@ permissions:
   contents: read
 
 jobs:
+  # A tag names the version it publishes, and nothing else checked that it
+  # does: `v0.3.1` pushed onto a 0.3.0 commit would have uploaded 0.3.0.
+  # First, so a wrong tag fails in seconds rather than after every wheel.
+  version:
+    name: Tag matches the package version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare the tag with pyproject.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not name pyproject version ${version}"
+            exit 1
+          fi
+
   # One wheel per interpreter and platform, because the scanner carries an
   # optional C extension now (`disktide/scanner/_scanfast`). The pure
   # `py3-none-any` wheel has left the artifact set: a version publishes
@@ -19,6 +39,7 @@ jobs:
   # rot unnoticed.
   wheels:
     name: Wheels ${{ matrix.name }}
+    needs: version
     runs-on: ${{ matrix.os }}
     # Sized for the slowest leg: five interpreters x manylinux + musllinux
     # on aarch64, every one of them under binfmt emulation. The default is
@@ -40,12 +61,15 @@ jobs:
             # A repository with `ubuntu-24.04-arm` available should switch
             # to it and drop the QEMU step.
             qemu: true
+          # `macos-13` was retired in December 2025 and `macos-14` is being
+          # withdrawn in the autumn of 2026; a leg on a label GitHub no longer
+          # offers fails, and `build` and `publish` both need every leg.
           - name: macOS arm64
-            os: macos-14
+            os: macos-15
             archs: arm64
             qemu: false
           - name: macOS x86_64
-            os: macos-13
+            os: macos-15-intel
             archs: x86_64
             qemu: false
     steps:
