@@ -263,10 +263,6 @@ def _verify_sdist(path: Path, version: str) -> None:
         prefix + "src/disktide/widgets/growth_heatmap.py",
         prefix + "src/fs_monitor/__init__.py",
         prefix + "src/fs_monitor/__main__.py",
-        prefix + "tool/benchmark_wave12.py",
-        prefix + "tool/benchmark_wave13.py",
-        prefix + "tool/benchmark_wave14.py",
-        prefix + "tool/benchmark_wave15.py",
     }
     missing = sorted(required - names)
     if missing:

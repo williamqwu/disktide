@@ -359,7 +359,6 @@ default_action = "safe"
 | `tool/verify_distribution` | Check wheel and sdist metadata and packaged files; see [Distribution Checks](#distribution-checks). |
 | `tool/check_dependency_budget` | Fail when the minimal runtime install exceeds the core budget (`--max-distributions`, `--max-mib`) or carries a third-party native extension. Helpers live in `tool/dependency_budget.py`. |
 | `tool/generate_sbom` | Write a compact CycloneDX SBOM from a minimal installed wheel. |
-| `tool/benchmark_wave12`, `13`, `14`, `15` | Emit machine-readable timings for one earlier wave each: history and projection (12), scanner and resource policy (13), cleanup (14), watch and projection (15). |
 
 ### Benchmarking a scan
 
