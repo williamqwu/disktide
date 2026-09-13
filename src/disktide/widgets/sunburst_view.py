@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.cells import set_cell_size
 from rich.segment import Segment
 from rich.style import Style
 from textual.events import Click, Leave, MouseMove, Resize
@@ -21,6 +22,7 @@ from disktide.metrics import (
 )
 from disktide.models.tree import FSNode
 from disktide.domain.visualization import DiffFrame
+from disktide.glyphs import visible_width
 from disktide.presentation.tui.viewmodels.visualization import legend_text
 from disktide.rendering import render_epoch
 from disktide.viz.categories import CategoryIndex
@@ -343,10 +345,12 @@ class SunburstView(OpaqueStripMixin, Widget):
                     )
                 ])
             if self._diff is not None and y == self.size.height // 2:
+                # Centred and cropped by cells: the legend's `＋` is two.
                 message = legend_text()
+                lead = max(0, self.size.width - visible_width(message)) // 2
                 return Strip([
                     Segment(
-                        message[: self.size.width].center(self.size.width),
+                        set_cell_size(" " * lead + message, self.size.width),
                         Style(dim=True),
                     )
                 ])

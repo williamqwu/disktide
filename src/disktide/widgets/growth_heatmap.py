@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.cells import set_cell_size
 from rich.segment import Segment
 from rich.style import Style
 from textual.binding import Binding
@@ -12,6 +13,7 @@ from disktide.widgets import OpaqueStripMixin
 from textual.widget import Widget
 
 from disktide.domain.visualization import GrowthHeatmapModel, HeatmapCell, VisualState
+from disktide.glyphs import visible_width
 from disktide.pathdisplay import elide_path, relative_label
 from disktide.presentation.tui.viewmodels.visualization import legend_text, visual_token
 from disktide.viz.colors import delta_background
@@ -130,11 +132,11 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
                 f"{row.consistency:.0%} · streak {row.longest_streak}"
             )
             return Strip(
-                [Segment(text[:width].ljust(width), Style(color=token.color))]
+                [Segment(set_cell_size(text, width), Style(color=token.color))]
             )
         if y == self.size.height - 1:
             return Strip(
-                [Segment(legend_text()[:width].ljust(width), Style(dim=True))]
+                [Segment(set_cell_size(legend_text(), width), Style(dim=True))]
             )
         return Strip.blank(width)
 
@@ -155,7 +157,7 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
             header += "".join("·" for _ in model.intervals[start:])
             header += "  consistency"
             return Strip(
-                [Segment(header[:width].ljust(width), Style(bold=True, dim=True))]
+                [Segment(set_cell_size(header, width), Style(bold=True, dim=True))]
             )
 
         row_index = y - 1
@@ -163,9 +165,10 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
             row = model.rows[row_index]
             selected = row_index == self._cursor
             marker = ">" if selected else " "
-            label = (
-                marker + elide_path(self._row_label(row.path), path_width - 1)
-            ).ljust(path_width)
+            label = set_cell_size(
+                marker + elide_path(self._row_label(row.path), path_width - 1),
+                path_width,
+            )
             segments = [
                 Segment(label + "  ", Style(reverse=selected, bold=selected))
             ]
@@ -183,7 +186,7 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
         if y == height - 1:
             suffix = f"  +{model.truncated_paths} more" if model.truncated_paths else ""
             text = legend_text() + suffix
-            return Strip([Segment(text[:width].ljust(width), Style(dim=True))])
+            return Strip([Segment(set_cell_size(text, width), Style(dim=True))])
         return Strip.blank(width)
 
     @staticmethod
@@ -192,6 +195,9 @@ class GrowthHeatmap(OpaqueStripMixin, Widget, can_focus=True):
         glyph = token.glyph
         if cell.state in {VisualState.GROWTH, VisualState.NEW} and cell.intensity:
             glyph = "1234"[cell.intensity - 1]
+        elif visible_width(glyph) != 1:
+            # One cell per interval, and `＋` takes two.
+            glyph = token.safe_glyph
         return Segment(
             glyph[:1],
             Style(

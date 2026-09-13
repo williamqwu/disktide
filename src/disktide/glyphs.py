@@ -13,10 +13,15 @@ that would otherwise emoji-render these glyphs as 2-cell wide keep them
 at width 1. The VS-15 itself is a zero-width combining mark, so a glyph
 takes 2 codepoints but advances the cursor exactly 1 cell.
 
-Because `len()` over-counts that combining mark, viz code that does
-manual character-grid placement must use `visible_width()` for any
-padding/centering math.
+`len()` is wrong about a glyph's width in both directions. It counts that
+combining mark as a cell, and it counts a wide glyph -- the fullwidth `＋`
+the diff views mark a new path with, any character of a Chinese or
+Japanese file name -- as one cell where the terminal draws two. Code that
+places text on a character grid itself must measure it with
+`visible_width()`.
 """
+
+from rich.cells import cell_len
 
 VS15 = "︎"
 
@@ -29,8 +34,16 @@ ARROW = "→"
 
 
 def visible_width(s: str) -> int:
-    """Terminal cell width of `s`, treating VS-15 as zero-width."""
-    return len(s) - s.count(VS15)
+    """Terminal cell width of `s`: a VS-15 takes no cell, a wide glyph two.
+
+    Rich's measure, which is the one Textual lays a strip out with, so a
+    row padded to it comes out exactly that many cells wide on screen.
+    Subtracting the VS-15s from `len(s)` made the Monitor summary's keys
+    row, whose state legend spells new as `＋`, one cell longer than it
+    measured: at 150 columns the row wrapped, and the trend marks under it
+    fell out of the four-row box.
+    """
+    return cell_len(s)
 
 
 # --------------------------------------------------------------------------

@@ -1340,9 +1340,9 @@ def _place_label(
 ) -> None:
     """Place a label centered at (center_x, y), skipping on collision.
 
-    Centering and collision use *visible* width so the trailing VS-15 on
+    Centering and collision use *visible* width, so the trailing VS-15 on
     accessibility glyphs (zero-width combining mark) does not claim a
-    grid cell of its own.
+    grid cell of its own and a wide glyph claims both of its cells.
     """
     width = visible_width(text)
     start_x = center_x - width // 2
@@ -1382,9 +1382,12 @@ def _compute_legend(
             row = []
             for state in present[index : index + 2]:
                 token = visual_token(state)
-                row.append(
-                    (f"{token.glyph} {token.label:<11}", delta_background(state))
-                )
+                entry = f"{token.glyph} {token.label}"
+                # Padded by cells, not characters: `＋` is two cells wide.
+                row.append((
+                    entry + " " * max(0, 13 - visible_width(entry)),
+                    delta_background(state),
+                ))
             lines.append(row)
         layout.legend_lines = lines
         layout.legend_start_y = layout.char_height - len(lines)
@@ -1484,43 +1487,34 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
     if y >= len(cells):
         return []
 
-    # Build label lookup for this row: x -> (char_or_cluster, fg, bg).
-    # VS-15 (︎) is folded onto the previous cell so the rendered
-    # cluster stays within a single terminal cell.
+    # Build label lookup for this row: x -> (text, fg, bg), one entry per
+    # terminal cell the label covers. `_cell_text` folds a VS-15 into its
+    # glyph's cell and gives a wide glyph two.
     label_chars: dict[int, tuple[str, str, str | None]] = {}
+    split = False
     for label in layout.labels:
         if label.char_y != y:
             continue
-        cell = 0
-        prev_x: int | None = None
-        for ch in label.text:
-            if ch == "︎" and prev_x is not None:
-                prior_ch, fg, bg = label_chars[prev_x]
-                label_chars[prev_x] = (prior_ch + ch, fg, bg)
-                continue
-            x = label.char_x + cell
+        for offset, text in enumerate(_cell_text(label.text)):
+            x = label.char_x + offset
             if 0 <= x < layout.char_width:
-                label_chars[x] = (ch, label.fg, label.bg)
-                prev_x = x
-            cell += 1
+                label_chars[x] = (text, label.fg, label.bg)
+            split = split or not text
 
-    # Build legend lookup for this row: x -> (char, color)
+    # Build legend lookup for this row: x -> (text, color)
     legend_chars: dict[int, tuple[str, str]] = {}
     if layout.legend_lines and y >= layout.legend_start_y:
         legend_idx = y - layout.legend_start_y
         if 0 <= legend_idx < len(layout.legend_lines):
             offset = 1  # 1-char left padding
             for entry_text, color in layout.legend_lines[legend_idx]:
-                for ch in entry_text:
-                    legend_chars[offset] = (ch, color)
+                for text in _cell_text(entry_text):
+                    legend_chars[offset] = (text, color)
+                    split = split or not text
                     offset += 1
 
     legend_bg = _cell_color(layout.panel_bg) if legend_chars else None
-    segments: list[Segment] = []
-    pending: list[str] = []
-    pending_style: Style | None = None
-    have_pending = False
-
+    row: list[tuple[str, Style | None]] = []
     for x, (ch, style) in enumerate(cells[y]):
         if x in legend_chars:
             lch, lcolor = legend_chars[x]
@@ -1535,6 +1529,16 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
         elif x in label_chars:
             lch, lfg, lbg = label_chars[x]
             ch, style = lch, Style(color=lfg, bgcolor=lbg)
+        row.append((ch, style))
+    if split:
+        _mend_wide_glyphs(row)
+
+    segments: list[Segment] = []
+    pending: list[str] = []
+    pending_style: Style | None = None
+    have_pending = False
+
+    for ch, style in row:
         # Runs of identical cells — the disc interior is mostly those —
         # collapse into one Segment.
         if have_pending and style == pending_style:
@@ -1550,3 +1554,40 @@ def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
         segments.append(Segment("".join(pending), pending_style))
 
     return segments
+
+
+def _cell_text(text: str) -> list[str]:
+    """What each terminal cell `text` covers shows, left to right.
+
+    A zero-width mark -- the VS-15 on the access glyphs -- rides in the
+    cell of the glyph before it. A wide glyph -- the diff views' `＋`, a
+    character of a CJK name -- is drawn from its first cell and leaves the
+    second empty, so a row put together one entry per cell is exactly as
+    many cells wide as it has entries.
+    """
+    cells: list[str] = []
+    for char in text:
+        width = visible_width(char)
+        if width == 0:
+            if cells:
+                cells[-1 if cells[-1] else -2] += char
+            continue
+        cells.append(char)
+        cells.extend([""] * (width - 1))
+    return cells
+
+
+def _mend_wide_glyphs(row: list[tuple[str, Style | None]]) -> None:
+    """Blank whichever half of a wide glyph lost its other half.
+
+    The legend is drawn over labels and a label is clipped at the row's
+    edge, so a wide glyph's empty second cell can end up holding something
+    else, or be off the row. The glyph would then spill into its neighbour
+    and push the rest of the row one cell right; a space keeps the width.
+    """
+    for x, (text, style) in enumerate(row):
+        if not text:
+            if x == 0 or visible_width(row[x - 1][0]) < 2:
+                row[x] = (" ", style)
+        elif visible_width(text) > 1 and (x + 1 == len(row) or row[x + 1][0]):
+            row[x] = (" ", style)

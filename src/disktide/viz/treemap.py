@@ -788,9 +788,11 @@ def render_line(layout: TreemapLayout, y: int) -> list[Segment]:
             pad_left = (run - lw) // 2
             pad_right = run - lw - pad_left
             text = " " * pad_left + label + " " * pad_right
-        elif size_label and rel_y == label_y + 1 and run >= len(size_label):
-            pad_left = (run - len(size_label)) // 2
-            pad_right = run - len(size_label) - pad_left
+        elif size_label and rel_y == label_y + 1 and run >= visible_width(size_label):
+            # A new path's delta opens with `＋`, which is two cells.
+            sw = visible_width(size_label)
+            pad_left = (run - sw) // 2
+            pad_right = run - sw - pad_left
             text = " " * pad_left + size_label + " " * pad_right
         else:
             text = " " * run

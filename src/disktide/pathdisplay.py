@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pathlib import PurePath
 
+from rich.cells import get_character_cell_size
+
 from disktide.glyphs import visible_width
 from disktide.rendering import is_safe_rendering
 
@@ -64,7 +66,7 @@ def elide_path(path: str, width: int) -> str:
     room = width - visible_width(mark)
     if room <= 0:
         return mark[:width]
-    return mark + tail[-room:]
+    return mark + _last_cells(tail, room)
 
 
 def relative_label(path: str, root: str | None) -> str:
@@ -97,4 +99,34 @@ def elide_text(text: str, width: int) -> str:
     room = width - visible_width(mark)
     if room <= 0:
         return mark[:width]
-    return text[:room] + mark
+    return _first_cells(text, room) + mark
+
+
+def _first_cells(text: str, width: int) -> str:
+    """The longest start of `text` that fits in `width` cells.
+
+    The cut is made by what each character occupies rather than by
+    counting them: a wide glyph that would straddle the edge is left out
+    instead of spilling past it, and a zero-width mark stays with the
+    glyph before it.
+    """
+    used = 0
+    for index, char in enumerate(text):
+        used += get_character_cell_size(char)
+        if used > width:
+            return text[:index]
+    return text
+
+
+def _last_cells(text: str, width: int) -> str:
+    """The longest end of `text` that fits in `width` cells."""
+    used = 0
+    for index in range(len(text) - 1, -1, -1):
+        used += get_character_cell_size(text[index])
+        if used > width:
+            start = index + 1
+            # A zero-width mark at the cut belonged to the glyph left out.
+            while start < len(text) and get_character_cell_size(text[start]) == 0:
+                start += 1
+            return text[start:]
+    return text

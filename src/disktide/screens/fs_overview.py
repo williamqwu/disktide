@@ -628,9 +628,7 @@ def _build_summary(entries: list[FSEntry]) -> Text:
     for e in shown:
         # The mountpoint, not its basename: `5(128.0K)` for
         # `/snap/bare/5` named a revision number and nothing else.
-        label = e.mountpoint if len(e.mountpoint) <= 18 else elide_path(
-            e.mountpoint, 18
-        )
+        label = elide_path(e.mountpoint, 18)
         size_str = humanize.naturalsize(e.total_bytes, binary=True, gnu=True)
         t.append(f"■ {label}({size_str}) ", style=e.speed_style)
     if folded:

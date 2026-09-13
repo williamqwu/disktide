@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import log1p
 from statistics import median
 
+from rich.cells import set_cell_size
 from rich.segment import Segment
 from rich.style import Style
 from textual.binding import Binding
@@ -224,7 +225,7 @@ class CleanupMap(OpaqueStripMixin, Widget, can_focus=True):
     ) -> Strip:
         if y == 0:
             title = "Age/Size opportunities · fallback list"
-            return Strip([Segment(title[:width].ljust(width), Style(bold=True))])
+            return Strip([Segment(set_cell_size(title, width), Style(bold=True))])
         visible = min(len(model.points), max(0, height - 2))
         index = y - 1
         if 0 <= index < visible:
@@ -236,12 +237,12 @@ class CleanupMap(OpaqueStripMixin, Widget, can_focus=True):
                 f"{point.confidence:>4.0%}  {point.path}"
             )
             return Strip(
-                [Segment(text[:width].ljust(width), _point_style(point, selected))]
+                [Segment(set_cell_size(text, width), _point_style(point, selected))]
             )
         if y == height - 1:
             suffix = f" · +{model.omitted} omitted" if model.omitted else ""
             text = f"score · age · confidence · path{suffix}"
-            return Strip([Segment(text[:width].ljust(width), Style(dim=True))])
+            return Strip([Segment(set_cell_size(text, width), Style(dim=True))])
         return Strip.blank(width)
 
     def _render_map_line(
@@ -258,11 +259,11 @@ class CleanupMap(OpaqueStripMixin, Widget, can_focus=True):
                 f"Age ↑ / Size →  selected {selected.score:.1f} · "
                 f"{selected.age_days:.1f}d · {selected.confidence:.0%} · {selected.path}"
             )
-            return Strip([Segment(text[:width].ljust(width), Style(bold=True))])
+            return Strip([Segment(set_cell_size(text, width), Style(bold=True))])
         if y == height - 1:
             suffix = f" · +{model.omitted} omitted" if model.omitted else ""
             text = "o safe  ^ moderate  ! dangerous  @ selected" + suffix
-            return Strip([Segment(text[:width].ljust(width), Style(dim=True))])
+            return Strip([Segment(set_cell_size(text, width), Style(dim=True))])
         plot_y = plot_height - y
         cells: dict[int, tuple[CleanupMapPoint, bool]] = {}
         for index, point in enumerate(model.points):
