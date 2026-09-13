@@ -215,15 +215,6 @@ def assert_layout_integrity(
             )
 
 
-def _render_full(layout: TreemapLayout) -> list[str]:
-    """Render the entire treemap as a list of text lines (for debugging)."""
-    lines = []
-    for y in range(layout.height):
-        segs = render_line(layout, y)
-        lines.append("".join(s.text for s in segs))
-    return lines
-
-
 # ---------------------------------------------------------------------------
 # Viewport sizes used across tests — includes odd dimensions, tiny, and large
 # ---------------------------------------------------------------------------

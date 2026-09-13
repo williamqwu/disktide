@@ -51,10 +51,6 @@ def repository(tmp_path):
         value.close()
 
 
-def _catalog(tmp_path: Path | None = None):
-    return get_rule_catalog(user_directory=tmp_path)
-
-
 def _cache_target(root: Path, payload: bytes = b"cache"):
     cache = root / "__pycache__"
     cache.mkdir(parents=True)

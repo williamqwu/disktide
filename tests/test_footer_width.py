@@ -71,12 +71,6 @@ def _footer_runs(app) -> tuple[str, str]:
     return text[:split].rstrip(), text[split:].rstrip()
 
 
-def _painted_width(app) -> int:
-    """Cells the footer needs before the terminal starts eating it."""
-    keys, palette = _footer_runs(app)
-    return len(keys) + len(palette)
-
-
 @pytest.mark.parametrize(
     ("mode_key", "screen_name"),
     [

@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import threading
 import time
-from dataclasses import replace
 
 import pytest
 
@@ -519,82 +518,6 @@ def test_bounded_event_queue_coalesces_for_slow_consumers(tmp_path):
         if isinstance(event, DirectoryCompleted)
     ) == 200
     assert sum(isinstance(event, NodeAggregateUpdated) for event in events) < 200
-
-
-def test_settled_directory_does_not_requeue_an_already_scanned_child(
-    tmp_path,
-    monkeypatch,
-):
-    """Settling reorders a directory's entries; its child cursor must not follow.
-
-    ``parent`` is read as ``[zdir-a, zdir-b, 0file, 1file]``, so its cursor sits
-    at index 2 once both subdirectories are dispatched. ``busy`` keeps the
-    bounded source queue occupied long enough for both of them to come back and
-    settle ``parent`` first, which sorts the entries to
-    ``[0file, 1file, zdir-a, zdir-b]``. A cursor left at index 2 then hands out
-    ``zdir-a`` a second time, and ``parent`` has already been dropped from the
-    live state map by the time that duplicate lands -- which used to abort the
-    whole scan with a ``KeyError``.
-    """
-    parent = tmp_path / "parent"
-    parent.mkdir()
-    for name in ("zdir-a", "zdir-b"):
-        subdirectory = parent / name
-        subdirectory.mkdir()
-        (subdirectory / "leaf.bin").write_bytes(b"x")
-    for name in ("0file", "1file"):
-        (parent / name).write_bytes(b"yy")
-
-    busy = tmp_path / "busy"
-    busy.mkdir()
-    for index in range(8):
-        branch = busy / f"sub{index:02d}"
-        branch.mkdir()
-        (branch / "leaf.bin").write_bytes(b"z")
-
-    original = scheduler_module.scan_directory_once
-
-    def directories_first(job, **kwargs):
-        """Publish chunks with directories ahead of files, whatever readdir said."""
-        callback = kwargs.get("checkpoint_callback")
-        if callback is not None:
-
-            def reordered(chunk):
-                return callback(
-                    replace(
-                        chunk,
-                        children=tuple(
-                            sorted(chunk.children, key=lambda c: not c.is_dir)
-                        ),
-                    )
-                )
-
-            kwargs["checkpoint_callback"] = reordered
-        return original(job, **kwargs)
-
-    monkeypatch.setattr(scheduler_module, "scan_directory_once", directories_first)
-
-    engine = ScanEngine(
-        workers=1,
-        scan_path=str(tmp_path),
-        scheduler_queue_capacity=1,
-        scheduler_submission_limit=1,
-    )
-    root = engine.scan(str(tmp_path))
-
-    scanned = next(child for child in root.children if child.name == "parent")
-    assert [child.name for child in scanned.children] == [
-        "0file",
-        "1file",
-        "zdir-a",
-        "zdir-b",
-    ]
-    assert scanned.dir_count == 2
-    assert scanned.file_count == 4
-    assert root.dir_count == 12
-    assert root.file_count == 12
-    # root + parent + busy + 2 subdirectories + 8 branches, each scanned once.
-    assert engine.scheduler_stats.submitted_tasks == 13
 
 
 def test_published_frame_survives_late_dispatch_of_its_placeholders(

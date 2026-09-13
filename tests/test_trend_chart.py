@@ -2,15 +2,9 @@
 
 from datetime import datetime, timedelta
 
-import pytest
+import plotext
 from disktide.domain.metrics import MetricId
 from disktide.widgets.trend_chart import _pick_date_form
-
-try:
-    import plotext
-    HAS_PLOTEXT = True
-except ImportError:
-    HAS_PLOTEXT = False
 
 
 class TestPickDateForm:
@@ -34,7 +28,6 @@ class TestPickDateForm:
         assert _pick_date_form(dates) == "Y-m-d"
 
 
-@pytest.mark.skipif(not HAS_PLOTEXT, reason="plotext not installed")
 class TestDateConversion:
     def test_datetimes_to_string_includes_time(self):
         """Verify plotext produces distinct strings for same-day timestamps."""
@@ -58,7 +51,6 @@ class TestDateConversion:
         assert len(set(strings)) == 2
 
 
-@pytest.mark.skipif(not HAS_PLOTEXT, reason="plotext not installed")
 def test_the_plotted_line_is_not_drawn_out_of_block_elements():
     """plotext's default marker is `▀▄▖▗▘▚▝▞`, halves and quadrants.
 
@@ -196,7 +188,6 @@ class TestSeriesColorStability:
             assert glyph in legend
 
 
-@pytest.mark.skipif(not HAS_PLOTEXT, reason="plotext not installed")
 class TestAxisUnits:
     def test_the_y_axis_names_the_unit_it_divides_by(self):
         """`_plot_value` divides by 1024**2, so the label is MiB."""

@@ -26,27 +26,6 @@ class _FakeTTY:
         return 1
 
 
-def _rendered_cells(layout):
-    """Flatten the sunburst render to {(x, y): (char, style)}."""
-    grid = {}
-    for y in range(layout.char_height):
-        x = 0
-        for seg in render_sunburst_line(layout, y):
-            for ch in seg.text:
-                grid[(x, y)] = (ch, seg.style)
-                x += 1
-    return grid
-
-
-def _label_cells(layout):
-    """Cells claimed by a label, which keeps its own chip background."""
-    claimed = set()
-    for label in layout.labels:
-        for i in range(-1, len(label.text) + 1):
-            claimed.add((label.char_x + i, label.char_y))
-    return claimed
-
-
 def _cell_radius_range(layout, char_x, char_y):
     """Exact (nearest, farthest) distance from the disc centre to a cell.
 
