@@ -83,14 +83,6 @@ def detect_targets(
     return targets
 
 
-def group_by_category(targets: list[CleanupTarget]) -> dict[str, list[CleanupTarget]]:
-    """Group targets by their rule category."""
-    groups: dict[str, list[CleanupTarget]] = {}
-    for t in targets:
-        groups.setdefault(t.category, []).append(t)
-    return groups
-
-
 def total_savings(targets: list[CleanupTarget]) -> int:
     """Calculate total space that would be freed."""
     return sum(t.size for t in targets)

@@ -1,14 +1,12 @@
 """Extended cleanup tests — real filesystem operations."""
 
 import os
-import tempfile
 
 import pytest
 from disktide.scanner import scheduler as scheduler_module
 from disktide.scanner.walker import scan_directory
-from disktide.cleanup.detector import detect_targets, group_by_category, total_savings
-from disktide.cleanup.actions import delete_targets, CleanupResult
-from disktide.models.patterns import CleanupRule, CleanupTarget, RiskLevel
+from disktide.cleanup.detector import detect_targets
+from disktide.models.patterns import CleanupRule, RiskLevel
 
 
 class TestDetectorRealFS:
@@ -53,87 +51,6 @@ class TestDetectorRealFS:
         targets = detect_targets(root, rules=[custom_rule])
         assert len(targets) == 1
         assert targets[0].rule.name == "custom"
-
-
-class TestDeleteRealFS:
-    def test_delete_directory(self, tmp_path):
-        target_dir = tmp_path / "to_delete"
-        target_dir.mkdir()
-        (target_dir / "file1.txt").write_text("a")
-        (target_dir / "file2.txt").write_text("b")
-
-        targets = [
-            CleanupTarget(
-                path=str(target_dir), size=2,
-                rule=CleanupRule(name="t", description="", patterns=[]),
-            )
-        ]
-        result = delete_targets(targets)
-        assert len(result.successful) == 1
-        assert not target_dir.exists()
-
-    def test_delete_directory_symlink_only_unlinks_symlink(self, tmp_path):
-        target_dir = tmp_path / "real_data"
-        target_dir.mkdir()
-        (target_dir / "keep.txt").write_text("keep")
-        target_link = tmp_path / "linked_cache"
-        target_link.symlink_to(target_dir, target_is_directory=True)
-
-        targets = [
-            CleanupTarget(
-                path=str(target_link), size=4,
-                rule=CleanupRule(name="t", description="", patterns=[]),
-            )
-        ]
-
-        result = delete_targets(targets)
-
-        assert len(result.successful) == 1
-        assert not target_link.exists()
-        assert target_dir.exists()
-        assert (target_dir / "keep.txt").exists()
-
-    def test_delete_with_progress(self, tmp_path):
-        f = tmp_path / "file.txt"
-        f.write_text("test")
-
-        progress_calls = []
-        targets = [
-            CleanupTarget(
-                path=str(f), size=4,
-                rule=CleanupRule(name="t", description="", patterns=[]),
-            )
-        ]
-        result = delete_targets(
-            targets,
-            progress_callback=lambda c, t, p: progress_calls.append((c, t)),
-        )
-        assert len(progress_calls) >= 1
-        assert result.total_freed == 4
-
-    def test_delete_mixed_success_failure(self, tmp_path):
-        good = tmp_path / "good.txt"
-        good.write_text("ok")
-
-        rule = CleanupRule(name="t", description="", patterns=[])
-        targets = [
-            CleanupTarget(path=str(good), size=2, rule=rule),
-            CleanupTarget(path="/nonexistent/bad", size=100, rule=rule),
-        ]
-        result = delete_targets(targets)
-        assert len(result.successful) == 1
-        assert len(result.failed) == 1
-        assert result.total_freed == 2
-        assert result.total_errors == 1
-
-
-class TestCleanupResult:
-    def test_empty_result(self):
-        r = CleanupResult()
-        assert r.total_freed == 0
-        assert r.total_errors == 0
-        assert r.successful == []
-        assert r.failed == []
 
 
 class TestPathsLongerThanPathMax:

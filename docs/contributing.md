@@ -80,8 +80,8 @@ enforced by convention:
   testable without a running app.
 - `services/` has no Textual dependency; `screens/` and `widgets/` can
   import everything above.
-- CLI and TUI must never call `delete_targets()` or permanent filesystem
-  primitives directly — only through `CleanupService`.
+- CLI and TUI must never call permanent filesystem primitives directly —
+  only through `CleanupService`.
 - Declarative policy loaders must never execute user-authored content.
 
 ### Startup Import Boundary
