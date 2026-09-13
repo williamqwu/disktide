@@ -11,16 +11,27 @@ Architecture decisions are recorded as ADRs in the companion
 ```
 src/disktide/
   __main__.py            CLI entry point (Click)
+  _compat.py             tomllib/StrEnum shims for Python 3.10
   app.py                 Textual App, screen management
+  clipboard.py           Copy routes: tool, tmux buffer, OSC 52
+  commands.py            Command palette provider: every binding by name
   config.py              TOML config load/save, dataclasses
   glyphs.py              Unicode/ASCII glyph selection + the block-element policy
+  keys.py                Binding ids, footer groups, key-map sections, presets
   metrics.py             Size vs. file-count view metric helpers
+  pathdisplay.py         Path elision to a cell budget, root-relative labels
+  paths.py               Application data paths + pre-DiskTide fallbacks
   rendering.py           Process-wide safe-rendering state and render epoch
+  textsafe.py            Display and JSON forms of names that are not UTF-8
+  themes.py              Theme names + retired-name resolution, no imports
+  visualization_formatting.py
+                         Rendering-neutral glyphs, labels, space-time text
 
   domain/
     alerts.py            Alert rule/event contracts
     cleanup.py           Persistent plan/action/identity/audit contracts
     delta.py             Compatibility decisions + shared delta result
+    live_view.py         Immutable, bounded view models for live charts
     metrics.py           MetricId + StorageMeasurements semantics
     monitor.py           Definitions, status, history, retention contracts
     policy.py            Explicit ScanPolicy metadata
@@ -70,6 +81,12 @@ src/disktide/
     blockdev.py          Compatibility facade over platform adapter
     engine.py            ScanEngine compatibility facade
     scheduler.py         Bounded all-tree directory scheduler + COW frames
+    accel.py             Picks the directory reader once, at import
+    _scanfast.c          C reader: a whole directory in one GIL release
+    _scanfast_py.py      Pure-Python reader, tuple for tuple the same
+    gcpause.py           Collector paused for the walk, result frozen
+    accounting.py        Post-scan Unique (hardlink) accounting
+    policy.py            Pseudo-mount and snapshot-directory scope discovery
     walker.py            Recursive os.scandir() compatibility walker
     progress.py          Throttled progress reporting
     sysinfo.py           System detection for adaptive threading
@@ -96,10 +113,13 @@ src/disktide/
   viz/
     layout.py            Viewport-bounded top-N + aggregate remainder
     treemap.py           Squarified treemap layout + rendering
-    sunburst.py          Ring chart, supersampled half-block rasterizer
-    braille.py           ColorBrailleCanvas -- per-cell color voting
+    sunburst.py          Ring chart layout + supersampled rasterizer
+    ringshape.py         Ring geometries: disc, fill, tiles (default)
+    categories.py        Per-directory content-category rollup
     cellgeom.py          Layered cell-aspect resolver + XTWINOPS probe
-    colors.py            5 color schemes, HSL utilities
+    colordepth.py        Terminal colour depth, resolved before Textual
+    colors.py            Chart palettes + ink roles for the 6 themes
+    chrome.py            Chrome half of each theme, as Textual Themes
 
   screens/
     welcome.py           Welcome screen with path completion
@@ -108,6 +128,7 @@ src/disktide/
     monitor.py           Monitor Center management + history/alerts/retention
     fs_overview.py       Mounted filesystems, block devices, benchmark
     settings.py          Configuration editing
+    keymap.py            Key map on ?, read from the screen underneath
 
   widgets/
     size_tree.py         Tree[FSNode] with size bars, lazy loading
@@ -124,6 +145,10 @@ src/disktide/
     cleanup_map.py       Bounded synchronized Age/Size opportunity map
     cleanup_history.py   Estimated/isolated/purged/actual/undone history
     confirm_modal.py     Reusable y/n confirmation dialog
+    path_modal.py        The path in a modal for Y, mouse reporting off
+
+  presentation/tui/viewmodels/
+    visualization.py     Compatibility imports of visualization helpers
 ```
 
 ## Platform Capability Boundary
@@ -423,53 +448,9 @@ node ever grows a back-reference, that test fails before the leak reaches
 One thing to know when measuring: `gc.get_objects()` does **not** report the
 permanent generation, so after a freeze it reads as an almost empty heap.
 
-**Known issue: repeated raw scans in one process drift upward, and the gate
-that watches for it is noisy.** `tool/soak_memory.py --mode raw` on the
-88,000-directory fixture grew from 65.6 MB at iteration 3 to 103.3 MB at
-iteration 25 -- +57.5% against its own 5% budget, so it exits 1. The drift
-is pymalloc keeping nearly empty arenas, not scan data being retained.
-Three measurements on the same fixture (raw, one worker, 25 scans in one
-process) pin that down:
-
-- `sys._debugmallocstats()` after every scan. Bytes in allocated blocks --
-  the Python objects actually alive between scans -- stay at 5.4-5.5 MB
-  from the first scan to the last. Arenas currently allocated go from 34 at
-  scan 3 to 47-50 at scan 25, and RSS goes from 42 to 55-57 MB over the
-  same scans. An arena is 1 MiB; the RSS curve is the arena curve.
-- `tracemalloc` between scan 3 and scan 12: +0.03 MB in total, a few
-  hundred small blocks -- a rehashed `threading._active` table, the strings
-  the cgroup and mount probes read, a weak-set entry. A scan allocates and
-  frees about 550 arenas, and pymalloc returns an arena to the OS only when
-  every pool in it is empty, so each of those survivors pins the whole
-  arena it landed in. About one arena in two outlives its scan.
-- `PYTHONMALLOC=malloc`, so glibc serves every allocation instead of
-  pymalloc: 636-637 MB after every one of the 25 scans. glibc never hands
-  the freed tree back at all, and never drifts either.
-
-So the process accumulates near-empty 1 MiB arenas at roughly half a
-megabyte a scan, which is why the same build scored +4.9% over 14
-iterations and +57.5% over 25, and why the 5% gate read at the default 20
-iterations can pass and fail on the same build. It is why the earlier
-candidates all came up empty: the pure-Python fallback grows more (+84.8%)
-because it allocates more; `MALLOC_ARENA_MAX=2` changes nothing because
-pymalloc's arenas are not glibc's; a single worker still drifts (+40.5%)
-because the survivors are not per-thread. A 20,000-directory tree shows no
-drift at all over 12 scans (arenas 30-34 throughout), and `--mode live`,
-which is the mode the explorer takes, is within budget: 100.1 MB to
-102.2 MB over 12 iterations, +2.1%.
-
-The freeze is not the cause; it is what keeps the number small. With
-`FREEZE_MIN_ENTRIES` raised so `freeze_retained_tree()` never runs, RSS is
-flatter and four and a half times higher: iteration 3 at 332.0 MB to
-iteration 14 at 333.7 MB, against 71.7 MB to 75.2 MB with the freeze on.
-The `gc.get_freeze_count()` that grows by exactly one per scan is the soak
-tool's own per-iteration sample dict, not anything in the scanner.
-
-Read the raw-mode soak as a measurement, not as a gate. Closing it means
-making a walk leave nothing behind in its arenas: find the few kilobytes
-that survive a scan, starting with the platform probes in
-`collectors/platform/linux.py` that `select_scan_workers()` runs on every
-engine, and allocate or cache them outside the walk.
+Repeated raw scans in one process still drift upward in RSS. That is pymalloc
+keeping near-empty arenas rather than scan data being retained, and it is
+written up under [Known Issues](#known-issues).
 
 ### Adaptive Worker Count
 
@@ -817,9 +798,9 @@ See ADR 0005 (host, scheduling, retention, alerts) and ADR 0009 (events).
 SQLite with WAL mode at `~/.local/share/disktide/data.db` (respects
 `XDG_DATA_HOME`; legacy directory names retained for upgrade compatibility).
 
-### Schema (v10)
+### Schema (v11)
 
-Database schema v10 is distinct from snapshot format v2 and the public
+Database schema v11 is distinct from snapshot format v2 and the public
 snapshot API version.
 
 | Table | Contents |
@@ -1003,10 +984,14 @@ Squarified layout via the `squarify` library:
 
 Ring chart where each ring = one depth level, arc angle ∝ size:
 
-- **Ring width**: `max_radius // (max_depth + 1)`.
-- **Arc rendering**: a supersampled half-block pass — each half-cell
-  averages four subsamples, and vertically adjacent halves that disagree
-  become U+2580/U+2584.
+- **Ring width**: `fit.ring_width`, which the ring shape's `geometry_for`
+  works out along with the radius and the hole; `tiles` picks whole cells
+  first and reports the radius they add up to.
+- **Arc rendering**: supersampled. `disc` and `fill` take a half-block pass —
+  each half-cell averages four subsamples, and vertically adjacent halves that
+  disagree become U+2580/U+2584. `tiles` takes every subsample at the cell
+  centre, so each cell is one colour on a space (see
+  [Web-Shell Glyph Set](#web-shell-glyph-set)).
 - **Labels**: arcs > 30° at depth 1 get labeled; collision detection
   prevents overlaps.
 - **Legend**: bottom-left, categories with byte shares.
@@ -1021,12 +1006,13 @@ tree. That was 97% of a frame (618k function calls for one 182×62 live
 frame, 190k of them `ringshape._faces`), recomputed unchanged dozens of
 times per scan. `viz/sunburst.py` now builds those answers once per
 `(geometry, size, aspect, hole, ring width, radius)` into flat `array`
-tables and keeps them LRU: 163 ms → 48 ms for that frame, 223 ms → 93 ms
-for the full-depth one. The first frame at a new geometry pays for the
-table (~165 ms at 182×62), which a live scan amortises over every frame
-after it. A plan is 36 bytes a subsample — 3.25 MB at 182×62, 6.1 MB at
-307×69 — so the cache is bounded by subsamples (400k, ~14 MB) as well as
-by entries (4); the newest plan is always kept whatever its size.
+tables and keeps them LRU, which brings that frame under a third of its
+163 ms and the full-depth one under half of its 223 ms. The first frame at a
+new geometry pays for the table (~165 ms at 182×62), which a live scan
+amortises over every frame after it. A plan is 36 bytes a subsample — 3.25 MB
+at 182×62, 6.1 MB at 307×69 — so the cache is bounded by subsamples (400k,
+~14 MB) as well as by entries (4); the newest plan is always kept whatever its
+size.
 
 The frames must be byte-identical to the uncached renderer, and a cache
 whose key misses a parameter draws a wrong picture rather than raising, so
@@ -1047,7 +1033,7 @@ around — and swapping the pair produces different ring geometries:
 | `fill` | Chebyshev distance | perimeter position |
 | `tiles` | Cumulative area along the face | face position (straight-line cuts) |
 
-`tiles` picks whole columns and half-rows first, so ring boundaries land on
+`tiles` picks whole columns and whole rows first, so ring boundaries land on
 the cell grid at any aspect — no calibration needed.
 `tests/test_ring_shapes.py` verifies the claim by rasterizing against two
 panel colors and counting partially-covered cells.
@@ -1095,15 +1081,6 @@ magnitude — repeated small growth outranks one spike. Lifecycle inference
 treats absent rows as unchanged while the path exists, and missing before
 creation or after removal. Narrow/safe/no-color rendering uses text summary
 and state glyphs.
-
-### Braille Canvas
-
-`ColorBrailleCanvas` wraps `drawille.Canvas` with per-cell color tracking:
-
-- Each cell maps to a 2×4 braille sub-pixel grid.
-- Pixel colors are recorded per cell via voting — dominant color wins.
-- `render_rows()` returns `(character, color)` tuples for Rich.
-- Supports per-cell background colors and Bresenham line drawing.
 
 ### Live Scan Rendering
 
@@ -1188,17 +1165,20 @@ used to build — and `SizeTree.apply_live_update` filters to the rows it
 has actually materialised before it sorts, which is dozens rather than
 thousands.
 
-What is left is the rest of the live pipeline, not the UI. The 307x69 A/B
-is ~21.7 s off against 29-38 s on, and pinning the gate shut so the
-snapshot work never happens still costs 28.0 s. That floor is the
-copy-on-write publishing itself — `emit_tree_updates` roughly doubles the
-process's CPU whether or not anything is drawn — and it is on the
-scheduler's own thread, where nothing the UI does can reach it.
+What the gate left was the rest of the live pipeline, not the UI. The 307x69
+A/B was ~21.7 s off against 29-38 s on, and pinning the gate shut so the
+snapshot work never happened still cost 28.0 s, on the scheduler's own thread
+where nothing the UI does can reach it. That floor was first put down to the
+copy-on-write publishing. Measured directly, most of it was the cyclic
+collector ([The Collector and the Scan](#the-collector-and-the-scan)), and
+frames nobody applies are no longer built (the consumer pacing above); the
+figures here predate both.
 
 ### Color Schemes
 
-Five built-in schemes: `disktide` (default), `cold`, `colorblind`,
-`cyberpunk`, `mono`.
+Six built-in schemes: `disktide` (default), `cold`, `colorblind`, `cyberpunk`,
+`mono`, and `ansi`, which names the sixteen ANSI colours rather than RGB
+values and is what the app renders with when the resolved colour depth is 16.
 
 A `ColorScheme` is a set of table keys: `name`, `label`, `category_key`,
 `neutral_key`, `delta_key`, `textual_theme`, and treemap surface colors.
@@ -1230,10 +1210,10 @@ truth).
 ladder; directories are never tinted.
 
 **Ink roles**: styled text (tree, breadcrumb, progress, details, cleanup, FS
-Overview) uses `viz.colors.ink(role)` with 15 semantic roles (`dir`, `file`,
-`link`, `bar`, `warning`, `error`, `accent`, etc.) instead of hardcoded Rich
-colors. Each ink is measured at ≥ 4.5:1 contrast against its theme's surface.
-`mono`'s inks are asserted to have zero chroma.
+Overview) uses `viz.colors.ink(role)` with 16 semantic roles (`dir`, `file`,
+`link`, `bar`, `bar_track`, `warning`, `error`, `accent`, etc.) instead of
+hardcoded Rich colors. Each ink is measured at ≥ 4.5:1 contrast against its
+theme's surface. `mono`'s inks are asserted to have zero chroma.
 
 **Diff palettes**: three diverging tables selected by `delta_key` — `default`
 (shared by disktide/cold/cyberpunk), `colorblind` (blue/orange axis), and
@@ -1407,9 +1387,9 @@ confirmed before writing, one at a time).
 | textual ≥ 8.2, < 9 | TUI framework |
 | textual-plotext ≥ 1.0, < 2 | Line chart plotting |
 | squarify ≥ 0.4.0 | Treemap squarification |
-| drawille ≥ 0.2.0 | Braille canvas |
 | click ≥ 8.0 | CLI argument parsing |
 | humanize ≥ 4.0 | Human-readable sizes/dates |
+| tomli ≥ 2.0.1 (Python 3.10) | `tomllib` backport |
 | inotify-simple ≥ 2, < 3 | Optional `[watch]` event acceleration |
 
 Python ≥ 3.10 required (`slots=True` dataclasses, `X | Y` union syntax).
@@ -1420,3 +1400,76 @@ on 3.10.
 installs the wheel into a clean environment. Budget: ≤ 20 runtime
 distributions, ≤ 20 MiB, no third-party native extension — the scanner's own
 optional `_scanfast` is exempt, because nothing requires it.
+
+## Known Issues
+
+### Repeated raw scans drift upward, and the gate that watches is noisy
+
+`tool/soak_memory.py --mode raw` on the 88,000-directory fixture grew from
+65.6 MB at iteration 3 to 103.3 MB at iteration 25 -- +57.5% against its own
+5% budget, so it exits 1. The drift is pymalloc keeping nearly empty arenas,
+not scan data being retained. Three measurements on the same fixture (raw, one
+worker, 25 scans in one process) pin that down:
+
+- `sys._debugmallocstats()` after every scan. Bytes in allocated blocks --
+  the Python objects actually alive between scans -- stay at 5.4-5.5 MB
+  from the first scan to the last. Arenas currently allocated go from 34 at
+  scan 3 to 47-50 at scan 25, and RSS goes from 42 to 55-57 MB over the
+  same scans. An arena is 1 MiB; the RSS curve is the arena curve.
+- `tracemalloc` between scan 3 and scan 12: +0.03 MB in total, a few
+  hundred small blocks -- a rehashed `threading._active` table, the strings
+  the cgroup and mount probes read, a weak-set entry. A scan allocates and
+  frees about 550 arenas, and pymalloc returns an arena to the OS only when
+  every pool in it is empty, so each of those survivors pins the whole
+  arena it landed in. About one arena in two outlives its scan.
+- `PYTHONMALLOC=malloc`, so glibc serves every allocation instead of
+  pymalloc: 636-637 MB after every one of the 25 scans. glibc never hands
+  the freed tree back at all, and never drifts either.
+
+So the process accumulates near-empty 1 MiB arenas at roughly half a
+megabyte a scan, which is why the same build scored +4.9% over 14
+iterations and +57.5% over 25, and why the 5% gate read at the default 20
+iterations can pass and fail on the same build. It is why the earlier
+candidates all came up empty: the pure-Python fallback grows more (+84.8%)
+because it allocates more; `MALLOC_ARENA_MAX=2` changes nothing because
+pymalloc's arenas are not glibc's; a single worker still drifts (+40.5%)
+because the survivors are not per-thread. A 20,000-directory tree shows no
+drift at all over 12 scans (arenas 30-34 throughout), and `--mode live`,
+which is the mode the explorer takes, is within budget: 100.1 MB to
+102.2 MB over 12 iterations, +2.1%.
+
+The freeze is not the cause; it is what keeps the number small. With
+`FREEZE_MIN_ENTRIES` raised so `freeze_retained_tree()` never runs, RSS is
+flatter and four and a half times higher: iteration 3 at 332.0 MB to
+iteration 14 at 333.7 MB, against 71.7 MB to 75.2 MB with the freeze on.
+The `gc.get_freeze_count()` that grows by exactly one per scan is the soak
+tool's own per-iteration sample dict, not anything in the scanner.
+
+Read the raw-mode soak as a measurement, not as a gate. Closing it means
+making a walk leave nothing behind in its arenas: find the few kilobytes
+that survive a scan, starting with the platform probes in
+`collectors/platform/linux.py` that `select_scan_workers()` runs on every
+engine, and allocate or cache them outside the walk.
+
+### Most release wheel legs are first built at the tag
+
+`wheels-smoke` in `.github/workflows/ci.yml` builds one release wheel,
+`cp313-manylinux_x86_64`, on every push to `main` or a `dev/**` branch and on
+every pull request, with the same pinned `cibuildwheel` action and
+`CIBW_TEST_COMMAND` as `release.yml`. It does not cover the aarch64 legs
+(under QEMU), musllinux, macOS, or any interpreter but 3.13: those are first
+built by the tag, so a build hook that stops producing the extension on one of
+them is found at release time.
+
+### Cleanup actions fail past PATH_MAX
+
+The scan and `classify_symlink` work at any depth, so a row whose path is
+longer than PATH_MAX (4,096 bytes on Linux) can be selected. Cleanup cannot
+act on it: `identity_from_path`, `_open_directory`, `available_bytes`,
+`XDGTrashAdapter.move` and `QuarantineExecutor.move` all name whole paths, and
+only the machinery below an already-opened parent is descriptor-relative. A
+cleanup of such a row refuses with an error before anything is renamed or
+unlinked, which is the right side to fail on, and
+`tests/test_cleanup_extended.py::TestPathsLongerThanPathMax` pins that.
+Deleting an ancestor whose own path is short enough still works, because
+`shutil.rmtree` is fd-relative. See [fs.md](fs.md#deep-trees).

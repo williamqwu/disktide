@@ -1,7 +1,7 @@
 """Binding identity, footer grouping, and the named key presets.
 
 Three things live here, and they exist because the footer, the key map and
-``config.toml`` all need to agree about the same 93 bindings.
+``config.toml`` all need to agree about the same bindings.
 
 **Ids are a public contract.** Every ``Binding`` in the app carries an ``id=``
 from :data:`ALL_IDS`. Those ids are what a user writes into the ``[keys]``

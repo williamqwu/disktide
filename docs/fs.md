@@ -62,21 +62,23 @@ On Windows, `os.scandir` and `os.stat` work, but `os.getloadavg()` and `os.sched
 
 ## Every Filesystem Touchpoint
 
-### Scanning -- `scanner/walker.py`, `scanner/engine.py`
+### Scanning -- `scanner/scheduler.py`, `scanner/accel.py`
 
 The scanner is the most filesystem-intensive component. Here is exactly what it calls for each directory:
 
 ```
 os.open(path, O_RDONLY|O_DIRECTORY|O_CLOEXEC)  # once per directory
-                                 # + O_NOFOLLOW below the scan root
-os.fstat(fd).st_mtime            # this directory's mtime + cycle-guard identity
-os.scandir(fd)                   # iterate directory entries, fd-relative
-  entry.is_symlink()             # classify: symlink?
-  entry.is_dir(follow_symlinks=False)   # classify: directory?
-  entry.is_file(follow_symlinks=False)  # classify: regular file?
-  entry.stat(follow_symlinks=False)     # fstatat(fd, name): st_size, st_blocks,
-                                        # dev/inode/nlink, mtime
-  entry.name                     # basename (str)
+                                 # + O_NOFOLLOW below the scan root; a path
+                                 # past PATH_MAX opens in 4,000-byte steps
+os.fstat(fd)                     # this directory's mtime, blocks, dev/inode
+os.stat(path)                    # only if the open failed: a denied
+                                 # directory's own blocks and identity
+scan_dir(fd)                     # scanner/accel.py; the C reader by default:
+  fdopendir(dup(fd))             # its own handle on the directory
+  readdir()                      # every name, with its d_type
+  fstatat(fd, name, AT_SYMLINK_NOFOLLOW)  # non-directories only: st_size,
+                                 # st_blocks, dev/inode/nlink, mtime
+  closedir()
 os.close(fd)                     # two descriptors in flight per worker, no more
 
 # Deferred work, runs on demand when the UI looks at a symlink
@@ -84,19 +86,21 @@ os.close(fd)                     # two descriptors in flight per worker, no more
 # plus eagerly for the first 100 symlinks at the scan root only:
   os.readlink(node.path)         # symlinks only: target string
   os.stat(node.path)             # symlinks only: classify target type
+                                 # (past 4,000 characters, both ask about one
+                                 # name under a descriptor on the parent)
 ```
 
 **Metadata captured per entry, directories included:** logical payload (`st_size`), allocated payload (`st_blocks * 512` when available -- a directory's own blocks come from the `fstat` of the descriptor it was opened on, so they cost no extra syscall), device/inode identity (`st_dev`, `st_ino`), hard link count (`st_nlink`), modification time (`st_mtime`), and type. For symlinks the target path and target type are populated lazily (see Symlink Handling below).
 
 **Metadata NOT captured:** permissions, ownership (uid/gid), extended attributes, ACLs, creation time, filesystem compression ratio, reflink sharing, or snapshot-exclusive physical blocks.
 
-`os.scandir()` is used instead of `os.listdir()` + `os.stat()` because it avoids a second syscall per entry on Linux (the kernel returns `d_type` from `getdents64`). It is handed a *descriptor* rather than a path so that each entry's stat is an `fstatat` of one name instead of an `lstat` of a whole path: measured on one thread with no node building, 3.14 us per entry against 3.58 warm on local xfs and 11.0 against 13.0 on warm NFSv4. The full child path is then joined in Python, which is what `FSNode.path` stores; it is never handed back to the kernel. `scanner/walker.py::scan_directory`, the recursive compatibility walker, is deliberately still path-based -- it recurses one Python frame per level, so it runs out of interpreter stack long before it runs out of pathname.
+`scan_dir` comes from `scanner/accel.py`, which picks a reader once, at import. The default is `_scanfast`, a small C extension that does the `fdopendir`, the `readdir` loop and the `fstatat` of every non-directory entry inside one GIL release -- one handoff per directory instead of one per entry (see [One GIL Release Per Directory](architecture.md#one-gil-release-per-directory)). Where it was not built for the running interpreter, or under `DISKTIDE_ACCEL=0`, `_scanfast_py` does the same work through `os.scandir(fd)` and `DirEntry.stat(follow_symlinks=False)` and returns the same tuples. Neither stats a directory entry during the read: `d_type` from `getdents64` already says what it is, and its own `fstat` comes when its job opens it; an entry whose filesystem leaves `d_type` unknown is statted and decided by its mode. Every stat names one entry against a descriptor already held rather than a whole path: measured on one thread with no node building, 3.14 us per entry against 3.58 on warm local xfs and 11.0 against 13.0 on warm NFSv4. The full child path is then joined in Python, which is what `FSNode.path` stores; it is never handed back to the kernel. `scanner/walker.py::scan_directory`, the recursive compatibility walker kept for diagnostics and `tool/` scripts, is deliberately still path-based -- it recurses one Python frame per level, so it runs out of interpreter stack long before it runs out of pathname.
 
 ### Deep trees
 
 PATH_MAX -- 4,096 bytes on Linux -- is a limit on the pathname *argument* of a syscall, not on the depth of a tree, and the scan no longer runs into it. Nothing below the scan root is ever named by its whole path, and the scan root's own path is opened in PATH_MAX-sized steps, each relative to the descriptor the last step returned (four opens for a 10,900-byte path). A chain of 1,200 directories with an eight-letter name at each level scans to the bottom; before this it stopped at level 442 and recorded `[Errno 36] File name too long` as a *denied* directory, so the tree looked like a permissions problem rather than a deep one.
 
-Two things still use whole paths and still fail past 4,096 bytes: `os.readlink` and the follow-stat in `classify_symlink`, so a symlink deeper than PATH_MAX is reported as broken rather than classified; and every cleanup action -- trash, quarantine, delete -- which builds the full path to hand to `shutil` and the trash spec. Deleting a directory *containing* such a path works, because `shutil.rmtree` is fd-relative itself; naming one of its descendants directly does not.
+`classify_symlink` is past it too: from 4,000 characters it opens the link's parent and asks `readlink` and the follow-stat about one name under that descriptor, so a symlink deeper than PATH_MAX is classified like any other. One thing still uses whole paths and still fails past 4,096 bytes: every cleanup action -- trash, quarantine, delete -- which builds the full path to hand to `shutil` and the trash spec, and refuses such a row with an error before anything is renamed or unlinked. Deleting a directory *containing* such a path works, because `shutil.rmtree` is fd-relative itself; naming one of its descendants directly does not.
 
 ### Symlink Handling
 
@@ -158,7 +162,7 @@ and cleanup audit records remain available.
 | Locate DB | `os.environ.get("XDG_DATA_HOME")`, `os.path.expanduser("~/.local/share")` |
 | Create dir | `os.makedirs(db_dir, exist_ok=True)` |
 | Open/create DB | `sqlite3.connect(path)` |
-| Open read-only recovery | SQLite URI with `mode=ro`, then `PRAGMA query_only=ON` |
+| Open read-only recovery | SQLite URI with `mode=ro`, then `PRAGMA query_only=ON`; if that open is refused as read-only and no `-wal` is pending (a directory that cannot hold the `-shm` sidecar), the same URI with `immutable=1` |
 | Pre-migration backup | SQLite backup API to `data.db.pre-v11.bak.partial`, then `os.replace` to `data.db.pre-v11.bak` |
 | Open-path validity | `SELECT 1 FROM sqlite_master LIMIT 1` |
 | Integrity probe | `PRAGMA quick_check`, in `doctor` only |

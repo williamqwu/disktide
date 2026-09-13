@@ -167,8 +167,8 @@ _ANSI_INK = {
 # ---------------------------------------------------------------------------
 
 # The vocabulary, in index order. A 16-colour terminal defines what each of
-# these looks like -- the OnDemand web shell paints them from xterm.js's
-# "Monokai Remastered", a Linux console from its own table -- so naming one
+# these looks like -- the OnDemand web shell paints them from its
+# "Monokai Remastered" theme, a Linux console from its own table -- so naming one
 # is the only way to ask for a colour a 16-colour terminal actually has.
 ANSI_NAMES: tuple[str, ...] = (
     "black", "red", "green", "yellow",

@@ -100,7 +100,9 @@ for the whole scan.
 
 **Diff mode** — when at least two compatible snapshots exist, `d` switches to
 Diff view. Color and glyphs show growth, shrink, new, and removed paths.
-Tree rows add a delta and a sparkline. `[`/`]` step through adjacent pairs.
+Tree rows add a delta (the `.:-=+*#` sparkline after a row is there in Current
+mode too, whenever its path has snapshots). `[`/`]` step through adjacent
+pairs.
 
 Diff compares **two saved snapshots** — the two most recent by default, named
 in the indicator as `Diff snapshots #30 → #31` — and never the scan currently
@@ -113,12 +115,12 @@ no direction. Everything else keeps its direction, and carries a leading `≈`
 when the snapshot as a whole was incomplete — one refused directory hedges the
 picture, it no longer flattens it.
 
-**Symlinks** — shown as `name → target`, never traversed, never counted
-toward folder sizes. `i` on a symlinked directory resolves and rescans from
-the real location.
+**Symlinks** — shown as `name → target` and never traversed: the link's own
+size counts toward its folder, its target's does not. `i` on a symlinked
+directory resolves and rescans from the real location.
 
 **Unreadable entries** — a directory the scan could not open at all is marked
-with a red `◐`. Any other directory is marked `◐ N hidden`, where N counts
+with a red `⚠`. Any other directory is marked `◐ N hidden`, where N counts
 everything unreadable *at or below* that row — its own entries plus every
 descendant's, a denied subdirectory counting as one — so the root's number is
 the whole story and not just its own top level. The badge is bright when some
@@ -152,6 +154,8 @@ how a directory's size changes over time.
 | `t` | Run retention maintenance |
 | `r` | Refresh all monitor data |
 | Tab | Cycle history charts (F1–F4) |
+| `z` | Zoom the trend: all of it, the newest half, the newest quarter |
+| Shift+← / Shift+→ | Pan a zoomed trend older / newer |
 
 **Auto-start**: the toggle at the top persists `monitor.auto_start_in_tui`
 so future TUI launches start the foreground host automatically. It does not
@@ -167,9 +171,10 @@ install a daemon.
 | Growth Rings (`F3`) | Sunburst with a growth overlay |
 | Heatmap (`F4`) | Paths ranked by persistent growth across intervals |
 
-**No daemon**: scans run only while the TUI session or a `disktide watch`
-foreground host is alive. Monitors show `enabled · no-host` when no process
-owns them — press `S` or run `disktide watch --all` to host.
+**No daemon**: scans run only while a TUI session is sampling (`S`, or
+Auto-start) or a `disktide watch` foreground host is alive. Monitors show
+`enabled/no-host/…` when no process owns them — press `S` or run
+`disktide watch --all` to host.
 
 ### FS Overview (3)
 
@@ -249,7 +254,7 @@ then press `4`.
 | `h` | Show savings history by category |
 | `m` | Focus the synchronized Age/Size Map |
 
-**Workflow**: select candidates → `p` to review a plan → **Apply Safely**
+**Workflow**: select candidates → `p` to review a plan → **Apply Safe Candidates**
 moves targets to system Trash (or owned quarantine if Trash is unavailable)
 → `z` to undo if needed. Permanent deletion is a separate red action
 requiring a typed `DELETE <plan-id>` confirmation.
@@ -301,6 +306,8 @@ Press `?` in the app for a live, screen-specific version of this table.
 | `g` | Monitor | Full reconciliation |
 | `b` / `v` | Monitor | Set baseline / target snapshot |
 | Tab | Monitor | Cycle history charts |
+| `z` | Monitor | Trend zoom |
+| Shift+← / Shift+→ | Monitor | Pan trend older / newer |
 | `B` | FS Overview | Benchmark mount |
 | Enter | FS Overview | Open details |
 | Space / `a` | Cleanup | Toggle / select all |
@@ -326,7 +333,7 @@ Three presets:
 |--------|-------------|
 | `spine` | Current default layout |
 | `safe` | v0.2.30 layout with three consequence mismatches fixed (`d`, `u`, `s`) |
-| `classic` | v0.2.30 layout exactly |
+| `classic` | v0.2.30 key layout (archiving a monitor stays in the command palette) |
 
 A shifted letter is written as the capital letter — `"explorer.setup_monitor"
 = "M"` — because that is what a terminal sends and what Textual reports.
@@ -590,7 +597,7 @@ quarantine_max_bytes = 10737418240       # 10 GiB
 # enabled_rule_packs = ["mine"]        # packs shipping default_enabled = false
 
 [ui]
-color_theme = "disktide"                 # disktide, cold, colorblind, cyberpunk, mono
+color_theme = "disktide"                 # disktide, cold, colorblind, cyberpunk, mono, ansi
 default_viz = "sunburst"                 # treemap, sunburst, details
 # show_cleanup = true                    # default false
 # ring_shape = "disc"                    # default tiles
@@ -757,8 +764,8 @@ the extension out of a bug, not for changing what a scan reports.
 the extension when a C compiler is present, so the fast path needs
 `cc`/`gcc`/`clang` and your Python's development headers (`python3-dev` /
 `python3-devel`). The install succeeds either way, because a missing compiler
-is not an error. Once DiskTide ships prebuilt wheels, a platform that has one
-will not need a compiler at all.
+is not an error. A platform with a prebuilt wheel (Linux and macOS, from a
+release) needs no compiler at all.
 
 One thing to know about the fast path: a single directory read is not
 interruptible, so cancelling a scan inside one enormous directory (hundreds
@@ -889,10 +896,11 @@ bled over the size text above and below it, and `▀`/`▄` *narrower* than the
 cell, leaving a comb of background-coloured slits along every horizontal edge
 of the chart.
 
-So DiskTide draws no block element anywhere. **Every fill is a background
-colour on spaces** — the tree's proportional bar, the FS Overview's usage and
-capacity bars, the scan progress bar, the theme swatches in Settings, the
-sunburst and the treemap — and anything that needs a *ramp* rather than a fill
+So DiskTide draws no block element in its defaults. **Every fill is a
+background colour on spaces** — the tree's proportional bar, the FS
+Overview's usage and capacity bars, the scan progress bar, the theme swatches
+in Settings, the sunburst in its default `tiles` shape and the treemap — and
+anything that needs a *ramp* rather than a fill
 is ASCII: the mini trend sparkline is `.:-=+*#`, and the `disktide scan`
 summary bar on stdout is `#` and `-`. The Monitor's trend chart plots its line
 with `•` (one dot per cell) rather than plotext's default half-and-quadrant

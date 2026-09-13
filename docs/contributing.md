@@ -10,14 +10,13 @@ uv sync --locked
 ```
 
 Creates an editable `.venv` from the committed `uv.lock`, including dev
-dependencies (pytest, pytest-asyncio, textual-dev).
+dependencies (pytest, pytest-asyncio, pytest-xdist, textual-dev).
 
 ## Running Tests
 
 ```bash
 uv run pytest tests/ -v                    # full suite
 uv run pytest tests/test_scanner.py -v     # specific module
-uv run pytest tests/ --cov=disktide        # with coverage
 ```
 
 `PathSuggester` coroutine tests use `@pytest.mark.asyncio`. Most Textual app
@@ -58,8 +57,7 @@ boundaries. In brief:
 - `src/disktide/` — all source code
 - `tests/` — flat test suite
 - `assets/` — TCSS stylesheets
-- `tool/` — dev utilities (`gen_activity`, `bench_scan`, `diag_scan`,
-  and the scan-benchmark harness: `make_homelike`, `tui_time`, `spy_agg`)
+- `tool/` — dev utilities; see [Dev Utilities](#dev-utilities)
 - `docs/` — documentation
 
 ## Key Conventions
@@ -232,9 +230,15 @@ See [release-process.md](release-process.md) for the tag and PyPI flow.
 ### Adding a Config Field
 
 1. Add the field to the appropriate dataclass (`ScanConfig`, `MonitorConfig`,
-   `UIConfig`, or `HostPaths`).
-2. Add serialization in `save_config()` — skip `None` for optional fields.
-3. Add deserialization in `load_config()` with a sensible default.
+   `CleanupConfig`, `UIConfig`, `KeysConfig`, or `HostPaths`).
+2. Add serialization in `save_config()` — skip `None` for optional fields, and
+   write strings through `_toml_str` so a quote or backslash stays valid TOML.
+3. Add deserialization in `load_config()` with a sensible default, through the
+   typed readers (`_table`, `_int_value`, `_bool_value`, `_str_value`). A value
+   of the wrong type raises `ConfigError` naming its section and key, which the
+   CLI reports as exit 2; a value this build does not recognise (a theme, a
+   ring shape, a key binding) falls back to the default instead, so a file
+   written by a newer release still opens.
 4. Add a roundtrip test in `tests/test_config.py`.
 
 ### Adding a Database Migration
@@ -283,7 +287,13 @@ default_action = "safe"
 ### Adding a Screen
 
 1. Create `screens/my_screen.py` subclassing `textual.screen.Screen`.
-2. Define `BINDINGS` and `compose()`.
+2. Define `BINDINGS` and `compose()`. Give every `Binding` an `id=`
+   (`myscreen.action`), add the ids to a tuple in `disktide/keys.py` that
+   `ALL_IDS` includes, and give each one a heading in `keys.SECTIONS`. The key
+   map and `[keys]` both work from ids, so a binding without one is silently
+   missing from `?` and cannot be remapped, and no test notices.
+   `tests/test_keymap.py` does fail on an id missing from `ALL_IDS`, and on one
+   missing from `SECTIONS` once the new tuple is in that test's list.
 3. Install in `app.py` `_launch_explorer()` (not at module scope):
    ```python
    from disktide.screens.my_screen import MyScreen
@@ -298,8 +308,9 @@ default_action = "safe"
 
 ### Adding a Visualization
 
-1. Create layout/rendering in `viz/my_viz.py` — produce Rich Segments or use
-   the braille canvas.
+1. Create layout/rendering in `viz/my_viz.py` — produce Rich Segments, and draw
+   a fill as a background colour on spaces, never as a block element (see
+   `disktide.glyphs`).
 2. Reuse `VisualState`/`VisualDelta` — don't classify growth independently.
 3. Create a Textual widget in `widgets/my_viz_view.py` that consumes a
    prebuilt model (not a repository).
@@ -317,7 +328,8 @@ default_action = "safe"
 - **Async**: `@pytest.mark.asyncio` for coroutines; `asyncio.run(go())` +
   `app.run_test()` for Textual flows.
 - **Don't read the host**: inject values (`resolve_live_scan_render(...,
-  cpu_count=2)`), pin config, or use `threading.Event` instead of sleep.
+  terminal_width=80, terminal_height=24)`), pin config, or use
+  `threading.Event` instead of sleep.
 - **Visualization**: test layout separately from rendering. Cover state
   classification, coordinates, gap handling, selected-path identity,
   80×24/safe/no-color fallback, and 100k-node performance.
@@ -327,17 +339,27 @@ default_action = "safe"
 | Script | Purpose |
 |--------|---------|
 | `tool/gen_activity` | Generate filesystem activity for testing watch/monitor. `--max-files`, `--max-size` caps. |
-| `tool/bench_scan` | Scan timing. `--mode raw` (compatibility baseline), `events` (service delivery), `live` (view-model delivery). `--workers N`. |
+| `tool/bench_scan` | Scan timing. `--mode raw` (compatibility baseline), `events` (service delivery), `live` (view-model delivery). `--workers N`. `--json` emits one document, with the reader backend and a `gc` object. `--paint COLSxROWS` rasterizes a sunburst per accepted live frame, behind the explorer's duty cycle; `--paint-every-frame` skips the duty cycle, and `--consume-every-frame` applies every live frame instead of the explorer's cadence. |
 | `tool/diag_scan` | Diagnostic scan: 1s heartbeat, 5s stall detector, per-directory hotspot table. `--profile` for `cProfile`. Designed for NFS/remote slowness where the TUI progress bar pulses but you can't see what's slow. |
 | `tool/make_homelike` | Build the benchmark fixture: 88,000 dirs / 888,100 files, deterministic for a seed. Plans the exact entry count before it creates anything. |
 | `tool/scratchguard` | The gate every generator above asks before writing in bulk: refuses `$HOME`, network filesystems, and paths without inode headroom. `python tool/scratchguard.py PATH --entries N` answers the same question from a shell. |
 | `tool/tui_time` | Time one scan in the *real* TUI, under a private tmux server, with per-thread CPU. |
 | `tool/spy_agg` | Aggregate a `py-spy record --format raw --threads` profile per thread. |
+| `tool/soak_scan` | Randomised soak for the scan scheduler: adversarial trees from random seeds, checked for the scheduler's structural invariants, for published live frames that change afterwards, and for totals against an independent walker. `--cases N`. |
 | `tool/soak_memory` | Scan one tree N times in one process and watch RSS. The memory half of `soak_scan`, which is a randomised *invariants* soak. |
 | `tool/dump_tree` | Every node of one scan as sorted text, for byte-identity diffs. `--backend native\|python` picks the directory reader; the first header line names it. |
 | `tool/check_doctor_backend` | Assert which scanner backend a `doctor --json` report names. Used by CI on each install shape. |
 | `tool/build_scanfast` | Compile the optional scanner extension in place after editing `_scanfast.c`, then load it to check it imports. `--print-command`, `--dry-run`, `--output DIR`. |
 | `tool/capture_glyphs` | Walk every screen in a private tmux server and report any non-ASCII glyph outside `disktide.glyphs`'s reviewed set. `--size 307x71 --size 120x32` by default; `--slow-tree N` makes the scan last long enough to photograph the progress overlay. |
+| `tool/gen_readme_shots` | Regenerate the README hero shots from real tmux captures of the TUI, into the assets checkout (`--out`). |
+| `tool/gen_blog_shots` | Regenerate the figures of `docs/blogs/2026-09-12-reading-the-tui.md` the same way, into the assets checkout's `disktide/blog/` (`--out`). |
+| `tool/gen_palette` | Regenerate the colour tables in `viz/colors.py`. `--check` runs the palette gates and prints the measured numbers. |
+| `tool/palette_checks` | Stdlib port of the six-checks palette validator (OKLab, colour-vision simulation, WCAG contrast) that `gen_palette` and `tests/test_palette_gates.py` use. |
+| `tool/capture_colour_bytes` | Drive the real TUI in a private tmux server and read back the colour escapes the pane stored (`capture-pane -e`). |
+| `tool/verify_distribution` | Check wheel and sdist metadata and packaged files; see [Distribution Checks](#distribution-checks). |
+| `tool/check_dependency_budget` | Fail when the minimal runtime install exceeds the core budget (`--max-distributions`, `--max-mib`) or carries a third-party native extension. Helpers live in `tool/dependency_budget.py`. |
+| `tool/generate_sbom` | Write a compact CycloneDX SBOM from a minimal installed wheel. |
+| `tool/benchmark_wave12`, `13`, `14`, `15` | Emit machine-readable timings for one earlier wave each: history and projection (12), scanner and resource policy (13), cleanup (14), watch and projection (15). |
 
 ### Benchmarking a scan
 
@@ -445,17 +467,19 @@ does not name OS threads, so every key is `python#<tid>`; sort by CPU and they
 read as walk workers, then the scheduler (which runs inside Textual's
 `asyncio_0` worker thread), then `main`, the UI thread.
 
-`--pyspy FILE` records a profile over the scan; aggregate it per thread with
-`tool/spy_agg.py --grep <function>`. Sample counts only compare at the same
-`--rate`.
+`--pyspy FILE` records a profile over the scan at a fixed 200 Hz (`tui_time`
+has no option for the rate); aggregate it per thread with
+`tool/spy_agg.py --grep <function>`. A `py-spy record` run by hand samples at
+100 Hz unless told otherwise, so compare sample counts only between profiles
+taken at the same rate.
 
-Read the *scheduler* thread as its own number. It is one thread applying
-every directory result, so its share of the process is a per-directory
-price: on the 88,000-directory fixture at one worker, 100 Hz, it was 270 of
-960 samples (28.1 % of the process, 31 µs a directory) and is now 152 of 822
-(18.5 %, 17 µs). In `bench_scan` it is `MainThread`; in `tui_time` it is the
-second-largest `python#<tid>` after the walk workers, because it runs inside
-Textual's `asyncio_0` worker thread.
+Read the *scheduler* thread as its own number. It is one thread applying every
+directory result, so its share of the process is a per-directory price: on the
+88,000-directory fixture at one worker, in a raw `bench_scan` profiled by hand
+at 100 Hz, it was 270 of 960 samples (28.1 % of the process, 31 µs a
+directory) and is now 152 of 822 (18.5 %, 17 µs). In `bench_scan` it is
+`MainThread`; in `tui_time` it is the second-largest `python#<tid>` after the
+walk workers, because it runs inside Textual's `asyncio_0` worker thread.
 
 **A profile cannot see the garbage collector.** A collection runs inside
 whichever allocation crossed the threshold, so py-spy charges its time to the

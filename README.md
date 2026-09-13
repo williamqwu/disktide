@@ -39,14 +39,14 @@
 - **General.** DiskTide measures every directory four ways: logical bytes, allocated blocks, unique on-disk bytes after hardlink dedup, and file count. Sparse files, hardlinks and piles of tiny files all show up for what they are. Anything the scan could not cover (other filesystems, pseudo mounts, excluded paths, unreadable directories) is reported as coverage instead of being silently dropped.
   - Six color themes, one of which follows your terminal's own 16 colors. The mouse works. Config and data live in standard XDG paths.
 
-- **Explorer.** A sorted file tree next to a sunburst, a treemap, or a details panel. `t` switches the size metric everywhere at once, `g` switches the sunburst shape (tiles, disc, fill), and `d` shows the difference against an earlier snapshot.
+- **Explorer.** A sorted file tree next to a sunburst, a treemap, or a details panel. `t` switches the size metric everywhere at once, `g` switches the sunburst shape (tiles, disc, fill), and `d` shows what changed between two saved snapshots (the newest two by default).
 
 - **Monitor.** Takes a snapshot of a directory on a schedule (every 6 hours by default) and shows you how it grew: a trend chart, a diff treemap, a growth sunburst, and a heatmap of what keeps growing. Snapshots can be pinned, retention thins out the old ones, and alerts fire on thresholds you set.
-  - There is no daemon. Scans run only while the TUI or `disktide watch` is running.
+  - There is no daemon. Scans run only while a TUI session is sampling (`S` in the Monitor Center, or Auto-start) or `disktide watch` is running.
 
 - **Cleanup.** Finds reclaimable build and cache artifacts using six rule packs (Python, Node, Rust, general, IDE, containers). You review a plan before anything moves. Files go to the system Trash or to a quarantine directory, and the plan can be undone. Permanent deletion is a separate step that asks you to type a confirmation.
 
-Scanning is metadata only: DiskTide never opens or reads file contents. A small optional C extension makes multi-worker scans several times faster.
+Scanning is metadata only: DiskTide never opens or reads file contents. A small optional C extension makes multi-worker scans about twice as fast.
 
 ## Installation
 
@@ -88,12 +88,12 @@ The scanner has a small optional C extension. Installing from this checkout comp
 ## Quick start
 
 ```bash
-disktide                         # interactive TUI, welcome screen
-disktide ~/projects              # interactive TUI, straight into that path
-disktide scan ~/projects         # one-shot scan
-disktide monitor                 # list monitors
-disktide compare <monitor>       # growth report
-disktide cleanup ~/projects      # review cleanup candidates
+disktide                                # interactive TUI, welcome screen
+disktide ~/projects                     # interactive TUI, straight into that path
+disktide scan ~/projects                # one-shot scan
+disktide monitor list                   # list monitors
+disktide compare --since 7d ~/projects  # what grew in the last week
+disktide cleanup ~/projects             # review cleanup candidates
 ```
 
 `?` opens the key map for the current screen, `,` opens Settings, and Ctrl+P searches every command by name. `--help` works at every level. See the [User Guide](docs/user-guide.md) for details.

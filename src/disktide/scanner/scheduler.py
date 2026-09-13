@@ -457,8 +457,8 @@ def scan_directory_once(
 
     Everything below the initial open is fd-relative: the directory is
     opened once, its own metadata comes from `os.fstat`, its entries come
-    from `os.scandir(fd)`, and each entry's `stat` is an `fstatat` of one
-    name. Two things follow. The cheap one is 12% off the per-entry syscall
+    from `accel.scan_dir(fd)` -- the C reader, or the `os.scandir(fd)` it
+    falls back to -- and each entry's `stat` is an `fstatat` of one name. Two things follow. The cheap one is 12% off the per-entry syscall
     cost on warm local xfs and 15% on warm NFSv4. The other is that a path
     longer than PATH_MAX stops being a wall: the kernel never sees a child
     path at all, and the directory's own path is walked in PATH_MAX-sized

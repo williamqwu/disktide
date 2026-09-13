@@ -753,7 +753,7 @@ def test_disktide_at_sixteen_colours_is_the_collapse_the_screenshot_showed():
     40 distinct colours reach the Open OnDemand web shell as 13, and the
     three that merge are the three the screenshot showed merging:
     `archive`, `ephemeral` and the neutral directory ring all arrive as
-    ANSI 1, which xterm.js's Monokai Remastered paints hot pink. `data`
+    ANSI 1, which the shell's Monokai Remastered theme paints hot pink. `data`
     lands on the same index as `$primary`, which is the window border.
 
     This is documentation with an assertion on it, not a target. If a
