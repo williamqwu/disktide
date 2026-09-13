@@ -850,9 +850,9 @@ def test_make_homelike_default_plan_is_the_documented_fixture():
 def test_make_homelike_refuses_before_building_when_inodes_are_short(tmp_path):
     """The refusal that matters most: nothing is created, not even the root.
 
-    `statvfs` on the quota'd NFS home reported orders of magnitude more free inodes while
-    the account had far fewer left, so the guard asks `quota` as well. Here it
-    is handed a report with ten files of headroom for the filesystem the
+    `statvfs` on the quota'd NFS home reported orders of magnitude more free
+    inodes than the account had left, so the guard asks `quota` as well. Here
+    it is handed a report with ten files of headroom for the filesystem the
     target is actually on.
     """
     guard = _load_scratchguard()
@@ -865,8 +865,8 @@ def test_make_homelike_refuses_before_building_when_inodes_are_short(tmp_path):
         "Disk quotas for user alice (uid 51234):\n"
         "     Filesystem  blocks   quota   limit   grace   files   quota"
         "   limit   grace\n"
-        f"{row[0]} 157286400  1048576000 1048576000       0  999990"
-        "  1000000 1000000       0\n"
+        f"{row[0]} 157286400  1048576000 1048576000       0  1999990"
+        "  2000000 2000000       0\n"
     )
     target = tmp_path / "fixture"
 

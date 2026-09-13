@@ -378,10 +378,10 @@ Three refusals, each naming the path, the reason, and what lifts it:
   on every call. The trust is network-only: a `$DISKTIDE_SCRATCH` under `~`
   is still refused without `--allow-home`, and headroom is still checked.
 - **inode headroom** -- **no flag lifts this one.** `os.statvfs` alone is not
-  enough: on the quota'd NFS home this was written for it reports orders of magnitude more
-  free inodes while `quota` reports far fewer left, so `quota -w -u -p` is asked
-  as well. A host without the `quota` binary (every CI runner) simply gets the
-  `statvfs` answer; a missing tool never fails closed.
+  enough: on the quota'd NFS home this was written for it reports hundreds of
+  times more free inodes than `quota` says are left, so `quota -w -u -p` is
+  asked as well. A host without the `quota` binary (every CI runner) simply
+  gets the `statvfs` answer; a missing tool never fails closed.
 
 With no target the tree goes to `$DISKTIDE_SCRATCH` (or `$TMPDIR`)
 `/disktide-<user>/<label>`, through the same three checks -- a `TMPDIR` under

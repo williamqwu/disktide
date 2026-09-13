@@ -76,8 +76,8 @@ class Breadcrumb(Widget):
         """Crumbs for the current path, middle folded away if it must be.
 
         A crumb trail cropped at the right edge -- what any overflow rule
-        does -- keeps `/fs/project/PRJ0042` and drops the directory the user is
-        standing in, which is the one crumb that was worth the row. So the
+        does -- keeps `/fs/project/PRJ0042` and drops the directory the user
+        is standing in, which is the one crumb that was worth the row. So the
         leading crumbs go first, replaced by a single `…`, and the tail is
         kept whole. `None` marks that fold for `render`.
 

@@ -1,8 +1,8 @@
 """A path that does not fit must lose its prefix, never its tail.
 
 Every place DiskTide shows a path in a fixed number of cells used to crop
-it on the right, which on an HPC filesystem keeps `/fs/project/PRJ0042` -- the
-four segments every path on the machine shares -- and drops the directory
+it on the right, which on an HPC filesystem keeps `/fs/project/PRJ0042` --
+the four segments every path on the machine shares -- and drops the directory
 the row was about. The breadcrumb, the Details panel, the growth heatmap
 and the monitor's history table all read from the two helpers here.
 """
@@ -19,7 +19,7 @@ from disktide.rendering import set_safe_rendering
 from disktide.widgets.breadcrumb import Breadcrumb
 
 
-LONG = "/fs/project/PRJ0042/alice/coreutil/disktide/scratchpad/stage/home/datasets/raw"
+LONG = "/fs/project/PRJ0042/alice/climate/ensemble/run-017/output/datasets/raw"
 
 
 class TestElidePath:

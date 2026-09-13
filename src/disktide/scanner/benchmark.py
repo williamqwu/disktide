@@ -12,8 +12,8 @@ ignored outright, and the read figure there is the client page cache.
 
 **Where it writes.** Not the mountpoint, necessarily. On a shared machine the
 mount root is the one directory a user cannot write: `/users/PRJ0042`,
-`/fs/scratch` and `/fs/project` on the cluster this was measured against are all
-root-owned and mode 755, so a probe that insists on the mount root can
+`/fs/scratch` and `/fs/project` on the cluster this was measured against are
+all root-owned and mode 755, so a probe that insists on the mount root can
 benchmark two of that host's seventy mounts, both of them views of the same
 local scratch disk, and neither of them holding any of the user's data.
 :func:`writable_probe_dir` therefore looks for a directory *on that same
@@ -24,10 +24,10 @@ one it picked before asking for consent.
 caller asks for. The free-space fraction below it is a second opinion and not
 a good one: `os.statvfs` reports the filesystem's free space, not the caller's
 share of it, and under a disk quota those are different numbers. Measured on
-the NFS home this was written against, `statvfs` reported thousands of GiB available
-where `quota` reported hundreds of GiB — a tens of times overstatement, enough to make a
-"never more than 25 % of free" rule permit 2 TB. Pass ``headroom_bytes`` when
-you know the real figure; the absolute cap is what holds when you don't.
+the NFS home this was written against, `statvfs` reported tens of times the
+space `quota` did, enough to make a "never more than 25 % of free" rule
+permit terabytes. Pass ``headroom_bytes`` when you know the real figure; the
+absolute cap is what holds when you don't.
 
 **How long it takes.** ``max_seconds`` is a budget, not a guarantee. The write
 phase and the read-back both stop at their share of it, but a buffered write
@@ -128,8 +128,8 @@ def _candidate_dirs(mountpoint: str) -> list[str]:
 
     The home-suffix rule is the one that earns its place on a cluster. A
     site that gives a user `/users/PRJ0042/alice` gives them
-    `/fs/scratch/PRJ0042/alice` and `/fs/project/PRJ0042/alice` too, because the
-    project/user layout is mirrored across the filesystems; so each suffix
+    `/fs/scratch/PRJ0042/alice` and `/fs/project/PRJ0042/alice` too, because
+    the project/user layout is mirrored across the filesystems; so each suffix
     of the home path is tried under the mount, longest first.
     """
     candidates = [mountpoint]
@@ -158,8 +158,8 @@ def writable_probe_dir(mountpoint: str) -> str | None:
     case on a machine with one user on it. Otherwise the first candidate
     from :func:`_candidate_dirs` that is a writable directory *on the same
     filesystem*. Callers should show the answer to the user before writing:
-    "benchmark /users/PRJ0042" and "write a file in /users/PRJ0042/alice" are
-    not the same sentence, and only the second one is true.
+    "benchmark /users/PRJ0042" and "write a file in /users/PRJ0042/alice"
+    are not the same sentence, and only the second one is true.
     """
     if not os.path.isdir(mountpoint):
         return None

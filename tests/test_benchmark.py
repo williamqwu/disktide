@@ -77,8 +77,8 @@ class TestBenchmarkMount:
 class TestWhereItWrites:
     """The mount root is the one directory a shared machine denies you.
 
-    On the cluster this was written against, `/users/PRJ0042`, `/fs/project` and
-    `/fs/scratch` are all root-owned and mode 755, so a probe that insists
+    On the cluster this was written against, `/users/PRJ0042`, `/fs/project`
+    and `/fs/scratch` are all root-owned and mode 755, so a probe that insists
     on the mount root can benchmark two of that host's seventy mounts and
     neither holds any of the user's data.
     """
@@ -152,8 +152,8 @@ class TestWhereItWrites:
 class TestHowMuchItWrites:
     def test_the_absolute_cap_holds_whatever_is_asked_for(self, tmp_path):
         """`statvfs` is not a limit on a quota'd mount -- measured, it
-        reported tens of times the space `quota` did -- so the byte ceiling cannot
-        depend on it."""
+        reported tens of times the space `quota` did -- so the byte ceiling
+        cannot depend on it."""
         res = benchmark_mount(str(tmp_path), size_mb=1024 * 1024, max_seconds=60)
         assert res.bytes_io <= MAX_PROBE_BYTES
 

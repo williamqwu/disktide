@@ -172,10 +172,10 @@ def test_double_b_confirms_records_and_displays(tmp_path):
 def test_the_probe_is_told_where_to_write_and_what_it_may_use(tmp_path):
     """The screen knows the user's quota; `statvfs` does not. It passes it.
 
-    On the NFS home this was written against `statvfs` reports tens of times the
-    space `quota` does, so the probe's own "never more than 25 % of free"
-    rule is measured against a number that is not true. The screen has the
-    real figure and hands it over.
+    On the NFS home this was written against `statvfs` reports tens of
+    times the space `quota` does, so the probe's own "never more than 25 %
+    of free" rule is measured against a number that is not true. The screen
+    has the real figure and hands it over.
     """
 
     async def go():

@@ -199,7 +199,7 @@ their usage bars drawn without the colour ramp as well: a read-only image is
 binds a host directory onto itself for every path it needs writable, and each
 one reports the whole filesystem's capacity again: a cluster login node lists
 seventy mounts of which fifty-six are `/etc/pam.d`, `/var/log`,
-`/usr/bin/turbostat` and more like them, all repeating the 15.6 GiB of
+`/usr/bin/turbostat` and more like them, all repeating the size of
 `/var/lib/stateless/writable`. A bind mount whose filesystem is mounted
 nowhere else is *not* folded — on that same host `/tmp` is a bind mount and
 is the only local storage on it.
@@ -214,8 +214,8 @@ with seventeen 64 MiB snaps still gets a bar that is 50 cells wide.
 The prompt names **the directory it will write in**, which is not always the
 mountpoint: on a shared machine the mount root is usually the one directory
 you cannot write, so the probe falls back to your own directory on that same
-filesystem (`/users/PRJ0042` is probed in `/users/PRJ0042/alice`). A mount with
-nowhere writable on it says so instead of prompting.
+filesystem (`/users/PRJ0042` is probed in `/users/PRJ0042/alice`). A mount
+with nowhere writable on it says so instead of prompting.
 
 It writes at most 256 MiB of incompressible data, never more than a quarter
 of the space you actually have left — your quota where one is enforced,

@@ -32,9 +32,10 @@ or environment variable that lifts it:
 
 Headroom asks two sources and refuses if either one, when it answers, is
 short. `os.statvfs` is the obvious one and is not sufficient: on the quota'd
-NFS home this was written for it reports orders of magnitude more free inodes while the
-account has far fewer left. Only `quota` knows about the quota, so `quota` is
-asked as well -- and never fails closed, because CI runners do not have it.
+NFS home this was written for it reports orders of magnitude more free
+inodes than the account has left. Only `quota` knows about the quota, so
+`quota` is asked as well -- and never fails closed, because CI runners do
+not have it.
 
 The default destination, when a caller passes no path, is
 `$DISKTIDE_SCRATCH` (or `tempfile.gettempdir()`) `/disktide-<user>/<label>`,

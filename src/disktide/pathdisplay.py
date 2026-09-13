@@ -1,6 +1,6 @@
 """Fitting a filesystem path into a fixed number of terminal cells.
 
-A path is read from the right. `/fs/project/PRJ0042/alice/project/datasets/raw`
+A path is read from the right. `/fs/project/PRJ0042/alice/climate/datasets/raw`
 is one of thousands under the same four-segment prefix, and on an HPC
 filesystem that prefix is most of the string: cropping from the right --
 which is what a plain slice and every `Text` overflow rule do -- keeps the

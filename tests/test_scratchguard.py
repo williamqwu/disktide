@@ -5,9 +5,10 @@ Three groups here.
 *The guard itself* -- `tool/scratchguard.py`, loaded by file path because
 `tool/` is not an importable package. Each test gets its own module object, so
 one test's `PROC_MOUNTS` cannot decide the next one's answer. The mount tables
-and quota reports are the real ones from the host this was written for: a
-`/users autofs` row sitting above a `/users/PRJ0042 nfs4` row, and the wide
-`quota -p` layout with its eight numeric columns.
+and quota reports have the shape of the real ones from the host this was
+written for, with invented names and figures: a `/users autofs` row sitting
+above a `/users/PRJ0042 nfs4` row, and the wide `quota -p` layout with its
+eight numeric columns.
 
 *The lint* -- an AST check that a `tool/*.py` which writes files inside a loop
 imports the guard. The point is not this week's scripts; it is that the next
@@ -19,8 +20,8 @@ this.
 worth pinning.
 
 Nothing here creates a fixture under `$HOME`. `$HOME` on the machine this
-guard exists for is a quota'd NFS home with a inode limit, which is
-the whole reason there is a guard.
+guard exists for is a quota'd NFS home with an inode limit, which is the
+whole reason there is a guard.
 """
 
 from __future__ import annotations
@@ -39,19 +40,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOL_DIR = REPO_ROOT / "tool"
 GUARD_PATH = TOOL_DIR / "scratchguard.py"
 
-#: `quota -w -u -p` on the host the guard was written for, verbatim. `-p`
-#: prints every grace as a number, so the row is the device plus exactly
-#: eight numeric fields and positional parsing is finally safe.
+#: `quota -w -u -p` laid out exactly as on the host the guard was written
+#: for; the user, uid and figures are invented. `-p` prints every grace as a
+#: number, so the row is the device plus exactly eight numeric fields and
+#: positional parsing is finally safe.
 QUOTA_WIDE = """Disk quotas for user alice (uid 51234):
      Filesystem  blocks   quota   limit   grace   files   quota   limit   grace
-{device} 157286400  1048576000 1048576000       0  {files}  1000000 1000000       0
+{device} 157286400  1048576000 1048576000       0  {files}  2000000 2000000       0
 """
 
 #: The same report from a `quota` that does not number its graces: the grace
 #: columns are simply absent, leaving six numeric fields.
 QUOTA_NARROW = """Disk quotas for user alice (uid 51234):
      Filesystem  blocks   quota   limit   grace   files   quota   limit   grace
-{device} 157286400  1048576000 1048576000  {files}  1000000 1000000
+{device} 157286400  1048576000 1048576000  {files}  2000000 2000000
 """
 
 
@@ -379,11 +381,11 @@ def test_headroom_short_on_quota(guard, tmp_path, monkeypatch):
     """statvfs says there is room; only `quota` knows there is not.
 
     This is the real shape of the incident: `statvfs` on the NFS home
-    reported orders of magnitude more free inodes while the account had far fewer left.
+    reported orders of magnitude more free inodes than the account had left.
     """
     monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
     report = tmp_path / "quota.txt"
-    report.write_text(QUOTA_WIDE.format(device="10.0.0.1:/vol", files=999_990))
+    report.write_text(QUOTA_WIDE.format(device="10.0.0.1:/vol", files=1_999_990))
     monkeypatch.setenv("DISKTIDE_SCRATCHGUARD_QUOTA", str(report))
     monkeypatch.setattr(guard, "PROC_MOUNTS", _mounts(tmp_path, [
         ("10.0.0.1:/vol", str(tmp_path), "xfs"),
@@ -403,7 +405,7 @@ def test_allow_home_does_not_lift_headroom(guard, tmp_path, monkeypatch):
     """Being sure you want to write to your home does not create inodes."""
     monkeypatch.setenv("HOME", str(tmp_path))
     report = tmp_path / "quota.txt"
-    report.write_text(QUOTA_WIDE.format(device="10.0.0.1:/vol", files=999_990))
+    report.write_text(QUOTA_WIDE.format(device="10.0.0.1:/vol", files=1_999_990))
     monkeypatch.setenv("DISKTIDE_SCRATCHGUARD_QUOTA", str(report))
     monkeypatch.setattr(guard, "PROC_MOUNTS", _mounts(tmp_path, [
         ("10.0.0.1:/vol", str(tmp_path), "nfs4"),
@@ -432,7 +434,7 @@ def test_both_grace_layouts_parse(guard, template):
         template.format(device="192.0.2.12:/PRJ0042", files=612_000)
     )
 
-    assert rows == [("192.0.2.12:/PRJ0042", 612_000, 1_000_000, 1_000_000)]
+    assert rows == [("192.0.2.12:/PRJ0042", 612_000, 2_000_000, 2_000_000)]
 
 
 def test_over_quota_markers_and_headers_do_not_confuse_the_parser(guard):
@@ -440,11 +442,11 @@ def test_over_quota_markers_and_headers_do_not_confuse_the_parser(guard):
         "Disk quotas for user alice (uid 51234):\n"
         "     Filesystem  blocks   quota   limit   grace   files   quota"
         "   limit   grace\n"
-        "10.0.0.1:/vol 999999* 500 500 0 999999* 1000000 1000000 0\n"
+        "10.0.0.1:/vol 999999* 500 500 0 1999999* 2000000 2000000 0\n"
     )
 
     assert guard.parse_quota(text) == [
-        ("10.0.0.1:/vol", 999_999, 1_000_000, 1_000_000)
+        ("10.0.0.1:/vol", 1_999_999, 2_000_000, 2_000_000)
     ]
 
 

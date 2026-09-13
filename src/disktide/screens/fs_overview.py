@@ -133,10 +133,10 @@ class FSEntry:
         """Bytes this *user* may still write here, or None if unlimited.
 
         Not what `statvfs` says. On the NFS home this was written against
-        `statvfs` reported thousands of GiB free against a quota that left hundreds of GiB
+        `statvfs` reported tens of times more free space than the quota left
         -- so anything sized as a fraction of "free space" is sized against
-        a number tens of times too large. Where a quota is enforced, this is the real
-        one, and it is what the benchmark probe is capped by.
+        a number that many times too large. Where a quota is enforced, this
+        is the real one, and it is what the benchmark probe is capped by.
         """
         if not self.has_quota or self.quota_used_bytes is None:
             return None
@@ -462,8 +462,8 @@ def _format_benchmark(res: BenchmarkResult, mountpoint: str = "") -> str:
     """One-line summary of a throughput probe, shared by toast and detail view.
 
     Says where it wrote when that is not the mountpoint, because on a shared
-    machine it usually is not, and "/users/PRJ0042 does 700 MB/s" and
-    "/users/PRJ0042/alice does 700 MB/s" are claims about the same filesystem
+    machine it usually is not, and "/users/PRJ0042 does 500 MB/s" and
+    "/users/PRJ0042/alice does 500 MB/s" are claims about the same filesystem
     made with different amounts of honesty.
     """
     parts = [
@@ -521,8 +521,8 @@ def _dedup_by_device(entries: list[FSEntry]) -> list[FSEntry]:
 
     *Which* of the views represents the device matters to the header bar,
     whose legend writes the chosen one's mountpoint: taking whichever came
-    first named a 15.6 GiB segment `/etc/cdi`. `_canonical_rank` picks the
-    same view the row folding keeps, so the bar and the table agree.
+    first named that device's segment `/etc/cdi`. `_canonical_rank` picks
+    the same view the row folding keeps, so the bar and the table agree.
     """
     best: dict[str, FSEntry] = {}
     for e in entries:
@@ -541,7 +541,7 @@ def _duplicate_views(entries: list[FSEntry]) -> list[FSEntry]:
     filesystem however small the bound subtree is. The login node this was
     written on lists seventy real mounts, of which fifty-six are
     `/etc/pam.d`, `/var/log`, `/usr/bin/turbostat` and fifty-three more like
-    them, each reporting the same 15.6 GiB as `/var/lib/stateless/writable`
+    them, each reporting the same size as `/var/lib/stateless/writable`
     and none of them a filesystem you can do anything about. It is the same
     complaint as the seventeen snap images, in a different costume: rows
     that are 100 % of the table's height and 0 % of its information.

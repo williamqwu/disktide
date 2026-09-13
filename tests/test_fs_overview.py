@@ -41,7 +41,7 @@ class TestDuplicateViews:
     however small the bound subtree is. The login node this was written on
     lists seventy real mounts of which fifty-six are `/etc/pam.d`,
     `/var/log`, `/usr/bin/turbostat` and fifty-three more like them, each
-    reporting the same 15.6 GiB as `/var/lib/stateless/writable`.
+    reporting the same size as `/var/lib/stateless/writable`.
     """
 
     @staticmethod
@@ -475,7 +475,7 @@ class TestTheTableFoldsWhatRepeats:
 def test_the_header_bar_legend_names_the_real_mount(tmp_path):
     """The legend writes the chosen view's mountpoint, so the choice shows.
 
-    Taking whichever device came first labelled a 15.6 GiB segment
+    Taking whichever device came first labelled the segment
     `/etc/cdi` — a two-component bind of the root filesystem — instead of
     `/var/lib/stateless/writable`, where it is actually mounted.
     """
