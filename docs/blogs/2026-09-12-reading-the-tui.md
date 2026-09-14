@@ -1,6 +1,6 @@
 # Reading the TUI: the Explorer, Monitor Center and FS Overview
 
-*A field guide to what every panel on DiskTide's three main screens is drawing,
+*A field guide to what every panel on DiskTide's three main screens shows,
 and how to read it. Written against v0.3.0.*
 
 DiskTide has three main screens, one number key each: `1` Explorer, `2` Monitor
@@ -95,7 +95,7 @@ shape `tiles`.*
 7. **Centre.** The current root and its total under the current metric.
    Clicking it goes up one level, like `u`.
 8. **Innermost ring.** The root itself, so it is always a full ring. Hovering it
-   says `home (this root)` and that a click goes up.
+   says `home (this root)` and that clicking goes up.
 9. **Second ring.** The root's direct children. A segment's length along the ring
    is its share: `vm/` holds 36.6% of the bytes, so its grey segment covers a
    little over a third of the ring. Thin dark seams separate neighbours where
@@ -183,7 +183,7 @@ has two children, both data, and the legend folds everything else into
   half-block characters.
 - **fill** keeps the rays but squares the rings off to fill the panel.
 
-`disc` and `fill` need the terminal's cell aspect to be drawn true. DiskTide
+`disc` and `fill` need the terminal's cell aspect ratio to render correctly. DiskTide
 measures it where the terminal reports pixel sizes and otherwise assumes 2.0.
 Settings → Cell aspect overrides it.
 
@@ -250,7 +250,7 @@ where `photos/` shrinks and `backup/` does not.*
 
 ![The Explorer under Files with the treemap: home 2,356 files, projects/ at 70.0% with 1,650 files; the treemap is dominated by node_modules (1,080 files) and .venv (397 files).](https://raw.githubusercontent.com/williamqwu/assets/main/disktide/blog/metric-files.png)
 
-*Files: a pile of small files that is invisible by bytes and dominant by count.*
+*Files: a pile of small files that is invisible by size, dominant by count.*
 
 ## Details (`F3`)
 
