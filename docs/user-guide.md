@@ -13,11 +13,12 @@ disktide                   # welcome screen
 disktide ~/projects        # straight into the explorer on that path
 ```
 
-`uvx disktide` runs it once without installing. pip works too
-(`python -m venv .venv && . .venv/bin/activate && pip install disktide`), and
-`pipx install disktide` gives you a global command as well; see the README for
-the details and for installing from a checkout, and [why-uv.md](why-uv.md) for
-what uv is and how to install it.
+`uvx disktide` runs it once without installing. `pipx install disktide` does
+the same job as `uv tool install`, and `pip install disktide` works inside a
+virtual environment you already use (many Linux distributions and Homebrew
+refuse a plain `pip install` into the system Python). See the README for the
+details and for installing from a checkout, and [why-uv.md](why-uv.md) for what
+uv is and how to install it.
 
 The installed command is always `disktide`; `sizetrail`, `fsmonitor`, and
 `fsmonitor-cli` remain compatibility aliases.
