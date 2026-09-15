@@ -13,10 +13,14 @@
 <p>
   <a href="https://github.com/williamqwu/disktide/actions/workflows/ci.yml">
     <img alt="CI" src="https://github.com/williamqwu/disktide/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://pypi.org/project/disktide/">
+    <img alt="PyPI version" src="https://img.shields.io/pypi/v/disktide"></a>
   <img alt="Python 3.10 to 3.14" src="https://img.shields.io/badge/python-3.10%20to%203.14-3776AB?logo=python&logoColor=white">
   <a href="https://github.com/williamqwu/disktide/blob/main/LICENSE">
     <img alt="License Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-green"></a>
   <img alt="Textual TUI" src="https://img.shields.io/badge/TUI-Textual-5A2CA0">
+  <a href="https://hits.sh/github.com/williamqwu/disktide/">
+    <img alt="Visitors" src="https://hits.sh/github.com/williamqwu/disktide.svg?label=visitors"></a>
 </p>
 
 <img alt="Explorer: the file tree of a disktide working checkout on the left, led by .venv/ at 45.2% of 8.5 MiB, every row's share bar drawn in one column, its sunburst on the right in the default tiles shape, concentric rectangular rings cut by straight lines with the virtualenv a rust frame enclosing every inner ring, legend reading ephemeral 49%, code 42%, docs 8%"
