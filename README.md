@@ -14,7 +14,7 @@
   <a href="https://github.com/williamqwu/disktide/actions/workflows/ci.yml">
     <img alt="CI" src="https://github.com/williamqwu/disktide/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python 3.10 to 3.14" src="https://img.shields.io/badge/python-3.10%20to%203.14-3776AB?logo=python&logoColor=white">
-  <a href="LICENSE">
+  <a href="https://github.com/williamqwu/disktide/blob/main/LICENSE">
     <img alt="License Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-green"></a>
   <img alt="Textual TUI" src="https://img.shields.io/badge/TUI-Textual-5A2CA0">
 </p>
@@ -26,10 +26,10 @@
 
 <p>
   <a href="#installation"><b>Install</b></a> &nbsp;·&nbsp;
-  <a href="docs/user-guide.md">User Guide</a> &nbsp;·&nbsp;
-  <a href="docs/user-guide.md#cli-commands">CLI</a> &nbsp;·&nbsp;
-  <a href="docs/architecture.md">Architecture</a> &nbsp;·&nbsp;
-  <a href="docs/contributing.md">Contributing</a>
+  <a href="https://github.com/williamqwu/disktide/blob/main/docs/user-guide.md">User Guide</a> &nbsp;·&nbsp;
+  <a href="https://github.com/williamqwu/disktide/blob/main/docs/user-guide.md#cli-commands">CLI</a> &nbsp;·&nbsp;
+  <a href="https://github.com/williamqwu/disktide/blob/main/docs/architecture.md">Architecture</a> &nbsp;·&nbsp;
+  <a href="https://github.com/williamqwu/disktide/blob/main/docs/contributing.md">Contributing</a>
 </p>
 
 </div>
@@ -56,7 +56,7 @@ Python 3.10 to 3.14, Linux or macOS, five runtime dependencies. DiskTide is not 
 git clone https://github.com/williamqwu/disktide && cd disktide
 ```
 
-**With uv** (recommended) [(Why uv?)](docs/why-uv.md):
+**With uv** (recommended) [(Why uv?)](https://github.com/williamqwu/disktide/blob/main/docs/why-uv.md):
 
 ```bash
 uv tool install .      # isolated environment, `disktide` on your PATH
@@ -75,7 +75,7 @@ disktide
 
 `pipx install .` is a one-line alternative that also gives you a global `disktide` command.
 
-The scanner has a small optional C extension. Installing from this checkout compiles it when a C compiler is present. Without one the install still succeeds and DiskTide uses a slower pure-Python reader instead. `disktide doctor` shows which one is active. See [contributing.md](docs/contributing.md#scanner-extension-in-a-development-checkout) for rebuilding it after editing the C.
+The scanner has a small optional C extension. Installing from this checkout compiles it when a C compiler is present. Without one the install still succeeds and DiskTide uses a slower pure-Python reader instead. `disktide doctor` shows which one is active. See [contributing.md](https://github.com/williamqwu/disktide/blob/main/docs/contributing.md#scanner-extension-in-a-development-checkout) for rebuilding it after editing the C.
 
 ### Optional extras
 
@@ -96,7 +96,7 @@ disktide compare --since 7d ~/projects  # what grew in the last week
 disktide cleanup ~/projects             # review cleanup candidates
 ```
 
-`?` opens the key map for the current screen, `,` opens Settings, and Ctrl+P searches every command by name. `--help` works at every level. See the [User Guide](docs/user-guide.md) for details.
+`?` opens the key map for the current screen, `,` opens Settings, and Ctrl+P searches every command by name. `--help` works at every level. See the [User Guide](https://github.com/williamqwu/disktide/blob/main/docs/user-guide.md) for details.
 
 ## Stored data
 
@@ -113,13 +113,13 @@ Paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. Legacy `sizetrail` and
 
 ## Documentation
 
-- **[User Guide](docs/user-guide.md)**: usage, configuration, key bindings
-- **[CLI Reference](docs/user-guide.md#cli-commands)**: subcommands, flags, JSON output, exit codes
-- **[Architecture](docs/architecture.md)**: scanner threading, database schema, visualization algorithms
-- **[Filesystem Compatibility](docs/fs.md)**: supported filesystems and platform behavior
-- **[Release Process](docs/release-process.md)**: locked builds, checksums, SBOM, provenance
-- **[Contributing](docs/contributing.md)**: dev setup, testing, extending
+- **[User Guide](https://github.com/williamqwu/disktide/blob/main/docs/user-guide.md)**: usage, configuration, key bindings
+- **[CLI Reference](https://github.com/williamqwu/disktide/blob/main/docs/user-guide.md#cli-commands)**: subcommands, flags, JSON output, exit codes
+- **[Architecture](https://github.com/williamqwu/disktide/blob/main/docs/architecture.md)**: scanner threading, database schema, visualization algorithms
+- **[Filesystem Compatibility](https://github.com/williamqwu/disktide/blob/main/docs/fs.md)**: supported filesystems and platform behavior
+- **[Release Process](https://github.com/williamqwu/disktide/blob/main/docs/release-process.md)**: locked builds, checksums, SBOM, provenance
+- **[Contributing](https://github.com/williamqwu/disktide/blob/main/docs/contributing.md)**: dev setup, testing, extending
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](https://github.com/williamqwu/disktide/blob/main/LICENSE).
