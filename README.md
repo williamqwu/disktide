@@ -52,38 +52,43 @@ Scanning is metadata only: DiskTide never opens or reads file contents. A small 
 
 ## Installation
 
-Python 3.10 to 3.14, Linux or macOS, five runtime dependencies. DiskTide is not on PyPI yet, so start with a clone:
-
-```bash
-git clone https://github.com/williamqwu/disktide && cd disktide
-```
+Python 3.10 to 3.14, Linux or macOS, five runtime dependencies.
 
 **With uv** (recommended) [(Why uv?)](https://github.com/williamqwu/disktide/blob/main/docs/why-uv.md):
 
 ```bash
-uv tool install .      # isolated environment, `disktide` on your PATH
+uv tool install disktide   # isolated environment, `disktide` on your PATH
 disktide
 ```
 
-After a `git pull`, run `uv tool install --reinstall .` to pick up the new version. `uv tool uninstall disktide` removes it. If your shell cannot find `disktide` afterwards, run `uv tool update-shell` (it adds uv's bin directory, normally `~/.local/bin`, to your PATH) and open a new shell.
+`uvx disktide` runs it once without installing anything. `uv tool upgrade disktide` picks up a new release and `uv tool uninstall disktide` removes it. If your shell cannot find `disktide` afterwards, run `uv tool update-shell` (it adds uv's bin directory, normally `~/.local/bin`, to your PATH) and open a new shell.
 
 **With pip:**
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install .
+pip install disktide
 disktide
 ```
 
-`pipx install .` is a one-line alternative that also gives you a global `disktide` command.
+`pipx install disktide` is a one-line alternative that also gives you a global `disktide` command.
 
-The scanner has a small optional C extension. Installing from this checkout compiles it when a C compiler is present. Without one the install still succeeds and DiskTide uses a slower pure-Python reader instead. `disktide doctor` shows which one is active. See [contributing.md](https://github.com/williamqwu/disktide/blob/main/docs/contributing.md#scanner-extension-in-a-development-checkout) for rebuilding it after editing the C.
+The scanner has a small optional C extension. The wheels on PyPI include it for CPython 3.10 to 3.14 on Linux (x86_64 and aarch64, glibc and musl) and macOS (Intel and Apple silicon). Anywhere else the install compiles it when a C compiler is present. Without one the install still succeeds and DiskTide uses a slower pure-Python reader instead. `disktide doctor` shows which one is active.
+
+**From source:**
+
+```bash
+git clone https://github.com/williamqwu/disktide && cd disktide
+uv tool install .      # or: pip install .
+```
+
+After a `git pull`, run `uv tool install --reinstall .` to pick up the new version. See [contributing.md](https://github.com/williamqwu/disktide/blob/main/docs/contributing.md#scanner-extension-in-a-development-checkout) for rebuilding the C extension after editing it.
 
 ### Optional extras
 
 | Extra | Install | Effect |
 |---|---|---|
-| `watch` | `uv tool install '.[watch]'` / `pip install '.[watch]'` | Linux only. Installs `inotify-simple` so monitors react to filesystem events. Without it, monitors run on a timer. |
+| `watch` | `uv tool install 'disktide[watch]'` / `pip install 'disktide[watch]'` | Linux only. Installs `inotify-simple` so monitors react to filesystem events. Without it, monitors run on a timer. |
 
 `disktide doctor` reports the active watch backend and its status.
 

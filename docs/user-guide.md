@@ -5,23 +5,25 @@ cleanup opportunities, and tracking how directory sizes change over time.
 
 ## Getting Started
 
-DiskTide is not on PyPI yet, so install from a checkout:
+Install it from PyPI:
 
 ```bash
-git clone https://github.com/williamqwu/disktide && cd disktide
-uv tool install .   # isolated environment, disktide on your PATH
-disktide            # welcome screen
-disktide ~/projects # straight into the explorer on that path
+uv tool install disktide   # isolated environment, disktide on your PATH
+disktide                   # welcome screen
+disktide ~/projects        # straight into the explorer on that path
 ```
 
-pip works too (`python -m venv .venv && . .venv/bin/activate && pip install .`),
-and `pipx install .` gives you a global command as well; see the README for the
-details and [why-uv.md](why-uv.md) for what uv is and how to install it.
+`uvx disktide` runs it once without installing. pip works too
+(`python -m venv .venv && . .venv/bin/activate && pip install disktide`), and
+`pipx install disktide` gives you a global command as well; see the README for
+the details and for installing from a checkout, and [why-uv.md](why-uv.md) for
+what uv is and how to install it.
 
 The installed command is always `disktide`; `sizetrail`, `fsmonitor`, and
 `fsmonitor-cli` remain compatibility aliases.
 
-Installing from the checkout compiles the small optional C extension when a C
+The PyPI wheels for Linux and macOS include the small optional C extension.
+Anywhere else, and when installing from a checkout, it is compiled when a C
 compiler is present. Without one the install still succeeds and DiskTide uses
 the slower pure-Python reader instead. `disktide doctor` shows which one is
 active. See *Scanner backend* below.

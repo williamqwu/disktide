@@ -12,16 +12,15 @@ machine with no suitable Python installed.
 
 ## Why DiskTide recommends it
 
-`uv tool install .` builds the package once, installs it into its own isolated
-environment, and puts a `disktide` command on your PATH. That means:
+`uv tool install disktide` installs DiskTide into its own isolated environment
+and puts a `disktide` command on your PATH. That means:
 
 - Nothing touches your system Python or any project virtualenv.
 - There is no environment to activate. You type `disktide` and it runs.
 - `uv tool upgrade` and `uv tool uninstall` manage it afterwards.
 - Resolving and installing is much faster than pip.
 
-Once DiskTide is published to PyPI, `uvx disktide` will run it without
-installing anything at all.
+`uvx disktide` runs it without installing anything at all.
 
 ## Installing uv
 
@@ -46,11 +45,14 @@ shims in `~/.local/bin`.
 ## The commands you need
 
 ```bash
-uv tool install .              # install from a checkout
-uv tool install --reinstall .  # after a git pull
-uv tool install '.[watch]'     # with the Linux inotify extra
-uv tool list                   # what is installed
-uv tool uninstall disktide     # remove it
+uv tool install disktide           # install from PyPI
+uv tool install 'disktide[watch]'  # with the Linux inotify extra
+uvx disktide                       # run it once without installing
+uv tool upgrade disktide           # pick up a new release
+uv tool list                       # what is installed
+uv tool uninstall disktide         # remove it
+uv tool install .                  # install from a checkout instead
+uv tool install --reinstall .      # after a git pull in that checkout
 ```
 
 ## Not a requirement
