@@ -24,6 +24,8 @@
 <img alt="Monitor Center: the Space-Time Trend of the disktide codebase growing from March to September 2026, 342 snapshots, one per commit"
      src="https://raw.githubusercontent.com/williamqwu/assets/main/disktide/readme/monitor.png" width="49%">
 
+<p><a href="https://github.com/williamqwu/disktide/blob/main/docs/blogs/2026-09-12-reading-the-tui.md">(How to read these charts?)</a></p>
+
 <p>
   <a href="#installation"><b>Install</b></a> &nbsp;·&nbsp;
   <a href="https://github.com/williamqwu/disktide/blob/main/docs/user-guide.md">User Guide</a> &nbsp;·&nbsp;
