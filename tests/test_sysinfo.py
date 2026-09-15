@@ -5,7 +5,10 @@ import tempfile
 from unittest.mock import patch, mock_open
 
 import pytest
-from fs_monitor.scanner.sysinfo import (
+from disktide.scanner.sysinfo import (
+    HostAllocation,
+    count_other_users,
+    detect_host_allocation,
     SystemInfo,
     detect_cpu_count,
     detect_load_average,
@@ -18,29 +21,43 @@ from fs_monitor.scanner.sysinfo import (
     detect_transforms,
     facet_labels,
     unescape_mount_path,
+    _budget_worker_cap,
     _compute_recommended_workers,
+    _cores_per_worker,
+    _cpu_budget,
     _find_block_device,
+    detect_mount_latency,
+    select_scan_workers,
+    worker_ceiling,
+    _MEDIUM_BADGE,
+)
+from disktide.viz.colors import (
+    INK_ROLES,
+    SCHEMES,
+    get_color_scheme,
+    ink,
+    set_color_scheme,
 )
 
 
 class TestStorageClass:
     def test_ssd(self):
-        assert storage_class("ext4", False, False) == ("Fast (SSD)", "green")
+        assert storage_class("ext4", False, False) == ("Fast (SSD)", "bar")
 
     def test_hdd(self):
-        assert storage_class("ext4", False, True) == ("Medium (HDD)", "yellow")
+        assert storage_class("ext4", False, True) == ("Medium (HDD)", "warning")
 
     def test_network_beats_rotational(self):
         # A network mount has no meaningful rotational bit; locality wins.
-        assert storage_class("nfs4", True, False) == ("Slow (Network)", "red")
+        assert storage_class("nfs4", True, False) == ("Slow (Network)", "error")
 
     def test_ram_backed(self):
         # Regression: tmpfs/ramfs used to fall through to "Unknown".
-        assert storage_class("tmpfs", False, None) == ("Fast (RAM)", "green")
-        assert storage_class("ramfs", False, None) == ("Fast (RAM)", "green")
+        assert storage_class("tmpfs", False, None) == ("Fast (RAM)", "bar")
+        assert storage_class("ramfs", False, None) == ("Fast (RAM)", "bar")
 
     def test_unknown_fallback(self):
-        assert storage_class("xfs", False, None) == ("Unknown", "dim")
+        assert storage_class("xfs", False, None) == ("Unknown", "muted")
 
 
 class TestFacets:
@@ -72,11 +89,71 @@ class TestFacets:
 
     def test_facet_labels_order_medium_then_transforms(self):
         labels = facet_labels("xfs", False, False, ["RAID"])
-        assert labels == [("Flash", "green"), ("RAID", "cyan")]
+        assert labels == [("Flash", "bar"), ("RAID", "link")]
 
     def test_facet_labels_network_no_local_badge(self):
         labels = facet_labels("nfs4", True, None, [])
-        assert labels == [("Network", "red")]
+        assert labels == [("Network", "error")]
+
+    def test_facet_labels_unknown_medium(self):
+        """The case that shipped broken: `("?", "dim")` where a role belonged.
+
+        `dim` is a Rich style, not an ink role, so rendering this badge
+        raised `KeyError` inside a Textual worker. It reached CI because it
+        needs a mount whose rotational bit is unreadable -- the runner's
+        `/dev/root` -- and the box this was written on has none.
+        """
+        assert facet_labels("ext4", False, None, []) == [("?", "muted")]
+
+
+class TestInkRolesAreReal:
+    """Every role these tables hand to `ink()` has to be one it knows.
+
+    `ink()` raises on an unknown role by design -- an unthemed string is a
+    typo at the call site, not something to paint silently -- which makes
+    the role column of a lookup table a live wire: it is only exercised on
+    a host whose mounts reach that row, so a bad value can sit in the
+    table through a release. `test_palette_gates` asserts every theme
+    *answers* for every role; this is the other direction, that nothing
+    *asks* for a role no theme has.
+    """
+
+    _MEDIA = [
+        ("ext4", False, False),   # flash
+        ("ext4", False, True),    # hdd
+        ("tmpfs", False, None),   # ram
+        ("nfs4", True, None),     # network
+        ("ext4", False, None),    # unknown
+    ]
+
+    def test_storage_class_roles(self):
+        for args in self._MEDIA:
+            role = storage_class(*args)[1]
+            assert role in INK_ROLES, f"{args} -> {role!r}"
+
+    def test_facet_label_roles(self):
+        transforms = ["RAID", "CoW", "Compressed", "Encrypted"]
+        for args in self._MEDIA:
+            for label, role in facet_labels(*args, transforms):
+                assert role in INK_ROLES, f"{args} {label!r} -> {role!r}"
+
+    def test_every_medium_badge_role(self):
+        """Covers rows no `classify_medium` input above happens to reach."""
+        for key, (label, role) in _MEDIUM_BADGE.items():
+            assert role in INK_ROLES, f"{key} {label!r} -> {role!r}"
+
+    def test_roles_resolve_under_every_theme(self):
+        """A role in the tuple still has to resolve in each theme's table."""
+        original = get_color_scheme().name
+        try:
+            for theme in SCHEMES:
+                set_color_scheme(theme)
+                for args in self._MEDIA:
+                    ink(storage_class(*args)[1])
+                    for _, role in facet_labels(*args, ["RAID"]):
+                        assert ink(role), f"{theme}/{role}"
+        finally:
+            set_color_scheme(original)
 
 
 class TestUnescapeMountPath:
@@ -92,6 +169,62 @@ class TestUnescapeMountPath:
     def test_preserves_non_ascii(self):
         # The old encode/decode trick corrupted this to '/mnt/cafÃ©'.
         assert unescape_mount_path(r"/mnt/café\040x") == "/mnt/café x"
+
+
+class TestMountinfoRoots:
+    """Which *part* of a filesystem is mounted where.
+
+    `/proc/mounts` does not say, which is why nothing in the FS overview
+    could tell a filesystem from a second window onto one. `mountinfo`
+    says, and it is the only table that does.
+    """
+
+    @staticmethod
+    def _parse(text):
+        from disktide.collectors.platform.linux import _parse_mountinfo_roots
+        return _parse_mountinfo_roots(text.splitlines())
+
+    def test_a_whole_filesystem_has_root_slash(self):
+        line = "25 1 8:1 / /var rw,relatime shared:1 - ext4 /dev/sda1 rw"
+        assert self._parse(line) == {"/var": "/"}
+
+    def test_a_bind_mount_names_the_subtree(self):
+        line = "26 25 8:1 /var/log /var/log rw - ext4 /dev/sda1 rw"
+        assert self._parse(line) == {"/var/log": "/var/log"}
+
+    def test_optional_fields_are_skipped_by_the_separator(self):
+        """The count of optional fields varies per row, so nothing after
+        field six can be read by index. Only fields 4 and 5 are."""
+        line = (
+            "31 25 0:29 /sub /mnt rw shared:2 master:3 propagate_from:4"
+            " unbindable - btrfs /dev/sdb1 rw,subvol=/sub"
+        )
+        assert self._parse(line) == {"/mnt": "/sub"}
+
+    def test_octal_escapes_are_decoded_in_both_paths(self):
+        line = r"40 1 8:1 /a\040b /mnt/c\040d rw - ext4 /dev/sda1 rw"
+        assert self._parse(line) == {"/mnt/c d": "/a b"}
+
+    def test_the_last_row_for_a_mountpoint_wins(self):
+        """Mount order is stacking order: what a path serves is whatever
+        was mounted over it most recently."""
+        text = (
+            "25 1 8:1 / /mnt rw - ext4 /dev/sda1 rw\n"
+            "26 1 8:2 /sub /mnt rw - ext4 /dev/sdb1 rw\n"
+        )
+        assert self._parse(text) == {"/mnt": "/sub"}
+
+    def test_short_rows_are_ignored(self):
+        assert self._parse("garbage\n25 1 8:1 /\n") == {}
+
+    def test_records_keep_the_default_when_mountinfo_is_unreadable(self):
+        """A host without the table reads as "no bind mounts", which costs
+        the row folding and nothing else."""
+        from disktide.collectors.platform.linux import _with_mount_roots
+        from disktide.collectors.platform.models import MountRecord
+        records = [MountRecord("/dev/sda1", "/", "ext4", "rw")]
+        assert _with_mount_roots(records, "/no/such/procfs") == records
+        assert records[0].is_bind is False
 
 
 class TestFindBlockDevicePartitionStripping:
@@ -230,11 +363,133 @@ class TestDetectFsType:
                 fs_type, _ = detect_fs_type("/home/user/file")
                 assert fs_type == "xfs"
 
+    def test_an_automounted_share_reports_the_filesystem_on_top(self):
+        """Two records, one mountpoint: the later one is what serves the path.
+
+        A direct autofs mount leaves its trigger in `/proc/mounts` *and* the
+        filesystem the automounter put over it, trigger first. Keeping the
+        first match answered `autofs` for an NFSv3 home on this project's
+        cluster, `is_network` came back False, and a 0.65 ms round trip was
+        tuned as though it were local disk.
+        """
+        fake_mounts = (
+            "/dev/sda1 / ext4 rw 0 0\n"
+            "systemd-1 /research/share autofs rw,direct 0 0\n"
+            "server:/export /research/share nfs rw,vers=3 0 0\n"
+        )
+        with patch("builtins.open", mock_open(read_data=fake_mounts)):
+            with patch("os.path.realpath", side_effect=lambda p: p):
+                fs_type, is_network = detect_fs_type("/research/share/sub")
+        assert (fs_type, is_network) == ("nfs", True)
+
+    def test_an_unfired_trigger_still_reads_as_autofs(self):
+        """Nothing is mounted over it, so autofs is the honest answer."""
+        fake_mounts = (
+            "/dev/sda1 / ext4 rw 0 0\n"
+            "systemd-1 /research/share autofs rw,direct 0 0\n"
+        )
+        with patch("builtins.open", mock_open(read_data=fake_mounts)):
+            with patch("os.path.realpath", side_effect=lambda p: p):
+                with patch("os.open", side_effect=OSError):
+                    fs_type, is_network = detect_fs_type("/research/share")
+        assert (fs_type, is_network) == ("autofs", False)
+
     def test_fallback_on_missing_proc(self):
         with patch("builtins.open", side_effect=OSError):
             fs_type, is_network = detect_fs_type("/")
             assert fs_type == "unknown"
             assert is_network is False
+
+
+class TestFindMountFiresAnAutofsTrigger:
+    """An autofs winner is a trigger that has not fired; fire it once."""
+
+    @staticmethod
+    def _adapter(*tables):
+        from disktide.collectors.platform.base import PlatformAdapter
+        from disktide.collectors.platform.models import ProbeResult
+
+        class _StackedMounts(PlatformAdapter):
+            """A mount table that may differ between reads, as a real one does."""
+
+            def __init__(self):
+                super().__init__("Linux")
+                self.reads = 0
+
+            def enumerate_mounts(self):
+                records = tables[min(self.reads, len(tables) - 1)]
+                self.reads += 1
+                return ProbeResult.available(list(records), "fake mount table")
+
+        return _StackedMounts()
+
+    @staticmethod
+    def _record(mountpoint, fs_type):
+        from disktide.collectors.platform.models import MountRecord
+
+        return MountRecord(
+            device="systemd-1" if fs_type == "autofs" else "server:/export",
+            mountpoint=mountpoint,
+            filesystem_type=fs_type,
+        )
+
+    def test_the_path_is_opened_and_the_table_read_again(self, tmp_path, monkeypatch):
+        mountpoint = os.path.realpath(str(tmp_path))
+        adapter = self._adapter(
+            [self._record(mountpoint, "autofs")],
+            [
+                self._record(mountpoint, "autofs"),
+                self._record(mountpoint, "nfs"),
+            ],
+        )
+        opened: list[str] = []
+        real_open = os.open
+
+        def recording_open(path, flags, *args, **kwargs):
+            opened.append(path)
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", recording_open)
+
+        mount = adapter.find_mount(mountpoint)
+
+        assert mount is not None and mount.filesystem_type == "nfs"
+        assert opened == [mountpoint]
+        assert adapter.reads == 2
+
+    def test_a_shadowed_trigger_needs_no_second_read(self, tmp_path):
+        mountpoint = os.path.realpath(str(tmp_path))
+        adapter = self._adapter([
+            self._record(mountpoint, "autofs"),
+            self._record(mountpoint, "nfs"),
+        ])
+
+        mount = adapter.find_mount(mountpoint)
+
+        assert mount is not None and mount.filesystem_type == "nfs"
+        assert adapter.reads == 1
+
+    def test_a_trigger_that_stays_untriggered_is_still_autofs(self, tmp_path):
+        mountpoint = os.path.realpath(str(tmp_path))
+        adapter = self._adapter([self._record(mountpoint, "autofs")])
+
+        mount = adapter.find_mount(mountpoint)
+
+        assert mount is not None and mount.filesystem_type == "autofs"
+        assert adapter.reads == 2
+
+    def test_a_longer_mountpoint_still_beats_a_later_shorter_one(self, tmp_path):
+        """The tie-break is for equal mountpoints only."""
+        root = os.path.realpath(str(tmp_path))
+        nested = os.path.join(root, "nested")
+        adapter = self._adapter([
+            self._record(nested, "nfs"),
+            self._record(root, "ext4"),
+        ])
+
+        mount = adapter.find_mount(os.path.join(nested, "file"))
+
+        assert mount is not None and mount.filesystem_type == "nfs"
 
 
 class TestDetectStorageType:
@@ -261,8 +516,8 @@ class TestComputeRecommendedWorkers:
             is_rotational=False,
             available_mb=4096,
         )
-        assert workers == 8
-        assert reason == "8"
+        assert workers == 1
+        assert "conservative" in reason
 
     def test_high_load_reduces_workers(self):
         workers, reason = _compute_recommended_workers(
@@ -273,9 +528,14 @@ class TestComputeRecommendedWorkers:
             available_mb=4096,
         )
         assert workers < 8
-        assert "high load" in reason
+        assert workers == 1
 
-    def test_network_fs_caps_at_4(self):
+    def test_network_fs_caps_at_8(self):
+        """8 is where the measured cold-NFS curve flattens; see _NETWORK_WORKER_CAP.
+
+        With no metadata sample there is no latency to tier on, so the base
+        is what a network mount gets.
+        """
         workers, reason = _compute_recommended_workers(
             available_cpus=16,
             load_average=(0.0, 0.0, 0.0),
@@ -283,8 +543,9 @@ class TestComputeRecommendedWorkers:
             is_rotational=False,
             available_mb=4096,
         )
-        assert workers <= 4
-        assert "network FS" in reason
+        assert workers <= 8
+        assert "latency-bound" in reason
+        assert "measured network base" in reason
 
     def test_hdd_caps_at_4(self):
         workers, reason = _compute_recommended_workers(
@@ -295,7 +556,7 @@ class TestComputeRecommendedWorkers:
             available_mb=4096,
         )
         assert workers <= 4
-        assert "HDD" in reason
+        assert "rotational" in reason
 
     def test_low_memory_caps_at_2(self):
         workers, reason = _compute_recommended_workers(
@@ -337,8 +598,8 @@ class TestComputeRecommendedWorkers:
             available_mb=256,
         )
         assert workers >= 1
-        assert "high load" in reason
-        assert "network FS" in reason
+        assert "host load" in reason
+        assert "latency-bound" in reason
         assert "low memory" in reason
 
     def test_zero_memory_not_flagged(self):
@@ -350,7 +611,7 @@ class TestComputeRecommendedWorkers:
             is_rotational=False,
             available_mb=0,
         )
-        assert workers == 8
+        assert workers == 1
         assert "low memory" not in reason
 
     def test_ssd_not_capped(self):
@@ -361,8 +622,8 @@ class TestComputeRecommendedWorkers:
             is_rotational=False,
             available_mb=4096,
         )
-        assert workers == 12
-        assert "HDD" not in reason
+        assert workers == 1
+        assert "low-latency" not in reason
 
 
 class TestDetectSystemInfo:
@@ -386,3 +647,1191 @@ class TestDetectSystemInfo:
         assert isinstance(info.fs_type, str)
         assert isinstance(info.is_network_fs, bool)
         assert info.is_rotational is None or isinstance(info.is_rotational, bool)
+
+
+def _allocation(kind, *, total=128, available=10, others=0):
+    return HostAllocation(
+        total_cpus=total,
+        available_cpus=available,
+        batch_job=kind == "allocated",
+        confined=available < total,
+        other_users=others,
+        kind=kind,
+    )
+
+
+class TestHostAllocation:
+    """An allocated slice, a shared login node, and a machine of our own."""
+
+    def test_batch_job_env_reports_allocated(self):
+        with patch.dict(os.environ, {"SLURM_JOB_ID": "12345"}, clear=False):
+            allocation = detect_host_allocation()
+        assert allocation.kind == "allocated"
+        assert allocation.batch_job is True
+
+    def test_cgroup_subset_reports_allocated_without_batch_env(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "disktide.scanner.sysinfo.detect_cpu_count",
+            return_value=(64, 8),
+        ):
+            allocation = detect_host_allocation()
+        assert allocation.confined is True
+        assert allocation.kind == "allocated"
+
+    def test_allocated_host_skips_the_proc_walk(self):
+        """The user count cannot change an allocated verdict, so never pay for it."""
+        with patch("disktide.scanner.sysinfo.detect_cpu_count", return_value=(64, 8)):
+            with patch(
+                "disktide.scanner.sysinfo.count_other_users",
+                side_effect=AssertionError("should not be called"),
+            ):
+                allocation = detect_host_allocation()
+        assert allocation.kind == "allocated"
+
+    def test_unconfined_with_other_users_is_shared(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "disktide.scanner.sysinfo.detect_cpu_count",
+            return_value=(16, 16),
+        ):
+            with patch("disktide.scanner.sysinfo.count_other_users", return_value=4):
+                allocation = detect_host_allocation()
+        assert allocation.kind == "shared"
+        assert allocation.other_users == 4
+
+    def test_unconfined_alone_is_dedicated(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "disktide.scanner.sysinfo.detect_cpu_count",
+            return_value=(16, 16),
+        ):
+            with patch("disktide.scanner.sysinfo.count_other_users", return_value=0):
+                allocation = detect_host_allocation()
+        assert allocation.kind == "dedicated"
+
+    def test_count_other_users_never_raises(self):
+        with patch("os.scandir", side_effect=OSError("nope")):
+            assert count_other_users() == 0
+
+
+class TestCpuBudget:
+    """How many cores this scan may spend, before any storage is considered."""
+
+    def test_an_allocation_is_ours_whatever_the_host_is_doing(self):
+        budget, reason = _cpu_budget(
+            _allocation("allocated", total=128, available=10),
+            (96.0, 90.0, 88.0),
+            10,
+        )
+        assert budget == 10.0
+        assert "own CPU allocation of 10 CPUs" in reason
+
+    def test_a_machine_of_our_own_is_what_the_load_leaves(self):
+        budget, reason = _cpu_budget(
+            _allocation("dedicated", total=16, available=16),
+            (4.0, 4.0, 4.0),
+            16,
+        )
+        assert budget == 12.0
+        assert "host load 4.00 on 16 CPUs leaves 12.0 cores" in reason
+
+    def test_a_machine_of_our_own_never_budgets_below_one_core(self):
+        budget, _reason = _cpu_budget(
+            _allocation("dedicated", total=16, available=16),
+            (30.0, 30.0, 30.0),
+            16,
+        )
+        assert budget == 1.0
+
+    def test_a_shared_host_divides_what_is_idle_by_everyone_present(self):
+        """The measured case: 128 CPUs, load 1, five other users."""
+        budget, reason = _cpu_budget(
+            _allocation("shared", total=128, available=128, others=5),
+            (1.0, 1.0, 1.0),
+            128,
+        )
+        assert budget == pytest.approx(127 / 6)
+        assert "fair share of 127 idle CPUs across 6 users is 21.2 cores" in reason
+
+    def test_a_shared_host_takes_the_worse_of_the_one_and_five_minute_load(self):
+        """A dip in the last minute is not room; the five-minute figure is."""
+        budget, _reason = _cpu_budget(
+            _allocation("shared", total=16, available=16, others=3),
+            (2.0, 14.0, 14.0),
+            16,
+        )
+        assert budget == 0.5
+
+    def test_a_shared_host_with_nothing_idle_budgets_nothing(self):
+        budget, _reason = _cpu_budget(
+            _allocation("shared", total=16, available=16, others=3),
+            (40.0, 40.0, 40.0),
+            16,
+        )
+        assert budget == 0.0
+
+    def test_no_allocation_is_priced_like_a_machine_of_our_own(self):
+        budget, reason = _cpu_budget(None, (4.0, 4.0, 4.0), 16)
+        assert budget == 12.0
+        assert "host load 4.00 on 16 CPUs" in reason
+
+
+class TestCoresPerWorker:
+    """What a worker costs is 160 us of CPU per entry, spread over the wait."""
+
+    def test_the_measured_mount_comes_out_at_a_quarter_core(self):
+        """0.16 ms of CPU against a 0.65 ms round trip."""
+        assert _cores_per_worker(0.00065) == 0.25
+
+    def test_a_slower_mount_costs_proportionally_less(self):
+        assert _cores_per_worker(0.005) == 0.03
+        assert _cores_per_worker(0.001) == 0.16
+
+    def test_a_worker_never_costs_more_than_the_thread_it_is(self):
+        assert _cores_per_worker(0.00005) == 1.0
+
+    def test_and_never_less_than_a_fiftieth_of_a_core(self):
+        assert _cores_per_worker(1.0) == 0.02
+
+    def test_no_latency_signal_falls_back_to_the_measured_default(self):
+        assert _cores_per_worker(0.0) == 0.25
+        assert _cores_per_worker(-1.0) == 0.25
+
+
+class TestBudgetWorkerCap:
+    """Cores into workers, at whatever a worker costs on this mount."""
+
+    def test_a_latency_bound_worker_is_priced_from_the_latency(self):
+        assert _budget_worker_cap(21.2, True, 0.00065) == 84
+        assert _budget_worker_cap(2.0, True, 0.005) == 66
+
+    def test_an_unpriced_mount_takes_the_default_quarter_core(self):
+        assert _budget_worker_cap(21.2, True) == 84
+        assert _budget_worker_cap(4.0, True) == 16
+
+    def test_a_latency_bound_mount_never_drops_below_two(self):
+        """One worker on a half-millisecond stat is a scan that never ends."""
+        assert _budget_worker_cap(0.0, True) == 2
+        assert _budget_worker_cap(0.4, True) == 2
+
+    def test_a_local_worker_costs_a_whole_core(self):
+        assert _budget_worker_cap(21.2, False) == 21
+        assert _budget_worker_cap(0.1, False) == 1
+
+
+class TestAllocationAwareWorkers:
+    """What the machine can spare, against what the storage would repay."""
+
+    def test_allocated_slice_ignores_host_wide_load(self):
+        """A busy 128-core node says nothing about our own 10-core allocation."""
+        workers, reason = _compute_recommended_workers(
+            available_cpus=10,
+            load_average=(32.0, 30.0, 28.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            allocation=_allocation("allocated"),
+        )
+        assert workers == 8
+        assert "own CPU allocation" in reason
+        assert "up to 40 workers" in reason
+
+    def test_an_idle_shared_host_gets_its_fair_share(self):
+        """The reported case, and the reason this policy was rebuilt.
+
+        128 CPUs at load 1 with five other users is 127 idle cores and a
+        sixth of them to spend, which is more workers than the widest tier
+        asks for. The old flat cap answered 2.
+        """
+        workers, reason = _compute_recommended_workers(
+            available_cpus=128,
+            load_average=(1.0, 1.0, 1.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs",
+            mount_latency_seconds=0.00065,
+            allocation=_allocation("shared", total=128, available=128, others=5),
+        )
+        assert workers == 16
+        assert "fair share of 127 idle CPUs across 6 users" in reason
+        assert "0.5 ms/entry tier" in reason
+
+    def test_a_busy_shared_host_stays_at_two(self):
+        """16 cores at load 14 with three others leaves half a core each."""
+        workers, reason = _compute_recommended_workers(
+            available_cpus=16,
+            load_average=(14.0, 14.0, 13.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs",
+            allocation=_allocation("shared", total=16, available=16, others=3),
+        )
+        assert workers == 2
+        assert "fair share of 2 idle CPUs across 4 users" in reason
+
+    def test_dedicated_host_uses_host_scoped_load_ratio(self):
+        """Load 32 on 128 cores is a quiet machine, not an overloaded one."""
+        workers, reason = _compute_recommended_workers(
+            available_cpus=128,
+            load_average=(32.0, 30.0, 28.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            allocation=_allocation("dedicated", total=128, available=128),
+        )
+        assert workers == 8
+        assert "host load 32.00 on 128 CPUs leaves 96.0 cores" in reason
+
+    def test_dedicated_host_still_throttles_when_truly_busy(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=16,
+            load_average=(30.0, 30.0, 30.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            allocation=_allocation("dedicated", total=16, available=16),
+        )
+        assert workers == 4
+        assert "host load 30.00 on 16 CPUs leaves 1.0 cores" in reason
+
+    def test_a_busy_machine_of_our_own_still_spends_its_one_core(self):
+        """The same 16 cores at load 30, on a mount we have timed.
+
+        With no latency signal the last test charges the default quarter
+        core and lands on 4. Knowing the mount costs 1 ms an entry prices a
+        worker at 0.16 core instead, and the same single core of budget buys
+        6 of them.
+        """
+        workers, reason = _compute_recommended_workers(
+            available_cpus=16,
+            load_average=(30.0, 30.0, 30.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            mount_latency_seconds=0.001,
+            allocation=_allocation("dedicated", total=16, available=16),
+        )
+        assert workers == 6
+        assert "1.0 cores at 0.16 core/worker -> up to 6 workers" in reason
+
+    def test_omitting_allocation_preserves_legacy_behaviour(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=16,
+            load_average=(16.0, 8.0, 4.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+        )
+        assert workers == 4
+        assert "host load 16.00 on 16 CPUs leaves 1.0 cores" in reason
+
+
+# --- control groups -------------------------------------------------------
+#
+# A container hands out a fraction of a host, and neither interface that
+# describes a machine knows it: `sched_getaffinity` sees a cpuset but not a
+# CPU quota, and /proc/meminfo is host-wide however small the memory limit.
+# Nothing about that is testable in place, so these build a control-group
+# tree in tmp_path and point the adapter at it.
+
+
+def _write_cgroup(root, relative: str, **files: str):
+    directory = root
+    for part in relative.split("/"):
+        if part:
+            directory = directory / part
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, value in files.items():
+        (directory / name.replace("__", ".")).write_text(value + "\n")
+    return directory
+
+
+def _fake_host(tmp_path, procfs_line: str):
+    """A procfs and a cgroup root the adapter can be pointed at."""
+    procfs = tmp_path / "proc"
+    (procfs / "self").mkdir(parents=True)
+    (procfs / "self" / "cgroup").write_text(procfs_line + "\n")
+    (procfs / "meminfo").write_text(
+        "MemTotal:       264241152 kB\nMemAvailable:   201326592 kB\n"
+    )
+    cgroup = tmp_path / "cgroup"
+    cgroup.mkdir()
+    return procfs, cgroup
+
+
+def _adapter(procfs, cgroup):
+    from disktide.collectors.platform.linux import LinuxPlatformAdapter
+
+    return LinuxPlatformAdapter(
+        cgroup_root=str(cgroup), procfs_root=str(procfs)
+    )
+
+
+class TestCgroupLimits:
+    def test_v2_quota_is_read_as_whole_cpus(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(cgroup, "", cpu__max="max 100000")
+        _write_cgroup(cgroup, "user.slice", cpu__max="max 100000")
+        _write_cgroup(cgroup, "user.slice/job", cpu__max="250000 100000")
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.version == "v2"
+        assert limits.cpu_quota == 2.5
+
+    def test_v2_takes_the_tightest_limit_on_the_chain(self, tmp_path):
+        """A parent group's quota binds a child that never set one."""
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(cgroup, "user.slice", cpu__max="100000 100000")
+        _write_cgroup(cgroup, "user.slice/job", cpu__max="400000 100000")
+
+        assert _adapter(procfs, cgroup).cgroup_limits().cpu_quota == 1.0
+
+    def test_v2_unlimited_reads_as_no_quota(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(
+            cgroup, "user.slice/job", cpu__max="max 100000", memory__max="max"
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.version == "v2"
+        assert limits.cpu_quota is None
+        assert limits.memory_limit_bytes is None
+
+    def test_v2_memory_prefers_the_lower_of_max_and_high(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(
+            cgroup,
+            "user.slice/job",
+            memory__max="1073741824",
+            memory__high="536870912",
+            memory__current="134217728",
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.memory_limit_bytes == 536870912
+        assert limits.memory_current_bytes == 134217728
+
+    def test_v1_quota_and_memory(self, tmp_path):
+        procfs, cgroup = _fake_host(
+            tmp_path, "4:cpu,cpuacct:/job\n5:memory:/job"
+        )
+        _write_cgroup(
+            cgroup,
+            "cpu,cpuacct/job",
+            cpu__cfs_quota_us="150000",
+            cpu__cfs_period_us="100000",
+        )
+        _write_cgroup(
+            cgroup,
+            "memory/job",
+            memory__limit_in_bytes="268435456",
+            memory__usage_in_bytes="67108864",
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.version == "v1"
+        assert limits.cpu_quota == 1.5
+        assert limits.memory_limit_bytes == 268435456
+        assert limits.memory_current_bytes == 67108864
+
+    def test_v1_unlimited_sentinels_are_ignored(self, tmp_path):
+        procfs, cgroup = _fake_host(
+            tmp_path, "4:cpu,cpuacct:/job\n5:memory:/job"
+        )
+        _write_cgroup(
+            cgroup,
+            "cpu,cpuacct/job",
+            cpu__cfs_quota_us="-1",
+            cpu__cfs_period_us="100000",
+        )
+        _write_cgroup(
+            cgroup,
+            "memory/job",
+            memory__limit_in_bytes="9223372036854771712",
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.cpu_quota is None
+        assert limits.memory_limit_bytes is None
+
+    def test_missing_files_report_no_limit(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(cgroup, "user.slice/job", cpu__max="max 100000")
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.cpu_quota is None
+        assert limits.memory_limit_bytes is None
+
+    def test_no_cgroup_file_at_all(self, tmp_path):
+        cgroup = tmp_path / "cgroup"
+        cgroup.mkdir()
+        limits = _adapter(tmp_path / "nowhere", cgroup).cgroup_limits()
+
+        assert limits.version is None
+        assert limits.cpu_quota is None
+
+    def test_unparsable_content_reports_no_limit(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(
+            cgroup,
+            "user.slice/job",
+            cpu__max="banana pancakes",
+            memory__max="not-a-number",
+            memory__high="",
+        )
+
+        limits = _adapter(procfs, cgroup).cgroup_limits()
+
+        assert limits.cpu_quota is None
+        assert limits.memory_limit_bytes is None
+
+    def test_memory_probe_clamps_a_hostwide_meminfo_to_the_limit(
+        self, tmp_path
+    ):
+        """256 GB of host, 512 MB of container: the container's number wins."""
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(
+            cgroup,
+            "user.slice/job",
+            memory__max=str(512 * 1024 * 1024),
+            memory__current=str(100 * 1024 * 1024),
+        )
+
+        result = _adapter(procfs, cgroup).memory_info()
+
+        assert result.value.total_mb == 512
+        assert result.value.available_mb == 412
+        assert result.value.limit_mb == 512
+        assert "cgroup v2 limit of 512 MB" in result.reason
+
+    def test_memory_probe_without_a_limit_is_unchanged(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        _write_cgroup(cgroup, "user.slice/job", memory__max="max")
+
+        result = _adapter(procfs, cgroup).memory_info()
+
+        assert result.value.total_mb == 264241152 // 1024
+        assert result.value.available_mb == 201326592 // 1024
+        assert result.value.limit_mb is None
+
+
+# --- server round trips ---------------------------------------------------
+#
+# `/proc/self/mountstats` is the only place a client learns what its server
+# actually costs. A 64-entry sample of a scan root cannot: on the mount these
+# numbers come from the root holds 14 directories whose attributes are warm,
+# and it reads 0.07 ms an entry against a real 0.66.
+
+#: Two blocks for one mountpoint -- an autofs trigger and the NFS mount over
+#: it -- and a third mount that is not NFS at all. The GETATTR line is this
+#: project's cluster mount, verbatim: 58,041,907 calls in 38,346,064 ms.
+_MOUNTSTATS = """\
+device systemd-1 mounted on /research/share with fstype autofs
+device server:/export mounted on /research/share with fstype nfs statvers=1.1
+\topts:\trw,vers=3,sec=krb5p
+\tage:\t1483257
+\tper-op statistics
+\t        NULL: 20 20 0 44 24 1 0 58948 19
+\t     GETATTR: 58041907 58041907 0 13000570688 12071921424 2206493 38346064 42740077 3832
+\t READDIRPLUS: 2199835 2199835 0 545559080 3392941880 77910 3174362 3392586 4
+device /dev/sda1 mounted on / with fstype ext4
+"""
+
+
+def _mountstats_adapter(tmp_path, text=_MOUNTSTATS):
+    procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+    (procfs / "self" / "mountstats").write_text(text)
+    return _adapter(procfs, cgroup)
+
+
+class TestMountLatencyStatistics:
+    """Mean GETATTR round trip, read from the mount's own counters."""
+
+    def test_the_nfs_block_answers_for_an_automounted_mountpoint(self, tmp_path):
+        """The autofs block claims the same path and has no statistics."""
+        result = _mountstats_adapter(tmp_path).mount_latency("/research/share")
+
+        assert result.value == pytest.approx(38346064 / 58041907 / 1000.0)
+        assert result.value == pytest.approx(0.00066, abs=1e-5)
+        assert "58,041,907 GETATTR calls" in result.reason
+
+    def test_a_local_mount_has_no_server_to_ask(self, tmp_path):
+        result = _mountstats_adapter(tmp_path).mount_latency("/")
+
+        assert result.value is None
+        assert "no NFS statistics" in result.reason
+
+    def test_an_unlisted_mountpoint_is_unavailable(self, tmp_path):
+        assert _mountstats_adapter(tmp_path).mount_latency("/elsewhere").value is None
+
+    def test_too_few_calls_to_average(self, tmp_path):
+        """One straggler over a cold TCP connection is not a mount's latency."""
+        text = _MOUNTSTATS.replace(
+            "GETATTR: 58041907 58041907", "GETATTR: 12 12"
+        )
+        result = _mountstats_adapter(tmp_path, text).mount_latency("/research/share")
+
+        assert result.value is None
+        assert "only 12 GETATTR call(s)" in result.reason
+
+    def test_a_block_without_a_getattr_line(self, tmp_path):
+        text = "\n".join(
+            line
+            for line in _MOUNTSTATS.splitlines()
+            if "GETATTR" not in line
+        )
+        result = _mountstats_adapter(tmp_path, text).mount_latency("/research/share")
+
+        assert result.value is None
+
+    def test_a_truncated_getattr_line_is_not_arithmetic(self, tmp_path):
+        text = _MOUNTSTATS.replace(
+            "GETATTR: 58041907 58041907 0 13000570688 12071921424 2206493 "
+            "38346064 42740077 3832",
+            "GETATTR: 58041907 58041907 0",
+        )
+        assert _mountstats_adapter(tmp_path, text).mount_latency(
+            "/research/share"
+        ).value is None
+
+    def test_a_missing_mountstats_file_is_unavailable(self, tmp_path):
+        procfs, cgroup = _fake_host(tmp_path, "0::/user.slice/job")
+        result = _adapter(procfs, cgroup).mount_latency("/research/share")
+
+        assert result.value is None
+        assert "could not read" in result.reason
+
+    def test_the_portable_adapter_publishes_nothing(self):
+        from disktide.collectors.platform.portable import PortablePlatformAdapter
+
+        result = PortablePlatformAdapter("Darwin").mount_latency("/")
+
+        assert result.value is None
+        assert "not implemented" in result.reason
+
+    def test_detect_mount_latency_asks_about_the_mount_holding_the_path(
+        self, monkeypatch
+    ):
+        from disktide.collectors.platform.base import PlatformAdapter
+        from disktide.collectors.platform.models import MountRecord, ProbeResult
+
+        asked: list[str] = []
+
+        class _Adapter(PlatformAdapter):
+            def find_mount(self, path):
+                return MountRecord("server:/export", "/research/share", "nfs")
+
+            def mount_latency(self, mountpoint):
+                asked.append(mountpoint)
+                return ProbeResult.available(0.00066, "fake")
+
+        monkeypatch.setattr(
+            "disktide.scanner.sysinfo.get_platform_adapter", lambda: _Adapter()
+        )
+
+        assert detect_mount_latency("/research/share/deep/dir") == 0.00066
+        assert asked == ["/research/share"]
+
+    def test_detect_mount_latency_without_a_mount_is_none(self, monkeypatch):
+        from disktide.collectors.platform.base import PlatformAdapter
+
+        class _Adapter(PlatformAdapter):
+            def find_mount(self, path):
+                return None
+
+        monkeypatch.setattr(
+            "disktide.scanner.sysinfo.get_platform_adapter", lambda: _Adapter()
+        )
+
+        assert detect_mount_latency("/anywhere") is None
+
+
+class TestCpuCountUnderAQuota:
+    @staticmethod
+    def _with_quota(quota):
+        return patch(
+            "disktide.scanner.sysinfo.detect_cpu_quota", return_value=quota
+        )
+
+    def test_quota_narrows_the_available_count(self):
+        with patch("os.cpu_count", return_value=64), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(64))
+        ), self._with_quota(1.0):
+            total, available = detect_cpu_count()
+        assert (total, available) == (64, 1)
+
+    def test_a_fractional_quota_rounds_up(self):
+        """Half a core still runs a thread; it just runs it slower."""
+        with patch("os.cpu_count", return_value=64), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(64))
+        ), self._with_quota(2.5):
+            _total, available = detect_cpu_count()
+        assert available == 3
+
+    def test_a_quota_wider_than_the_cpuset_binds_nothing(self):
+        with patch("os.cpu_count", return_value=64), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(8))
+        ), self._with_quota(32.0):
+            total, available = detect_cpu_count()
+        assert (total, available) == (64, 8)
+
+    def test_a_binding_quota_makes_the_host_allocated(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "os.cpu_count", return_value=64
+        ), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(64))
+        ), self._with_quota(2.0):
+            allocation = detect_host_allocation()
+        assert allocation.available_cpus == 2
+        assert allocation.confined is True
+        assert allocation.kind == "allocated"
+
+    def test_no_quota_leaves_the_verdict_to_the_cpuset(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "os.cpu_count", return_value=16
+        ), patch(
+            "os.sched_getaffinity", return_value=frozenset(range(16))
+        ), self._with_quota(None):
+            with patch(
+                "disktide.scanner.sysinfo.count_other_users", return_value=0
+            ):
+                allocation = detect_host_allocation()
+        assert allocation.confined is False
+        assert allocation.kind == "dedicated"
+
+
+# --- latency tiers --------------------------------------------------------
+
+
+def _latency_pick(fs_type, ms, *, cpus=64, load=0.0, is_network=None, **kwargs):
+    """A tier pick on a machine with room, so the tier is what is measured.
+
+    `cpus` defaults high on purpose: the CPU budget is a separate limit with
+    its own tests, and a four-core box cannot spend the 32- or 64-worker tier
+    whatever the mount costs.
+    """
+    from disktide.collectors.platform.models import NETWORK_FS_TYPES
+
+    network = fs_type in NETWORK_FS_TYPES if is_network is None else is_network
+    return _compute_recommended_workers(
+        available_cpus=cpus,
+        load_average=(load, load, load),
+        is_network_fs=network,
+        is_rotational=False,
+        available_mb=8192,
+        fs_type=fs_type,
+        sample_entries=16,
+        sample_elapsed_seconds=16 * ms / 1000.0,
+        sample_outcome="sampled",
+        **kwargs,
+    )
+
+
+class TestLatencyBoundClassification:
+    @pytest.mark.parametrize(
+        "fs_type",
+        [
+            "nfs4", "cifs", "smb3", "smbfs", "ceph", "9p", "glusterfs",
+            "beegfs", "panfs", "davfs", "fuse.sshfs", "fuse.rclone",
+            "fuse.s3fs", "fuse.gcsfuse", "fuse.goofys", "fuse.blobfuse2",
+            "fuse.juicefs", "fuse.mountpoint-s3", "fuse.davfs2",
+        ],
+    )
+    def test_known_remote_types_are_latency_bound(self, fs_type):
+        from disktide.collectors.platform.models import (
+            NETWORK_FS_TYPES,
+            is_latency_bound,
+        )
+
+        assert fs_type in NETWORK_FS_TYPES
+        assert is_latency_bound(fs_type, True) is True
+
+    def test_an_unlisted_fuse_backend_is_still_latency_bound(self):
+        """A FUSE round trip is a context switch per call at best."""
+        from disktide.collectors.platform.models import is_latency_bound
+
+        assert is_latency_bound("fuse.somethingnew", False) is True
+        assert is_latency_bound("fuse", False) is True
+
+    @pytest.mark.parametrize("fs_type", ["virtiofs", "overlay", "xfs", "zfs"])
+    def test_local_types_stay_local(self, fs_type):
+        from disktide.collectors.platform.models import is_latency_bound
+
+        assert is_latency_bound(fs_type, False) is False
+
+
+class TestLatencyWorkerTiers:
+    """The knee moves with the latency; see `_LATENCY_WORKER_TIERS`."""
+
+    @pytest.mark.parametrize(
+        "ms, expected, tier",
+        [
+            (0.1, 8, "measured network base"),
+            (0.49, 8, "measured network base"),
+            (0.5, 16, "0.5 ms/entry tier"),
+            (0.99, 16, "0.5 ms/entry tier"),
+            (1.0, 32, "1 ms/entry tier"),
+            (2.9, 32, "1 ms/entry tier"),
+            (3.0, 64, "3 ms/entry tier"),
+            (12.0, 64, "3 ms/entry tier"),
+        ],
+    )
+    def test_each_tier_and_its_reason(self, ms, expected, tier):
+        workers, reason = _latency_pick("nfs4", ms)
+        assert workers == expected
+        assert tier in reason
+        assert f"{expected} workers" in reason
+
+    def test_a_tier_can_be_reached_from_the_mount_instead_of_the_sample(self):
+        """The server's own average, where a warm root sample sees nothing.
+
+        The mount this policy was rebuilt for: 14 cached directories in the
+        root sample at 0.07 ms an entry, and 58 million GETATTRs on the
+        server averaging 0.66 ms.
+        """
+        workers, reason = _compute_recommended_workers(
+            available_cpus=128,
+            load_average=(1.0, 1.0, 1.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs",
+            sample_entries=64,
+            sample_elapsed_seconds=64 * 0.00007,
+            sample_outcome="sampled",
+            mount_latency_seconds=0.00066,
+            allocation=_allocation("dedicated", total=128, available=128),
+        )
+        assert workers == 16
+        assert "0.66 ms/entry (mount RTT)" in reason
+        assert "0.5 ms/entry tier" in reason
+
+    def test_the_sample_wins_when_it_is_the_worse_of_the_two(self):
+        """A mount whose cached average flatters a cold tree we are walking."""
+        workers, reason = _latency_pick(
+            "nfs", 3.0, cpus=128, mount_latency_seconds=0.0006
+        )
+        assert workers == 64
+        assert "3.00 ms/entry (sampled)" in reason
+
+    def test_an_unsampled_latency_mount_keeps_the_measured_base(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=4,
+            load_average=(0.0, 0.0, 0.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=8192,
+            fs_type="nfs4",
+            sample_entries=0,
+            sample_outcome="not-run",
+        )
+        assert workers == 8
+        assert "measured network base" in reason
+
+    def test_a_two_core_box_still_reaches_the_widest_tier(self):
+        """A thread asleep in a syscall is not holding a core open.
+
+        It is not free either -- it costs about 160 us of CPU per entry --
+        but that is charged per *round trip*, so a worker on a 5 ms mount
+        holds 0.03 of a core and two cores buy 66 of them. The tier's 64 is
+        what binds, which is the answer the measurements asked for: 5 ms an
+        entry falls from 25.1 s at one worker to 0.88 s at 64, on a box of
+        any size.
+        """
+        workers, reason = _latency_pick("fuse.sshfs", 5.0, cpus=2)
+        assert workers == 64
+        assert "2.0 cores at 0.03 core/worker -> up to 66 workers" in reason
+
+    def test_a_worker_costs_more_on_a_faster_mount(self):
+        """The same two cores, a mount ten times quicker: 8 workers, not 66.
+
+        0.5 ms an entry is 0.32 of a core each, so the CPU budget binds well
+        below the tier it would otherwise reach.
+        """
+        workers, reason = _latency_pick("nfs4", 0.5, cpus=2)
+        assert workers == 6
+        assert "0.32 core/worker -> up to 6 workers" in reason
+
+    def test_the_cpu_cap_still_applies_to_a_slow_local_mount(self):
+        workers, reason = _latency_pick("xfs", 5.0, cpus=2)
+        assert workers == 2
+        assert "high latency" in reason
+
+    def test_a_slow_local_mount_keeps_its_conservative_cap(self):
+        """A local mount that samples slow is a busy or failing disk."""
+        workers, reason = _latency_pick("ext4", 5.0, cpus=16)
+        assert workers == 4
+        assert "high latency" in reason
+
+    def test_a_fast_local_mount_is_unchanged(self):
+        workers, reason = _latency_pick("xfs", 0.004, cpus=16)
+        assert workers == 1
+        assert "low-latency local metadata" in reason
+
+    def test_a_busy_shared_host_spends_only_its_share(self):
+        """Being a guest is not latency-dependent, but the price of one is.
+
+        Three others on 16 cores at load 14 leaves half a core, which on a
+        5 ms mount is still 16 workers -- because sixteen workers on that
+        mount *is* half a core, which is all we said we would take. The same
+        host on a mount with no latency signal, priced at the default quarter
+        core, gets 2.
+        """
+        workers, reason = _latency_pick(
+            "fuse.rclone",
+            5.0,
+            cpus=16,
+            load=14.0,
+            allocation=_allocation("shared", total=16, available=16, others=3),
+        )
+        assert workers == 16
+        assert "fair share of 2 idle CPUs across 4 users" in reason
+        assert "0.5 cores at 0.03 core/worker -> up to 16 workers" in reason
+
+    def test_an_idle_shared_host_reaches_the_tier(self):
+        """16 idle cores across four users is four cores: 133 workers' worth."""
+        workers, reason = _latency_pick(
+            "fuse.rclone",
+            5.0,
+            cpus=16,
+            allocation=_allocation("shared", total=16, available=16, others=3),
+        )
+        assert workers == 64
+        assert "up to 133 workers" in reason
+
+    def test_an_allocated_host_gets_the_whole_tier(self):
+        workers, _reason = _latency_pick(
+            "fuse.rclone",
+            5.0,
+            cpus=16,
+            load=100.0,
+            allocation=_allocation("allocated", total=128, available=16),
+        )
+        assert workers == 64
+
+    def test_low_memory_still_forces_serial(self):
+        workers, reason = _compute_recommended_workers(
+            available_cpus=16,
+            load_average=(0.0, 0.0, 0.0),
+            is_network_fs=True,
+            is_rotational=False,
+            available_mb=256,
+            fs_type="fuse.s3fs",
+            sample_entries=16,
+            sample_elapsed_seconds=0.08,
+            sample_outcome="sampled",
+        )
+        assert workers == 1
+        assert "low memory" in reason
+
+
+def _system_info(**overrides) -> SystemInfo:
+    """A `SystemInfo` for the explicit-worker path, host details to taste."""
+    fields = dict(
+        cpu_count=16,
+        available_cpus=16,
+        load_average=(1.0, 1.0, 1.0),
+        memory_total_mb=32768,
+        memory_available_mb=16384,
+        fs_type="xfs",
+        is_network_fs=False,
+        is_rotational=False,
+        storage_medium="flash",
+        sample_entries=0,
+        sample_elapsed_seconds=0.0,
+        sample_errors=0,
+        sample_outcome="not-run",
+        recommended_workers=1,
+        recommendation_reason="1 (low-latency local metadata)",
+        allocation=_allocation("dedicated", total=16, available=16),
+    )
+    fields.update(overrides)
+    return SystemInfo(**fields)
+
+
+def _select(requested, monkeypatch, **overrides):
+    info = _system_info(**overrides)
+    monkeypatch.setattr(
+        "disktide.scanner.sysinfo.detect_system_info", lambda *a, **k: info
+    )
+    return select_scan_workers("/tmp", requested)
+
+
+class TestWorkerCeiling:
+    """`-w` is an instruction, but not an unbounded one."""
+
+    def test_the_floor_is_the_widest_measured_auto_tier(self):
+        """A 2-core box must still be able to ask for the 5 ms/entry tier."""
+        assert worker_ceiling(1) == 64
+        assert worker_ceiling(2) == 64
+        assert worker_ceiling(16) == 64
+
+    def test_above_the_floor_it_is_four_per_visible_cpu(self):
+        """Not one per CPU: a worker asleep in a stat holds no core."""
+        assert worker_ceiling(32) == 128
+        assert worker_ceiling(104) == 416
+
+    def test_zero_or_negative_cpus_still_give_the_floor(self):
+        assert worker_ceiling(0) == 64
+        assert worker_ceiling(-1) == 64
+
+    def test_a_request_within_the_ceiling_is_used_exactly(self, monkeypatch):
+        selection = _select(32, monkeypatch)
+        assert selection.effective_workers == 32
+        assert selection.mode == "explicit"
+        assert "explicit override selected 32" in selection.reason
+
+    def test_a_request_above_the_ceiling_is_clamped_not_refused(self, monkeypatch):
+        selection = _select(100_000, monkeypatch)
+        assert selection.effective_workers == 64
+        assert selection.requested_workers == 100_000
+        assert selection.mode == "explicit"
+        assert "exceeds the ceiling of 64" in selection.reason
+        assert any("ceiling of 64" in w for w in selection.warnings)
+
+    def test_an_absurd_request_reaches_no_thread_pool(self, monkeypatch):
+        """The reported case: `-w 10**21` was echoed back verbatim."""
+        selection = _select(10**21, monkeypatch)
+        assert selection.effective_workers == 64
+
+    def test_a_big_node_can_still_be_told_to_use_more(self, monkeypatch):
+        selection = _select(
+            256,
+            monkeypatch,
+            cpu_count=104,
+            available_cpus=104,
+            allocation=_allocation("allocated", total=104, available=104),
+        )
+        assert selection.effective_workers == 256
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_non_positive_still_raises(self, bad):
+        with pytest.raises(ValueError):
+            select_scan_workers("/tmp", bad)
+
+    def test_auto_carries_no_warnings(self, monkeypatch):
+        selection = _select(None, monkeypatch)
+        assert selection.mode == "auto"
+        assert selection.warnings == ()
+
+
+class TestExplicitWorkerWarnings:
+    """What the host looks like from here, said once per scan."""
+
+    def test_shared_host_names_the_other_users_and_the_auto_answer(
+        self, monkeypatch
+    ):
+        selection = _select(
+            8,
+            monkeypatch,
+            recommended_workers=2,
+            allocation=_allocation("shared", total=16, available=16, others=3),
+        )
+        warning = next(w for w in selection.warnings if "shared host" in w)
+        assert "8 workers on a shared host with 3 other active user(s)" in warning
+        assert "would use 2" in warning
+        assert "fair share of 15 idle CPUs across 4 users" in warning
+
+    def test_a_shared_host_stays_quiet_at_what_auto_would_have_picked(
+        self, monkeypatch
+    ):
+        """Not a fixed 2 any more: an idle login node recommends more than that.
+
+        A request of 16 on a host whose fair share is 16 is the auto answer
+        typed out, and warning about it would be noise.
+        """
+        selection = _select(
+            16,
+            monkeypatch,
+            recommended_workers=16,
+            fs_type="nfs",
+            is_network_fs=True,
+            allocation=_allocation("shared", total=128, available=128, others=5),
+        )
+        assert not any("shared host" in w for w in selection.warnings)
+
+    def test_a_busy_host_says_what_auto_would_have_picked(self, monkeypatch):
+        selection = _select(
+            32,
+            monkeypatch,
+            load_average=(14.0, 13.0, 12.0),
+            recommended_workers=4,
+            fs_type="nfs4",
+            is_network_fs=True,
+            allocation=_allocation("dedicated", total=16, available=16),
+        )
+        warning = next(w for w in selection.warnings if "already high" in w)
+        assert "host load 14.00 on 16 CPUs" in warning
+        assert "supports about 8 worker(s)" in warning
+        assert "auto would pick 4" in warning
+
+    def test_a_quiet_host_says_nothing_about_load(self, monkeypatch):
+        selection = _select(
+            32,
+            monkeypatch,
+            load_average=(1.0, 1.0, 1.0),
+            recommended_workers=4,
+            fs_type="nfs4",
+            is_network_fs=True,
+        )
+        assert not any("already high" in w for w in selection.warnings)
+
+    def test_load_is_measured_against_the_whole_host_not_the_slice(
+        self, monkeypatch
+    ):
+        """A busy 128-core node is not busy for a 10-core allocation."""
+        selection = _select(
+            32,
+            monkeypatch,
+            available_cpus=10,
+            cpu_count=128,
+            load_average=(32.0, 30.0, 28.0),
+            recommended_workers=8,
+            fs_type="nfs4",
+            is_network_fs=True,
+            allocation=_allocation("allocated", total=128, available=10),
+        )
+        assert not any("already high" in w for w in selection.warnings)
+
+    def test_an_allocated_slice_never_warns_about_host_wide_load(
+        self, monkeypatch
+    ):
+        """The auto policy's rule, applied to the warning as well.
+
+        `os.getloadavg()` is host-wide and cgroups do not virtualize it, so
+        on a slice the load counts jobs this process is isolated from --
+        which is why `_compute_recommended_workers` skips its load guard
+        there. Warning about it would be the same mistake with a nicer
+        wording: on a compute node at load 96 whose 16 cores are ours,
+        `-w 16` is exactly right.
+        """
+        kwargs = dict(
+            available_cpus=16,
+            cpu_count=16,
+            load_average=(96.0, 90.0, 88.0),
+            recommended_workers=8,
+            fs_type="nfs4",
+            is_network_fs=True,
+        )
+        allocated = _select(
+            16,
+            monkeypatch,
+            allocation=_allocation("allocated", total=16, available=16),
+            **kwargs,
+        )
+        assert not any("already high" in w for w in allocated.warnings)
+
+        # The identical host with no allocation still says it is busy.
+        dedicated = _select(
+            16,
+            monkeypatch,
+            allocation=_allocation("dedicated", total=16, available=16),
+            **kwargs,
+        )
+        assert any("already high" in w for w in dedicated.warnings)
+
+    def test_more_workers_than_cpus_on_a_local_mount_is_pointless(
+        self, monkeypatch
+    ):
+        selection = _select(32, monkeypatch, available_cpus=4, cpu_count=4)
+        warning = next(w for w in selection.warnings if "local scans gain" in w)
+        assert "32 workers on 4 CPU(s)" in warning
+
+    def test_a_latency_bound_mount_gets_no_cpu_count_warning(self, monkeypatch):
+        """Threads asleep in a network stat overlap; that is the whole point."""
+        selection = _select(
+            32,
+            monkeypatch,
+            available_cpus=4,
+            cpu_count=4,
+            fs_type="nfs4",
+            is_network_fs=True,
+        )
+        assert not any("local scans gain" in w for w in selection.warnings)
+
+    def test_a_fuse_mount_counts_as_latency_bound_too(self, monkeypatch):
+        selection = _select(
+            32,
+            monkeypatch,
+            available_cpus=4,
+            cpu_count=4,
+            fs_type="fuse.sshfs",
+            is_network_fs=False,
+        )
+        assert not any("local scans gain" in w for w in selection.warnings)
+
+    def test_a_reasonable_request_warns_about_nothing(self, monkeypatch):
+        assert _select(4, monkeypatch, available_cpus=16).warnings == ()
+
+
+class TestWorkerCeilingThroughTheCli:
+    """The reported reproducer, end to end."""
+
+    def test_absurd_worker_count_is_clamped_and_warned_about(self, tmp_path):
+        from click.testing import CliRunner
+        from disktide.__main__ import cli
+        import json
+
+        (tmp_path / "a.txt").write_text("hi")
+        result = CliRunner().invoke(
+            cli, ["scan", "--json", "-w", "999999999999999999999", str(tmp_path)]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        ceiling = worker_ceiling(
+            detect_host_allocation(count_users=False).available_cpus
+        )
+        assert payload["workers"]["requested"] == 999999999999999999999
+        assert payload["workers"]["effective"] == ceiling
+        assert payload["workers"]["warnings"]
+        # stderr, so the JSON on stdout stays machine-readable.
+        assert "Warning: " in result.stderr
+        assert "Warning" not in result.stdout
+
+    def test_a_worker_count_within_the_ceiling_is_quiet(self, tmp_path):
+        from click.testing import CliRunner
+        from disktide.__main__ import cli
+        import json
+
+        (tmp_path / "a.txt").write_text("hi")
+        result = CliRunner().invoke(
+            cli, ["scan", "--json", "-w", "1", str(tmp_path)]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["workers"]["effective"] == 1
+        assert payload["workers"]["warnings"] == []
+
+    def test_the_payload_carries_what_the_policy_decided_from(self, tmp_path):
+        """A scan that picked a number should say what it read to pick it."""
+        from click.testing import CliRunner
+        from disktide.__main__ import cli
+        import json
+
+        (tmp_path / "a.txt").write_text("hi")
+        result = CliRunner().invoke(cli, ["scan", "--json", str(tmp_path)])
+
+        assert result.exit_code == 0
+        workers = json.loads(result.stdout)["workers"]
+        # Not a floor on the value: a two-core runner shared with a busy
+        # suite has a fair share of nothing, and 0.0 cores is the honest
+        # number for it. What has to hold is that the field is the one the
+        # printed reason was built from.
+        assert isinstance(workers["cpu_budget"], float)
+        assert f"{workers['cpu_budget']:.1f} cores" in workers["reason"]
+        # `tmp_path` is local on every host the suite runs on, so there is no
+        # server round trip to report -- the key is still there to say so.
+        assert workers["mount_latency_seconds"] is None

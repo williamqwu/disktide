@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""Generate random filesystem activity for testing fsmonitor.
+"""Generate random filesystem activity for testing disktide.
 
 Creates, modifies, and deletes small files continuously under a target
 directory so you can observe the monitor/watch features in action.
 
 Usage:
-    python tool/gen_activity.py                  # default ~/tests/sysmonitor-cli
+    python tool/gen_activity.py                  # the guarded scratch root
     python tool/gen_activity.py /tmp/testdir     # custom path
     python tool/gen_activity.py --interval 2     # seconds between actions
     python tool/gen_activity.py --batch 5        # files per cycle
     python tool/gen_activity.py --max-files 500  # cap at 500 files
     python tool/gen_activity.py --max-size 50M   # cap total size at 50 MB
+
+The default used to be `~/tests/sysmonitor-cli`, which is a thousand files
+into the network home this project is developed on. It goes through
+`tool/scratchguard.py` now, like every other generator here: no target means
+the guarded scratch root, and a target under `$HOME` or on a network
+filesystem needs `--allow-home` or `--allow-network`. Neither lifts the inode
+headroom check.
 """
 
 from __future__ import annotations
@@ -23,7 +30,9 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_TARGET = os.path.expanduser("~/tests/sysmonitor-cli")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scratchguard  # noqa: E402 - needs tool/ on the path first
+
 DEFAULT_MAX_FILES = 1000
 DEFAULT_MAX_SIZE = "100M"
 
@@ -173,11 +182,11 @@ def confirm_existing(target: Path) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate random filesystem activity for testing fsmonitor."
+        description="Generate random filesystem activity for testing disktide."
     )
     parser.add_argument(
-        "path", nargs="?", default=DEFAULT_TARGET,
-        help=f"Target directory (default: {DEFAULT_TARGET})",
+        "path", nargs="?", default=None,
+        help="Target directory (default: the guarded scratch root)",
     )
     parser.add_argument(
         "--interval", type=float, default=3.0,
@@ -195,16 +204,30 @@ def main():
         "--max-size", type=str, default=DEFAULT_MAX_SIZE,
         help=f"Max total size, e.g. 50M, 1G (default: {DEFAULT_MAX_SIZE})",
     )
+    parser.add_argument(
+        "--allow-home", action="store_true",
+        help="permit a target under $HOME, which this otherwise refuses",
+    )
+    parser.add_argument(
+        "--allow-network", action="store_true",
+        help="permit a target on a network filesystem",
+    )
     args = parser.parse_args()
     max_bytes = parse_size(args.max_size)
 
-    root = Path(args.path).resolve()
+    # The cycle never exceeds --max-files, and the subdirectories plus the
+    # root are the only other entries it is guaranteed to make; `create_dir`
+    # adds a few more, which the guard's margin covers.
+    entries = args.max_files + len(SUBDIRS) + 1
+    root = scratchguard.claim(
+        args.path, entries=entries, label="activity",
+        allow_home=args.allow_home, allow_network=args.allow_network,
+    )
 
     if not confirm_existing(root):
         print("Aborted.")
         sys.exit(0)
 
-    root.mkdir(parents=True, exist_ok=True)
     # Seed subdirectories
     for sub in SUBDIRS:
         (root / sub).mkdir(parents=True, exist_ok=True)

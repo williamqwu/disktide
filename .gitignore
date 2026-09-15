@@ -6,11 +6,13 @@ __pycache__/
 *.egg-info/
 *.egg
 dist/
+dist-pure/
 build/
+wheelhouse/
 *.whl
 
 # Virtual environments
-.venv/
+.venv*/
 venv/
 env/
 
@@ -30,6 +32,8 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+# An NFS client's stand-in for a file deleted while still open
+.nfs*
 
 # Project-specific
 *.db

@@ -2,10 +2,13 @@
 
 import os
 import tempfile
+import threading
 
 import pytest
-from fs_monitor.scanner.walker import scan_directory
-from fs_monitor.scanner.engine import ScanEngine
+from disktide.domain.policy import ScanPolicy
+from disktide.scanner import scheduler as scheduler_module
+from disktide.scanner.walker import scan_directory
+from disktide.scanner.engine import ScanEngine
 
 
 @pytest.fixture
@@ -163,7 +166,7 @@ class TestCancelPropagation:
 
         # Wrap scandir to set the cancel event as soon as the *first* dir
         # entry is yielded, so subsequent recursions must observe it.
-        import fs_monitor.scanner.walker as walker_mod
+        import disktide.scanner.walker as walker_mod
         real_scandir = os.scandir
         triggered = {"done": False}
 
@@ -289,3 +292,192 @@ class TestPartialInaccessibility:
         root = scan_directory(str(tmp_path))
         assert root.denied_dir_subtree_count == 0
         assert root.partial_dir_subtree_count == 0
+
+
+class TestPathsLongerThanPathMax:
+    """A path the kernel will not accept is not a limit on the walk.
+
+    Every syscall the scan makes below the scan root is relative to a
+    directory descriptor, so the 4,096-byte cap on a pathname argument
+    applies to the root's own path and to nothing else. Before that, a
+    1,200-level tree stopped at level 442 with `[Errno 36] File name too
+    long` recorded as a *denied* directory -- the scan reported a
+    permissions problem for a tree it simply could not name.
+    """
+
+    @staticmethod
+    def _build_chain(root, levels: int, name: str = "abcdefgh") -> int:
+        """mkdir `levels` deep with dir_fd, since the path stops being usable."""
+        handle = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for _ in range(levels):
+                os.mkdir(name, dir_fd=handle)
+                nested = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=handle
+                )
+                os.close(handle)
+                handle = nested
+            with open(
+                os.open("leaf.txt", os.O_WRONLY | os.O_CREAT, 0o644,
+                        dir_fd=handle),
+                "wb",
+            ) as leaf:
+                leaf.write(b"x" * 4096)
+        finally:
+            os.close(handle)
+        return len(str(root)) + levels * (len(name) + 1)
+
+    def test_engine_scans_past_path_max(self, tmp_path):
+        levels = 900
+        length = self._build_chain(tmp_path, levels)
+        assert length > 4096, "the fixture has to outgrow PATH_MAX to prove it"
+
+        root = ScanEngine(workers=1, scan_path=str(tmp_path)).scan(str(tmp_path))
+
+        assert root.dir_count == levels
+        assert root.file_count == 1
+        assert root.size == 4096
+        assert root.error is None
+        assert root.denied_dir_subtree_count == 0
+        assert root.partial_dir_subtree_count == 0
+        assert root.inaccessible_subtree_count == 0
+
+    def test_root_path_the_kernel_rejects_is_still_an_error(self, tmp_path):
+        """A component past NAME_MAX is a bad argument, not a deep tree."""
+        from disktide.scanner.scheduler import DirectoryJob, scan_directory_once
+
+        bad = str(tmp_path / ("y" * 300))
+        result = scan_directory_once(
+            DirectoryJob(bad, 0, None),
+            policy=ScanPolicy(),
+            cancel_event=threading.Event(),
+            root_device=None,
+            excluded_mounts={},
+        )
+        assert result.node.error is not None
+        assert "too long" in result.node.error.lower()
+        assert not result.node.vanished
+
+    @staticmethod
+    def _link_at_the_bottom(root, levels: int, name: str = "abcdefgh"):
+        """Put a symlink and its target at the bottom of a `levels` chain.
+
+        Returns (link path, target path). Both are built through directory
+        descriptors, because past level 442 of eight-letter names neither can
+        be named to the kernel any more.
+        """
+        handle = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        parts = [str(root)]
+        try:
+            for _ in range(levels):
+                os.mkdir(name, dir_fd=handle)
+                parts.append(name)
+                nested = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=handle
+                )
+                os.close(handle)
+                handle = nested
+            with open(
+                os.open("target.txt", os.O_WRONLY | os.O_CREAT, 0o644,
+                        dir_fd=handle),
+                "wb",
+            ) as target:
+                target.write(b"z" * 128)
+            os.symlink("target.txt", "link.txt", dir_fd=handle)
+        finally:
+            os.close(handle)
+        base = "/".join(parts)
+        return f"{base}/link.txt", f"{base}/target.txt"
+
+    def test_a_symlink_past_path_max_is_classified_not_called_broken(
+        self,
+        tmp_path,
+    ):
+        """`classify_symlink` asks about the parent's fd, not the whole path.
+
+        `os.readlink(path)` and `os.stat(path)` both take a pathname argument
+        capped at PATH_MAX, so at 1,200 levels they raised ENAMETOOLONG and
+        the link was recorded as broken with no target -- a link that is
+        perfectly fine, in a tree the scan itself now walks to the bottom.
+        """
+        from disktide.models.tree import LeafNode
+        from disktide.scanner.walker import classify_symlink
+
+        link_path, _ = self._link_at_the_bottom(tmp_path, 1200)
+        assert len(link_path) > 4096, "the fixture has to outgrow PATH_MAX"
+
+        node = LeafNode(
+            name="link.txt",
+            path=link_path,
+            depth=1201,
+            is_symlink=True,
+        )
+        classify_symlink(node)
+
+        assert node.link_classified is True
+        assert node.link_target == "target.txt"
+        assert node.link_broken is False
+        assert node.link_is_dir is False
+
+    def test_a_broken_symlink_past_path_max_is_still_broken(self, tmp_path):
+        """The fix must not turn every deep link into a working one."""
+        from disktide.models.tree import LeafNode
+        from disktide.scanner.walker import classify_symlink
+
+        link_path, target_path = self._link_at_the_bottom(tmp_path, 1200)
+        parent_fd = scheduler_module.open_scan_directory(
+            os.path.dirname(target_path), follow_symlink=False
+        )
+        try:
+            os.unlink("target.txt", dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+
+        node = LeafNode(
+            name="link.txt",
+            path=link_path,
+            depth=1201,
+            is_symlink=True,
+        )
+        classify_symlink(node)
+
+        assert node.link_target == "target.txt", "readlink does not need it"
+        assert node.link_broken is True
+
+    @pytest.mark.skipif(
+        not os.path.isdir("/proc/self/fd"),
+        reason="descriptor accounting needs /proc",
+    )
+    def test_a_worker_holds_at_most_two_descriptors(self, tmp_path):
+        """One fd for the directory, one for the dup the reader makes.
+
+        Both directory readers hand a `dup` to `fdopendir`, exactly as
+        `os.scandir(fd)` does, so the count is the same either way.
+        """
+        for index in range(240):
+            branch = tmp_path / f"d{index:03d}"
+            branch.mkdir()
+            for leaf in range(20):
+                (branch / f"f{leaf:02d}").write_bytes(b"x")
+
+        workers = 8
+        baseline = len(os.listdir("/proc/self/fd"))
+        peak = 0
+
+        def observe(_path: str) -> None:
+            nonlocal peak
+            live = len(os.listdir("/proc/self/fd"))
+            if live > peak:
+                peak = live
+
+        ScanEngine(
+            workers=workers,
+            scan_path=str(tmp_path),
+            directory_observer=observe,
+        ).scan(str(tmp_path))
+
+        # +1 for the descriptor `os.listdir` itself holds while it reads
+        # /proc/self/fd from inside a worker.
+        assert peak - baseline <= 2 * workers + 1, (
+            f"peak {peak} against a baseline of {baseline} for {workers} workers"
+        )

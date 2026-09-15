@@ -1,0 +1,16 @@
+schema_version = 1
+name = "rust"
+version = "1.0.0"
+description = "Rust and Cargo build artifacts"
+default_enabled = true
+
+[[rules]]
+name = "rust_target"
+description = "Cargo build artifacts"
+patterns = ["target"]
+parent_indicators = ["Cargo.toml"]
+risk = "moderate"
+category = "build"
+rebuild_hint = "Run cargo build or cargo test"
+confidence = 0.97
+default_action = "safe"

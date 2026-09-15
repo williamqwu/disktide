@@ -1,13 +1,7 @@
-"""Tests for cleanup detection and actions."""
+"""Tests for cleanup detection."""
 
-import os
-import tempfile
-
-import pytest
-from fs_monitor.models.tree import FSNode
-from fs_monitor.models.patterns import CleanupRule, CleanupTarget, RiskLevel
-from fs_monitor.cleanup.detector import detect_targets, group_by_category, total_savings
-from fs_monitor.cleanup.actions import delete_targets
+from disktide.models.tree import FSNode
+from disktide.cleanup.detector import detect_targets, total_savings
 
 
 def make_project_tree():
@@ -56,7 +50,7 @@ class TestDetector:
         root = make_project_tree()
         # Use a custom rule without parent_indicators for unit testing
         # (the real rule requires package.json on the actual filesystem)
-        from fs_monitor.models.patterns import CleanupRule, RiskLevel
+        from disktide.models.patterns import CleanupRule, RiskLevel
         rules = [
             CleanupRule(
                 name="node_modules", description="test",
@@ -88,67 +82,8 @@ class TestDetector:
         assert "/project/main.py" not in paths
         assert "/project/package.json" not in paths
 
-    def test_group_by_category(self):
-        root = make_project_tree()
-        targets = detect_targets(root)
-        groups = group_by_category(targets)
-        assert "dependencies" in groups or "cache" in groups or "junk" in groups
-
     def test_total_savings(self):
         root = make_project_tree()
         targets = detect_targets(root)
         total = total_savings(targets)
         assert total > 0
-
-
-class TestActions:
-    def test_dry_run(self):
-        targets = [
-            CleanupTarget(
-                path="/fake/path",
-                size=1000,
-                rule=CleanupRule(
-                    name="test", description="test",
-                    patterns=["test"], risk=RiskLevel.SAFE,
-                ),
-            )
-        ]
-        result = delete_targets(targets, dry_run=True)
-        assert len(result.successful) == 1
-        assert result.total_freed == 1000
-        assert result.results[0].dry_run
-
-    def test_delete_real_files(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a file to delete
-            test_file = os.path.join(tmpdir, "test.txt")
-            with open(test_file, "w") as f:
-                f.write("test content")
-
-            targets = [
-                CleanupTarget(
-                    path=test_file,
-                    size=12,
-                    rule=CleanupRule(
-                        name="test", description="test",
-                        patterns=["test.txt"], risk=RiskLevel.SAFE,
-                    ),
-                )
-            ]
-            result = delete_targets(targets)
-            assert len(result.successful) == 1
-            assert not os.path.exists(test_file)
-
-    def test_delete_nonexistent(self):
-        targets = [
-            CleanupTarget(
-                path="/nonexistent/file",
-                size=100,
-                rule=CleanupRule(
-                    name="test", description="test",
-                    patterns=["file"], risk=RiskLevel.SAFE,
-                ),
-            )
-        ]
-        result = delete_targets(targets)
-        assert len(result.failed) == 1

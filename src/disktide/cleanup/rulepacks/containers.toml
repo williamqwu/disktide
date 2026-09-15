@@ -1,0 +1,17 @@
+schema_version = 1
+name = "containers"
+version = "1.0.0"
+description = "Container and build caches exposed as detection-only opportunities"
+default_enabled = true
+
+[[rules]]
+name = "container_build_cache"
+description = "Project-local container or BuildKit cache"
+patterns = [".docker-cache", ".buildx-cache", "buildkit-cache", ".container-cache"]
+parent_indicators = ["Dockerfile", "compose.yaml", "docker-compose.yml", "Containerfile"]
+path_context = ["*docker*", "*buildx*", "*buildkit*", "*container*"]
+risk = "dangerous"
+category = "container"
+rebuild_hint = "Rebuild through the container provider after reviewing active images and layers"
+confidence = 0.72
+default_action = "detection-only"

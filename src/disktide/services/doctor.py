@@ -1,0 +1,1331 @@
+"""Diagnostic report service for installation and platform capabilities."""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import re
+import shutil
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+from disktide import APP_NAME, __version__
+from disktide.cleanup.actions import QuarantineExecutor, mutation_capabilities
+from disktide.cleanup.rules import get_rule_catalog
+from disktide.collectors.platform import get_platform_adapter
+from disktide.collectors.platform.base import PlatformAdapter
+from disktide.config import AppConfig, load_config
+from disktide.extensions.capabilities import (
+    Capability,
+    CapabilityId,
+    CapabilityStatus,
+)
+from disktide.paths import config_file, data_root
+from disktide.scanner.accel import ACCEL_BACKEND, ACCEL_REASON, NATIVE_AVAILABLE
+from disktide.scanner.sysinfo import detect_cpu_count, detect_cpu_quota
+from disktide.storage.database import Database
+from disktide.storage.migrations import (
+    CURRENT_VERSION,
+    get_version,
+    migration_backup_path,
+)
+
+
+DOCTOR_SCHEMA_VERSION = 10
+
+#: Above this, `doctor` reports the integrity check as skipped rather than
+#: spending minutes on it unasked. `PRAGMA quick_check` reads every page: on
+#: a 729 MiB store on a rotating disk it measured 10 s warm and over 300 s
+#: cold, which is not a wait a diagnostic command may impose by default.
+INTEGRITY_SIZE_LIMIT = 256 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorReport:
+    """Versioned, JSON-safe doctor payload."""
+
+    application: dict[str, object]
+    platform: dict[str, object]
+    terminal: dict[str, object]
+    colour: dict[str, object]
+    clipboard: dict[str, object]
+    paths: dict[str, object]
+    config: dict[str, object]
+    database: dict[str, object]
+    metrics: dict[str, object]
+    capabilities: dict[str, object]
+    optional_extras: dict[str, object]
+    scan_policy: dict[str, object]
+    cleanup_rules: dict[str, object]
+    cleanup_safety: dict[str, object]
+    schema_version: int = DOCTOR_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "application": self.application,
+            "platform": self.platform,
+            "terminal": self.terminal,
+            "colour": self.colour,
+            "clipboard": self.clipboard,
+            "paths": self.paths,
+            "config": self.config,
+            "database": self.database,
+            "metrics": self.metrics,
+            "capabilities": self.capabilities,
+            "optional_extras": self.optional_extras,
+            "scan_policy": self.scan_policy,
+            "cleanup_rules": self.cleanup_rules,
+            "cleanup_safety": self.cleanup_safety,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2, sort_keys=True)
+
+
+def build_doctor_report(
+    *,
+    adapter: PlatformAdapter | None = None,
+    show_paths: bool = False,
+    check_integrity: bool = False,
+    migration_progress: Callable[[str], None] | None = None,
+    database_factory: Callable[[], Database] = Database,
+    config_loader: Callable[..., AppConfig] = load_config,
+) -> DoctorReport:
+    """Build a complete report while isolating every optional probe.
+
+    `migration_progress` exists because `doctor` is often the first command
+    run after an upgrade, and therefore often the one that performs a
+    schema migration -- which on a large legacy database spends minutes
+    copying the file. Binding it here rather than in the CLI keeps
+    `disktide.storage.database` out of the entry point, which
+    `tests/test_snapshot_wave05.py` pins.
+    """
+    if migration_progress is not None:
+        database_factory = partial(
+            database_factory, migration_progress=migration_progress
+        )
+    platform_adapter = adapter or get_platform_adapter()
+    capabilities = platform_adapter.capabilities("/")
+    cpu_total, cpu_available = detect_cpu_count()
+    cpu_quota = _safe_cpu_quota()
+    memory_probe = _safe_memory_probe(platform_adapter)
+
+    application_paths = _application_paths(show_paths)
+    config_path = _actual_config_path()
+    try:
+        config = config_loader(config_path)
+        config_status = "available"
+        if config_path.exists():
+            config_reason = "configuration loaded"
+        else:
+            config_reason = "configuration file does not exist; defaults are active"
+    except Exception as exc:
+        config = AppConfig()
+        config_status = "unavailable"
+        config_reason = f"configuration could not be loaded: {type(exc).__name__}: {exc}"
+
+    # One connection for the whole report. Both the storage section and the
+    # cleanup-safety section need the database, and each used to open its
+    # own: against a file that cannot be opened, that ran the read-only
+    # recovery twice and logged "Could not open database ..." twice, which
+    # reads like two separate problems.
+    report_database, database_error = _open_report_database(database_factory)
+    try:
+        database_report = _database_report(
+            report_database,
+            database_error,
+            show_paths=show_paths,
+            check_integrity=check_integrity,
+        )
+        cleanup_safety = _cleanup_safety_report(
+            report_database,
+            show_paths=show_paths,
+        )
+    finally:
+        if report_database is not None:
+            try:
+                report_database.close()
+            except Exception:
+                pass
+    catalog = get_rule_catalog(
+        disabled_packs=config.cleanup.disabled_rule_packs,
+        enabled_packs=config.cleanup.enabled_rule_packs,
+        user_directory=config_path.parent / "cleanup-rules",
+    )
+    cleanup_rules = {
+        "schema_version": 1,
+        "pack_count": len(catalog.packs),
+        "enabled_pack_count": sum(pack.enabled for pack in catalog.packs),
+        "rule_count": len(catalog.rules),
+        "packs": [
+            {
+                "name": pack.name,
+                "version": pack.version,
+                "schema_version": pack.schema_version,
+                "source": pack.source,
+                "enabled": pack.enabled,
+                "rule_count": len(pack.rules),
+            }
+            for pack in catalog.packs
+        ],
+        "issues": [
+            {
+                "pack": issue.pack_name,
+                "source": issue.source,
+                "path": _redact_text(issue.path, show_paths),
+                "error": _redact_text(issue.error, show_paths),
+            }
+            for issue in catalog.issues
+        ],
+    }
+
+    metric_items = {
+        "logical": capabilities.get(CapabilityId.LOGICAL_METRIC).to_dict(),
+        "allocated": capabilities.get(CapabilityId.ALLOCATED_METRIC).to_dict(),
+        "unique": capabilities.get(CapabilityId.UNIQUE_METRIC).to_dict(),
+        "files": Capability(
+            CapabilityId.FILES_METRIC,
+            CapabilityStatus.AVAILABLE,
+            "file and symlink entry counts are platform independent",
+        ).to_dict(),
+    }
+    platform_items = {
+        capability_id.value: capabilities.get(capability_id).to_dict()
+        for capability_id in (
+            CapabilityId.MOUNT_ENUMERATION,
+            CapabilityId.BLOCK_DEVICES,
+            CapabilityId.STORAGE_MEDIUM,
+            CapabilityId.TRASH,
+            CapabilityId.FILESYSTEM_EVENTS,
+        )
+    }
+
+    memory: dict[str, object] = {
+        "status": memory_probe.status.value,
+        "reason": memory_probe.reason,
+        "total_mb": None,
+        "available_mb": None,
+        "cgroup_limit_mb": None,
+    }
+    if memory_probe.value is not None:
+        memory["total_mb"] = memory_probe.value.total_mb
+        memory["available_mb"] = memory_probe.value.available_mb
+        memory["cgroup_limit_mb"] = memory_probe.value.limit_mb
+
+    return DoctorReport(
+        application={
+            "name": APP_NAME,
+            "version": __version__,
+            "python_version": platform.python_version(),
+            "python_executable": Path(sys.executable).name,
+            "textual_version": _distribution_version("textual"),
+            "textual_plotext_version": _distribution_version("textual-plotext"),
+            # A wheel built where a compiler was found carries one optional
+            # C extension, the scanner's directory reader; a pure wheel and
+            # a compiler-less sdist install carry none and run the Python
+            # fallback. Which one is installed is a different question from
+            # which one is *in use* -- see the scanner block below.
+            "core_install": (
+                "native-accelerated" if NATIVE_AVAILABLE else "pure-python"
+            ),
+        },
+        platform={
+            "system": platform_adapter.system,
+            "release": platform.release(),
+            "machine": platform.machine() or "unknown",
+            "adapter": platform_adapter.name,
+            "cpu_total": cpu_total,
+            "cpu_available": cpu_available,
+            "cgroup_cpu_quota": cpu_quota,
+            "memory": memory,
+            "scanner": {
+                "backend": ACCEL_BACKEND,
+                "native_available": NATIVE_AVAILABLE,
+                "reason": ACCEL_REASON,
+            },
+        },
+        terminal=_terminal_report(),
+        colour=_colour_report(config.ui.color_depth),
+        clipboard=_clipboard_report(),
+        paths=application_paths,
+        config={
+            "status": config_status,
+            "reason": _redact_text(config_reason, show_paths),
+            "monitor_event_mode": config.monitor.event_mode,
+        },
+        database=database_report,
+        metrics=metric_items,
+        capabilities=platform_items,
+        optional_extras=_optional_extras(config.monitor.event_mode),
+        scan_policy={
+            "one_file_system": config.scan.one_file_system,
+            "exclude_pseudo_filesystems": config.scan.exclude_pseudo_filesystems,
+            "exclude_snapshot_dirs": config.scan.exclude_snapshot_dirs,
+            "max_depth": config.scan.max_depth,
+            "symlinks": "never-follow",
+            "hardlinks": "lexical-owner",
+        },
+        cleanup_rules=cleanup_rules,
+        cleanup_safety=cleanup_safety,
+    )
+
+
+def render_doctor_report(report: DoctorReport) -> str:
+    """Render the default human-readable doctor output."""
+    payload = report.to_dict()
+    application = payload["application"]
+    platform_info = payload["platform"]
+    paths = payload["paths"]
+    database = payload["database"]
+
+    lines = [
+        "disktide doctor",
+        "================",
+        "",
+        "Application",
+        f"  Version: {application['version']}",
+        f"  Python: {application['python_version']}",
+        f"  Textual: {application['textual_version']}",
+        f"  Textual Plotext: {application['textual_plotext_version']}",
+        f"  Core install: {application['core_install']}",
+        "",
+        "Platform",
+        f"  OS: {platform_info['system']} {platform_info['release']}",
+        f"  Machine: {platform_info['machine']}",
+        f"  Adapter: {platform_info['adapter']}",
+        (
+            f"  CPUs: {platform_info['cpu_available']} available / "
+            f"{platform_info['cpu_total']} total"
+            f" ({_cpu_quota_text(platform_info.get('cgroup_cpu_quota'))})"
+        ),
+        _memory_line(platform_info.get("memory")),
+        _scanner_line(platform_info.get("scanner")),
+        "",
+    ]
+    lines.extend(_render_terminal_block(payload["terminal"]))
+    lines.append("")
+    lines.extend(_render_colour_block(payload["colour"]))
+    lines.append("")
+    lines.extend(_render_clipboard_block(payload["clipboard"]))
+    lines.extend([
+        "",
+        "Application paths",
+        f"  Config: {paths['config']}",
+        f"  Database: {paths['database']}",
+        "  Paths: raw" if not paths["redacted"] else "  Paths: redacted (use --show-paths)",
+        "",
+        "Configuration",
+        f"  [{str(payload['config']['status']).upper()}] {payload['config']['reason']}",
+        "",
+        "Database",
+        f"  [{str(database['status']).upper()}] {database['reason']}",
+        _schema_line(database),
+        f"  Writable persistence: {database['writable']}",
+        _integrity_line(database.get("integrity")),
+    ])
+    lines.extend(_backup_lines(database.get("backup")))
+    lines.extend([
+        "",
+        "Storage metrics",
+    ])
+    lines.extend(_render_capability_group(payload["metrics"]))
+    lines.extend(["", "Platform capabilities"])
+    lines.extend(_render_capability_group(payload["capabilities"]))
+    lines.extend(["", "Optional extras"])
+    lines.extend(_render_capability_group(payload["optional_extras"]))
+
+    cleanup_rules = payload["cleanup_rules"]
+    lines.extend([
+        "",
+        "Cleanup rule packs",
+        (
+            f"  Packs: {cleanup_rules['enabled_pack_count']} enabled / "
+            f"{cleanup_rules['pack_count']} loaded"
+        ),
+        f"  Active rules: {cleanup_rules['rule_count']}",
+    ])
+    for pack in cleanup_rules["packs"]:
+        state = "ON" if pack["enabled"] else "OFF"
+        lines.append(
+            f"  [{state}] {pack['name']} v{pack['version']} · "
+            f"{pack['rule_count']} rules · {pack['source']}"
+        )
+    for issue in cleanup_rules["issues"]:
+        lines.append(
+            f"  [INVALID] {issue['path']}: {issue['error']}"
+        )
+
+    cleanup_safety = payload["cleanup_safety"]
+    mutation = cleanup_safety["mutation"]
+    quarantine = cleanup_safety["quarantine_ledger"]
+    lines.extend([
+        "",
+        "Cleanup mutation safety",
+        f"  Dir-fd verification: {mutation['dir_fd_verification']}",
+        f"  Recoverable move: {mutation['recoverable_move']}",
+        f"  Permanent file: {mutation['permanent_file']}",
+        f"  Permanent directory: {mutation['permanent_directory']}",
+        f"  Quarantine ledgers: {quarantine['status']}",
+    ])
+    for item in quarantine["roots"]:
+        state = "OK" if item["ledger_matches"] else "MISMATCH"
+        lines.append(
+            f"  [{state}] {item['root']} · {item['manifest_items']} items · "
+            f"{item['manifest_bytes']} bytes"
+        )
+    for issue in quarantine["issues"]:
+        lines.append(f"  [CHECK] {issue}")
+
+    policy = payload["scan_policy"]
+    lines.extend([
+        "",
+        "Default scan policy",
+        f"  One filesystem: {policy['one_file_system']}",
+        f"  Exclude pseudo filesystems: {policy['exclude_pseudo_filesystems']}",
+        f"  Exclude snapshot directories: {policy['exclude_snapshot_dirs']}",
+        f"  Max depth: {policy['max_depth'] if policy['max_depth'] is not None else 'unlimited'}",
+        f"  Symlinks: {policy['symlinks']}",
+        f"  Hardlinks: {policy['hardlinks']}",
+    ])
+    return "\n".join(lines)
+
+
+def _terminal_report() -> dict[str, object]:
+    """Report which mechanism, if any, can measure this terminal's cell.
+
+    The sunburst is only round when something reports a pixel size, and the
+    number of terminals that report none is large enough — web shells, VS
+    Code, ConPTY, mosh, screen — that "why is my disc oval" needs an answer
+    a user can act on rather than a shrug. So each mechanism is listed
+    separately: knowing that 14t answered where 16t did not says which
+    terminal you are actually in, which a single resolved number cannot.
+
+    `is_tty` covers both halves of the terminal, because the probe needs to
+    write to one and read from the other; when it is false the XTWINOPS and
+    DECRQM answers are None — not-asked, which is not the same as asked-and-
+    refused. That is also the shape this takes in CI, where `doctor --json`
+    runs with stdout on a pipe.
+    """
+    from disktide.viz import cellgeom
+
+    try:
+        is_tty = bool(
+            sys.__stdin__ is not None
+            and sys.__stdin__.isatty()
+            and sys.__stdout__ is not None
+            and sys.__stdout__.isatty()
+        )
+    except Exception:
+        is_tty = False
+
+    winsize = cellgeom.terminal_winsize()
+    probe = cellgeom.probe_terminal_cell_size() if is_tty else None
+    aspect = cellgeom.resolve_cell_aspect()
+
+    if os.environ.get("TMUX"):
+        multiplexer = "tmux"
+    elif os.environ.get("STY"):
+        multiplexer = "screen"
+    else:
+        multiplexer = None
+
+    return {
+        "is_tty": is_tty,
+        "term": os.environ.get("TERM"),
+        "term_program": os.environ.get("TERM_PROGRAM"),
+        "multiplexer": multiplexer,
+        "ssh": bool(
+            os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION")
+        ),
+        "winsize": (
+            None
+            if winsize is None
+            else {
+                "rows": winsize[0],
+                "cols": winsize[1],
+                "xpixel": winsize[2],
+                "ypixel": winsize[3],
+            }
+        ),
+        "cell_aspect": {
+            "value": round(aspect.value, 4),
+            "source": aspect.source,
+            "cell_px": (
+                None
+                if aspect.cell_px is None
+                else [
+                    round(aspect.cell_px[0], 3),
+                    round(aspect.cell_px[1], 3),
+                ]
+            ),
+        },
+        "pixel_reports": {
+            "tiocgwinsz": bool(
+                winsize is not None and winsize[2] > 0 and winsize[3] > 0
+            ),
+            "xtwinops_16t": None if probe is None else probe.answered_16t,
+            "xtwinops_14t": None if probe is None else probe.answered_14t,
+            "in_band_resize_2048": (
+                None if probe is None else probe.supports_in_band_resize
+            ),
+        },
+    }
+
+
+def _colour_report(
+    config_depth: object = "auto",
+    *,
+    environ: dict[str, str] | None = None,
+    runner=None,
+) -> dict[str, object]:
+    """Why the chart is the colour it is, and what to change to fix it.
+
+    The whole diagnosis is here rather than split across the Terminal
+    block because it is one question with several possible answers, and
+    the wrong one is invisible: an app writing 256-colour SGRs into a
+    16-colour tmux client looks exactly like an app that chose those
+    colours. So the three variables Rich reads, the clients tmux is
+    actually feeding, and the layer that decided are all printed side by
+    side; the reader can then see which of them is the one that is wrong.
+
+    `environ` and `runner` are injected so the four environments this has
+    to describe -- OnDemand, Jupyter, a local 256-colour tmux, a truecolor
+    terminal -- can each be a test rather than a screenshot.
+    """
+    from disktide.viz import colordepth
+
+    env = os.environ if environ is None else environ
+    depth = colordepth.resolve_color_depth(
+        config_depth=config_depth, environ=env, runner=runner
+    )
+    clients = (
+        colordepth.tmux_clients(runner) if env.get("TMUX") else ()
+    )
+    return {
+        "term": env.get("TERM"),
+        "colorterm": env.get("COLORTERM"),
+        "textual_color_system": env.get(colordepth.TEXTUAL_ENV_VAR),
+        "multiplexer": (
+            "tmux" if env.get("TMUX")
+            else ("screen" if env.get("STY") else None)
+        ),
+        "config_color_depth": (
+            config_depth if isinstance(config_depth, str) else None
+        ),
+        "tmux_clients": [
+            {"termname": client.termname, "features": list(client.features)}
+            for client in clients
+        ],
+        "depth": depth.value,
+        "source": depth.source,
+        "detail": depth.detail,
+        "suggestion": _colour_suggestion(
+            depth, clients, in_tmux=bool(env.get("TMUX"))
+        ),
+    }
+
+
+def _colour_suggestion(depth, clients, *, in_tmux: bool = False) -> str | None:
+    """What to change, printed only where there is something to gain.
+
+    Silent when the depth was chosen by hand -- a user who exported
+    `DISKTIDE_COLOR_DEPTH` or set `[ui] color_depth` has already made this
+    decision and does not need it re-litigated on every run -- and silent
+    at truecolor, which is the ceiling.
+
+    Inside tmux the advice is never about `COLORTERM`. That variable is a
+    property of an environment rather than of a pane: it is whatever the
+    shell that started the server exported, it survives every detach, and
+    it says nothing about the client currently reading this session. The
+    resolver reads the client list first for exactly that reason, so the
+    only line that changes anything here is the `terminal-features` entry.
+    """
+    if depth.source in ("env", "config", "textual-env"):
+        return None
+    if depth.value == "truecolor":
+        return None
+    if depth.source == "tmux-client" and clients:
+        weakest = max(
+            clients,
+            key=lambda client: ("truecolor", "256", "16").index(client.depth),
+        )
+        name = weakest.termname or "xterm"
+        if depth.value == "16":
+            lacks, missing = "256-colour or RGB", "256,RGB"
+        else:
+            lacks, missing = "RGB", "RGB"
+        return (
+            f"the attached tmux client {name} reports no {lacks} support, "
+            "so tmux quantises everything this app writes. Add  "
+            f'set -as terminal-features ",{name}:{missing}"  to '
+            "~/.tmux.conf, then detach and reattach (or tmux kill-server); "
+            "or start tmux from a shell with TERM=xterm-256color; or tmux -2"
+        )
+    if in_tmux:
+        # Under tmux but without a client list: no server reachable, a
+        # query that timed out, or a session nothing is attached to. TERM
+        # here describes the pty tmux handed us and cannot be trusted, and
+        # COLORTERM would only be describing some other shell.
+        return (
+            "tmux could not say which clients are attached, so this is "
+            "TERM's guess about a pty rather than anything about your "
+            "terminal. Check  tmux list-clients -F "
+            "'#{client_termname} #{client_termfeatures}'  and, for a "
+            "client missing 256 or RGB, add  set -as terminal-features "
+            '",<termname>:256,RGB"  to ~/.tmux.conf'
+        )
+    if depth.value == "16":
+        return (
+            "export COLORTERM=truecolor in this shell — xterm.js web "
+            "shells (Open OnDemand, JupyterLab) and every modern terminal "
+            "accept RGB whatever their TERM says — or set "
+            "DISKTIDE_COLOR_DEPTH=truecolor / [ui] color_depth"
+        )
+    return (
+        "the app is running at 256 colours because nothing claims RGB: "
+        "export COLORTERM=truecolor in this shell (ssh does not forward "
+        "it) or set DISKTIDE_COLOR_DEPTH=truecolor"
+    )
+
+
+def _render_colour_block(colour: object) -> list[str]:
+    """Render the Colour block: what the terminal can paint, and who said so.
+
+    One line per kind of evidence, in the order a reader has to take them:
+    what the environment claims, what tmux is actually feeding, then the
+    answer and its provenance. The suggestion comes last and only when
+    there is colour left on the table.
+    """
+    if not isinstance(colour, dict):
+        return []
+
+    def _shown(value: object) -> str:
+        return "unset" if not value else str(value)
+
+    identity = [
+        f"TERM: {_shown(colour.get('term'))}",
+        f"COLORTERM: {_shown(colour.get('colorterm'))}",
+        f"TEXTUAL_COLOR_SYSTEM: {_shown(colour.get('textual_color_system'))}",
+    ]
+    if colour.get("multiplexer"):
+        identity.append(f"multiplexer: {colour['multiplexer']}")
+    lines = ["Colour", "  " + " · ".join(identity)]
+
+    clients = colour.get("tmux_clients")
+    if isinstance(clients, list) and clients:
+        for index, client in enumerate(clients):
+            features = ",".join(client.get("features") or []) or "none"
+            label = "  tmux clients: " if index == 0 else "                "
+            lines.append(f"{label}{client.get('termname') or 'unknown'}: {features}")
+    elif colour.get("multiplexer") == "tmux":
+        lines.append("  tmux clients: none attached (tmux could not be asked)")
+
+    detail = colour.get("detail")
+    depth_line = f"  Depth: {colour.get('depth')} ({colour.get('source')}"
+    depth_line += f": {detail})" if detail else ")"
+    lines.append(depth_line)
+    suggestion = colour.get("suggestion")
+    if suggestion:
+        lines.append(f"  Suggestion: {suggestion}")
+    return lines
+
+
+def _clipboard_report(
+    environ: dict[str, str] | None = None,
+    *,
+    runner=None,
+    which: Callable[[str], str | None] = shutil.which,
+    platform: str = sys.platform,
+) -> dict[str, object]:
+    """Where `y` sends a path, and which of those routes can prove it.
+
+    The same shape of problem as the colour block, and the same reason for
+    printing all the evidence rather than a verdict: a copy that went
+    nowhere looks exactly like a copy that worked. Under tmux it usually
+    *had* gone nowhere -- `input_osc_52` discards an application's OSC 52
+    unless `set-clipboard` is `on`, and the default is `external` -- and
+    the only way a user could find that out was to try pasting.
+
+    So the block names the multiplexer and its version, the
+    `set-clipboard` value, what clipboard tools are installed, and every
+    route with whether it has an exit status behind it. Injected the same
+    way `_colour_report` is, so tmux 2.7, tmux 3.2a, a browser terminal
+    and a desktop with `xclip` are each a test rather than a screenshot.
+    """
+    from disktide.clipboard import plan_clipboard
+
+    plan = plan_clipboard(
+        os.environ if environ is None else environ,
+        runner=runner,
+        which=which,
+        platform=platform,
+    )
+    env = os.environ if environ is None else environ
+    version = plan.tmux_version
+    return {
+        "multiplexer": plan.multiplexer,
+        "tmux_version": plan.tmux_release or (
+            None if version is None else f"{version[0]}.{version[1]}"
+        ),
+        "tmux_set_clipboard": plan.tmux_set_clipboard,
+        "ssh": bool(env.get("SSH_TTY") or env.get("SSH_CONNECTION")),
+        "display": env.get("WAYLAND_DISPLAY") or env.get("DISPLAY") or None,
+        "tools": dict(plan.tools),
+        "routes": [
+            {
+                "name": route.name,
+                "confirmable": route.confirmable,
+                "detail": route.detail,
+            }
+            for route in plan.routes
+        ],
+        "suggestion": plan.suggestion,
+    }
+
+
+def _render_clipboard_block(clipboard: object) -> list[str]:
+    """Render the Clipboard block: where `y` goes and what can be proven.
+
+    Environment first, then one line per route saying whether an exit
+    status stands behind it, then the tools, then the advice. The last
+    line is unconditional: every route in this list can fail silently
+    except the ones with a status, so the reader always needs to know
+    that `Y` will put the path on screen instead.
+    """
+    if not isinstance(clipboard, dict):
+        return []
+
+    environment: list[str] = []
+    multiplexer = clipboard.get("multiplexer")
+    if multiplexer == "tmux":
+        version = clipboard.get("tmux_version") or "version unknown"
+        setting = clipboard.get("tmux_set_clipboard") or "unknown"
+        environment.append(f"tmux {version} · set-clipboard {setting}")
+    elif multiplexer:
+        environment.append(str(multiplexer))
+    else:
+        environment.append("no multiplexer")
+    environment.append(f"ssh: {'yes' if clipboard.get('ssh') else 'no'}")
+    environment.append(f"display: {clipboard.get('display') or 'none'}")
+    lines = ["Clipboard", "  " + " · ".join(environment)]
+
+    routes = clipboard.get("routes")
+    if isinstance(routes, list) and routes:
+        for index, route in enumerate(routes):
+            proof = (
+                "verified by exit status"
+                if route.get("confirmable")
+                else "cannot be verified"
+            )
+            label = "  y: " if index == 0 else "     "
+            lines.append(f"{label}{route.get('detail')} ({proof})")
+    else:
+        lines.append("  y: no route available")
+
+    tools = clipboard.get("tools")
+    if isinstance(tools, dict):
+        present = sorted(name for name, found in tools.items() if found)
+        lines.append(f"  Tools: {', '.join(present) if present else 'none installed'}")
+
+    suggestion = clipboard.get("suggestion")
+    if suggestion:
+        lines.append(f"  Suggestion: {suggestion}")
+    lines.append(
+        "  Y in the explorer shows the path with mouse reporting off, "
+        "for hand selection."
+    )
+    return lines
+
+
+def _cleanup_safety_report(
+    database: Database | None,
+    *,
+    show_paths: bool,
+) -> dict[str, object]:
+    capabilities = mutation_capabilities().to_dict()
+    roots: set[Path] = set()
+    issues: list[str] = []
+    try:
+        if database is None:
+            raise RuntimeError("the database could not be opened")
+        list_roots = getattr(database, "list_quarantine_roots", None)
+        if callable(list_roots):
+            roots.update(Path(item) for item in list_roots(limit=1000))
+    except Exception as exc:
+        issues.append(
+            _redact_text(
+                f"quarantine discovery unavailable: {type(exc).__name__}: {exc}",
+                show_paths,
+            )
+        )
+    finally:
+        if database is not None:
+            try:
+                database.close()
+            except Exception:
+                pass
+
+    statuses: list[dict[str, object]] = []
+    executor = QuarantineExecutor()
+    for root in sorted(roots):
+        try:
+            payload = executor.audit(root).to_dict()
+            payload["root"] = _redact_text(str(root), show_paths)
+            payload["issues"] = [
+                _redact_text(str(issue), show_paths)
+                for issue in payload["issues"]
+            ]
+            statuses.append(payload)
+        except Exception as exc:
+            issues.append(
+                _redact_text(
+                    f"{root}: {type(exc).__name__}: {exc}",
+                    show_paths,
+                )
+            )
+    state = "ok"
+    if issues:
+        state = "degraded"
+    if any(not bool(item["ledger_matches"]) for item in statuses):
+        state = "mismatch"
+    return {
+        "mutation": capabilities,
+        "quarantine_ledger": {
+            "status": state,
+            "root_count": len(statuses),
+            "roots": statuses,
+            "issues": issues,
+            "rebuild_command": "disktide cleanup quarantine rebuild ROOT",
+        },
+    }
+
+
+def _render_terminal_block(terminal: object) -> list[str]:
+    """Render the Terminal block: which mechanism gives a round disc.
+
+    Written to be readable in one glance, because the question it answers
+    is asked in exactly one mood — "why is my sunburst an ellipse". The
+    suggestion is printed only when nothing measured the cell, since that
+    is the only case where the user has to do anything.
+    """
+    if not isinstance(terminal, dict):
+        return []
+    aspect = terminal.get("cell_aspect") or {}
+    reports = terminal.get("pixel_reports") or {}
+    winsize = terminal.get("winsize")
+
+    identity = [f"TERM: {terminal.get('term') or 'unset'}"]
+    if terminal.get("term_program"):
+        identity.append(f"program: {terminal['term_program']}")
+    if terminal.get("multiplexer"):
+        identity.append(f"multiplexer: {terminal['multiplexer']}")
+    identity.append(f"ssh: {'yes' if terminal.get('ssh') else 'no'}")
+    identity.append(f"tty: {'yes' if terminal.get('is_tty') else 'no'}")
+
+    lines = ["Terminal", "  " + " · ".join(identity)]
+
+    if isinstance(winsize, dict):
+        size = f"  Size: {winsize['cols']}x{winsize['rows']} cells"
+        if winsize["xpixel"] > 0 and winsize["ypixel"] > 0:
+            size += f", {winsize['xpixel']}x{winsize['ypixel']} px"
+        lines.append(size)
+
+    source = str(aspect.get("source", "default"))
+    measured_labels = {
+        "ioctl": "TIOCGWINSZ",
+        "in-band": "in-band resize",
+        "xtwinops": "XTWINOPS",
+    }
+    value = float(aspect.get("value", 2.0))
+    if source in measured_labels:
+        detail = f"measured: {measured_labels[source]}"
+        cell = aspect.get("cell_px")
+        if isinstance(cell, list) and len(cell) == 2:
+            detail += f", {_px(cell[0])}x{_px(cell[1])} px cell"
+    elif source == "env":
+        detail = "set: DISKTIDE_CELL_ASPECT"
+    elif source == "config":
+        detail = "set: [ui] cell_aspect"
+    else:
+        detail = "assumed; nothing measured it"
+    lines.append(f"  Cell aspect: {value:.2f} ({detail})")
+
+    def _flag(value: object) -> str:
+        if value is None:
+            return "not asked"
+        return "yes" if value else "no"
+
+    lines.append(
+        "  Pixel size reports: "
+        f"TIOCGWINSZ {_flag(reports.get('tiocgwinsz'))} · "
+        f"XTWINOPS 16t {_flag(reports.get('xtwinops_16t'))} · "
+        f"14t {_flag(reports.get('xtwinops_14t'))} · "
+        f"in-band resize (2048) {_flag(reports.get('in_band_resize_2048'))}"
+    )
+    if source not in measured_labels and source not in ("env", "config"):
+        lines.append(
+            "  Suggestion: set Settings (,) > Cell aspect, or use the "
+            "command palette (^p) entries \"Cell aspect: rounder/taller\", "
+            "or export DISKTIDE_CELL_ASPECT"
+        )
+    return lines
+
+
+def _px(value: object) -> str:
+    """A pixel measurement, without a decimal point it has not earned.
+
+    16t answers in whole pixels; a cell derived from 14t over the grid
+    rarely does, and rounding that to an int would claim a precision the
+    terminal never gave.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "?"
+    if abs(number - round(number)) < 0.05:
+        return str(int(round(number)))
+    return f"{number:.1f}"
+
+
+def _render_capability_group(items: object) -> list[str]:
+    if not isinstance(items, dict):
+        return []
+    lines: list[str] = []
+    labels = {
+        "logical": "Logical",
+        "allocated": "Allocated",
+        "unique": "Unique",
+        "files": "Files",
+        "mount_enumeration": "Mount enumeration",
+        "block_devices": "Block devices",
+        "storage_medium": "Storage medium",
+        "trash": "Trash/quarantine",
+        "filesystem_events": "Filesystem events",
+        "watch": "Watch",
+        "remote": "Remote",
+        "web": "Web",
+        "export": "Export",
+    }
+    for key, value in items.items():
+        if not isinstance(value, dict):
+            continue
+        status = str(value.get("status", "unavailable"))
+        marker = {
+            "available": "OK",
+            "degraded": "WARN",
+            "unavailable": "NO",
+        }.get(status, "NO")
+        label = labels.get(key, key.replace("_", " ").title())
+        lines.append(f"  [{marker}] {label}: {value.get('reason', '')}")
+        version_value = value.get("version")
+        if version_value:
+            lines.append(f"       Backend version: {version_value}")
+        configured_mode = value.get("configured_mode")
+        if configured_mode:
+            lines.append(f"       Configured mode: {configured_mode}")
+        suggestion = value.get("suggestion")
+        if suggestion:
+            lines.append(f"       Suggestion: {suggestion}")
+    return lines
+
+
+#: What `schema_version` says relative to `expected_schema_version`. The two
+#: were printed next to each other and never compared, so a database written
+#: by a newer disktide -- the case that cannot be fixed by anything local --
+#: read as an unremarkable pair of numbers.
+SCHEMA_CURRENT = "current"
+SCHEMA_MIGRATION_PENDING = "migration-pending"
+SCHEMA_NEWER = "newer-than-this-build"
+SCHEMA_UNKNOWN = "unknown"
+
+
+def _schema_state(schema_version: int | None) -> str:
+    if schema_version is None:
+        return SCHEMA_UNKNOWN
+    if schema_version > CURRENT_VERSION:
+        return SCHEMA_NEWER
+    if schema_version < CURRENT_VERSION:
+        return SCHEMA_MIGRATION_PENDING
+    return SCHEMA_CURRENT
+
+
+def _mib(size: int) -> str:
+    return f"{size / (1024 * 1024):,.0f} MiB"
+
+
+def _integrity_report(
+    database: Database, *, check_integrity: bool
+) -> dict[str, object]:
+    """Run `PRAGMA quick_check`, or say why it was not run.
+
+    It used to run on every `Database._open()` -- every subcommand and every
+    TUI launch -- where it was invisible and unbounded in the size of the
+    file. Here it is a step with a name and a duration, and above
+    `INTEGRITY_SIZE_LIMIT` it is the user's decision (`--check-integrity`)
+    rather than the default cost of asking a diagnostic question.
+    """
+    import time
+
+    path = Path(database.path)
+    size = path.stat().st_size if path.exists() else None
+    report: dict[str, object] = {
+        "status": "skipped",
+        "detail": "",
+        "duration_seconds": None,
+        "database_bytes": size,
+        "threshold_bytes": INTEGRITY_SIZE_LIMIT,
+        "forced": check_integrity,
+    }
+    if size is None:
+        report["status"] = "unavailable"
+        report["detail"] = "no database file on disk"
+        return report
+    if database.degraded and not getattr(database, "read_only", False):
+        # The connection is the in-memory fallback, created fresh a moment
+        # ago. Checking it would report `ok` about a database that is not the
+        # file the user is asking about.
+        report["status"] = "unavailable"
+        report["detail"] = "running on the in-memory fallback, not this file"
+        return report
+    if not check_integrity and size > INTEGRITY_SIZE_LIMIT:
+        report["detail"] = (
+            f"database is {_mib(size)}; run doctor --check-integrity"
+        )
+        return report
+    started = time.perf_counter()
+    try:
+        row = database.conn.execute("PRAGMA quick_check").fetchone()
+    except Exception as exc:
+        report["status"] = "unavailable"
+        report["detail"] = f"{type(exc).__name__}: {exc}"
+        return report
+    report["duration_seconds"] = round(time.perf_counter() - started, 3)
+    verdict = "ok" if row is None else str(row[0])
+    report["status"] = "ok" if verdict == "ok" else "failed"
+    report["detail"] = "" if verdict == "ok" else verdict
+    return report
+
+
+def _backup_report(database_path: Path, *, show_paths: bool) -> dict[str, object]:
+    """Name the pre-migration copy, because it is the size of the database.
+
+    Migrating the 729 MiB legacy store took its data directory to 1.5 GB, and
+    nothing told the user the second file was theirs to delete.
+    """
+    backup_path = migration_backup_path(database_path)
+    try:
+        size = backup_path.stat().st_size
+    except OSError:
+        return {"present": False, "path": None, "bytes": None}
+    return {
+        "present": True,
+        "path": _redact_path(backup_path, show_paths),
+        "bytes": size,
+    }
+
+
+def _open_report_database(
+    database_factory: Callable[[], Database],
+) -> tuple[Database | None, Exception | None]:
+    """Open the database once, for every section of the report that wants it."""
+    try:
+        database = database_factory()
+        database.connect()
+    except Exception as exc:
+        return None, exc
+    return database, None
+
+
+def _database_report(
+    database: Database | None,
+    open_error: Exception | None = None,
+    *,
+    show_paths: bool,
+    check_integrity: bool = False,
+) -> dict[str, object]:
+    try:
+        if database is None:
+            raise open_error or RuntimeError("the database could not be opened")
+        schema_version = get_version(database.conn)
+        read_only = bool(getattr(database, "read_only", False))
+        if read_only:
+            status = "read-only"
+            reason = (
+                database.degraded_reason
+                or "persistent SQLite database is available read-only"
+            )
+            writable = False
+        elif database.degraded:
+            status = "degraded"
+            reason = database.degraded_reason or "using an in-memory database"
+            writable = False
+        else:
+            status = "available"
+            reason = "persistent SQLite database is writable"
+            writable = True
+        path = _redact_path(Path(database.path), show_paths)
+        return {
+            "status": status,
+            "reason": _redact_text(reason, show_paths),
+            "path": path,
+            "integrity": _integrity_report(
+                database, check_integrity=check_integrity
+            ),
+            "backup": _backup_report(Path(database.path), show_paths=show_paths),
+            "schema_version": schema_version,
+            "expected_schema_version": CURRENT_VERSION,
+            "schema_state": _schema_state(schema_version),
+            # Which schema the number describes. The degraded, not-read-only
+            # state is the in-memory fallback, whose schema is always current
+            # and says nothing at all about the file on disk -- `Schema: 10 /
+            # 10` printed next to "database disk image is malformed" read as
+            # a contradiction.
+            "schema_source": (
+                "in-memory fallback"
+                if database.degraded and not read_only
+                else "database"
+            ),
+            "writable": writable,
+            "degraded": database.degraded,
+            "read_only": read_only,
+            "recovery_hint": _redact_text(
+                getattr(database, "recovery_hint", None) or "",
+                show_paths,
+            ) or None,
+        }
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "reason": _redact_text(
+                f"database probe failed: {type(exc).__name__}: {exc}",
+                show_paths,
+            ),
+            "path": _application_paths(show_paths)["database"],
+            "integrity": {
+                "status": "unavailable",
+                "detail": "the database could not be opened",
+                "duration_seconds": None,
+                "database_bytes": None,
+                "threshold_bytes": INTEGRITY_SIZE_LIMIT,
+                "forced": check_integrity,
+            },
+            "backup": {"present": False, "path": None, "bytes": None},
+            "schema_version": None,
+            "expected_schema_version": CURRENT_VERSION,
+            "schema_state": _schema_state(None),
+            "writable": False,
+            "degraded": True,
+            "read_only": False,
+            "recovery_hint": None,
+            "schema_source": "unavailable",
+        }
+
+
+def _schema_line(database: dict[str, object]) -> str:
+    """The schema numbers, and where they came from when that is not the file."""
+    line = (
+        f"  Schema: {database['schema_version']} / "
+        f"{database['expected_schema_version']}"
+    )
+    if database.get("schema_state") == SCHEMA_NEWER:
+        return f"{line} (newer than this build)"
+    source = database.get("schema_source")
+    if source not in (None, "database"):
+        return f"{line} ({source})"
+    return line
+
+
+def _integrity_line(integrity: object) -> str:
+    """One line for the whole-file check, including why it did not run."""
+    if not isinstance(integrity, dict):
+        return "  Integrity: unavailable"
+    status = integrity.get("status")
+    detail = str(integrity.get("detail") or "")
+    if status == "ok":
+        seconds = integrity.get("duration_seconds")
+        elapsed = f"{seconds:.1f} s" if isinstance(seconds, (int, float)) else "?"
+        return f"  Integrity: ok ({elapsed})"
+    if status == "failed":
+        return f"  Integrity: FAILED: {detail}"
+    if status == "skipped":
+        return f"  Integrity: skipped ({detail})"
+    return f"  Integrity: unavailable ({detail or 'no reason given'})"
+
+
+def _backup_lines(backup: object) -> list[str]:
+    """Name an existing pre-migration backup, and say it can go."""
+    if not isinstance(backup, dict) or not backup.get("present"):
+        return []
+    size = backup.get("bytes")
+    measured = _mib(size) if isinstance(size, int) else "unknown size"
+    return [
+        f"  Migration backup: {backup.get('path')} ({measured})",
+        "    Safe to delete once this version has been used successfully.",
+    ]
+
+
+def _cpu_quota_text(quota: object) -> str:
+    """What the control group allows, in the units `--cpus` uses."""
+    if not isinstance(quota, (int, float)):
+        return "cgroup cpu quota: none"
+    return f"cgroup cpu quota: {float(quota):.1f} CPUs"
+
+
+def _memory_line(memory: object) -> str:
+    """One line of memory, naming the cgroup limit when one applies.
+
+    /proc/meminfo is host-wide inside a container, so without the limit this
+    line would tell a 512 MB process about a 256 GB machine.
+    """
+    if not isinstance(memory, dict):
+        return "  Memory: unavailable"
+    total = memory.get("total_mb")
+    available = memory.get("available_mb")
+    if not isinstance(total, int) or not isinstance(available, int):
+        return f"  Memory: unavailable ({memory.get('reason', 'no reason given')})"
+    line = f"  Memory: {available} MB available of {total} MB"
+    limit = memory.get("cgroup_limit_mb")
+    if isinstance(limit, int):
+        line = f"{line} (cgroup limit: {limit} MB)"
+    return line
+
+
+def _scanner_line(scanner: object) -> str:
+    """Which directory reader a scan on this machine will use.
+
+    The distinction the line has to carry is between "there is no extension
+    here" and "there is one and something switched it off", because the
+    answers are different: install a wheel for this platform, or unset
+    `DISKTIDE_ACCEL`.
+    """
+    if not isinstance(scanner, dict):
+        return "  Scanner: unknown"
+    backend = scanner.get("backend")
+    if backend == "native":
+        return "  Scanner: native (_scanfast)"
+    return f"  Scanner: python fallback ({scanner.get('reason', 'no reason given')})"
+
+
+def _safe_cpu_quota() -> float | None:
+    try:
+        return detect_cpu_quota()
+    except Exception:
+        return None
+
+
+def _safe_memory_probe(adapter: PlatformAdapter):
+    try:
+        return adapter.memory_info()
+    except Exception as exc:
+        from disktide.collectors.platform.models import ProbeResult
+
+        return ProbeResult.unavailable(
+            f"memory probe failed: {type(exc).__name__}: {exc}"
+        )
+
+
+def _optional_extras(configured_mode: str) -> dict[str, object]:
+    from disktide.collectors.events.native import probe_native_event_backend
+
+    watch = probe_native_event_backend().to_dict()
+    watch.update(
+        {
+            "extra": "watch",
+            "configured_mode": configured_mode,
+            "install": "uv tool install 'disktide[watch]'",
+        }
+    )
+    reason = "not shipped by the core installation"
+    suggestion = "No action required; this integration is reserved for a later wave."
+    reserved = {
+        name: {
+            "status": "unavailable",
+            "available": False,
+            "supported": False,
+            "reason": reason,
+            "suggestion": suggestion,
+        }
+        for name in ("remote", "web", "export")
+    }
+    return {"watch": watch, **reserved}
+
+
+def _distribution_version(distribution: str) -> str:
+    try:
+        return version(distribution)
+    except PackageNotFoundError:
+        return "unavailable"
+
+
+def _actual_config_path() -> Path:
+    return config_file()
+
+
+def _application_paths(show_paths: bool) -> dict[str, object]:
+    return {
+        "config": _redact_path(config_file(), show_paths),
+        "database": _redact_path(data_root() / "data.db", show_paths),
+        "redacted": not show_paths,
+    }
+
+
+def _redact_path(path: Path, show_paths: bool) -> str:
+    expanded = path.expanduser()
+    if show_paths:
+        return str(expanded)
+    home = Path.home()
+    try:
+        return str(Path("~") / expanded.relative_to(home))
+    except ValueError:
+        pass
+    roots = {
+        "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME"),
+        "XDG_DATA_HOME": os.environ.get("XDG_DATA_HOME"),
+        "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME"),
+        "XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME"),
+    }
+    for variable, raw_root in roots.items():
+        if not raw_root:
+            continue
+        try:
+            relative = expanded.relative_to(Path(raw_root).expanduser())
+        except ValueError:
+            continue
+        return str(Path(f"${variable}") / relative)
+    return f"<redacted>/{expanded.name}"
+
+
+def _redact_text(value: str, show_paths: bool) -> str:
+    if show_paths:
+        return value
+    replacements = [str(Path.home())]
+    replacements.extend(
+        raw
+        for raw in (
+            os.environ.get("XDG_CONFIG_HOME"),
+            os.environ.get("XDG_DATA_HOME"),
+            os.environ.get("XDG_CACHE_HOME"),
+            os.environ.get("XDG_STATE_HOME"),
+        )
+        if raw
+    )
+    redacted = value
+    for root in replacements:
+        redacted = redacted.replace(root, "<redacted>")
+    # Two guards, both learned from `<redacted><redacted> SchemaTooNewError`.
+    # The first: whatever follows a root that has *already* been replaced is
+    # the part worth keeping (`<redacted>/disktide/data.db` says which file),
+    # and running the sweep over it redacted it a second time. The second:
+    # `[^\s,;]+` ran to the next space, so the colon separating a path from
+    # the message that follows it was swallowed along with the path.
+    return re.sub(
+        r"(?<!<redacted>)(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|/)[^\s,;:]+",
+        "<redacted>",
+        redacted,
+    )

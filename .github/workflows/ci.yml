@@ -1,0 +1,231 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "dev/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The single primary signal.
+  #
+  # Every other job that runs this same suite waits on this one. The suite
+  # is identical across the version matrix, so a test that is sensitive to
+  # the *environment* rather than to the Python version used to fail in
+  # all five matrix jobs at once, plus the watch and pre-release jobs --
+  # seven red boxes describing one broken test, and no hint in any of them
+  # about which kind of problem it was. Gating costs a couple of minutes
+  # on a green run and saves six job-runs on every red one.
+  test:
+    name: Python 3.13
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python 3.13
+      - name: Run test suite
+        # The suite is about half wait -- app boot and scan handoffs -- so
+        # one worker per core roughly halves it on the two-core runners.
+        run: .venv/bin/python -m pytest -q -n auto
+
+  # Runs the suite against a host deliberately shaped unlike a developer's.
+  #
+  # Three of the four divergences that have turned this board red were a
+  # test reading the host rather than reading disktide: the order the
+  # filesystem returns directory entries in, a mount whose rotational bit
+  # sysfs cannot answer for, and the core count -- which is an input to
+  # the `live_scan_render` auto-gate, so it changes what the explorer
+  # *does*, not just how fast it does it. `tests/hostshape.py` models each
+  # one deterministically, which is what lets a developer reproduce this
+  # job in seconds instead of by pushing. Keeping it in CI is what keeps
+  # the models honest.
+  host-shapes:
+    name: Host shapes (readdir, medium, cores)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python 3.13
+      - name: Run test suite against a differently shaped host
+        env:
+          DISKTIDE_HOST_SHAPE: readdir,medium,cores
+        run: .venv/bin/python -m pytest -q -n auto
+
+  test-matrix:
+    name: Python ${{ matrix.python-version }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13 is the canary above and is not repeated here.
+        python-version: ["3.10", "3.11", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python "${{ matrix.python-version }}"
+      - name: Run test suite
+        run: .venv/bin/python -m pytest -q -n auto
+
+  test-prerelease:
+    # Informational only: 3.15 is still a beta, so a break here is a heads-up
+    # about upstream churn rather than a reason to block the merge. 3.15 is
+    # deliberately absent from the pyproject classifiers until it ships.
+    name: Python 3.15 pre-release (informational)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.15"
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python 3.15
+      - name: Run test suite
+        run: .venv/bin/python -m pytest -q -n auto
+
+  watch-test:
+    name: Python 3.13 with watch extra
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync locked watch environment
+        run: uv sync --locked --python 3.13 --extra watch
+      - name: Run full suite with watch extra
+        run: .venv/bin/python -m pytest -q -n auto
+
+  # Deliberately not gated on `test`: it runs no pytest at all, so it is
+  # the one job whose colour carries information independent of the suite.
+  # It stayed green through the run that turned every other job red.
+  minimal-distribution:
+    name: Minimal wheel and sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.24"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync locked development environment
+        run: uv sync --locked --python 3.13
+      - name: Build and inspect distributions
+        run: |
+          uv build
+          .venv/bin/python tool/verify_distribution.py
+      - name: Install wheel into a clean environment
+        run: |
+          uv venv --python 3.13 .venv-smoke
+          uv pip install --python .venv-smoke/bin/python dist/disktide-*.whl
+          uv venv --python 3.13 .venv-watch-smoke
+          wheel=$(echo dist/disktide-*.whl)
+          uv pip install --python .venv-watch-smoke/bin/python \
+            "disktide[watch] @ file://${PWD}/${wheel}"
+          uv venv --python 3.13 .venv-sdist-smoke
+          uv pip install --python .venv-sdist-smoke/bin/python dist/disktide-*.tar.gz
+      - name: Smoke test installed entry points
+        run: |
+          .venv-smoke/bin/disktide --version
+          .venv-smoke/bin/sizetrail --version
+          .venv-smoke/bin/fsmonitor --version
+          .venv-smoke/bin/fsmonitor-cli --version
+          .venv-smoke/bin/disktide doctor --json > doctor.json
+          .venv-smoke/bin/python -c 'import json; data=json.load(open("doctor.json")); assert not data["optional_extras"]["watch"]["available"]'
+          mkdir -p /tmp/disktide-smoke/data
+          printf 'smoke' > /tmp/disktide-smoke/data/file.txt
+          .venv-smoke/bin/disktide scan /tmp/disktide-smoke --metric unique --workers 1
+          .venv-smoke/bin/disktide watch /tmp/disktide-smoke --periodic-only --interval 1h --max-time 1s
+          .venv-watch-smoke/bin/disktide doctor --json > doctor-watch.json
+          .venv-watch-smoke/bin/python -c 'import json; data=json.load(open("doctor-watch.json")); assert data["optional_extras"]["watch"]["available"]'
+          .venv-watch-smoke/bin/disktide watch /tmp/disktide-smoke --events --interval 1h --max-time 1s
+          .venv-sdist-smoke/bin/disktide --version
+          .venv-sdist-smoke/bin/sizetrail --version
+          .venv-sdist-smoke/bin/fsmonitor --version
+          .venv-sdist-smoke/bin/fsmonitor-cli --version
+          .venv-sdist-smoke/bin/disktide doctor --json > doctor-sdist.json
+          .venv-sdist-smoke/bin/python -c 'import json; json.load(open("doctor-sdist.json"))'
+      - name: Check which scanner backend each install reports
+        run: |
+          # The wheel this runner built carries the optional C extension
+          # because ubuntu-latest has a compiler; so does the sdist install.
+          .venv/bin/python tool/check_doctor_backend.py native doctor.json doctor-sdist.json
+          # The path a platform with no wheel and no compiler takes. It has
+          # to install, and it has to say so rather than fail.
+          uv venv --python 3.13 .venv-fallback-smoke
+          CC=/bin/false uv pip install --no-cache \
+            --python .venv-fallback-smoke/bin/python dist/disktide-*.tar.gz
+          .venv-fallback-smoke/bin/disktide doctor --json > doctor-fallback.json
+          .venv/bin/python tool/check_doctor_backend.py python doctor-fallback.json
+          .venv-fallback-smoke/bin/disktide scan /tmp/disktide-smoke --workers 1
+          # And the escape hatch, on an install that does have the extension.
+          DISKTIDE_ACCEL=0 .venv-smoke/bin/disktide doctor --json > doctor-forced.json
+          .venv/bin/python tool/check_doctor_backend.py python doctor-forced.json
+      - name: Enforce core dependency budget
+        run: .venv-smoke/bin/python tool/check_dependency_budget.py
+
+  # The release wheel matrix, reduced to one target, so a tag is not the first
+  # time `pypa/cibuildwheel` runs against this project. Same pinned action and
+  # same `CIBW_TEST_COMMAND` as `release.yml`, so a build hook that stopped
+  # producing the extension fails here instead of publishing a platform wheel
+  # with nothing platform-specific in it.
+  #
+  # What it does not cover: the aarch64 legs (QEMU), musllinux, macOS, and
+  # every interpreter but 3.13. Those are still first exercised by the tag.
+  #
+  # Not gated on `test`: it runs no pytest, so its colour says something the
+  # suite's does not.
+  wheels-smoke:
+    name: Release wheel build (cp313 manylinux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build one release wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074 # v4.2.0
+        env:
+          CIBW_BUILD: "cp313-manylinux_x86_64"
+          CIBW_ARCHS: "x86_64"
+          CIBW_BUILD_VERBOSITY: "1"
+          CIBW_TEST_COMMAND: >-
+            python -c "from disktide.scanner.accel import ACCEL_BACKEND;
+            assert ACCEL_BACKEND == 'native', ACCEL_BACKEND;
+            print('scanner backend:', ACCEL_BACKEND)"
+      - name: Show what came out
+        run: ls -l wheelhouse

@@ -1,7 +1,7 @@
 """Tests for cleanup patterns and rules."""
 
 import pytest
-from fs_monitor.models.patterns import CleanupRule, CleanupTarget, RiskLevel
+from disktide.models.patterns import CleanupRule, CleanupTarget, RiskLevel
 
 
 class TestCleanupRule:

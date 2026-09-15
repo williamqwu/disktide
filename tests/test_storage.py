@@ -5,9 +5,9 @@ import tempfile
 from datetime import datetime, timedelta
 
 import pytest
-from fs_monitor.models.tree import FSNode
-from fs_monitor.models.snapshot import Snapshot
-from fs_monitor.storage.database import Database, _BASELINE_INTERVAL
+from disktide.models.tree import FSNode
+from disktide.models.snapshot import Snapshot
+from disktide.storage.database import Database, _BASELINE_INTERVAL
 
 
 @pytest.fixture
@@ -107,7 +107,10 @@ class TestDatabase:
         assert loaded is not None
         assert loaded.name == "root"
         assert loaded.size == 1000
-        assert len(loaded.children) == 1  # only directories are stored
+        assert {child.name for child in loaded.children} == {
+            "child",
+            "file.txt",
+        }
 
     def test_load_tree_delta_snapshot(self, db):
         """load_tree should work for delta snapshots too."""
@@ -305,9 +308,9 @@ class TestDatabase:
         snap2 = Snapshot(root_path="/test/root", total_size=1000)
         db.save_snapshot(snap2, root)
 
-        # Only 2 unique dir paths (root + child), regardless of snapshots
+        # Root, child directory, and file paths are interned once.
         count = db.conn.execute("SELECT COUNT(*) FROM paths").fetchone()[0]
-        assert count == 2
+        assert count == 3
 
     def test_delta_stores_only_changes(self, db):
         """Delta snapshot should only store rows for changed directories."""
@@ -358,6 +361,116 @@ class TestDatabase:
         promoted = db.get_snapshot(id2)
         assert promoted.is_baseline is True
         assert promoted.baseline_id is None
+
+    def _chain_tree(self, a_size, b_size=None):
+        root_size = a_size + (b_size or 0)
+        root = FSNode(
+            name="r", path="/r", size=root_size, own_size=0,
+            file_count=1 if b_size is None else 2, dir_count=0,
+            is_dir=True, depth=0,
+        )
+        children = [
+            FSNode(
+                name="a", path="/r/a", size=a_size, own_size=a_size,
+                file_count=1, is_dir=False, depth=1,
+            )
+        ]
+        if b_size is not None:
+            children.append(
+                FSNode(
+                    name="b", path="/r/b", size=b_size, own_size=b_size,
+                    file_count=1, is_dir=False, depth=1,
+                )
+            )
+        root.children = children
+        return root
+
+    def test_deleting_a_mid_chain_delta_keeps_later_snapshots_intact(self, db):
+        """A pruned mid-chain delta must not rewrite its successors."""
+        id1 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=1), self._chain_tree(1)
+        )
+        id2 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=2), self._chain_tree(2)
+        )
+        id3 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=7), self._chain_tree(2, 5)
+        )
+        assert db.get_snapshot(id1).is_baseline is True
+        assert db.get_snapshot(id2).is_baseline is False
+        assert db.get_snapshot(id3).is_baseline is False
+
+        before = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id3).items()
+        }
+        assert before == {"/r": 7, "/r/a": 2, "/r/b": 5}
+
+        db.delete_snapshot(id2)
+
+        after = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id3).items()
+        }
+        assert after == before
+        tree = db.load_tree(id3)
+        assert {child.name: child.size for child in tree.children} == {
+            "a": 2, "b": 5,
+        }
+
+    def test_deleting_two_mid_chain_deltas_keeps_the_survivor_intact(self, db):
+        """Consecutive prunes must each fold their rows forward."""
+        db.save_snapshot(
+            Snapshot(root_path="/r", total_size=1), self._chain_tree(1)
+        )
+        id2 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=2), self._chain_tree(2)
+        )
+        id3 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=3), self._chain_tree(3)
+        )
+        id4 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=8), self._chain_tree(3, 5)
+        )
+        before = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id4).items()
+        }
+        assert before == {"/r": 8, "/r/a": 3, "/r/b": 5}
+
+        db.delete_snapshot(id2)
+        db.delete_snapshot(id3)
+
+        after = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id4).items()
+        }
+        assert after == before
+
+    def test_deleting_a_delta_that_removed_a_path_keeps_it_removed(self, db):
+        """A removal recorded by the victim must survive its deletion."""
+        db.save_snapshot(
+            Snapshot(root_path="/r", total_size=6), self._chain_tree(1, 5)
+        )
+        id2 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=1), self._chain_tree(1)
+        )
+        id3 = db.save_snapshot(
+            Snapshot(root_path="/r", total_size=4), self._chain_tree(4)
+        )
+        before = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id3).items()
+        }
+        assert before == {"/r": 4, "/r/a": 4}
+
+        db.delete_snapshot(id2)
+
+        after = {
+            path: measurement.logical_bytes
+            for path, measurement in db.load_measurements(id3).items()
+        }
+        assert after == before
 
     def test_recent_paths_empty(self, db):
         assert db.recent_paths() == []
@@ -452,7 +565,7 @@ class TestDiskFull:
 
     def test_default_path_makedirs_failure_does_not_raise(self, tmp_path, monkeypatch):
         """A full disk can't create the data dir; construction must survive."""
-        import fs_monitor.storage.database as dbmod
+        import disktide.storage.database as dbmod
 
         def boom(*args, **kwargs):
             raise OSError(28, "No space left on device")

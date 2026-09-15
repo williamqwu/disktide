@@ -1,0 +1,710 @@
+"""Wave 06 Monitor Center setup, parity, navigation, and session UX."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+
+from textual.widgets import Button
+
+from disktide.app import DiskTideApp
+from disktide.config import AppConfig
+from disktide.domain.monitor import MonitorActivityState, MonitorDefinition
+from disktide.repositories.sqlite import SQLiteSnapshotRepository
+from disktide.screens.explorer import ExplorerScreen
+from disktide.screens.monitor import MonitorScreen
+from disktide.widgets.alert_editor import AlertEditor
+from disktide.widgets.monitor_editor import MonitorEditor
+from tests.waiting import wait_for_explorer, wait_until
+
+
+async def _wait_for_monitor_load(pilot, screen: MonitorScreen) -> None:
+    await wait_until(
+        pilot,
+        lambda: not screen._loading,
+        what="the Monitor Center never finished loading",
+        tries=200,
+        delay=0.025,
+    )
+
+
+async def _settle(pilot, predicate, tries: int = 160) -> None:
+    """Pump the message loop until ``predicate`` holds, or say which one did not.
+
+    Service flags flip on worker threads before the callbacks that rewrite the
+    UI reach the Textual message loop, so a single fixed pause is not a
+    synchronisation point on a busy (2-CPU CI) host. Most callers re-assert the
+    same condition right after, which reports the real value rather than a bare
+    timeout; the ones that go straight on to `query_one` do not, and a silent
+    return left those raising `NoMatches` from inside the widget instead.
+    """
+    await wait_until(pilot, predicate, tries=tries, delay=0.05)
+
+
+async def _drain_monitor_loads(pilot, app) -> None:
+    """Let in-flight Monitor Center reloads finish before the app tears down.
+
+    MonitorScreen._load_data runs on a thread worker; one still populating
+    widgets while run_test() unmounts the screen fails with NoMatches, which
+    Textual reports as a WorkerFailed crash rather than as a test assertion.
+    """
+    await _settle(
+        pilot,
+        lambda: not any(
+            worker.group == "monitor-load" and worker.is_running
+            for worker in app.workers
+        ),
+    )
+
+
+def _config() -> AppConfig:
+    config = AppConfig()
+    config.scan.workers = 1
+    config.ui.live_scan_render = "off"
+    return config
+
+
+def test_tui_setup_is_visible_to_shared_service_and_alert_editor(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    repository = SQLiteSnapshotRepository(path=str(tmp_path / "tui.db"))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot,
+                lambda: "No monitor definition"
+                in str(screen.query_one("#monitor-history-summary").render()),
+            )
+            assert screen.query_one("#monitor-tabs").active == "monitor-history-tab"
+            assert screen.query_one("#monitor-session-toggle", Button).disabled
+            assert "No monitor definition" in str(
+                screen.query_one("#monitor-history-summary").render()
+            )
+            assert "No monitor definition" in str(
+                screen.query_one("#monitor-overview").render()
+            )
+
+            await pilot.press("n")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorEditor))
+            assert isinstance(app.screen, MonitorEditor)
+            app.screen.query_one("#monitor-interval").value = "10m"
+            await pilot.press("ctrl+s")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot, lambda: screen.query_one("#monitor-list").row_count == 1
+            )
+
+            definitions = app._monitor_service.list_monitors()
+            assert len(definitions) == 1
+            assert definitions[0].root_path == str(root)
+            assert definitions[0].interval_seconds == 600
+            assert screen.query_one("#monitor-list").row_count == 1
+            assert not screen.query_one("#monitor-session-toggle", Button).disabled
+
+            await pilot.press("a")
+            await _settle(pilot, lambda: isinstance(app.screen, AlertEditor))
+            assert isinstance(app.screen, AlertEditor)
+            app.screen.query_one("#alert-threshold").value = "1B"
+            await pilot.press("ctrl+s")
+            await _settle(
+                pilot,
+                lambda: len(
+                    app._monitor_service.list_alert_rules(definitions[0].id)
+                )
+                == 1,
+            )
+            assert len(app._monitor_service.list_alert_rules(definitions[0].id)) == 1
+
+            await pilot.press("e")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorEditor))
+            assert isinstance(app.screen, MonitorEditor)
+            await pilot.press("escape")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            assert isinstance(app.screen, MonitorScreen)
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
+
+
+def test_monitor_sampling_controls_start_stop_and_persist_auto_start(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "controls.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    monitor = bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+    config = _config()
+    saved_auto_start: list[bool] = []
+    monkeypatch.setattr(
+        "disktide.screens.monitor.save_config",
+        lambda current: saved_auto_start.append(
+            current.monitor.auto_start_in_tui
+        ),
+    )
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=config,
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+
+            session_button = screen.query_one("#monitor-session-toggle", Button)
+            auto_start_button = screen.query_one(
+                "#monitor-auto-start-toggle", Button
+            )
+            await _settle(
+                pilot, lambda: session_button.label.plain == "Start sampling [S]"
+            )
+            assert session_button.label.plain == "Start sampling [S]"
+            assert auto_start_button.label.plain == "Auto-start: Off"
+
+            auto_start_button.press()
+            await _settle(
+                pilot, lambda: auto_start_button.label.plain == "Auto-start: On"
+            )
+            assert config.monitor.auto_start_in_tui is True
+            assert saved_auto_start == [True]
+            assert auto_start_button.label.plain == "Auto-start: On"
+
+            session_button.press()
+            await _settle(pilot, lambda: app._monitor_service.session_running)
+            assert app._monitor_service.session_running
+            await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot, lambda: session_button.label.plain == "Stop & cancel [S]"
+            )
+            assert session_button.label.plain == "Stop & cancel [S]"
+
+            session_button.press()
+            await _settle(pilot, lambda: not app._monitor_service.session_running)
+            assert not app._monitor_service.session_running
+            await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot, lambda: session_button.label.plain == "Start sampling [S]"
+            )
+            assert session_button.label.plain == "Start sampling [S]"
+            await _drain_monitor_loads(pilot, app)
+            status = repository.get_monitor_status(monitor.id)
+            assert status.activity is MonitorActivityState.NO_HOST
+            assert status.host_id is None
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
+
+
+def test_monitor_auto_start_launch_is_reflected_in_controls(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "auto-start.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+    config = _config()
+    config.monitor.auto_start_in_tui = True
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=config,
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await _settle(pilot, lambda: app._monitor_service.session_running)
+            assert app._monitor_service.session_running
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot,
+                lambda: screen.query_one(
+                    "#monitor-session-toggle", Button
+                ).label.plain
+                == "Stop & cancel [S]",
+            )
+            assert (
+                screen.query_one("#monitor-session-toggle", Button).label.plain
+                == "Stop & cancel [S]"
+            )
+            assert (
+                screen.query_one("#monitor-auto-start-toggle", Button).label.plain
+                == "Auto-start: On"
+            )
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
+
+
+def test_narrow_monitor_uses_list_detail_and_session_continues_off_screen(
+    tmp_path,
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "narrow.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    monitor = bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot,
+                lambda: "no active host"
+                in str(screen.query_one("#monitor-history-summary").render()),
+            )
+            assert screen.has_class("narrow")
+            assert screen.query_one("#monitor-tabs").active == "monitor-history-tab"
+            assert "no active host" in str(
+                screen.query_one("#monitor-history-summary").render()
+            )
+            # The mode digits used to be one binding whose description drew
+            # the other three by hand ("[1]Explorer [2]Monitor [3]FS-Overview",
+            # key_display="Mode"), because the footer could not group. It can:
+            # the four are a Binding.Group, rendered as bare keys plus one
+            # shared label, and each keeps its own real description for the
+            # key map.
+            mode_binding = app.active_bindings["1"].binding
+            assert mode_binding.group is not None
+            assert mode_binding.group.description == "Mode"
+            assert mode_binding.description == "Explorer"
+            for key, description in (
+                ("2", "Monitor"),
+                ("3", "FS Overview"),
+                ("4", "Cleanup"),
+            ):
+                sibling = app.active_bindings[key].binding
+                assert sibling.group is mode_binding.group
+                assert sibling.description == description
+
+            footer = screen.query_one("Footer")
+            groups = {
+                tuple(getattr(key, "key", None) for key in item.children)
+                for item in footer.children
+                if type(item).__name__ == "KeyGroup"
+            }
+            assert ("1", "2", "3", "4") in groups, groups
+            labels = [
+                str(getattr(item, "content", ""))
+                for item in footer.children
+                if type(item).__name__ == "FooterLabel"
+            ]
+            assert "Mode" in labels, labels
+            screen.query_one("#monitor-list").focus()
+            await pilot.press("enter")
+            await _settle(pilot, lambda: screen.has_class("detail"))
+            assert screen.has_class("detail")
+            await pilot.press("escape")
+            await _settle(pilot, lambda: not screen.has_class("detail"))
+            assert not screen.has_class("detail")
+
+            # The capital letter, because that is what a terminal delivers
+            # for Shift+S -- Textual has no `shift+<letter>` key event.
+            await pilot.press("S")
+            await _settle(pilot, lambda: app._monitor_service.session_running)
+            assert app._monitor_service.session_running
+            await pilot.press("1")
+            await _settle(pilot, lambda: isinstance(app.screen, ExplorerScreen))
+            assert isinstance(app.screen, ExplorerScreen)
+            assert app._monitor_service.session_running
+            previous_dashboard = screen._dashboard
+            app._monitor_service.stop_session(wait=True)
+            await _settle(
+                pilot, lambda: screen._dashboard is not previous_dashboard
+            )
+            await _drain_monitor_loads(pilot, app)
+            status = repository.get_monitor_status(monitor.id)
+            assert status.activity is MonitorActivityState.NO_HOST
+            assert status.host_id is None
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
+
+
+def test_explorer_sets_up_monitor_for_highlighted_directory(tmp_path):
+    root = tmp_path / "root"
+    selected = root / "selected"
+    selected.mkdir(parents=True)
+    (selected / "payload").write_text("x")
+    repository = SQLiteSnapshotRepository(path=str(tmp_path / "explorer.db"))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            tree = app.screen.query_one("#size-tree")
+            await pilot.press("down")
+            await _settle(
+                pilot,
+                lambda: getattr(tree.cursor_node.data, "path", None) == str(selected),
+            )
+            assert tree.cursor_node.data.path == str(selected)
+
+            await pilot.press("M")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorEditor))
+            assert isinstance(app.screen, MonitorEditor)
+            assert app.screen.query_one("#monitor-path").value == str(selected)
+
+            await pilot.press("ctrl+s")
+            await _settle(pilot, lambda: isinstance(app.screen, ExplorerScreen))
+            assert isinstance(app.screen, ExplorerScreen)
+            await _settle(
+                pilot, lambda: len(app._monitor_service.list_monitors()) == 1
+            )
+            definitions = app._monitor_service.list_monitors()
+            assert len(definitions) == 1
+            assert definitions[0].root_path == str(selected)
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
+
+
+def test_monitor_screen_depends_on_service_not_sqlite_adapter():
+    source = inspect.getsource(MonitorScreen)
+    assert "SQLite" not in source
+    assert "Database(" not in source
+    assert "default_snapshot_repository" not in source
+
+
+def test_run_now_on_a_paused_monitor_stays_off_the_ui_thread(tmp_path):
+    """A manual run the session will not take must not block the event loop.
+
+    `run_monitor_now` only queues when the running session is actually
+    hosting that monitor; for a paused one it runs the scan in the calling
+    thread and returns the result. The screen used to branch on
+    `session_running` alone, so the whole scan ran on Textual's event loop
+    and the toast then claimed the run had been queued.
+    """
+    import threading
+
+    from disktide.domain.monitor import MonitorDesiredState
+    from disktide.services.monitor import MonitorService
+
+    root = tmp_path / "root"
+    root.mkdir()
+    for index in range(4):
+        (root / f"payload{index}").write_text("x" * 64)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "payload").write_text("y")
+
+    path = tmp_path / "paused.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    paused = bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(other), interval_seconds=3600)
+    )
+    bootstrap.set_monitor_desired_state(paused.id, MonitorDesiredState.PAUSED)
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    threads: list[str] = []
+    original = MonitorService._execute_definition
+
+    def recording(self, definition, *args, **kwargs):
+        if definition.id == paused.id:
+            threads.append(threading.current_thread().name)
+        return original(self, definition, *args, **kwargs)
+
+    toasts: list[str] = []
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+
+            screen.query_one("#monitor-session-toggle", Button).press()
+            await _settle(pilot, lambda: app._monitor_service.session_running)
+            await _wait_for_monitor_load(pilot, screen)
+
+            notify = app.notify
+            app.notify = lambda message, **kwargs: (
+                toasts.append(str(message)), notify(message, **kwargs)
+            )[1]
+            screen._selected_monitor_id = paused.id
+            screen.action_run_now()
+            await _settle(pilot, lambda: bool(threads))
+            await _settle(pilot, lambda: bool(toasts))
+            app.notify = notify
+
+            app._monitor_service.stop_session(wait=True)
+            await _drain_monitor_loads(pilot, app)
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        MonitorService._execute_definition = recording
+        asyncio.run(exercise())
+    finally:
+        MonitorService._execute_definition = original
+        repository.close()
+
+    assert threads, "the paused monitor never ran"
+    assert "MainThread" not in threads
+    assert toasts
+    assert toasts[0].startswith("Run ")
+    assert "queued" not in toasts[0]
+
+
+def test_the_alert_editor_refuses_a_threshold_the_cli_would_refuse(tmp_path):
+    """`nan` used to be saved, read back as 0.0, and fire on every check."""
+    from textual.widgets import Input, Select, Static
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "editor.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    monitor = bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            assert isinstance(screen, MonitorScreen)
+            await _wait_for_monitor_load(pilot, screen)
+
+            await pilot.press("a")
+            await _settle(pilot, lambda: isinstance(app.screen, AlertEditor))
+            editor = app.screen
+            editor.query_one("#alert-kind", Select).value = "percentage-growth"
+            editor.query_one("#alert-threshold", Input).value = "nan"
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+            assert app.screen is editor
+            message = str(editor.query_one("#alert-editor-error", Static).render())
+            assert "finite" in message
+            assert app._monitor_service.list_alert_rules(monitor.id) == []
+
+            editor.query_one("#alert-threshold", Input).value = "25"
+            await pilot.press("ctrl+s")
+            await _settle(
+                pilot,
+                lambda: len(app._monitor_service.list_alert_rules(monitor.id)) == 1,
+            )
+            rules = app._monitor_service.list_alert_rules(monitor.id)
+            assert [rule.threshold for rule in rules] == [25.0]
+            await _drain_monitor_loads(pilot, app)
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
+
+
+def test_the_no_host_hint_names_the_key_the_binding_declares(tmp_path):
+    """"press s" outlived the move of sampling onto Shift+S.
+
+    `s` does nothing on this screen. The sentence now reads the key off
+    the binding that owns the action, so a rebind cannot leave it behind.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "hint.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(160, 40)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            await _wait_for_monitor_load(pilot, screen)
+            await _settle(
+                pilot,
+                lambda: "no active host"
+                in str(screen.query_one("#monitor-history-summary").render()),
+            )
+            summary = str(screen.query_one("#monitor-history-summary").render())
+            assert "press S" in summary
+            assert "press s " not in summary
+            # And S is really the key that starts sampling.
+            assert screen._key_display("monitor.sampling", "?") == "S"
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()
+
+
+def test_the_history_summary_keeps_its_row_count_when_narrow():
+    """Four rows of context in a four-row box, however narrow it gets.
+
+    The panel is 34 columns narrower than the screen, so at 100 columns the
+    legend row alone was half again as long as its box: Textual folded three
+    rows into five and pushed the trend chart down to two rows of plot.
+    """
+    fit = MonitorScreen._fit_clauses
+    clauses = ["Collection active", "31 canonical point(s)", "next full 09-08"]
+    assert fit(clauses, 0) == " · ".join(clauses)
+    assert fit(clauses, 200) == " · ".join(clauses)
+    narrow = fit(clauses, 24)
+    assert len(narrow) <= 24
+    # The first clause is never dropped.
+    assert narrow.startswith("Collection active")
+
+
+def test_the_narrow_list_says_how_to_reach_the_detail_panel(tmp_path):
+    """Below 90 columns the detail panel is not on screen at all."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "payload").write_text("x")
+    path = tmp_path / "narrow-hint.db"
+    bootstrap = SQLiteSnapshotRepository(path=str(path))
+    bootstrap.connect()
+    bootstrap.create_monitor(
+        MonitorDefinition(root_path=str(root), interval_seconds=3600)
+    )
+    bootstrap.close()
+    repository = SQLiteSnapshotRepository(path=str(path))
+
+    async def exercise() -> None:
+        app = DiskTideApp(
+            scan_path=str(root),
+            show_welcome=False,
+            config=_config(),
+            snapshot_repository=repository,
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            await wait_for_explorer(pilot, app)
+            await pilot.press("2")
+            await _settle(pilot, lambda: isinstance(app.screen, MonitorScreen))
+            screen = app.screen
+            await _wait_for_monitor_load(pilot, screen)
+            assert screen.has_class("narrow")
+            hint = screen.query_one("#monitor-list-hint")
+            assert hint.display is True
+            assert "Enter opens details" in str(hint.render())
+
+        app._monitor_service.shutdown(wait=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        repository.close()

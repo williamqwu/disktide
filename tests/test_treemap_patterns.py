@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 from rich.style import Style
 
-from fs_monitor.models.tree import FSNode
-from fs_monitor.viz.colors import file_category as _file_category
-from fs_monitor.viz.treemap import (
+from disktide.models.tree import FSNode
+from disktide.viz.colors import file_category as _file_category
+from disktide.viz.treemap import (
     TreemapLayout,
     compute_layout,
     render_line,
@@ -82,6 +82,27 @@ def _count_parent_bleed(layout: TreemapLayout, max_depth: int = 3) -> int:
     return bleed
 
 
+def _owned_cells(layout: TreemapLayout) -> dict[int, int]:
+    """Map id(rect) -> number of grid cells that actually point at it."""
+    owned: dict[int, int] = {}
+    for row in layout.grid:
+        for cell in row:
+            if cell is not None:
+                owned[id(cell)] = owned.get(id(cell), 0) + 1
+    return owned
+
+
+def _aggregate_count(name: str) -> int:
+    """Number of children folded into an '… N more' aggregate node."""
+    return int(name.split()[1].replace(",", ""))
+
+
+def _visual_aspect(rect) -> float:
+    """Aspect ratio as it appears on screen: a cell is ~2x taller than wide."""
+    w, vh = rect.w, rect.h * 2
+    return max(w, vh) / min(w, vh)
+
+
 def _border_ratio(layout: TreemapLayout) -> float:
     """Fraction of cells showing border (non-leaf) rects or None."""
     total = layout.width * layout.height
@@ -110,6 +131,7 @@ def assert_layout_integrity(
     4. Every segment carries a bgcolor (no unstyled gaps).
     5. All rects lie within the grid bounds.
     6. No parent bleeding in padded inner areas.
+    7. No leaf rect is fragmented or hidden by an overlapping neighbour.
     """
     w, h = layout.width, layout.height
 
@@ -148,6 +170,34 @@ def assert_layout_integrity(
         f"border color where content should be"
     )
 
+    # --- no fragmentation ---
+    # Rects tile their parent, so every leaf should own every cell it
+    # covers.  The one legitimate loss is _snap_rects inflating a
+    # zero-width neighbour to the minimum 1 cell, which can shave a single
+    # row or column off this rect — at most max(w, h) cells.  More than
+    # that means rects are overlapping and drawing over each other, which
+    # shows as broken blocks and vanished files.  Skipped on viewports too
+    # small to lay anything out, where inflation is the whole story.
+    if w >= 8 and h >= 6:
+        owned = _owned_cells(layout)
+        for rect in layout.rects:
+            if not rect.is_leaf:
+                continue
+            rw, rh = int(rect.w), int(rect.h)
+            area = rw * rh
+            if area <= 0:
+                continue
+            visible = owned.get(id(rect), 0)
+            assert visible > 0, (
+                f"Leaf {rect.node.name!r} ({rw}x{rh} at "
+                f"{int(rect.x)},{int(rect.y)}) claims cells but shows none — "
+                f"an overlapping rect was drawn over all of it"
+            )
+            assert visible >= area - max(rw, rh), (
+                f"Leaf {rect.node.name!r} ({rw}x{rh}, area {area}) shows only "
+                f"{visible} cells — fragmented by an overlapping neighbour"
+            )
+
     # --- rendered lines ---
     for y in range(h):
         segments = render_line(layout, y)
@@ -163,15 +213,6 @@ def assert_layout_integrity(
             assert seg.style.bgcolor is not None, (
                 f"Line {y}, segment {i}: no bgcolor — would render as a gap"
             )
-
-
-def _render_full(layout: TreemapLayout) -> list[str]:
-    """Render the entire treemap as a list of text lines (for debugging)."""
-    lines = []
-    for y in range(layout.height):
-        segs = render_line(layout, y)
-        lines.append("".join(s.text for s in segs))
-    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +402,7 @@ class TestMixedFileTypes:
                 continue
             cat = _file_category(rect.node.name)
             # Collect the style that would be rendered
-            from fs_monitor.viz.treemap import _rect_bg
+            from disktide.viz.treemap import _rect_bg
             bg = _rect_bg(rect.node, rect.depth, rect.is_leaf)
             leaf_bgs.setdefault(cat, set()).add(bg)
 
@@ -490,7 +531,7 @@ class TestTypicalProject:
 
 
 class TestBuildArtifactHeavy:
-    """Project dominated by build artifacts — tests the 'build' category."""
+    """Project dominated by build artifacts — tests the 'ephemeral' category."""
 
     @staticmethod
     def _tree():
@@ -563,50 +604,74 @@ class TestFileCategoryMapping:
     """Verify the extension → category mapping covers expected cases."""
 
     @pytest.mark.parametrize("name,expected", [
-        ("report.pdf", "document"),
-        ("REPORT.PDF", "document"),
-        ("doc.epub", "document"),
-        ("slides.pptx", "document"),
-        ("photo.jpeg", "image"),
-        ("icon.heic", "image"),
+        ("report.pdf", "docs"),
+        ("REPORT.PDF", "docs"),
+        ("doc.epub", "docs"),
+        ("slides.pptx", "docs"),
+        ("photo.jpeg", "media"),
+        ("icon.heic", "media"),
         ("style.css", "code"),
         ("component.tsx", "code"),
         ("notebook.ipynb", "code"),
-        ("settings.toml", "config"),
-        ("app.conf", "config"),
+        ("settings.toml", "docs"),
+        ("app.conf", "docs"),
         ("dump.sql", "data"),
         ("data.h5", "data"),
         ("dataset.hdf5", "data"),
         ("features.npz", "data"),
-        ("model.pt", "model"),
-        ("weights.safetensors", "model"),
-        ("checkpoint.ckpt", "model"),
+        ("model.pt", "data"),
+        ("weights.safetensors", "data"),
+        ("checkpoint.ckpt", "data"),
         ("archive.7z", "archive"),
         ("pkg.deb", "archive"),
         ("video.mkv", "media"),
         ("stream.ogg", "media"),
-        ("module.whl", "build"),
-        ("library.dll", "build"),
-        ("training.log", "log"),
-        ("output.out", "log"),
-        ("errors.err", "log"),
+        ("module.whl", "ephemeral"),
+        ("library.dll", "ephemeral"),
+        ("training.log", "ephemeral"),
+        ("output.out", "ephemeral"),
+        ("errors.err", "ephemeral"),
         ("Makefile", "other"),
         ("no_extension", "other"),
         (".hidden", "other"),
         ("multi.tar.gz", "archive"),  # uses last extension
+        # versioned shared libraries: numeric suffixes peel off (HPC trees
+        # are full of libfoo.so.N and would otherwise render as "other")
+        ("libcudnn.so.9", "ephemeral"),
+        ("libfoo.so.1.2.3", "ephemeral"),
+        ("liblapack.so.3", "ephemeral"),
+        ("data.1", "other"),  # all-numeric suffixes with no real extension
     ])
     def test_category(self, name, expected):
         assert _file_category(name) == expected
 
-    def test_all_schemes_cover_all_categories(self):
-        """Every color scheme must have a hue for every known category."""
-        from fs_monitor.viz.colors import SCHEMES, EXT_CATEGORIES
+    def test_every_category_has_a_color_in_every_scheme(self):
+        """No theme may leave a known category without a distinct fill.
+
+        `mono` used to be the exception -- all seven categories collapsed
+        onto one gray, so the legend named seven things the chart drew as
+        one. It has a gray ladder of its own now and is held to the same
+        rule as the rest.
+        """
+        from disktide.viz.colors import (
+            CATEGORIES,
+            EXT_CATEGORIES,
+            SCHEMES,
+            category_file_color,
+            set_color_scheme,
+        )
         all_cats = set(EXT_CATEGORIES.values()) | {"other"}
-        for name, scheme in SCHEMES.items():
-            for cat in all_cats:
-                assert cat in scheme.category_hues, (
-                    f"{name} scheme missing hue for '{cat}'"
+        assert all_cats == set(CATEGORIES)
+        try:
+            for name in SCHEMES:
+                set_color_scheme(name)
+                colors = {cat: category_file_color(cat, 2) for cat in CATEGORIES}
+                assert all(colors.values()), f"{name} scheme missing a fill"
+                assert len(set(colors.values())) == len(CATEGORIES), (
+                    f"{name} scheme reuses a fill across categories: {colors}"
                 )
+        finally:
+            set_color_scheme("disktide")
 
 
 class TestNonUniformSiblings:
@@ -634,7 +699,7 @@ class TestNonUniformSiblings:
 # ---------------------------------------------------------------------------
 
 class TestNoDroppedChildren:
-    """Children with very small sub-rects must still produce leaf rects.
+    """Children too small for their own rect must still be represented.
 
     Bug: _layout_node returns early when w < 1 or h < 1, completely
     dropping the child. Its allocated cells show as parent border color.
@@ -646,19 +711,37 @@ class TestNoDroppedChildren:
         smalls = [_make_file(f"s{i}.txt", 500) for i in range(100)]
         return _wrap_root([big] + smalls)
 
-    def test_all_children_produce_rects(self):
-        """Every sized child should generate at least one rect."""
+    def test_every_child_is_represented(self):
+        """No sized child is silently dropped.
+
+        This used to demand that at least 10 of the 100 sub-cell files each
+        get a rect of their own.  Meeting that required inflating zero-area
+        rects to a full cell, and consecutive inflations landed on the same
+        cells: build_grid draws later over earlier, so the survivors were
+        fragments and the rest were invisible.  The honest invariant is
+        representation — individually, or by an aggregate that accounts for
+        them — not a rect count.
+        """
         tree = self._tree()
         layout = compute_layout(tree, 80, 24)
-        leaf_names = {r.node.name for r in layout.rects if r.is_leaf}
-        # The dominant file must be present
-        assert "database.sqlite" in leaf_names
-        # At least some of the small files should produce rects
-        small_leaves = {n for n in leaf_names if n.startswith("s") and n.endswith(".txt")}
-        assert len(small_leaves) >= 10, (
-            f"Only {len(small_leaves)} of 100 small files produced rects — "
-            f"tiny children are being dropped"
+        assert_layout_integrity(layout)
+
+        leaves = [r for r in layout.rects if r.is_leaf]
+        assert any(r.node.name == "database.sqlite" for r in leaves)
+
+        aggregates = [r for r in leaves if "more" in r.node.name]
+        individual = [r for r in leaves if "more" not in r.node.name]
+
+        represented = len(individual) + sum(
+            _aggregate_count(r.node.name) for r in aggregates
         )
+        assert represented == 101, (
+            f"{represented} of 101 children are represented — the rest were "
+            f"silently dropped"
+        )
+        # ...and the aggregates carry their children's real bytes, so the
+        # picture still adds up to the root's size.
+        assert sum(r.node.size for r in leaves) == tree.size
 
     @pytest.mark.parametrize("w,h", VIEWPORTS)
     def test_no_parent_bleed(self, w, h):
@@ -826,17 +909,189 @@ class TestHighlySkewedDistribution:
         layout = compute_layout(self._tree(), w, h)
         assert_layout_integrity(layout)
 
-    def test_no_extreme_aspect_ratios(self):
-        """Leaf rects should not have aspect ratios worse than 20:1."""
-        layout = compute_layout(self._tree(), 80, 24)
+    @pytest.mark.parametrize("w,h", VIEWPORTS)
+    def test_no_extreme_visual_aspect_ratios(self, w, h):
+        """Bound the aspect ratio as it appears on screen.
+
+        The old check bounded raw cell dimensions at 20:1 and passed only
+        because the overlapping inflated rects had collapsed all 50 slivers
+        into 1x1s, half of them invisible.  A terminal cell is about twice
+        as tall as it is wide, so a w x h rect reads as w x 2h; that is the
+        ratio squarify now optimizes and the one worth asserting.
+
+        The crumbs are consolidated into a single "… N more" block per
+        parent.  Its thickness is set by the metric it honestly encodes,
+        not by the layout, so it is exempt — but only one such block per
+        parent is allowed, otherwise the sliver stack is simply back.
+        """
+        layout = compute_layout(self._tree(), w, h)
+        thin_aggregates: dict[str, int] = {}
         for rect in layout.rects:
-            if not rect.is_leaf or rect.w < 1 or rect.h < 1:
+            if not rect.is_leaf:
                 continue
-            ratio = max(rect.w / rect.h, rect.h / rect.w)
-            assert ratio <= 20, (
-                f"Rect {rect.node.name} has aspect ratio {ratio:.1f} "
-                f"({rect.w}x{rect.h})"
+            if rect.w < 1 or rect.h < 1 or int(rect.w) * int(rect.h) < 4:
+                continue
+            ratio = _visual_aspect(rect)
+            if "more" in rect.node.name and ratio > 4:
+                parent = rect.node.path.rsplit("/", 1)[0]
+                thin_aggregates[parent] = thin_aggregates.get(parent, 0) + 1
+                continue
+            assert ratio <= 4, (
+                f"Rect {rect.node.name} has visual aspect ratio {ratio:.1f} "
+                f"({rect.w}x{rect.h} cells)"
             )
+        for parent, count in thin_aggregates.items():
+            assert count == 1, (
+                f"{parent} emitted {count} thin aggregate strips — "
+                f"consolidation should leave at most one"
+            )
+
+
+class TestSkewedRealisticProject:
+    """The shape that produced the broken screenshot: one dominant subtree
+    per level plus a tail of crumbs, at a full-screen viewport.
+
+    Before consolidation this laid 'bin' out as a 1x35 strip, overwrote 13
+    of 'share''s 14 cells with a neighbour's inflated rect, and rendered
+    'd.tcss' and 'pyproject.toml' nowhere at all.
+    """
+
+    KIB = 1024
+    MIB = 1024 * 1024
+
+    @classmethod
+    def _tree(cls):
+        KiB, MiB = cls.KIB, cls.MIB
+        venv = _make_dir(".venv", [
+            _make_dir("lib", [
+                _make_file("python3.12", int(29.9 * MiB), "/p/.venv/lib", 3),
+            ], "/p/.venv", 2),
+            _make_file("bin", 300 * KiB, "/p/.venv", 2),
+            _make_file("share", 120 * KiB, "/p/.venv", 2),
+            _make_file("pyvenv.cfg", 1 * KiB, "/p/.venv", 2),
+        ], "/p", 1)
+        git = _make_dir(".git", [
+            _make_file("pack", int(4.9 * MiB), "/p/.git", 2),
+            _make_file("objects", 300 * KiB, "/p/.git", 2),
+            _make_file("refs", 40 * KiB, "/p/.git", 2),
+        ], "/p", 1)
+        src = _make_dir("src", [
+            _make_file("rest.py", 1600 * KiB, "/p/src", 2),
+            _make_file("screens.py", 409 * KiB, "/p/src", 2),
+            _make_file("storage.py", 336 * KiB, "/p/src", 2),
+            _make_file("viz.py", 250 * KiB, "/p/src", 2),
+            _make_file("app.py", 200 * KiB, "/p/src", 2),
+        ], "/p", 1)
+        tests = _make_dir("tests", [
+            _make_file("golden.png", int(2.2 * MiB), "/p/tests", 2),
+            _make_file("t1.py", 200 * KiB, "/p/tests", 2),
+            _make_file("t2.py", 200 * KiB, "/p/tests", 2),
+        ], "/p", 1)
+        docs = _make_dir("docs", [
+            _make_file("a.jpg", 700 * KiB, "/p/docs", 2),
+            _make_file("b.jpg", 500 * KiB, "/p/docs", 2),
+            _make_file("c.md", 300 * KiB, "/p/docs", 2),
+        ], "/p", 1)
+        children = [
+            venv, git, src, tests, docs,
+            _make_file("uv.lock", 223 * KiB, "/p", 1),
+            _make_dir("tool", [_make_file("x.py", 106 * KiB, "/p/tool", 2)], "/p", 1),
+            _make_dir(
+                ".pytest_cache",
+                [_make_file("v", 68 * KiB, "/p/.pytest_cache", 2)], "/p", 1,
+            ),
+            _make_file("README.md", 9 * KiB, "/p", 1),
+            _make_dir(
+                ".github",
+                [_make_file("ci.yml", 7 * KiB, "/p/.github", 2)], "/p", 1,
+            ),
+            _make_dir(
+                "assets",
+                [_make_file("d.tcss", 2 * KiB, "/p/assets", 2)], "/p", 1,
+            ),
+            _make_file("pyproject.toml", int(1.5 * KiB), "/p", 1),
+            _make_file(".gitignore", 304, "/p", 1),
+        ]
+        return _wrap_root(children, name="p")
+
+    @pytest.mark.parametrize("w,h", VIEWPORTS + [(128, 53)])
+    def test_integrity(self, w, h):
+        layout = compute_layout(self._tree(), w, h)
+        assert_layout_integrity(layout)
+
+    def test_no_fragmented_or_hidden_leaves(self):
+        """Every leaf owns every cell of its snapped rect."""
+        layout = compute_layout(self._tree(), 128, 53)
+        owned = _owned_cells(layout)
+        fragmented, hidden = [], []
+        for rect in layout.rects:
+            if not rect.is_leaf:
+                continue
+            area = int(rect.w) * int(rect.h)
+            if area <= 0:
+                continue
+            visible = owned.get(id(rect), 0)
+            if visible == 0:
+                hidden.append((rect.node.name, int(rect.w), int(rect.h)))
+            elif visible < area:
+                fragmented.append(
+                    (rect.node.name, int(rect.w), int(rect.h), visible)
+                )
+        assert hidden == [], f"leaves rendered nowhere: {hidden}"
+        assert fragmented == [], f"leaves partly overwritten: {fragmented}"
+
+    def test_no_adjacent_sibling_slivers(self):
+        """No two 1-cell-thin siblings sit side by side — no sliver stacks."""
+        layout = compute_layout(self._tree(), 128, 53)
+        thin = [
+            r for r in layout.rects
+            if r.is_leaf and min(int(r.w), int(r.h)) <= 1
+        ]
+        for i, a in enumerate(thin):
+            for b in thin[i + 1:]:
+                if a.node.path.rsplit("/", 1)[0] != b.node.path.rsplit("/", 1)[0]:
+                    continue
+                touch_x = (
+                    int(a.x) + int(a.w) == int(b.x)
+                    or int(b.x) + int(b.w) == int(a.x)
+                )
+                touch_y = (
+                    int(a.y) + int(a.h) == int(b.y)
+                    or int(b.y) + int(b.h) == int(a.y)
+                )
+                overlap_y = (
+                    int(a.y) < int(b.y) + int(b.h)
+                    and int(b.y) < int(a.y) + int(a.h)
+                )
+                overlap_x = (
+                    int(a.x) < int(b.x) + int(b.w)
+                    and int(b.x) < int(a.x) + int(a.w)
+                )
+                assert not ((touch_x and overlap_y) or (touch_y and overlap_x)), (
+                    f"sliver stack: {a.node.name!r} "
+                    f"({int(a.w)}x{int(a.h)} at {int(a.x)},{int(a.y)}) is "
+                    f"adjacent to {b.node.name!r} "
+                    f"({int(b.w)}x{int(b.h)} at {int(b.x)},{int(b.y)})"
+                )
+
+    def test_crumbs_are_consolidated_and_labeled(self):
+        """The crumb-heavy parents get a labeled '… N more' block."""
+        layout = compute_layout(self._tree(), 128, 53)
+        aggregates = {
+            r.node.path.rsplit("/", 1)[0]: r
+            for r in layout.rects
+            if r.is_leaf and "more" in r.node.name
+        }
+        # .venv (bin/share/pyvenv.cfg behind a 29.9 MiB sibling) and the
+        # root's tail of sub-10 KiB entries are the crumb-heavy parents.
+        assert "/p/.venv" in aggregates, f"no aggregate under /p/.venv: {aggregates}"
+        assert "/p" in aggregates, f"no aggregate at the root: {aggregates}"
+        for parent, rect in aggregates.items():
+            assert _aggregate_count(rect.node.name) >= 2
+            assert rect.node.is_dir, "aggregates use the neutral dir-leaf color"
+        # The wide ones are wide enough to actually show their label.
+        wide = [r for r in aggregates.values() if r.w >= 8]
+        assert wide and all(r.label for r in wide)
 
 
 class TestIntegerCoordinates:
@@ -861,3 +1116,108 @@ class TestIntegerCoordinates:
             assert rect.y == int(rect.y), f"rect.y={rect.y} is not integer"
             assert rect.w == int(rect.w), f"rect.w={rect.w} is not integer"
             assert rect.h == int(rect.h), f"rect.h={rect.h} is not integer"
+
+
+class TestNestedContainerLabels:
+    """A container two levels down must be able to say what it is.
+
+    `dir_label` was gated on `depth <= 1`, and the deepest container level
+    gets no frame at all, so `photos/2024`, `.cache/pip` and
+    `webapp/node_modules` were unnamed fields around labelled children --
+    the one word that said what the block *was* was the one word missing.
+    """
+
+    @staticmethod
+    def _tree():
+        def leaf(parent, name, size, depth):
+            return _make_file(name, size, parent, depth)
+
+        y2024 = _make_dir(
+            "2024",
+            [leaf("/home/photos/2024", f"p{i}.jpg", 900, 3) for i in range(8)],
+            "/home/photos",
+            2,
+        )
+        y2025 = _make_dir(
+            "2025",
+            [leaf("/home/photos/2025", f"q{i}.jpg", 700, 3) for i in range(8)],
+            "/home/photos",
+            2,
+        )
+        photos = _make_dir("photos", [y2024, y2025], "/home", 1)
+        pip = _make_dir(
+            "pip",
+            [leaf("/home/.cache/pip", f"w{i}.whl", 400, 3) for i in range(6)],
+            "/home/.cache",
+            2,
+        )
+        cache = _make_dir(".cache", [pip], "/home", 1)
+        return _wrap_root([photos, cache], name="home")
+
+    def test_depth_two_directories_are_named(self):
+        layout = compute_layout(self._tree(), 100, 30, max_depth=3)
+        named = {
+            rect.node.path
+            for rect in layout.rects
+            if not rect.is_leaf and rect.label
+        }
+        assert "/home/photos/2024" in named
+        assert "/home/photos/2025" in named
+        assert "/home/.cache/pip" in named
+
+    def test_a_rect_too_small_for_a_name_does_not_get_one(self):
+        layout = compute_layout(self._tree(), 24, 8, max_depth=3)
+        for rect in layout.rects:
+            if not rect.is_leaf and rect.label:
+                assert rect.w >= len(rect.label) + 2
+
+
+class TestAdjacentLeafZebra:
+    """Same-category siblings must not tile into one flat field.
+
+    69 `.csv` files under one directory were drawn in one colour with no
+    gap between them, so their size labels ran together into
+    "2.7 MiB2.7 MiB" with nothing saying where one file ended.
+    """
+
+    @staticmethod
+    def _tree():
+        return _wrap_root([
+            _make_dir(
+                "climate",
+                [
+                    _make_file(f"r{i:02d}.csv", 1000, "/root/climate", 2)
+                    for i in range(12)
+                ],
+                "/root",
+                1,
+            )
+        ])
+
+    def test_adjacent_siblings_alternate_their_fill(self):
+        from disktide.viz.treemap import _rect_bg
+
+        layout = compute_layout(self._tree(), 90, 26, max_depth=3)
+        leaves = [
+            rect for rect in layout.rects
+            if rect.is_leaf and rect.node.name.endswith(".csv")
+        ]
+        assert len(leaves) >= 4
+        by_ordinal = {}
+        for rect in leaves:
+            by_ordinal[rect.ordinal] = _rect_bg(
+                rect.node, rect.depth, True, None, None, rect.ordinal
+            )
+        assert by_ordinal.get(0) != by_ordinal.get(1)
+        # ...and the step repeats rather than drifting away from the hue.
+        assert by_ordinal.get(0) == by_ordinal.get(2)
+
+    def test_the_zebra_step_never_changes_the_category(self):
+        from disktide.viz.colors import parse_rgb, ZEBRA_GAIN, zebra_shade
+
+        base = "rgb(120,140,160)"
+        lifted = parse_rgb(zebra_shade(base))
+        original = parse_rgb(base)
+        for channel in range(3):
+            assert lifted[channel] >= original[channel]
+            assert lifted[channel] <= int(original[channel] * ZEBRA_GAIN) + 1

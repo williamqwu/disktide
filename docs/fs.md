@@ -1,6 +1,6 @@
 # Filesystem Interactions & Compatibility
 
-How fsmonitor interacts with the filesystem, and what works (or breaks) on different filesystem types.
+How disktide interacts with the filesystem, and what works (or breaks) on different filesystem types.
 
 ## Compatibility Summary
 
@@ -10,9 +10,10 @@ How fsmonitor interacts with the filesystem, and what works (or breaks) on diffe
 | ZFS | Full | Full | Full | |
 | NTFS (via fuse) | Full | Full | Full | Case-preserving; see [Case Sensitivity](#case-sensitivity) |
 | FAT32/exFAT (via fuse) | Full | Full | Full | No symlinks; mtime resolution is 2s |
-| NFS/NFS4 | Full | Full | Full | Workers capped at 4; latency may be high |
-| CIFS/SMB | Full | Full | Full | Workers capped at 4 |
-| sshfs (FUSE) | Full | Full | Caution | Workers capped at 4; deletion over sshfs can be slow |
+| NFS/NFS4 | Full | Full | Full | 8 workers, more when the mount samples slow; see [Network Filesystems](#network-filesystems-nfs-cifs-sshfs) |
+| CIFS/SMB | Full | Full | Full | Same tiering; `cifs`, `smb3` and `smbfs` all recognised |
+| Ceph, GlusterFS, BeeGFS, Lustre, GPFS, PanFS, AFS, 9p | Full | Full | Full | Same tiering |
+| sshfs, rclone, s3fs, gcsfuse, JuiceFS and other FUSE | Full | Full | Caution | Same tiering; deletion over sshfs can be slow |
 | tmpfs, ramfs | Full | Full | Full | |
 | OverlayFS | Partial | Partial | Caution | Sees merged view; deletions affect upper layer only |
 | macOS APFS/HFS+ | Scanning works | Watch works | Cleanup works | sysinfo falls back to defaults; see [Platform](#platform-support) |
@@ -20,50 +21,86 @@ How fsmonitor interacts with the filesystem, and what works (or breaks) on diffe
 
 ## Platform Support
 
-The core scanner (`os.scandir`, `os.stat`, `os.path`) is cross-platform Python. However, the adaptive threading system in `scanner/sysinfo.py` reads Linux-specific interfaces:
+The core scanner (`os.scandir`, `os.stat`, `os.path`) is cross-platform Python.
+Platform-specific probes are isolated under `collectors/platform/`. Linux uses
+procfs, sysfs, and optional system commands; macOS, Windows, and unknown
+platforms use conservative adapters that return structured unavailable reasons
+instead of raising into the scanner or UI.
 
 | Interface | Purpose | Fallback when absent |
 |-----------|---------|---------------------|
-| `/proc/meminfo` | Available memory | 0 MB (no low-memory cap applied) |
-| `/proc/mounts` | Filesystem type detection | `"unknown"`, not flagged as network FS |
-| `/sys/block/*/queue/rotational` | HDD vs SSD detection | `None` (no I/O cap applied) |
-| `os.sched_getaffinity(0)` | cgroup-aware CPU count | Falls back to `os.cpu_count()` |
+| `/proc/meminfo` | Available memory | 0 MB (no low-memory override applied) |
+| `/proc/mounts` | Filesystem type detection | `"unknown"`, conservative local fallback |
+| `/sys/block/*/queue/rotational` | HDD vs SSD detection | `None`, metadata sample decides or falls back to serial |
+| `os.sched_getaffinity(0)` | CPU count after a cpuset | Falls back to `os.cpu_count()` |
+| `/proc/self/cgroup` + `cpu.max` / `cpu.cfs_quota_us` | CPU count after a *quota* | No quota; the cpuset alone decides |
+| `memory.max` / `memory.limit_in_bytes` | Memory available after a container limit | Host-wide `/proc/meminfo` alone |
 | `os.getloadavg()` | System load | `(0, 0, 0)` (no load-based reduction) |
 
-On macOS, `/proc` and `/sys` don't exist. All sysinfo functions catch `OSError`/`AttributeError` and return safe defaults, so scanning works -- but worker count won't adapt to storage type or filesystem. Set `workers` in config explicitly on non-Linux systems.
+The two control-group rows exist because neither interface above them can see a
+container's limits. `sched_getaffinity` reports a cpuset, but `docker run
+--cpus=1` sets a *quota* and leaves every core visible, so on a 64-core host
+disktide believed it had 64 CPUs. `/proc/meminfo` is host-wide inside a
+container, so under `--memory=512m` on a 256 GB host it believed ~200 GB were
+free and the "under 512 MB, scan serially" guard never fired. Both hierarchies
+are read, from the process's own group up to the root, and the tightest limit on
+that chain is the one that binds -- a batch scheduler usually sets the limit on
+the job, not on the task. A quota that binds makes the host `allocated`, so
+host-wide load stops throttling the scan. `disktide doctor` prints both under
+Platform.
 
-FS Overview is currently Linux-oriented: mount discovery reads `/proc/mounts`, and the block-device panel uses `lsblk`. On platforms without those interfaces, scanning still works but FS Overview may be empty or omit the block-device panel.
+On macOS, `/proc` and `/sys` do not exist. Scanning still works, while mount,
+block-device, and medium detection report unavailable through `disktide doctor`
+and FS Overview. Set `workers` explicitly on platforms where storage-medium
+autodetection is unavailable.
+
+FS Overview consumes the same adapter results. On platforms without mount or
+`lsblk` support, it displays the capability status, reason, and remediation
+instead of silently presenting an empty panel.
 
 On Windows, `os.scandir` and `os.stat` work, but `os.getloadavg()` and `os.sched_getaffinity()` don't exist (`AttributeError` caught). The deeper issue is that the project hasn't been tested on Windows and the TUI depends on terminal capabilities that may not work under cmd.exe (Textual has partial Windows support via Windows Terminal).
 
 ## Every Filesystem Touchpoint
 
-### Scanning -- `scanner/walker.py`, `scanner/engine.py`
+### Scanning -- `scanner/scheduler.py`, `scanner/accel.py`
 
 The scanner is the most filesystem-intensive component. Here is exactly what it calls for each directory:
 
 ```
-os.stat(path).st_mtime           # root directory mtime + cycle-guard identity
-os.scandir(path)                 # iterate directory entries
-  entry.is_symlink()             # classify: symlink?
-  entry.is_dir(follow_symlinks=False)   # classify: directory?
-  entry.is_file(follow_symlinks=False)  # classify: regular file?
-  entry.stat(follow_symlinks=False)     # read st_size, st_mtime (incl. symlinks)
-  entry.name                     # basename (str)
-  entry.path                     # full path (str)
+os.open(path, O_RDONLY|O_DIRECTORY|O_CLOEXEC)  # once per directory
+                                 # + O_NOFOLLOW below the scan root; a path
+                                 # past PATH_MAX opens in 4,000-byte steps
+os.fstat(fd)                     # this directory's mtime, blocks, dev/inode
+os.stat(path)                    # only if the open failed: a denied
+                                 # directory's own blocks and identity
+scan_dir(fd)                     # scanner/accel.py; the C reader by default:
+  fdopendir(dup(fd))             # its own handle on the directory
+  readdir()                      # every name, with its d_type
+  fstatat(fd, name, AT_SYMLINK_NOFOLLOW)  # non-directories only: st_size,
+                                 # st_blocks, dev/inode/nlink, mtime
+  closedir()
+os.close(fd)                     # two descriptors in flight per worker, no more
 
 # Deferred work, runs on demand when the UI looks at a symlink
 # (Details panel render, or `i` to navigate into a symlinked dir),
 # plus eagerly for the first 100 symlinks at the scan root only:
   os.readlink(node.path)         # symlinks only: target string
   os.stat(node.path)             # symlinks only: classify target type
+                                 # (past 4,000 characters, both ask about one
+                                 # name under a descriptor on the parent)
 ```
 
-**Metadata captured per entry:** size (`st_size`), modification time (`st_mtime`), type (dir/file/symlink). For symlinks the target path and target type are populated lazily (see Symlink Handling below).
+**Metadata captured per entry, directories included:** logical payload (`st_size`), allocated payload (`st_blocks * 512` when available -- a directory's own blocks come from the `fstat` of the descriptor it was opened on, so they cost no extra syscall), device/inode identity (`st_dev`, `st_ino`), hard link count (`st_nlink`), modification time (`st_mtime`), and type. For symlinks the target path and target type are populated lazily (see Symlink Handling below).
 
-**Metadata NOT captured:** permissions, ownership (uid/gid), inode number, extended attributes, ACLs, creation time, hard link count.
+**Metadata NOT captured:** permissions, ownership (uid/gid), extended attributes, ACLs, creation time, filesystem compression ratio, reflink sharing, or snapshot-exclusive physical blocks.
 
-`os.scandir()` is used instead of `os.listdir()` + `os.stat()` because it avoids a second syscall per entry on Linux (the kernel returns `d_type` from `getdents64`).
+`scan_dir` comes from `scanner/accel.py`, which picks a reader once, at import. The default is `_scanfast`, a small C extension that does the `fdopendir`, the `readdir` loop and the `fstatat` of every non-directory entry inside one GIL release -- one handoff per directory instead of one per entry (see [One GIL Release Per Directory](architecture.md#one-gil-release-per-directory)). Where it was not built for the running interpreter, or under `DISKTIDE_ACCEL=0`, `_scanfast_py` does the same work through `os.scandir(fd)` and `DirEntry.stat(follow_symlinks=False)` and returns the same tuples. Neither stats a directory entry during the read: `d_type` from `getdents64` already says what it is, and its own `fstat` comes when its job opens it; an entry whose filesystem leaves `d_type` unknown is statted and decided by its mode. Every stat names one entry against a descriptor already held rather than a whole path: measured on one thread with no node building, 3.14 us per entry against 3.58 on warm local xfs and 11.0 against 13.0 on warm NFSv4. The full child path is then joined in Python, which is what `FSNode.path` stores; it is never handed back to the kernel. `scanner/walker.py::scan_directory`, the recursive compatibility walker kept for diagnostics and `tool/` scripts, is deliberately still path-based -- it recurses one Python frame per level, so it runs out of interpreter stack long before it runs out of pathname.
+
+### Deep trees
+
+PATH_MAX -- 4,096 bytes on Linux -- is a limit on the pathname *argument* of a syscall, not on the depth of a tree, and the scan no longer runs into it. Nothing below the scan root is ever named by its whole path, and the scan root's own path is opened in PATH_MAX-sized steps, each relative to the descriptor the last step returned (four opens for a 10,900-byte path). A chain of 1,200 directories with an eight-letter name at each level scans to the bottom; before this it stopped at level 442 and recorded `[Errno 36] File name too long` as a *denied* directory, so the tree looked like a permissions problem rather than a deep one.
+
+`classify_symlink` is past it too: from 4,000 characters it opens the link's parent and asks `readlink` and the follow-stat about one name under that descriptor, so a symlink deeper than PATH_MAX is classified like any other. One thing still uses whole paths and still fails past 4,096 bytes: every cleanup action -- trash, quarantine, delete -- which builds the full path to hand to `shutil` and the trash spec, and refuses such a row with an error before anything is renamed or unlinked. Deleting a directory *containing* such a path works, because `shutil.rmtree` is fd-relative itself; naming one of its descendants directly does not.
 
 ### Symlink Handling
 
@@ -76,7 +113,7 @@ This prevents:
 
 Target classification (the `readlink` for the target string and the `stat(follow_symlinks=True)` to learn whether the target is a directory, a file, or broken) is **deferred to first use**: `make_symlink_node` pays only the link's own `entry.stat(follow_symlinks=False)`, and `classify_symlink(node)` runs the deferred work when the Details panel renders the node or the `i` action navigates a symlinked directory. Result is cached on the node (`link_classified=True`), so a second look is free.
 
-To keep the typical `fsmonitor ~` case showing the inline `→ target` decoration in the tree from the start, the engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks it encounters at the scan root. Deeper symlinks remain fully lazy regardless of count. This costs at most ~60 ms of extra round-trips at scan start on slow shares; it cannot regress the case where the scan root itself is a directory containing hundreds of thousands of symlinks (a real shape: image-cache `.dataset/` trees on a cluster home), which used to add minutes to the scan.
+To keep the typical `disktide ~` case showing the inline `→ target` decoration in the tree from the start, the engine eagerly classifies the first `_TOP_LEVEL_CLASSIFY_CAP = 100` symlinks it encounters at the scan root. Deeper symlinks remain fully lazy regardless of count. This costs at most ~60 ms of extra round-trips at scan start on slow shares; it cannot regress the case where the scan root itself is a directory containing hundreds of thousands of symlinks (a real shape: image-cache `.dataset/` trees on a cluster home), which used to add minutes to the scan.
 
 The scan still never traverses the link.
 
@@ -96,21 +133,88 @@ A `PermissionError` on the directory itself (`os.scandir()` fails) records the e
 
 Errors are stored in `FSNode.error` and displayed in the TUI details panel.
 
-### Database -- `storage/database.py`
+**A coverage gap never turns a metric into "Unavailable".** A directory that could not be read still contributes its *own* blocks -- it was stat'ed from its parent even when it could not be opened -- and nothing from inside it. So does a directory stopped by `--max-depth`. A directory that vanished under the scan, one excluded as a pseudo mount or across a filesystem boundary, and one that is its own ancestor contribute zero; the last of those has already been counted under the ancestor that shares its inode. What is missing is reported by `inaccessible_count` / `inaccessible_subtree_count`, `depth_limited_subtree_count`, `excluded_subtree_count` and `vanished_subtree_count` -- the "Coverage: partial" line -- exactly as it always has been for Logical.
 
-SQLite database stored at `~/.local/share/fsmonitor-cli/data.db` (XDG-compliant; the legacy directory name is retained for upgrade compatibility).
+`None` ("Unavailable") in `allocated_size` / `unique_allocated_size` therefore means one thing and only one: this platform does not provide `st_blocks` at all, so no node in the tree has a number. The two shapes of unreadable therefore agree: a `chmod 000` directory (the open fails) and a `chmod 444` one (the listing succeeds, every `fstatat` under it fails) are both one inaccessible subtree and both report a number. `tests/scheduler_invariants.py` I8 fails any applied directory that reports `None` while all of its entries carry a number.
+
+**Changed during the scan is not the same as unreadable.** An `OSError` whose
+`errno` is `ENOENT`, `ESTALE` or `ENOTDIR` means the entry was listed by its
+parent's `readdir` and was gone by the time the `stat` reached it -- the tree
+moved under the walk, and nothing denied us anything. Those entries land in
+`FSNode.vanished_count` / `vanished_subtree_count`, a directory that
+disappeared before its own job ran is marked `vanished` with `error` left at
+`None`, and none of it reaches `inaccessible_count`, the progress error count,
+`AccessError` events or the run's `partial` status. Every other errno,
+`PermissionError` included, behaves exactly as it did. The scan root is the
+exception: a root that does not exist is a bad argument and still reports an
+error.
+
+### Monitor and snapshot repository -- `repositories/sqlite.py`, `storage/database.py`
+
+SQLite database stored at `~/.local/share/disktide/data.db` for new installs.
+When `~/.local/share/sizetrail/data.db` or the older
+`~/.local/share/fsmonitor-cli/data.db` already exists and the new path does not,
+DiskTide keeps using the newest available legacy database so monitor history
+and cleanup audit records remain available.
 
 | Operation | System call |
 |-----------|------------|
 | Locate DB | `os.environ.get("XDG_DATA_HOME")`, `os.path.expanduser("~/.local/share")` |
 | Create dir | `os.makedirs(db_dir, exist_ok=True)` |
 | Open/create DB | `sqlite3.connect(path)` |
+| Open read-only recovery | SQLite URI with `mode=ro`, then `PRAGMA query_only=ON`; if that open is refused as read-only and no `-wal` is pending (a directory that cannot hold the `-shm` sidecar), the same URI with `immutable=1` |
+| Pre-migration backup | SQLite backup API to `data.db.pre-v11.bak.partial`, then `os.replace` to `data.db.pre-v11.bak` |
+| Open-path validity | `SELECT 1 FROM sqlite_master LIMIT 1` |
+| Integrity probe | `PRAGMA quick_check`, in `doctor` only |
+| Budget measurement | `Path.stat()` on the database, WAL, and shared-memory files |
+| Retention compaction | `PRAGMA wal_checkpoint(TRUNCATE)` followed by `VACUUM` |
 
-Snapshot roots are stored as absolute strings in `snapshots.root_path`; directory paths are interned in `paths.path` and referenced by integer IDs from baseline and delta rows. Query filtering uses exact or ancestor/descendant string comparison. No additional normalization is applied at the database layer -- CLI roots are stored after `Path.resolve()`.
+Monitor definitions and snapshot roots are stored as absolute strings;
+definition paths are normalized with `Path.expanduser().resolve()`. File and
+directory paths are interned in `paths.path` and referenced by integer IDs from
+baseline and delta rows. Query filtering uses exact or ancestor/descendant
+string comparison. The repository also stores monitor leases/status, pins,
+rollup provenance, retention audits, and alert rule/event history; none of
+those tables causes an additional filesystem walk.
 
 SQLite pragmas: `journal_mode=WAL` (allows concurrent readers with one writer), `foreign_keys=ON`.
 
+Schema migration is transactional. If write/migration setup fails but the file
+is readable, history opens read-only; if it is corrupt, scanning continues with
+an in-memory degraded repository. The original database is never automatically
+deleted or overwritten.
+
 On network filesystems, placing the database on the network share would be slow. The default XDG path puts it on the local filesystem, which is correct.
+
+### Optional filesystem events -- `collectors/events/`, `services/watch.py`
+
+The core install performs no native watch calls. On Linux, installing
+`disktide[watch]` makes `inotify-simple` available through a lazy probe. A
+held monitor lease recursively adds directory watches while respecting
+`one_file_system`, pseudo-filesystem exclusion, snapshot-directory exclusion,
+maximum depth, and never-follow symlink policy. A snapshot directory stops the
+descent, so nothing inside one is watched and no event can arrive from there;
+the watch root itself is exempt, as the scan root is. Newly created
+directories receive watches before later events are consumed when possible.
+
+The backend emits normalized create, modify, delete, move, overflow, root-lost,
+and backend-error hints. Rename cookies are paired inside the adapter; unmatched
+moves become deletes after a bounded timeout. `Q_OVERFLOW`, watch-limit errors,
+unmounts, root replacement, backend restart, and expired host leases mark the
+monitor degraded and require a full reconciliation.
+
+Ordinary hints are projected to their containing parent/subtree and coalesced by
+`DirtyPathTracker`. Local reconciliation calls the same `ScanService`, metric,
+and policy contract but does not write a snapshot. Periodic/manual/recovery full
+scans remain authoritative. Consequently the event stream is not a filesystem
+audit log, and process downtime is never represented as complete event history.
+
+### Capacity alerts -- `services/alerts.py`
+
+Free-space and free-inode alert rules call `os.statvfs(rule.path)` after a
+monitor snapshot is saved. They read filesystem capacity metadata only; they do
+not traverse the rule path. Size, growth, and new-large-item rules evaluate the
+persisted snapshot measurements and make no extra filesystem calls.
 
 ### Configuration -- `config.py`
 
@@ -122,9 +226,14 @@ On network filesystems, placing the database on the network share would be slow.
 | Read | `open(config_file, "rb")` + `tomllib.load()` |
 | Write | `Path.write_text()` |
 
-### Cleanup -- `cleanup/actions.py`, `cleanup/detector.py`, `models/patterns.py`
+### Cleanup -- `services/cleanup.py`, `cleanup/actions.py`, `cleanup/detector.py`, `extensions/cleanup_rules.py`
 
-Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator rules perform live existence checks, and deletion performs direct filesystem operations:
+Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator
+rules perform live existence checks. Built-in declarative rule packs are read
+through `importlib.resources`; user packs are parsed with `tomllib` from
+`~/.config/disktide/cleanup-rules/*.toml`. Validation reads policy only:
+the schema has no shell, Python, or executor hook. Creating a plan additionally
+captures live identity without modifying the target:
 
 **Parent indicator checks** (`patterns.py`):
 ```python
@@ -132,16 +241,38 @@ Detection primarily operates on the in-memory `FSNode` tree. Parent-indicator ru
 ```
 This checks whether files like `package.json` or `Cargo.toml` exist next to a candidate target.
 
-**Deletion** (`actions.py`):
+**Revalidation and isolation** (`services/cleanup.py`, `actions.py`):
 ```python
-os.path.isdir(target.path)      # directory or file?
-os.path.islink(target.path)     # unlink a symlink itself, never its target
-shutil.rmtree(target.path)      # recursive directory delete
-os.path.exists(target.path)     # existence check
-os.unlink(target.path)          # single file delete
+os.lstat(target.path)           # device/inode/type/mtime/size; never follows links
+os.scandir(target.path)         # re-measure directory contents before action
+os.path.ismount(target.path)    # root/mount protection
+os.open(parent, O_DIRECTORY | O_NOFOLLOW)
+os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+os.rename(name, destination, src_dir_fd=parent_fd, dst_dir_fd=destination_fd)
+Path.write_text(...)            # .trashinfo or quarantine recovery manifest
 ```
 
-Deletion is permanent and does not use trash/quarantine, undo, persistent audit logging, or stale-target revalidation. The action checks whether the current path is a symlink before directory detection, so a directory symlink is unlinked without touching its target. A dry-run path exercises result reporting without making these calls.
+Quarantine directories must be owned by the current user, mode `0700`, and on
+the same device as the target. The executor never substitutes copy+delete for an
+atomic rename. A constant-size `.ledger.json` and lock provide normal-path
+capacity accounting; manifests are scanned only for explicit audit/rebuild or
+interrupted-state recovery. Undo uses a reverified dir-fd rename back to the
+original path only when that path is absent and the isolated inode still matches
+the plan identity.
+
+Owned quarantine purge repeats manifest and identity checks, then removes only
+the isolated quarantine object after the exact `PURGE <plan-id>` confirmation.
+It does not enumerate or remove system Trash. The audit/history model records
+isolated, purged, actual reclaimed, and undone bytes separately.
+
+Permanent deletion is not the default executor. It is available only after a
+plan-scoped typed confirmation. Supported POSIX systems stage a verified file or
+symlink under the same parent and unlink it by directory fd. Direct permanent
+directory deletion is blocked; directory content must first enter the owned
+quarantine and can then be purged through a no-symlink dir-fd traversal. Product
+CLI/TUI code cannot call this primitive without `CleanupService` revalidation
+and a successful pre-action audit write. Rules marked detection-only cannot
+reach either safe or permanent filesystem primitives.
 
 ### Welcome Screen -- `screens/welcome.py`
 
@@ -158,16 +289,20 @@ os.path.join(parent, name)      # construct full path
 Path(raw).resolve()             # resolve before submitting
 ```
 
-### System Info -- `scanner/sysinfo.py`
+### Platform Adapters and System Info
 
-Linux-specific reads (all wrapped in try/except with safe fallbacks):
+`scanner/sysinfo.py` remains the compatibility facade used by worker tuning.
+It combines adapter probes with a bounded direct-directory metadata sample and
+records the requested/effective count plus reason. The Linux I/O lives in
+`collectors/platform/linux.py`; each probe returns an available, degraded, or
+unavailable result with a reason.
 
 ```python
 os.cpu_count()                  # CPU count
 os.sched_getaffinity(0)         # cgroup-aware CPU count
 os.getloadavg()                 # 1/5/15-min load averages
 open("/proc/meminfo")           # total and available memory
-open("/proc/mounts")            # filesystem type, mountpoint
+open("/proc/self/mounts")       # filesystem type, mountpoint
 os.path.realpath(path)          # resolve symlinks for device lookup
 os.path.exists("/sys/block/...") # check sysfs paths
 open("/sys/block/.../rotational") # HDD vs SSD
@@ -175,20 +310,32 @@ os.listdir("/sys/block/.../slaves") # device-mapper slave devices
 os.path.basename(os.path.realpath(dev)) # resolve /dev symlinks
 ```
 
-### FS Overview -- `screens/fs_overview.py`, `scanner/blockdev.py`, `scanner/benchmark.py`
+### FS Overview -- `screens/fs_overview.py`, platform adapter, benchmark
 
 Mounted-filesystem discovery and capacity reporting use:
 
 ```python
-open("/proc/mounts")            # device, mountpoint, fs type, options
+adapter.enumerate_mounts()      # structured mount capability + records
 os.statvfs(mountpoint)          # blocks, available space, inode counts
 subprocess.run(["quota", ...]) # optional current-user quota data
-subprocess.run(["lsblk", ...]) # optional JSON block-device tree
+adapter.list_block_devices()    # structured lsblk capability + device tree
+open("/proc/self/mountinfo")    # which directory of the fs is mounted here
 ```
+
+`MountRecord.root` comes from field 4 of `mountinfo` and is the only way to
+tell a filesystem from a bind mount of one; `/proc/mounts` does not carry it.
+It is joined onto the `/proc/mounts` records by mountpoint rather than
+replacing them, because `mountinfo`'s device column, option split and
+escaping all differ. A host without the table leaves every record at `/`,
+which reads as "not a bind mount".
 
 `statvfs` for network mounts runs in a worker with a 3-second timeout so a stale NFS/CIFS mount cannot block the screen indefinitely. Local mounts are queried directly. Pseudo-filesystems and zero-capacity mounts are filtered from the table.
 
-The `b` action is explicitly opt-in and confirmed before writing. It uses `tempfile.mkstemp()` on the selected mount (mode 0600), writes at most 256 MiB and at most 25% of currently available space, calls `os.fsync()`, makes a best-effort `posix_fadvise(..., DONTNEED)` cache drop, reads the file back, and always unlinks it. The read rate is approximate because the cache-drop request is advisory.
+The `B` action is explicitly opt-in and confirmed before writing, and the prompt names the *directory* rather than the mount: `writable_probe_dir()` takes the mountpoint when it is writable and otherwise the first of `$HOME`, each suffix of the home path under the mount, `$USER` and `tmp` that is a writable directory with the same `st_dev`. On a shared machine the mount root is normally the one directory the user cannot write, and the `st_dev` check is what stops `$HOME` -- which is under `/` on every machine -- from answering a question about the root filesystem.
+
+It uses `tempfile.mkstemp()` in that directory (mode 0600) and writes at most 256 MiB, an absolute ceiling that does not depend on `statvfs`; the 25%-of-available rule is applied on top of it, against the caller-supplied `headroom_bytes` (the FS-Overview screen passes the user's quota headroom) where one is known, because `statvfs` reports the filesystem's free space and not the caller's share of it. The bytes are incompressible and each chunk is a differently-offset window onto one random buffer, so no block of the file equals another and a deduplicating or compressing filesystem cannot report fiction. It then calls `os.fsync()`, makes a best-effort `posix_fadvise(..., DONTNEED)` cache drop, reads the file back, and always unlinks it.
+
+`max_seconds` is a budget: the write phase gets half and the read-back runs against the whole of it, both setting `BenchmarkResult.truncated` when they stop on the clock. `fsync` cannot be bounded portably and is not pretended about. The read rate is approximate because the cache-drop request is advisory -- NFS ignores it, so a read figure there is the client page cache. Each run sweeps probe files this user owns that are older than an hour from the directory it is about to write in, which is the only thing that cleans up after a SIGKILL. One probe runs at a time; a thread blocked in `os.write` cannot be cancelled, so a second is refused rather than queued.
 
 ## Filesystem-Specific Considerations
 
@@ -198,15 +345,89 @@ The scanner stores paths exactly as returned by `os.scandir()`. On case-insensit
 
 ### Sparse Files
 
-`st_size` reports the logical size, not the on-disk allocation. A 1 GB sparse file with only 4 KB allocated will show as 1 GB. This matches what `du --apparent-size` reports, but differs from `du` (which reports allocated blocks). There is no `st_blocks` tracking.
+Logical uses `st_size`; Allocated uses `st_blocks * 512`. A 1 GB sparse file with only 4 KB allocated therefore shows roughly 1 GB in Logical and 4 KB in Allocated/Unique. On platforms without `st_blocks`, Allocated and Unique are shown as `Unavailable`, not zero.
 
 ### Hard Links
 
-Each hard link is counted independently. If the same inode is linked from two paths, its size is counted twice. There is no inode-based deduplication. For most use cases this doesn't matter, but on filesystems with heavy hard link usage (e.g., some backup systems, Nix store), reported sizes may exceed actual disk usage.
+Logical and Allocated count each visible path independently. Unique groups entries by `(st_dev, st_ino)` and assigns the allocated bytes to the lexicographically first absolute path in the scan root; other links show zero Unique bytes and identify the owner. This is deterministic across worker counts. Equal inode numbers on different devices are not deduplicated.
+
+### Directory Blocks
+
+A directory is a file too: it holds names, and the filesystem charges it blocks for them. On ext4 that is 4 KiB for any directory at all; on xfs a small directory's names live in the inode and cost nothing, and one that outgrows it takes 4 KiB and then more (a 300-entry directory measures 12,288 bytes).
+
+- **Logical** counts files and symlinks only. A directory's own `st_size` is *not* added: on ext4 it is 4,096 whatever the directory holds, and on xfs it is a byte count of the names themselves (24 for a directory holding two of them). Neither is payload anybody stored.
+- **Allocated** is `st_blocks * 512` of every file, symlink **and directory** in the subtree, the node itself included. This is what `du` reports, and a scan of a tree with no files in it is no longer zero.
+- **Unique** is the same after hardlink deduplication. A directory is never a hardlink duplicate -- no second path resolves to one directory inode -- so directory blocks pass through the dedup unchanged and appear once, under the directory that owns them.
+
+`du` deduplicates hardlinks by inode, so on a tree with hardlinks `du -s --block-size=1` matches **Unique**, and Allocated is larger by the duplicated bytes.
+
+A directory's *own* allocated bytes (`own_allocated_size`, the "Own allocated" row in the details panel) are its own blocks plus its direct files' and symlinks'. Sub-directories therefore no longer add up to their parent in the Allocated and Unique metrics -- the difference is the parent's own blocks -- exactly as they already did not in Logical, where the difference is the parent's direct files.
 
 ### Network Filesystems (NFS, CIFS, sshfs)
 
-- Worker count is automatically capped at 4 when a network filesystem is detected (via `/proc/mounts`)
+Worker count is chosen from a *measured* per-entry latency, not from the
+filesystem name alone. The mount type (via `/proc/mounts`) decides whether the
+scan is latency-bound at all; the per-entry cost then decides how many workers
+that buys. Two measurements answer that, and the **worse** of them is used:
+
+- a 64-entry, 75 ms metadata sample of the scan root, and
+- the mean GETATTR round trip the kernel has recorded for the mount over its
+  whole life, from `/proc/self/mountstats` (NFS only, ignored under 100 calls).
+
+The second exists because the first can be flattered by exactly the directory
+it looks at: the scan root of this project's cluster mount holds fourteen
+directories whose attributes are already cached, so it samples 0.07 ms an entry
+on storage whose real GETATTR averages 0.66 ms across 58 million calls --- and
+whose cold `scan_dir` of a 1,258-entry directory measured 543 us an entry over
+2,419 RPCs.
+
+| Per-entry latency (sample or server RTT) | Workers |
+|---|---|
+| under 0.5 ms (warm NFS, GPFS) | 8 |
+| 0.5 ms and up | 16 |
+| 1 ms and up (sshfs, CIFS over a WAN) | 32 |
+| 3 ms and up (an object store behind FUSE) | 64 |
+
+The tiers come from a sweep that wrapped `os.scandir` so every entry cost a
+fixed sleep and then ran the real engine: at 5 ms per entry the wall time falls
+from 25.1 s at one worker to 3.38 s at eight and 0.88 s at 64, and at 1 ms it
+bottoms out at 32. A fixed cap of 8 left roughly 3x on the table for those
+mounts. The `min(available_cpus, 8)` cap that applies to local storage does not
+apply here: a thread waiting on a server is descheduled for the whole wait and
+does not need a core to hold it open.
+
+A CPU budget still wins over the tier, because the node building between the
+waits is real CPU. The budget is every visible CPU inside a batch job or a
+CPU-limited container; what the 1-minute load leaves on a machine of our own;
+and, on a *shared* host -- no CPU allocation and other people's processes
+present, the cluster login-node case -- our fair share of what is idle: the
+host's CPUs minus the worse of the 1- and 5-minute load, over everyone with a
+process on it.
+
+What that budget buys depends on what a worker costs, and a worker costs CPU
+per *round trip* rather than per second: about 160 us an entry. A full scan of
+the NFSv3 `sec=krb5p` mount above with 16 workers took 368 s wall for 172 s
+user and 814 s sys (krb5p encrypts on the calling thread) across 1,173,122
+directories and 4,931,204 files --- 986 CPU-seconds over 6.1 million entries.
+So a worker holds `160 us / per-entry latency` of a core, clamped to
+[0.02, 1.0]: a quarter of a core at the 0.65 ms this was measured at, 0.03 at
+5 ms. 128 CPUs at load 0.5 with five other users is a share of 21 cores, which
+on that mount is 84 workers and the tier's 16 is what binds; the same node at
+load 120 gives the floor of 2; and a two-core box on a 5 ms mount can still
+afford the whole 64-worker tier, which is what the latency sweep says that
+mount repays. Under 512 MB of available memory the scan goes serial.
+
+An automounted share is detected as the filesystem mounted *on top of* the
+autofs trigger, not as the trigger. A direct automount leaves two records with
+the identical mountpoint in `/proc/mounts` --- `systemd-1 ... autofs` first,
+then the `nfs` mount the automounter made --- and among equal mountpoints the
+last record wins, because mount order is stacking order. A trigger that is
+still the winner has not fired: the path is opened once to make the
+automounter mount it, and the table is read again. Excluded-mount discovery
+follows the same rule, so an automounted share below a scan root is walked
+rather than skipped as a pseudo filesystem, while a trigger with nothing over
+it stays excluded.
+
 - Latency per `os.scandir()` call is higher, so scans take longer
 - `st_mtime` may have lower resolution or be subject to clock skew between client and server
 - The snapshot database is stored locally by default (`XDG_DATA_HOME`), not on the scanned network share
@@ -214,6 +435,15 @@ Each hard link is counted independently. If the same inode is linked from two pa
 ### FUSE Filesystems
 
 FUSE filesystems (sshfs, rclone, s3fs) generally work since the scanner only uses standard POSIX calls. Performance depends entirely on the FUSE implementation. `os.scandir()` may not benefit from kernel `d_type` optimization through FUSE, falling back to per-entry `stat()` calls.
+
+Every `fuse.*` mount is treated as latency-bound and tiered exactly as a network
+mount is, whether or not its backend is remote and whether or not the specific
+backend is named in `NETWORK_FS_TYPES`: a FUSE round trip is two context
+switches to a userspace daemon at best and a request to an object store at
+worst, and neither is something a thread can do without being descheduled. A
+mount backed by an object store routinely samples above 3 ms per entry and takes
+the 64-worker tier. `virtiofs` is *not* in that group -- it is a shared-memory
+transport with local-order latency -- and neither is `overlay`.
 
 ### OverlayFS
 
@@ -233,8 +463,18 @@ No symlink support (symlinks don't exist on FAT). Modification time resolution i
 
 ### ZFS
 
-Similar to Btrfs -- deduplication and compression mean apparent sizes may differ from physical usage. ZFS snapshots are not visible through the normal directory tree, so they don't affect scanning.
+Similar to Btrfs -- deduplication and compression mean apparent sizes may differ from physical usage. ZFS snapshots are hidden from the normal directory tree only while `snapdir=hidden`, which is the default; with `snapdir=visible` every snapshot appears under `.zfs/snapshot/<name>` as a full second copy of the dataset, and the snapshot-directory policy below is what keeps a scan from walking them.
+
+### Snapshot directories
+
+Storage systems publish read-only copies of a whole volume under a fixed directory name. NetApp exports `.snapshot` at the root of every NFS volume (`~snapshot` over CIFS), ZFS exposes `.zfs/snapshot` when `snapdir=visible`, and Veritas VxFS uses `.ckpt`. Each name below one of those is a complete copy of the tree, and on NetApp each is also an automatic NFS submount: `/proc/mounts` lists them as separate `nfs` mounts with `mountaddr=unspecified`, so a policy that crosses filesystems (the default) walks straight into them.
+
+The cost is proportional to how many snapshots are retained. A measured NetApp export held seven -- two `daily.*`, `weekly.*`, and `snapmirror.*` -- over a real tree of 1,173,122 directories, 4,931,204 files, and 10.02 TB, which took 368 s at 16 workers with the boundary honoured. Without the exclusion the same scan walks the volume eight times and reports roughly 80 TB on a 10 TB volume; `du` users hit the same thing.
+
+Descendant snapshot directories are therefore excluded by default and remain visible as policy-excluded boundary nodes with the reason `snapshot directory`, exactly as pseudo-filesystem mountpoints are. The name is enough to decide, so the directory is never opened -- listing `.snapshot` is what triggers the automounts. The scan root itself is never excluded, so `disktide scan /vol/.snapshot/daily.2026-09-06_0010` still measures that one snapshot. Use `--include-snapshots` or `scan.exclude_snapshot_dirs = false` to count them.
+
+Nothing found inside a snapshot is reclaimable -- a snapshot is read-only -- and its bytes are already charged to the volume as snapshot reserve rather than to the files the user sees, so for disk-usage accounting counting them twice is the error and skipping them is the measurement.
 
 ### procfs / sysfs / devfs
 
-These virtual filesystems can be scanned but the results are meaningless for disk usage purposes. The scanner reports whatever `st_size` the kernel returns (often 0 for procfs entries), so choose a narrower scan root instead of scanning a tree that crosses into them. FS Overview filters pseudo-filesystems automatically.
+Descendant pseudo-filesystem mountpoints are excluded by default and remain visible as policy-excluded boundary nodes. The scan root itself is never excluded, so explicitly scanning `/proc`, tmpfs, or an overlay root still works. Use `--include-pseudo` or `scan.exclude_pseudo_filesystems = false` to include descendant pseudo filesystems. FS Overview and the scanner share the same pseudo-filesystem classification.

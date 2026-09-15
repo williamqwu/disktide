@@ -1,0 +1,47 @@
+schema_version = 1
+name = "python"
+version = "1.0.0"
+description = "Python bytecode, tool caches, virtual environments, and build outputs"
+default_enabled = true
+
+[[rules]]
+name = "python_cache"
+description = "Python bytecode and local tool cache directory"
+patterns = ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"]
+risk = "safe"
+category = "cache"
+rebuild_hint = "Rerun Python or the corresponding test/type/lint tool"
+confidence = 0.98
+default_action = "safe"
+
+[[rules]]
+name = "python_bytecode"
+description = "Compiled Python bytecode file"
+patterns = ["*.pyc", "*.pyo"]
+risk = "safe"
+category = "cache"
+rebuild_hint = "Python recreates bytecode on the next import"
+confidence = 0.99
+default_action = "safe"
+
+[[rules]]
+name = "python_venv"
+description = "Project-local Python virtual environment"
+patterns = [".venv", "venv"]
+parent_indicators = ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"]
+risk = "moderate"
+category = "dependencies"
+rebuild_hint = "Recreate the environment and reinstall project dependencies"
+confidence = 0.86
+default_action = "safe"
+
+[[rules]]
+name = "python_build_outputs"
+description = "Python package build output"
+patterns = ["build", "dist"]
+parent_indicators = ["pyproject.toml", "setup.py"]
+risk = "moderate"
+category = "build"
+rebuild_hint = "Re-run the project build or packaging command"
+confidence = 0.9
+default_action = "safe"

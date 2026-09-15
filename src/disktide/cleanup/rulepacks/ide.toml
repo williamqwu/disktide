@@ -1,0 +1,15 @@
+schema_version = 1
+name = "ide"
+version = "1.0.0"
+description = "IDE project metadata and caches requiring explicit review"
+default_enabled = true
+
+[[rules]]
+name = "ide_caches"
+description = "IDE project metadata or cache directory"
+patterns = [".idea", ".vscode"]
+risk = "moderate"
+category = "ide"
+rebuild_hint = "The IDE can recreate caches, but project-specific settings may need review"
+confidence = 0.64
+default_action = "preview"

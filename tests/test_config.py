@@ -2,9 +2,11 @@
 
 from unittest.mock import patch
 
-from fs_monitor.config import (
+import pytest
+
+from disktide.config import (
     load_config, save_config, AppConfig, HostPaths,
-    get_effective_paths, set_effective_paths,
+    get_effective_paths, parse_size, set_effective_paths,
 )
 
 
@@ -14,7 +16,18 @@ class TestConfig:
         assert isinstance(config, AppConfig)
         assert config.ui.default_viz == "sunburst"
         assert config.scan.max_depth is None
+        assert config.scan.one_file_system is False
+        assert config.scan.exclude_pseudo_filesystems is True
+        assert config.scan.exclude_snapshot_dirs is True
         assert config.monitor.default_interval == 21600
+        assert config.monitor.database_soft_budget == 2 * 1024**3
+        assert config.monitor.database_hard_budget == 3 * 1024**3
+        assert config.monitor.auto_start_in_tui is False
+
+    def test_parse_size(self):
+        assert parse_size("4MiB") == 4 * 1024**2
+        assert parse_size("1.5 GB") == 1_500_000_000
+        assert parse_size("42") == 42
 
     def test_load_from_toml(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -22,22 +35,59 @@ class TestConfig:
 [scan]
 max_depth = 10
 workers = 2
+one_file_system = true
+exclude_pseudo_filesystems = false
+exclude_snapshot_dirs = false
 
 [monitor]
 default_interval = 3600
 
 [ui]
-color_theme = "dark"
+color_theme = "cyberpunk"
 default_viz = "sunburst"
 safe_rendering = true
 """)
         config = load_config(str(config_file))
         assert config.scan.max_depth == 10
         assert config.scan.workers == 2
+        assert config.scan.one_file_system is True
+        assert config.scan.exclude_pseudo_filesystems is False
+        assert config.scan.exclude_snapshot_dirs is False
         assert config.monitor.default_interval == 3600
-        assert config.ui.color_theme == "dark"
+        assert config.ui.color_theme == "cyberpunk"
         assert config.ui.default_viz == "sunburst"
         assert config.ui.safe_rendering is True
+
+    @pytest.mark.parametrize("retired", ["warm", "default", "vivid"])
+    def test_retired_theme_names_load_as_disktide(self, tmp_path, retired):
+        """Three keys named this palette before `disktide` did.
+
+        `vivid` (dropped in 0.2.25) and `default` (dropped when the five
+        themes landed) were both measured duplicates of `warm`, and `warm`
+        itself became the product's own theme under its own name. A config
+        naming any of them has to open on the colours it had, not on
+        whatever happens to sort first.
+        """
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(f"""
+[ui]
+color_theme = "{retired}"
+""")
+        assert load_config(str(config_file)).ui.color_theme == "disktide"
+
+    def test_an_unknown_theme_name_loads_as_the_default(self, tmp_path):
+        """A hand-typed or newer-build name must not stop the app opening.
+
+        `Select(value=...)` raises on a value outside its options, so a
+        name the picker cannot show has to be normalised before it reaches
+        the settings screen rather than after.
+        """
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[ui]
+color_theme = "aubergine"
+""")
+        assert load_config(str(config_file)).ui.color_theme == "disktide"
 
     def test_partial_config(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -63,6 +113,10 @@ enabled_rules = ["old_logs"]
 disabled_rules = ["ide_caches"]
 require_confirm_dangerous = false
 
+[monitor]
+snapshot_retention = 30
+strict_path = true
+
 [ui]
 default_sort = "name"
 show_hidden = true
@@ -71,7 +125,9 @@ show_hidden = true
         config = load_config(config_file)
 
         assert not hasattr(config.scan, "exclude_patterns")
-        assert not hasattr(config, "cleanup")
+        assert config.cleanup.prefer_trash is True
+        assert config.cleanup.quarantine_retention_days == 7
+        assert config.cleanup.quarantine_max_bytes == 10 * 1024**3
         assert not hasattr(config.ui, "default_sort")
         assert not hasattr(config.ui, "show_hidden")
 
@@ -82,17 +138,40 @@ show_hidden = true
             "enabled_rules",
             "disabled_rules",
             "require_confirm_dangerous",
+            "snapshot_retention",
+            "strict_path",
             "default_sort",
             "show_hidden",
         ):
             assert retired_key not in saved
 
+    def test_cleanup_policy_roundtrip(self, tmp_path):
+        config = AppConfig()
+        config.cleanup.prefer_trash = False
+        config.cleanup.quarantine_retention_days = 14
+        config.cleanup.quarantine_max_bytes = 512 * 1024**2
+        config.cleanup.disabled_rule_packs = ["node", "containers"]
+        config.cleanup.map_max_points = 120
+
+        config_file = tmp_path / "cleanup.toml"
+        save_config(config, config_file)
+        loaded = load_config(config_file)
+
+        assert loaded.cleanup.prefer_trash is False
+        assert loaded.cleanup.quarantine_retention_days == 14
+        assert loaded.cleanup.quarantine_max_bytes == 512 * 1024**2
+        assert loaded.cleanup.disabled_rule_packs == ["containers", "node"]
+        assert loaded.cleanup.map_max_points == 120
+
     def test_save_and_reload(self, tmp_path):
         config = AppConfig()
         config.scan.workers = 4
         config.scan.max_depth = 5
+        config.scan.one_file_system = True
+        config.scan.exclude_pseudo_filesystems = False
+        config.scan.exclude_snapshot_dirs = False
         config.monitor.default_interval = 7200
-        config.ui.color_theme = "dark"
+        config.ui.color_theme = "cyberpunk"
         config.ui.default_viz = "sunburst"
         config.ui.safe_rendering = True
 
@@ -102,10 +181,38 @@ show_hidden = true
         loaded = load_config(config_file)
         assert loaded.scan.workers == 4
         assert loaded.scan.max_depth == 5
+        assert loaded.scan.one_file_system is True
+        assert loaded.scan.exclude_pseudo_filesystems is False
+        assert loaded.scan.exclude_snapshot_dirs is False
         assert loaded.monitor.default_interval == 7200
-        assert loaded.ui.color_theme == "dark"
+        assert loaded.ui.color_theme == "cyberpunk"
         assert loaded.ui.default_viz == "sunburst"
         assert loaded.ui.safe_rendering is True
+
+    def test_monitor_budget_roundtrip(self, tmp_path):
+        config = AppConfig()
+        config.monitor.database_soft_budget = 512 * 1024**2
+        config.monitor.database_hard_budget = None
+        config.monitor.auto_start_in_tui = True
+        config.monitor.event_mode = "periodic"
+
+        config_file = tmp_path / "monitor.toml"
+        save_config(config, config_file)
+
+        loaded = load_config(config_file)
+        assert loaded.monitor.database_soft_budget == 512 * 1024**2
+        assert loaded.monitor.database_hard_budget is None
+        assert loaded.monitor.auto_start_in_tui is True
+        assert loaded.monitor.event_mode == "periodic"
+        assert "database_hard_budget = 0" in config_file.read_text()
+
+    def test_invalid_monitor_event_mode_falls_back_to_auto(self, tmp_path):
+        config_file = tmp_path / "invalid-monitor.toml"
+        config_file.write_text('[monitor]\nevent_mode = "audit-everything"\n')
+
+        loaded = load_config(config_file)
+
+        assert loaded.monitor.event_mode == "auto"
 
     def test_save_creates_parent_dirs(self, tmp_path):
         config = AppConfig()
@@ -123,6 +230,52 @@ show_hidden = true
         loaded = load_config(config_file)
         assert loaded.scan.workers is None
         assert loaded.scan.max_depth is None
+
+    def test_cell_aspect_roundtrip(self, tmp_path):
+        config = AppConfig()
+        config.ui.cell_aspect = 2.43
+        config_file = tmp_path / "aspect.toml"
+        save_config(config, config_file)
+
+        assert "cell_aspect = 2.43" in config_file.read_text()
+        assert load_config(config_file).ui.cell_aspect == 2.43
+
+    def test_cell_aspect_defaults_to_auto_and_is_not_written(self, tmp_path):
+        """Unset means "measure it", and leaves no key behind to argue with."""
+        config = AppConfig()
+        assert config.ui.cell_aspect is None
+        config_file = tmp_path / "auto.toml"
+        save_config(config, config_file)
+
+        assert "cell_aspect" not in config_file.read_text()
+        assert load_config(config_file).ui.cell_aspect is None
+
+    def test_cell_aspect_is_clamped_on_load(self, tmp_path):
+        """A value outside the range real cells occupy is a typo, not a font."""
+        config_file = tmp_path / "clamped.toml"
+        config_file.write_text("[ui]\ncell_aspect = 12.0\n")
+        assert load_config(config_file).ui.cell_aspect == 3.5
+
+        config_file.write_text("[ui]\ncell_aspect = 0.4\n")
+        assert load_config(config_file).ui.cell_aspect == 1.5
+
+    def test_unusable_cell_aspect_reads_as_auto(self, tmp_path):
+        """Including the "auto" a user would reasonably write by hand.
+
+        The field is an override for automatic detection, so anything
+        unusable has an obvious right answer -- go back to detecting -- and
+        refusing to start over it would be strictly worse.
+        """
+        config_file = tmp_path / "garbage.toml"
+        for literal in ('"auto"', '"2.43"', "0", "-1.0", "true"):
+            config_file.write_text(f"[ui]\ncell_aspect = {literal}\n")
+            assert load_config(config_file).ui.cell_aspect is None, literal
+
+    def test_integer_cell_aspect_is_accepted(self, tmp_path):
+        """TOML makes `cell_aspect = 2` an int; it is still a valid ratio."""
+        config_file = tmp_path / "int.toml"
+        config_file.write_text("[ui]\ncell_aspect = 2\n")
+        assert load_config(config_file).ui.cell_aspect == 2.0
 
     def test_default_scan_path_roundtrip(self, tmp_path):
         config = AppConfig()
@@ -168,7 +321,7 @@ show_hidden = true
         config = AppConfig()
         assert config.ui.hostname_aware_paths is True
 
-    @patch("fs_monitor.config.current_hostname", return_value="myhost")
+    @patch("disktide.config.current_hostname", return_value="myhost")
     def test_get_effective_paths_hostname_aware(self, mock_host):
         config = AppConfig()
         config.host_paths["myhost"] = HostPaths(
@@ -183,7 +336,7 @@ show_hidden = true
         assert paths.default_scan_path == "/data"
         assert paths.last_visited_path == "/data/logs"
 
-    @patch("fs_monitor.config.current_hostname", return_value="myhost")
+    @patch("disktide.config.current_hostname", return_value="myhost")
     def test_get_effective_paths_legacy_fallback(self, mock_host):
         """No per-host entry but legacy default_scan_path exists."""
         config = AppConfig()
@@ -193,7 +346,7 @@ show_hidden = true
         assert paths.default_scan_path == "/legacy/path"
         assert paths.last_visited_path is None
 
-    @patch("fs_monitor.config.current_hostname", return_value="myhost")
+    @patch("disktide.config.current_hostname", return_value="myhost")
     def test_get_effective_paths_legacy_mode(self, mock_host):
         """hostname_aware_paths=False uses _default key."""
         config = AppConfig()
@@ -205,7 +358,7 @@ show_hidden = true
         paths = get_effective_paths(config)
         assert paths.default_scan_path == "/shared"
 
-    @patch("fs_monitor.config.current_hostname", return_value="myhost")
+    @patch("disktide.config.current_hostname", return_value="myhost")
     def test_set_effective_paths(self, mock_host):
         config = AppConfig()
         hp = HostPaths(default_scan_path="/new", last_visited_path="/new/sub")
@@ -253,6 +406,36 @@ show_hidden = true
         assert loaded.ui.show_cleanup is False
 
 
+class TestMouseSupport:
+    """Round-trip for `ui.mouse`, which is read once at TUI launch."""
+
+    def test_default_is_enabled(self):
+        assert AppConfig().ui.mouse is True
+
+    def test_enabled_is_omitted_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        save_config(AppConfig(), config_file)
+        assert "mouse" not in config_file.read_text()
+
+    def test_disabled_roundtrips(self, tmp_path):
+        config = AppConfig()
+        config.ui.mouse = False
+
+        config_file = tmp_path / "config.toml"
+        save_config(config, config_file)
+
+        assert "mouse = false" in config_file.read_text()
+        assert load_config(config_file).ui.mouse is False
+
+    def test_missing_key_in_an_older_config_stays_enabled(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[ui]
+color_theme = "disktide"
+""")
+        assert load_config(config_file).ui.mouse is True
+
+
 class TestLiveScanRender:
     """Round-trip + auto-gate for `ui.live_scan_render`."""
 
@@ -292,48 +475,66 @@ live_scan_render = "always-and-forever"
 
 
 class TestResolveLiveScanRender:
-    """The auto-gate: terminal-size + cpu_count thresholds."""
+    """The auto-gate: a terminal-size threshold, and only that.
+
+    It used to also require four cores, on the premise that spare ones
+    absorb the redraw. They do not -- the paint is Python and holds the
+    GIL against every scan thread for the whole of a frame -- and the
+    clause was actively backwards, since the hosts with sixteen cores are
+    the ones with the 300-column terminals whose frames cost the most.
+    What bounds the cost is `ExplorerScreen`'s duty cycle. The keyword is
+    still accepted so callers and older tests keep working.
+    """
 
     def test_on_overrides_gate(self):
-        from fs_monitor.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "on", terminal_width=40, terminal_height=10, cpu_count=1
         ) is True
 
     def test_off_overrides_gate(self):
-        from fs_monitor.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "off", terminal_width=200, terminal_height=60, cpu_count=16
         ) is False
 
     def test_auto_enabled_on_roomy_terminal(self):
-        from fs_monitor.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=100, terminal_height=40, cpu_count=8
         ) is True
 
     def test_auto_disabled_when_terminal_too_narrow(self):
-        from fs_monitor.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=60, terminal_height=40, cpu_count=8
         ) is False
 
     def test_auto_disabled_when_terminal_too_short(self):
-        from fs_monitor.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=120, terminal_height=15, cpu_count=8
         ) is False
 
-    def test_auto_disabled_when_too_few_cpus(self):
-        from fs_monitor.config import resolve_live_scan_render
+    def test_auto_ignores_the_core_count(self):
+        """Two cores on a roomy terminal is a live chart, paced by cost."""
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "auto", terminal_width=120, terminal_height=40, cpu_count=2
+        ) is True
+        assert resolve_live_scan_render(
+            "auto", terminal_width=120, terminal_height=40, cpu_count=1
+        ) is True
+        # And a cramped terminal is still off, at any core count: the
+        # size gate is about whether the chart can be read.
+        assert resolve_live_scan_render(
+            "auto", terminal_width=60, terminal_height=40, cpu_count=64
         ) is False
 
     def test_unknown_value_treated_as_auto(self):
         """Any non-on/off value uses the gate, so a future bad config
         value can't permanently disable the feature."""
-        from fs_monitor.config import resolve_live_scan_render
+        from disktide.config import resolve_live_scan_render
         assert resolve_live_scan_render(
             "yes-please", terminal_width=120, terminal_height=40, cpu_count=8
         ) is True

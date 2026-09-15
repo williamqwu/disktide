@@ -1,6 +1,6 @@
-"""Smoke tests for tool/bench_scan.py and tool/diag_scan.py.
+"""Smoke tests for tool/bench_scan.py, tool/diag_scan.py and tool/dump_tree.py.
 
-These two debug scripts are how regressions like the v0.1.5 symlink-scan
+These debug scripts are how regressions like the v0.1.5 symlink-scan
 slowdown got diagnosed. They depend on a small forward-compat contract
 with the scanner (see each script's module docstring); if a future
 refactor breaks that contract, we want it to fail loudly in CI, not the
@@ -11,14 +11,23 @@ a handful of files and assert the expected output shape: the bench
 prints `rate=N files/sec`, the diag prints a `=== SCAN COMPLETE in Xs`
 banner and either a hotspot table or the explicit "disabled" notice.
 We do not assert specific counts or rates; those are environmental.
+
+`dump_tree.py` is the third of the three and the one a scanner change
+is diffed with: it has to keep printing every node exactly once, in a
+stable order, or a diff of two builds stops meaning anything.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +81,105 @@ def test_bench_scan_defaults_to_cwd(tmp_path, monkeypatch):
     assert "bench: done in" in cp.stdout
 
 
+def test_bench_scan_live_mode_reports_event_and_visual_metrics(tmp_path):
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py",
+        str(tmp_path),
+        "--workers",
+        "1",
+        "--mode",
+        "live",
+    )
+    assert cp.returncode == 0, cp.stderr
+    assert "bench: events=" in cp.stdout
+    assert "batches=" in cp.stdout
+    assert "scheduler_queue_hwm=" in cp.stdout
+    assert "bench: live_updates=" in cp.stdout
+    assert "first_visual=" in cp.stdout
+    assert "bench: done in" in cp.stdout
+
+
+def test_bench_scan_paints_a_chart_on_the_consumer_thread(tmp_path):
+    """`--paint` is what makes the live-render cost measurable headlessly.
+
+    A live paint is pure Python and holds the GIL for its whole duration,
+    so `--mode live` on its own measures the transport and none of the
+    thing that made a live scan on a real terminal ten times slower than
+    the same scan with the chart off.
+    """
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py", str(tmp_path), "--workers", "1", "--mode", "live",
+        "--paint", "96x36",
+    )
+    assert cp.returncode == 0, cp.stderr
+    assert "bench: paint=96x36" in cp.stdout
+    assert "painted=" in cp.stdout and "skipped=" in cp.stdout
+    assert "pacing=duty cycle" in cp.stdout
+    assert "bench: done in" in cp.stdout
+
+
+def test_bench_scan_can_paint_every_frame(tmp_path):
+    """The pre-duty-cycle behaviour, kept so the regression stays runnable."""
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py", str(tmp_path), "--workers", "1", "--mode", "live",
+        "--paint", "96x36", "--paint-every-frame",
+    )
+    assert cp.returncode == 0, cp.stderr
+    assert "pacing=every frame" in cp.stdout
+    assert "skipped=0" in cp.stdout
+
+
+def test_bench_scan_paint_reports_its_own_share_in_json(tmp_path):
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py", str(tmp_path), "--workers", "1", "--mode", "live",
+        "--paint", "96x36", "--json",
+    )
+    assert cp.returncode == 0, cp.stderr
+    payload = json.loads(cp.stdout)
+    paint = payload["paint"]
+    assert paint["size"] == "96x36"
+    assert paint["every_frame"] is False
+    assert paint["painted"] >= 1
+    assert paint["paint_seconds"] > 0.0
+
+
+def test_bench_scan_rejects_a_paint_size_it_cannot_use(tmp_path):
+    _make_tree(tmp_path)
+    bad = _run(
+        "bench_scan.py", str(tmp_path), "--mode", "live", "--paint", "wide",
+    )
+    assert bad.returncode == 2
+    assert "COLSxROWS" in bad.stderr
+
+    wrong_mode = _run(
+        "bench_scan.py", str(tmp_path), "--mode", "raw", "--paint", "96x36",
+    )
+    assert wrong_mode.returncode == 2
+    assert "--mode live" in wrong_mode.stderr
+
+
+def test_bench_scan_json_is_machine_readable(tmp_path):
+    _make_tree(tmp_path)
+    cp = _run(
+        "bench_scan.py",
+        str(tmp_path),
+        "--workers",
+        "1",
+        "--mode",
+        "live",
+        "--json",
+    )
+    assert cp.returncode == 0, cp.stderr
+    payload = json.loads(cp.stdout)
+    assert payload["benchmark"] == "scan"
+    assert payload["worker_selection"]["effective_workers"] == 1
+    assert payload["scheduler"]["entry_chunk_size"] > 0
+
+
 # --- diag_scan -------------------------------------------------------
 
 
@@ -117,7 +225,7 @@ def test_diag_scan_imports_cleanly_even_if_walker_changes(tmp_path, monkeypatch)
     # walker for monkey-patching, then exec's the script.
     shim = (
         "import sys, runpy; "
-        "from fs_monitor.scanner import walker; "
+        "from disktide.scanner import walker; "
         "del walker.scan_directory; "
         f"sys.argv = ['diag_scan.py', {str(tmp_path)!r}, '--workers', '1']; "
         f"runpy.run_path({str(TOOL_DIR / 'diag_scan.py')!r}, run_name='__main__')"
@@ -137,3 +245,638 @@ def test_diag_scan_imports_cleanly_even_if_walker_changes(tmp_path, monkeypatch)
         # failure points at the right thing.
         assert "scan_directory" in (cp.stdout + cp.stderr), \
             f"unexpected failure:\nSTDOUT:\n{cp.stdout}\nSTDERR:\n{cp.stderr}"
+
+
+# --- dump_tree -------------------------------------------------------
+
+
+def test_dump_tree_emits_one_sorted_line_per_node(tmp_path):
+    """The byte-identity harness: every node, one line, sorted by path."""
+    _make_tree(tmp_path)
+    cp = _run("dump_tree.py", str(tmp_path))
+    assert cp.returncode == 0, cp.stderr
+    lines = cp.stdout.splitlines()
+    # Two header lines: which directory reader produced the dump, then the
+    # columns. The backend line is the only one allowed to differ between
+    # two dumps of the same tree.
+    backend, header, rows = lines[0], lines[1], lines[2:]
+    assert backend in ("#backend=native", "#backend=python")
+    assert header.startswith("#path\tis_dir\t")
+    assert header.split("\t")[1:] == list(
+        (
+            "is_dir", "size", "allocated_size", "unique_allocated_size",
+            "file_count", "dir_count", "error", "vanished", "excluded",
+            "depth_limited",
+        )
+    )
+    # root, two files, one subdir, one nested file, one symlink
+    assert len(rows) == 6
+    assert rows == sorted(rows)
+    assert all(len(row.split("\t")) == len(header.split("\t")) for row in rows)
+    by_path = {row.split("\t")[0]: row.split("\t") for row in rows}
+    assert by_path[str(tmp_path)][1] == "1"
+    assert by_path[str(tmp_path / "a.txt")][1] == "0"
+    assert by_path[str(tmp_path / "a.txt")][2] == "5"
+
+
+def test_dump_tree_backend_flag_selects_the_reader(tmp_path):
+    """`--backend` picks the directory reader and the header says which.
+
+    The bodies have to match: the two readers exist to produce the same
+    tree, and this is the check that runs on every commit rather than only
+    when somebody remembers to diff two fixtures.
+    """
+    _make_tree(tmp_path)
+    dumps = {}
+    for backend in ("native", "python"):
+        cp = _run("dump_tree.py", str(tmp_path), "--backend", backend)
+        assert cp.returncode == 0, cp.stderr
+        dumps[backend] = cp.stdout.splitlines()
+    assert dumps["python"][0] == "#backend=python"
+    # The extension is optional; where it is not built, `--backend native`
+    # honestly reports the fallback rather than pretending.
+    assert dumps["native"][0] in ("#backend=native", "#backend=python")
+    assert dumps["native"][1:] == dumps["python"][1:]
+
+
+def test_dump_tree_writes_a_file_when_asked(tmp_path):
+    _make_tree(tmp_path)
+    out = tmp_path.parent / "dump.txt"
+    cp = _run("dump_tree.py", str(tmp_path), "-o", str(out))
+    assert cp.returncode == 0, cp.stderr
+    assert "dump_tree: 6 nodes ->" in cp.stderr
+    written = out.read_text().splitlines()
+    assert written[0].startswith("#backend=")
+    assert written[1].startswith("#path\t")
+
+
+# --- hatch_build.py: the wheel-building hook --------------------------------
+#
+# It compiles the optional scanner extension and is deliberately forgiving --
+# no compiler, an unknown compiler, a compile that errors, each leaves a
+# pure-Python wheel behind and says so. The case it used to be forgiving
+# about by accident is a compiler that *succeeds* and produces something the
+# interpreter cannot load: that got a platform-tagged wheel with a dead `.so`
+# in it, and the only symptom was `disktide doctor` reporting the fallback.
+
+
+def _load_build_hook(monkeypatch):
+    """Import `hatch_build.py` with a stand-in for its hatchling base class.
+
+    `hatchling` is a *build* requirement: it is resolved into an isolated
+    build environment and is not installed in the development environment or
+    in CI's, so importing the hook the ordinary way fails everywhere the
+    suite runs. The base class contributes nothing the hook uses.
+    """
+    import importlib.util
+    import types
+
+    interface = types.ModuleType(
+        "hatchling.builders.hooks.plugin.interface"
+    )
+
+    class BuildHookInterface:  # noqa: D401 - a stand-in, not an interface
+        pass
+
+    interface.BuildHookInterface = BuildHookInterface
+    for name, module in (
+        ("hatchling", types.ModuleType("hatchling")),
+        ("hatchling.builders", types.ModuleType("hatchling.builders")),
+        ("hatchling.builders.hooks", types.ModuleType("hatchling.builders.hooks")),
+        (
+            "hatchling.builders.hooks.plugin",
+            types.ModuleType("hatchling.builders.hooks.plugin"),
+        ),
+        ("hatchling.builders.hooks.plugin.interface", interface),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    spec = importlib.util.spec_from_file_location(
+        "disktide_hatch_build_under_test", REPO_ROOT / "hatch_build.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _RecordingApp:
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+        self.info: list[str] = []
+
+    def display_warning(self, message: str) -> None:
+        self.warnings.append(message)
+
+    def display_info(self, message: str) -> None:
+        self.info.append(message)
+
+
+def _run_hook(monkeypatch, module, app, version="standard", root=None):
+    hook = module.CustomBuildHook()
+    hook.target_name = "wheel"
+    hook.root = str(root) if root is not None else str(REPO_ROOT)
+    hook.app = app
+    # Only `force_include` is seeded, deliberately: hatchling's real default
+    # build data has `force_include_editable` too, and the hook has to
+    # `setdefault` it rather than assume it.
+    build_data: dict = {"force_include": {}}
+    try:
+        hook.initialize(version, build_data)
+    finally:
+        hook.finalize(version, build_data, "")
+    return build_data
+
+
+def _hook_root_with_source(tmp_path: Path) -> Path:
+    """A minimal tree the hook can build from.
+
+    Used wherever a test runs the *editable* version, which compiles in
+    place: pointed at the checkout it would overwrite the developer's own
+    `_scanfast.so`, which is a side effect a test has no business having.
+    """
+    scanner = tmp_path / "src" / "disktide" / "scanner"
+    scanner.mkdir(parents=True)
+    shutil.copyfile(
+        REPO_ROOT / "src" / "disktide" / "scanner" / "_scanfast.c",
+        scanner / "_scanfast.c",
+    )
+    return tmp_path
+
+
+def _fake_compiler(tmp_path, body: str) -> Path:
+    script = tmp_path / "fake-cc"
+    script.write_text("#!/bin/sh\n" + body)
+    script.chmod(0o755)
+    return script
+
+
+def test_a_compiler_that_produces_an_unloadable_object_falls_back(
+    tmp_path, monkeypatch
+):
+    """Exit 0 and garbage on the way out is the case that used to ship."""
+    compiler = _fake_compiler(
+        tmp_path,
+        # Consume the arguments, find -o, and write something that is not an
+        # ELF object where the real compiler would have written one.
+        'while [ $# -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then shift; printf "not an object" > "$1"; fi\n'
+        '  shift\n'
+        'done\n'
+        'exit 0\n',
+    )
+    monkeypatch.setenv("CC", str(compiler))
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+
+    build_data = _run_hook(monkeypatch, module, app)
+
+    assert "pure_python" not in build_data
+    assert build_data["force_include"] == {}
+    assert len(app.warnings) == 1
+    warning = app.warnings[0]
+    assert "does not import" in warning
+    assert "pure-Python wheel" in warning
+
+
+def test_a_working_compiler_still_produces_a_platform_wheel(
+    tmp_path, monkeypatch
+):
+    """The check must not cost the happy path its extension."""
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("no C compiler on PATH")
+    monkeypatch.setenv("CC", compiler)
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+
+    build_data = _run_hook(monkeypatch, module, app)
+
+    assert app.warnings == []
+    assert build_data["pure_python"] is False
+    assert build_data["infer_tag"] is True
+    assert len(build_data["force_include"]) == 1
+    assert next(iter(build_data["force_include"].values())).startswith(
+        "disktide/scanner/_scanfast"
+    )
+
+
+def test_a_cross_compiled_object_is_shipped_without_being_loaded(
+    tmp_path, monkeypatch
+):
+    """cibuildwheel's macOS legs build for an architecture this is not.
+
+    An arm64 object cannot be loaded on x86_64 however healthy it is, so the
+    check is skipped rather than failed -- and the warning says which check
+    was skipped, because that wheel's only proof is the release matrix's
+    `CIBW_TEST_COMMAND`, which runs on the target.
+    """
+    compiler = _fake_compiler(
+        tmp_path,
+        'while [ $# -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then shift; printf "not an object" > "$1"; fi\n'
+        '  shift\n'
+        'done\n'
+        'exit 0\n',
+    )
+    monkeypatch.setenv("CC", str(compiler))
+    monkeypatch.setenv("ARCHFLAGS", "-arch not-this-machine")
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+
+    build_data = _run_hook(monkeypatch, module, app)
+
+    assert build_data["pure_python"] is False
+    assert len(app.warnings) == 1
+    assert "not-this-machine" in app.warnings[0]
+    assert "not loaded here" in app.warnings[0]
+
+
+def test_archflags_for_this_machine_do_not_skip_the_check(monkeypatch):
+    module = _load_build_hook(monkeypatch)
+    import platform
+
+    host = platform.machine()
+    assert module._cross_architecture([]) is None
+    assert module._cross_architecture(["-arch", host]) is None
+    assert module._cross_architecture(["-arch", "sparc64"]) == "sparc64"
+    assert module._cross_architecture(["-arch", host, "-arch", "sparc64"]) == (
+        "sparc64"
+    )
+
+
+# --- hatch_build.py: the editable version -----------------------------------
+#
+# An editable install is a `.pth` naming `<root>/src`, so `import disktide`
+# resolves to `src/disktide/` -- a real package, which beats the `disktide/`
+# directory the wheel's own copy leaves in `site-packages` (no `__init__.py`,
+# so only a namespace portion). An editable install that force-included an
+# object built in a temporary directory therefore shipped a perfectly healthy
+# `.so` where nothing would ever look, and `disktide doctor` said `python
+# fallback`. These pin the fix: in place for editable, never in place for a
+# wheel.
+
+
+def _require_compiler() -> str:
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("no C compiler on PATH")
+    return compiler
+
+
+def _in_place_objects(root: Path) -> list[Path]:
+    return sorted((root / "src" / "disktide" / "scanner").glob("_scanfast*.so"))
+
+
+def test_an_editable_build_puts_the_object_where_the_pth_will_find_it(
+    tmp_path, monkeypatch
+):
+    """In place, next to the C file, and registered for the editable wheel."""
+    monkeypatch.setenv("CC", _require_compiler())
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+    root = _hook_root_with_source(tmp_path)
+
+    build_data = _run_hook(monkeypatch, module, app, version="editable", root=root)
+
+    assert app.warnings == []
+    assert build_data["pure_python"] is False
+    assert build_data["infer_tag"] is True
+    editable_map = build_data["force_include_editable"]
+    assert len(editable_map) == 1
+    source, destination = next(iter(editable_map.items()))
+    assert destination.startswith("disktide/scanner/_scanfast")
+    # The source is the object in the tree, and it is still there after
+    # `finalize`: that copy *is* the install.
+    assert Path(source).parent == root / "src" / "disktide" / "scanner"
+    assert Path(source).is_file()
+    assert _in_place_objects(root) == [Path(source)]
+
+
+def test_a_wheel_build_never_writes_into_the_source_tree(tmp_path, monkeypatch):
+    """The other half, and the older bug: a `.so` under src/ was swept into
+    a *pure* wheel that then claimed `py3-none-any` while carrying an
+    x86_64 binary."""
+    monkeypatch.setenv("CC", _require_compiler())
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+    root = _hook_root_with_source(tmp_path)
+
+    build_data = _run_hook(monkeypatch, module, app, root=root)
+
+    assert build_data["pure_python"] is False
+    assert _in_place_objects(root) == []
+    built = next(iter(build_data["force_include"]))
+    assert Path(built).parent != root / "src" / "disktide" / "scanner"
+
+
+def test_an_editable_build_that_cannot_compile_leaves_nothing_behind(
+    tmp_path, monkeypatch
+):
+    """A stale object would be loaded instead of the fallback, and be wrong.
+
+    Two ways to get one: an object from an older ABI still sitting there
+    when this build fails, and a half-written file from a compiler that
+    died. Both end with no object and a pure-Python install.
+    """
+    compiler = _fake_compiler(
+        tmp_path,
+        'while [ $# -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then shift; printf "half an object" > "$1"; fi\n'
+        '  shift\n'
+        'done\n'
+        'exit 1\n',
+    )
+    monkeypatch.setenv("CC", str(compiler))
+    monkeypatch.delenv("ARCHFLAGS", raising=False)
+    monkeypatch.delenv("DISKTIDE_NO_EXTENSION", raising=False)
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+    root = _hook_root_with_source(tmp_path / "tree")
+    stale = root / "src" / "disktide" / "scanner" / "_scanfast.stale-abi.so"
+    stale.write_bytes(b"an object from another interpreter")
+
+    build_data = _run_hook(monkeypatch, module, app, version="editable", root=root)
+
+    assert "pure_python" not in build_data
+    assert build_data.get("force_include_editable", {}) == {}
+    assert len(app.warnings) == 1
+    assert "pure-Python wheel" in app.warnings[0]
+    # The one it would have written is gone; a differently-suffixed object
+    # for another interpreter is not this build's to delete.
+    scanner = root / "src" / "disktide" / "scanner"
+    assert sorted(p.name for p in scanner.glob("_scanfast*.so")) == [stale.name]
+
+
+def test_an_editable_build_can_be_switched_off_like_a_wheel_build(
+    tmp_path, monkeypatch
+):
+    """`DISKTIDE_NO_EXTENSION` covers both versions, and writes nothing."""
+    monkeypatch.setenv("DISKTIDE_NO_EXTENSION", "1")
+    module = _load_build_hook(monkeypatch)
+    app = _RecordingApp()
+    root = _hook_root_with_source(tmp_path)
+
+    build_data = _run_hook(monkeypatch, module, app, version="editable", root=root)
+
+    assert "pure_python" not in build_data
+    assert _in_place_objects(root) == []
+    assert len(app.warnings) == 1
+    assert "DISKTIDE_NO_EXTENSION" in app.warnings[0]
+
+
+# --- tool/build_scanfast.py: the in-place builder ---------------------------
+
+
+def test_build_scanfast_prints_the_command_it_would_run():
+    """`--print-command` resolves everything and compiles nothing."""
+    cp = _run("build_scanfast.py", "--print-command")
+    if cp.returncode != 0 and "no C compiler" in cp.stderr:
+        pytest.skip("no C compiler on PATH")
+    assert cp.returncode == 0, cp.stderr
+    assert "_scanfast.c" in cp.stdout
+    assert " -o " in cp.stdout
+    # A CPython extension is a bundle on macOS and a shared library elsewhere.
+    assert "-shared" in cp.stdout or "-bundle" in cp.stdout
+
+
+def test_build_scanfast_builds_an_object_that_imports(tmp_path):
+    """`--output` keeps the test out of the checkout's own in-place object."""
+    cp = _run("build_scanfast.py", "--output", str(tmp_path))
+    if cp.returncode != 0 and "no C compiler" in cp.stderr:
+        pytest.skip("no C compiler on PATH")
+    assert cp.returncode == 0, cp.stderr + cp.stdout
+    assert "scanfast: built" in cp.stdout
+    # One object, and the tool only says "built" after loading it in a
+    # subprocess -- an object that compiles and will not import is the
+    # failure this whole path exists to catch.
+    built = sorted(tmp_path.glob("_scanfast*"))
+    assert len(built) == 1
+
+
+def test_build_scanfast_fails_loudly_when_there_is_no_compiler(monkeypatch):
+    """Exit status, not a shrug: the developer asked for the fast reader."""
+    env = dict(os.environ)
+    env["CC"] = "/nonexistent/not-a-compiler"
+    env["PATH"] = ""
+    cp = subprocess.run(
+        [sys.executable, str(TOOL_DIR / "build_scanfast.py"), "--print-command"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert cp.returncode == 1
+    assert "no C compiler" in cp.stderr
+
+
+# --- tool/make_homelike.py: the benchmark fixture builder -------------------
+
+
+MAKE_HOMELIKE = TOOL_DIR / "make_homelike.py"
+
+
+def _make_homelike(args, home=None, tmpdir=None, extra_env=None):
+    env = dict(os.environ)
+    env.pop("DISKTIDE_SCRATCH", None)
+    env.pop("DISKTIDE_SCRATCHGUARD_QUOTA", None)
+    if home is not None:
+        env["HOME"] = str(home)
+    if tmpdir is not None:
+        env["TMPDIR"] = str(tmpdir)
+    env.update(extra_env or {})
+    return subprocess.run(
+        [sys.executable, str(MAKE_HOMELIKE), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+
+
+def _load_make_homelike():
+    """Import the builder by path, for the planner. It creates nothing."""
+    spec = importlib.util.spec_from_file_location(
+        "make_homelike_under_test", MAKE_HOMELIKE
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_scratchguard():
+    spec = importlib.util.spec_from_file_location(
+        "scratchguard_for_test_tools", TOOL_DIR / "scratchguard.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_make_homelike_help_prints_usage_and_exits_zero(tmp_path):
+    """It had no argument parsing at all: `root = sys.argv[1]`.
+
+    So `--help` was a *target*, and the script built 88,000 directories and
+    888,100 files into a directory called `--help` -- on a quota'd network
+    home, in the working tree, until the account ran out of inodes.
+    """
+    result = _make_homelike(["--help"], home=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "usage: make_homelike.py" in result.stdout
+    assert "--allow-home" in result.stdout
+    # Nothing was built, least of all a directory named after the flag.
+    assert list(tmp_path.iterdir()) == []
+    assert not (Path.cwd() / "--help").exists()
+
+
+def test_make_homelike_without_a_target_builds_in_the_scratch_root(tmp_path):
+    """No target used to be a usage error; now it is the guarded default.
+
+    Which is only an improvement if the default is somewhere safe, so `HOME`
+    and `TMPDIR` are pointed at separate directories and the tree has to land
+    under the second one.
+    """
+    home = tmp_path / "home"
+    scratch = tmp_path / "scratch"
+    home.mkdir()
+    scratch.mkdir()
+
+    result = _make_homelike(
+        ["--dirs", "20", "--seed", "3"], home=home, tmpdir=scratch
+    )
+
+    assert result.returncode == 0, result.stderr
+    built = Path(result.stdout.split(":")[0])
+    assert scratch in built.parents
+    assert home not in built.parents
+    assert built.is_dir()
+    assert list(home.iterdir()) == []
+
+
+def test_make_homelike_refuses_a_target_under_home(tmp_path):
+    """The guard that would have prevented the incident above."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "fixture"
+
+    result = _make_homelike([str(target), "--dirs", "50"], home=home)
+
+    assert result.returncode == 2
+    assert "is under" in result.stderr
+    assert "--allow-home" in result.stderr
+    assert not target.exists()
+    assert list(home.iterdir()) == []
+
+
+def test_make_homelike_builds_when_asked_properly(tmp_path):
+    """And it still builds a tree, deterministically, off $HOME."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "scratch" / "fixture"
+
+    result = _make_homelike(
+        [str(target), "--dirs", "40", "--seed", "7"], home=home
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "40 dirs" in result.stdout
+    assert target.is_dir()
+    built = sum(1 for _ in target.rglob("*") if _.is_dir()) + 1
+    assert built == 40
+
+    again = tmp_path / "scratch" / "again"
+    assert _make_homelike(
+        [str(again), "--dirs", "40", "--seed", "7"], home=home
+    ).returncode == 0
+    assert sorted(p.relative_to(target).as_posix() for p in target.rglob("*")) == (
+        sorted(p.relative_to(again).as_posix() for p in again.rglob("*"))
+    )
+
+
+def test_make_homelike_allows_home_when_told_to(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "fixture"
+
+    result = _make_homelike(
+        [str(target), "--dirs", "5", "--allow-home"], home=home
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert target.is_dir()
+
+
+def test_make_homelike_plans_exactly_what_it_builds(tmp_path):
+    """The guard is only as good as the number it is handed.
+
+    An estimate would either refuse trees that fit or wave through trees that
+    do not, so the count is planned by walking the same RNG sequence the build
+    walks -- and this pins that the two agree.
+    """
+    module = _load_make_homelike()
+    planned_dirs, planned_files, planned_depth = module.summarize(200, 7)
+
+    target = tmp_path / "fixture"
+    result = _make_homelike(
+        [str(target), "--dirs", "200", "--seed", "7"], home=tmp_path / "home"
+    )
+
+    assert result.returncode == 0, result.stderr
+    built_dirs = sum(1 for p in target.rglob("*") if p.is_dir()) + 1
+    built_files = sum(1 for p in target.rglob("*") if p.is_file())
+    assert (built_dirs, built_files) == (planned_dirs, planned_files)
+    assert f"{planned_dirs} dirs, {planned_files} files" in result.stdout
+    assert f"max depth {planned_depth}" in result.stdout
+
+
+def test_make_homelike_default_plan_is_the_documented_fixture():
+    """88,000 / 888,100 is the number `docs/contributing.md` quotes.
+
+    Planning only: this walks a million random draws and touches nothing, so
+    the documented fixture size can be checked on a machine that has nowhere
+    to put a documented fixture.
+    """
+    module = _load_make_homelike()
+
+    assert module.summarize(88_000, 42) == (88_000, 888_100, 10)
+
+
+def test_make_homelike_refuses_before_building_when_inodes_are_short(tmp_path):
+    """The refusal that matters most: nothing is created, not even the root.
+
+    `statvfs` on the quota'd NFS home reported orders of magnitude more free
+    inodes than the account had left, so the guard asks `quota` as well. Here
+    it is handed a report with ten files of headroom for the filesystem the
+    target is actually on.
+    """
+    guard = _load_scratchguard()
+    row = guard.mount_for(tmp_path)
+    if row is None:
+        pytest.skip("no /proc/mounts: the quota source cannot be located")
+
+    report = tmp_path / "quota.txt"
+    report.write_text(
+        "Disk quotas for user alice (uid 51234):\n"
+        "     Filesystem  blocks   quota   limit   grace   files   quota"
+        "   limit   grace\n"
+        f"{row[0]} 157286400  1048576000 1048576000       0  1999990"
+        "  2000000 2000000       0\n"
+    )
+    target = tmp_path / "fixture"
+
+    result = _make_homelike(
+        [str(target), "--dirs", "300"],
+        home=tmp_path / "home",
+        extra_env={"DISKTIDE_SCRATCHGUARD_QUOTA": str(report)},
+    )
+
+    assert result.returncode == 2
+    assert "quota reports 10 left" in result.stderr
+    assert "No flag lifts this" in result.stderr
+    assert not target.exists()

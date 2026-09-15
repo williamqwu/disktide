@@ -1,0 +1,1593 @@
+"""Ring chart (sunburst) rendered with anti-aliased half-block cells.
+
+Geometry is done in *units*, where one unit is the width of a character
+cell.  A cell is ``cell_aspect`` units tall, so a disc of radius R units is
+a true circle on screen: it covers 2R columns and 2R/aspect rows.  Assuming
+a fixed 2.0 there (which the previous braille renderer had to, since a
+braille dot is only square when a cell is exactly 2:1) drew a vertical
+ellipse on any font whose cells are taller than that — a 7x17 cell, common
+for a 14px face at 1.2 line height, stretched the disc by 21%.
+
+The *shape* of a ring lives in `viz.ringshape`: how far out a point is
+and how far around it is are two functions there, and swapping the pair
+draws the same chart with rectangular rings -- cut by rays, or cut by
+straight lines.  Everything below is written in radius and angle and does
+not care which is in force.  The one thing it has to hand over is which
+*band* a sample landed in, because a shape whose separators are straight
+lines measures "how far around" against that band's own midline.
+
+Painting is a supersampled half-block pass rather than braille stippling.
+The framebuffer is W x 2H half-cells; each half-cell averages four
+subsamples taken at its quarter points, and each pair of vertically
+adjacent half-cells becomes one character: a space when both agree, or
+U+2580/U+2584 when they don't.  Braille could only ever be on or off per
+dot, so rims and the walls of empty wedges came out as dotted plumes
+against solid interiors.  Averaging colours instead lets an edge land
+anywhere between the arc and the background, and the same machinery draws
+the ring and sibling separators that give the chart its structure.
+
+A shape that declares `crisp_seams` -- `tiles`, the default -- opts out
+of all of that.  Every edge it draws is already on a cell edge, so its
+eight subsamples are all taken at the cell's own centre and a cell comes
+out one flat colour: a space, never a half block.  That is not a
+refinement, it is the point.  A browser terminal's default font (Courier
+New) draws `▀` and `▄` narrower than the cell, so a chart with half
+blocks in it shows a comb of background-coloured slits along every
+horizontal edge and the rows carrying them slide sideways.  `disc` and
+`fill` keep the supersampled pass, because they are round and a whole-cell
+circle is a staircase.
+"""
+
+from __future__ import annotations
+
+import math
+from array import array
+from bisect import bisect_right
+from dataclasses import dataclass, field
+from typing import Mapping, NamedTuple
+
+from rich.color import Color, ColorSystem
+from rich.segment import Segment
+from rich.style import Style
+
+from disktide.domain.metrics import MetricId
+from disktide.models.tree import FSNode
+from disktide.domain.visualization import VisualDelta, VisualState
+from disktide.glyphs import visible_width
+from disktide.metrics import metric_text
+from disktide.visualization_formatting import (
+    format_visual_delta,
+    visual_token,
+)
+from disktide.rendering import (
+    denied_glyph,
+    is_safe_rendering,
+    partial_glyph,
+    ring_shape,
+)
+from disktide.viz.categories import CategoryIndex
+from disktide.viz.cellgeom import DEFAULT_CELL_ASPECT
+from disktide.viz.colors import (
+    ANSI_SELECTED_ARC,
+    CATEGORIES,
+    ZEBRA_GAIN,
+    alternate_neutral_dir_color,
+    category_dir_tint,
+    category_file_color,
+    category_legend_color,
+    darken_rgb,
+    delta_background,
+    file_category,
+    get_color_scheme,
+    neutral_dir_color,
+    parse_rgb,
+    scale_rgb,
+)
+from disktide.viz.ringshape import (
+    DEFAULT_HOLE_RADIUS,
+    DiscGeometry,
+    RingGeometry,
+    geometry_for,
+    resolve_ring_shape,
+)
+from disktide.viz.layout import LayoutNode, bounded_children
+
+
+RGB = tuple[int, int, int]
+
+#: Background assumed when the widget cannot resolve its own.
+DEFAULT_PANEL_BG: RGB = (30, 30, 30)
+
+# Unpainted chart centre, in units, where the root label sits.  `disc`
+# and `fill` use it; the default shape sizes its hole from the cell grid
+# it snaps to and reports what it chose (`ringshape.RingFit`).
+_HOLE_RADIUS = DEFAULT_HOLE_RADIUS
+
+# Radial separator: the outermost slice of a ring that is darkened to
+# divide it from the ring outside it.  Capped as a fraction of the ring so
+# a cramped viewport does not turn a ring into mostly separator.
+_RING_SEAM = 0.35
+_RING_SEAM_MAX_FRACTION = 0.25
+
+# Angular separator between sibling arcs, measured as arc *length* in units
+# so it stays one hairline wide at every radius.
+_ARC_SEAM = 0.4
+# An arc only gets seams when it is this many seam-widths across; below
+# that the seam would eat the arc it is meant to delimit.
+_SEAM_MIN_SPAN_FACTOR = 4.0
+# An arc exactly that many cells wide is on the inside of the test, and
+# has to be on the inside at every cell aspect. The two sides of the
+# comparison reach it through different intermediates -- one carries the
+# ring's whole area, the other a single cell -- and on a four-cell arc at
+# a cell aspect of 2.43 they disagreed in the last bit, dropping one
+# divider from an otherwise identical chart. This slack is a billionth of
+# a cell: far below anything a terminal can draw, far above the error.
+_SEAM_MIN_SPAN_SLACK = 1.0 - 1e-9
+# Separators are a darkened copy of the arc they cut, not the panel
+# background: that reads as a division at any theme and any depth.
+_SEAM_DARKEN = 0.5
+
+# Both separators are narrower than the 0.5-unit subsample spacing, so a
+# point-in-seam test would sample them in and out and draw a dashed line.
+# Each subsample instead takes the fraction of its own footprint the seam
+# covers and mixes by it, which conserves the seam's ink and resolves it as
+# an even hairline however it happens to fall against the sample grid.
+_SAMPLE_FOOTPRINT = 0.5
+_FOOTPRINT_HALF = _SAMPLE_FOOTPRINT / 2.0
+
+# Sibling directories at one depth are otherwise the exact same colour, so
+# a run of them merges into one blob.  Odd siblings get a nudge in
+# luminance; seams carry the structure wherever they fit, this carries it
+# where they don't.
+_DIR_ZEBRA_GAIN = ZEBRA_GAIN
+
+# Selection in current mode is a lift towards white: the arc keeps the hue
+# that says what it holds, and diff mode keeps its own selection encoding.
+_SELECTED_MIX: RGB = (255, 255, 255)
+_SELECTED_WEIGHT = 0.22
+
+# Three rows of two, below which the legend starts crowding the disc.
+_LEGEND_MAX_ENTRIES = 6
+
+#: The legend heading is a caption, not a category: it takes the ANSI
+#: name every scheme resolves to its own dim neutral.
+_LEGEND_HEADING_COLOR = "bright_black"
+
+_HALF_TOP = "▀"  # ▀ upper half block
+_HALF_BOTTOM = "▄"  # ▄ lower half block
+
+
+@dataclass
+class ArcSegment:
+    """A segment in the sunburst chart.
+
+    Radii are in units (cell widths) and are floats: the ring width is a
+    fraction of the disc, not a whole number of pixels.
+    """
+    node: LayoutNode
+    depth: int
+    angle_start: float
+    angle_end: float
+    r_inner: float
+    r_outer: float
+    ordinal: int = 0
+    visual: VisualDelta | None = None
+    selected: bool = False
+
+    @property
+    def angle_mid(self) -> float:
+        return (self.angle_start + self.angle_end) / 2
+
+    @property
+    def angle_span(self) -> float:
+        return self.angle_end - self.angle_start
+
+
+@dataclass
+class _Label:
+    """A text label to overlay on the sunburst chart."""
+    char_x: int
+    char_y: int
+    text: str
+    fg: str
+    bg: str | None = None
+
+
+class _Ring(NamedTuple):
+    """One depth's arcs, prepared for point lookup."""
+    # Index-aligned with the parallel lists below, so a bisect on `starts`
+    # names an ArcSegment as well as a colour.
+    arcs: list[ArcSegment]
+    starts: list[float]
+    ends: list[float]
+    colors: list[RGB]
+    seam_colors: list[RGB]
+    # Narrowest of the two arcs meeting at this arc's start / end boundary,
+    # or -1.0 when that side is not an internal boundary.
+    boundary_start: list[float]
+    boundary_end: list[float]
+    r_outer: float
+    # Radius of the band's midline.  A shape that cuts siblings with
+    # straight lines measures "how far around" against the rectangle
+    # through the middle of the band, so every sample in the band is
+    # asked the same question whatever its own radius.
+    r_mid: float
+    full: bool  # one arc covering the whole circle: no angle lookup needed
+    ring_seam: bool  # another ring is painted outside this one
+
+
+@dataclass
+class SunburstLayout:
+    """Precomputed sunburst layout.
+
+    ``frame`` is the half-cell framebuffer: ``2 * char_height`` rows of
+    ``char_width`` entries, each either an already-blended RGB triple or
+    None for a half-cell no arc touched.
+    """
+    char_width: int
+    char_height: int
+    cell_aspect: float = DEFAULT_CELL_ASPECT
+    panel_bg: RGB = DEFAULT_PANEL_BG
+    # Round rings or rectangular ones, and the arithmetic that decides.
+    # The two travel together: `shape` is the name that was asked for --
+    # read only by `center_x`, which aligns a straight edge to a column --
+    # and `geometry` is what every radius and angle below actually goes
+    # through.  The defaults are a coherent placeholder for a layout that
+    # holds no arcs, not the configured default: `compute_sunburst` sets
+    # both together the moment it has a pane to fit them to.
+    shape: str = "disc"
+    geometry: RingGeometry = field(default_factory=DiscGeometry)
+    radius: float = 0.0
+    hole_radius: float = _HOLE_RADIUS
+    ring_width: float = 0.0
+    arcs: list[ArcSegment] = field(default_factory=list)
+    frame: list[list[RGB | None]] = field(default_factory=list)
+    labels: list[_Label] = field(default_factory=list)
+    legend_lines: list[list[tuple[str, str]]] = field(default_factory=list)
+    legend_start_y: int = 0
+    diff_mode: bool = False
+    # The rasterizer's per-depth lookup tables, kept so a mouse position
+    # resolves to an arc by the same geometry that painted it.
+    _rings: list[_Ring | None] = field(default_factory=list, repr=False)
+    _cells_cache: list[list[tuple[str, Style | None]]] | None = field(
+        default=None, repr=False
+    )
+
+    @property
+    def center_x(self) -> float:
+        """Chart centre along x, in units.
+
+        Rectangular rings snap it to a column boundary.  Their vertical
+        edges are the one part of the geometry the framebuffer cannot
+        resolve below a whole cell -- it supersamples in y, where half
+        blocks give it somewhere to put the answer, and only averages in
+        x -- so an edge landing mid-column is a soft band a full cell
+        wide.  Half a cell of offset at an odd width is the difference
+        between that and an exact edge, and `tiles` measures its ring
+        widths out from here.  A disc has no straight edges to align and
+        keeps the exact centre it always had.
+        """
+        if self.shape == "disc":
+            return self.char_width / 2.0
+        return float(round(self.char_width / 2.0))
+
+    @property
+    def center_y(self) -> float:
+        """Chart centre along y, in units.
+
+        `tiles` snaps it to a *row* boundary, for the same reason
+        `center_x` snaps to a column: every edge that shape draws is
+        measured out from here, and an edge that lands inside a row can
+        only be drawn with `▀`/`▄` -- glyphs a browser terminal fits to
+        neither the cell's width nor its height.  Half a row of offset at
+        an odd height is the difference between a chart of whole cells and
+        a chart with a comb of half blocks down every horizontal edge.
+
+        The other two shapes keep the exact centre.  A disc has no
+        straight edges to align, and `fill`'s rings are round enough in
+        their corners that a staircase would cost more than the half
+        blocks do.
+        """
+        if self.shape == "tiles":
+            return round(self.char_height / 2.0) * self.cell_aspect
+        return self.char_height * self.cell_aspect / 2.0
+
+    def cell_center(self, char_x: int, char_y: int) -> tuple[float, float]:
+        """Centre of a character cell in unit space."""
+        return (char_x + 0.5, (char_y + 0.5) * self.cell_aspect)
+
+    @property
+    def rendered_cells(self) -> list[list[tuple[str, Style | None]]]:
+        """Per-cell (glyph, style) grid before labels and legend, cached."""
+        if self._cells_cache is None and self.frame:
+            self._cells_cache = _render_cells(self)
+        return self._cells_cache or []
+
+    def hit_test(self, char_x: int, char_y: int) -> ArcSegment | None:
+        """The arc drawn at a character cell, or None outside the disc.
+
+        Runs once per mouse-move, so it repeats the rasterizer's radius /
+        angle arithmetic for a single point rather than consulting the
+        framebuffer: O(log n) in the arcs of one ring, and no per-call
+        allocation beyond the cell centre.
+        """
+        rings = self._rings
+        if not rings or self.ring_width <= 0.0:
+            return None
+
+        x, y = self.cell_center(char_x, char_y)
+        dx = x - self.center_x
+        dy = y - self.center_y
+        radius = self.geometry.radius(dx, dy)
+
+        if radius < self.hole_radius:
+            # The unpainted centre reads as the chart root, which is the
+            # arc filling the innermost ring.
+            root = rings[0]
+            return root.arcs[0] if root is not None and root.arcs else None
+
+        depth = int((radius - self.hole_radius) / self.ring_width)
+        if depth >= len(rings):
+            return None
+        ring = rings[depth]
+        if ring is None:
+            return None
+        if ring.full:
+            return ring.arcs[0]
+
+        theta = self.geometry.angle(dx, dy, ring.r_mid)
+        index = bisect_right(ring.starts, theta) - 1
+        if index < 0 or theta >= ring.ends[index]:
+            # An empty wedge: this ring's parent has no child here.
+            return None
+        return ring.arcs[index]
+
+
+def compute_sunburst(
+    node: LayoutNode,
+    char_width: int,
+    char_height: int,
+    max_depth: int = 4,
+    metric: str = "logical",
+    weights: Mapping[str, int] | None = None,
+    visuals: Mapping[str, VisualDelta] | None = None,
+    selected_path: str | None = None,
+    cell_aspect: float | None = None,
+    panel_bg: RGB | None = None,
+    category_index: CategoryIndex | None = None,
+    shape: str | None = None,
+) -> SunburstLayout:
+    """Compute and render a sunburst chart.
+
+    `metric` selects what arc angles encode.  `cell_aspect` is the pixel
+    height/width ratio of one character cell; None keeps the historical 2.0
+    so callers that do not measure their terminal stay deterministic.
+    `panel_bg` is the widget's own background, which subsamples that miss
+    every arc blend towards.  `category_index` tints directory arcs by what
+    dominates them; without it they stay neutral.  `shape` picks round or
+    rectangular rings (`viz.ringshape`); None takes the global the
+    settings own.
+    """
+    aspect = DEFAULT_CELL_ASPECT if cell_aspect is None else float(cell_aspect)
+    shape = resolve_ring_shape(ring_shape() if shape is None else shape)
+    layout = SunburstLayout(
+        char_width=char_width,
+        char_height=char_height,
+        cell_aspect=aspect,
+        panel_bg=DEFAULT_PANEL_BG if panel_bg is None else tuple(panel_bg),
+        shape=shape,
+        diff_mode=visuals is not None,
+    )
+
+    root_value = _layout_value(node, metric, weights)
+    if (
+        char_width <= 0
+        or char_height <= 0
+        or aspect <= 0
+        or root_value is None
+        or root_value <= 0
+    ):
+        return layout
+
+    # How far the chart reaches, and how that is divided radially, is the
+    # shape's own business.  A disc takes half the shorter side once a row
+    # is counted as `aspect` units tall -- the whole point of the unit
+    # space being that one number describes a circle rather than an
+    # ellipse.  `tiles` works the other way round, picking whole numbers
+    # of cells first so its boundaries land on the grid, and reporting the
+    # radius they add up to.
+    fit = geometry_for(shape, char_width, char_height, aspect, max_depth)
+    if fit.radius < 5.0 or fit.ring_width <= 0.0:
+        return layout
+
+    ring_width = fit.ring_width
+    layout.geometry = fit.geometry
+    layout.radius = fit.radius
+    layout.hole_radius = fit.hole_radius
+    layout.ring_width = ring_width
+
+    _build_arcs(
+        node, 0, 2 * math.pi,
+        depth=0, max_depth=max_depth,
+        hole_radius=fit.hole_radius,
+        ring_width=ring_width,
+        arcs=layout.arcs,
+        metric=metric,
+        weights=weights,
+        visuals=visuals,
+        selected_path=selected_path,
+        child_limit=max(24, min(128, char_width * 2)),
+        ordinal=0,
+    )
+
+    _rasterize_arcs(layout, ring_width, category_index)
+    _compute_labels(layout, node, metric, visuals, category_index)
+    _compute_legend(layout, node, category_index)
+
+    return layout
+
+
+def _arc_color(
+    arc: ArcSegment,
+    category_index: CategoryIndex | None = None,
+) -> str:
+    """Determine color for an arc segment based on file type."""
+    if arc.visual is not None:
+        intensity = 4 if arc.selected else _delta_intensity(arc.visual)
+        return delta_background(arc.visual.state, intensity)
+    node = arc.node
+    depth = arc.depth
+    if node.is_dir:
+        color = neutral_dir_color(depth)
+        if category_index is not None:
+            dominant = category_index.dominant(node.path)
+            # "other"-dominated is exactly what the neutral already says.
+            if dominant is not None and dominant[0] != "other":
+                color = category_dir_tint(dominant[0], dominant[1], depth)
+        zebra = bool(arc.ordinal % 2)
+    elif category_index is not None and category_index.file_is_ephemeral(node.path):
+        # Inside a venv or a cache the extension describes what the tool
+        # wrote, not whether keeping it is a choice.  Colouring these by
+        # extension would break the container's wedge into green `.py`
+        # slivers against a warm ground and hide that all of it goes
+        # together.
+        color = category_file_color("ephemeral", depth)
+        zebra = False
+    else:
+        color = category_file_color(file_category(node.name), depth)
+        zebra = False
+    if get_color_scheme().ansi:
+        # There is no 6 % of an ANSI name and no mixing one toward white,
+        # so the two markings the RGB path draws by interpolation are
+        # drawn by substitution: a zebra-striped directory takes the
+        # neutral its own depth does not use, and a selected arc takes the
+        # one colour the palette holds back for it.
+        if arc.selected:
+            return ANSI_SELECTED_ARC
+        return alternate_neutral_dir_color(depth) if zebra else color
+    if not zebra and not arc.selected:
+        return color
+    rgb = _parse_rgb(color)
+    if zebra:
+        rgb = _scale_rgb(rgb, _DIR_ZEBRA_GAIN)
+    if arc.selected:
+        rgb = _mix_rgb(rgb, _SELECTED_MIX, _SELECTED_WEIGHT)
+    return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
+
+
+#: `viz.colors` owns both, so the treemap's leaf zebra is the same step as
+#: this module's directory zebra rather than a second constant that drifts.
+_parse_rgb = parse_rgb
+_scale_rgb = scale_rgb
+
+
+def _mix_rgb(color: RGB, target: RGB, weight: float) -> RGB:
+    return (
+        int(color[0] + (target[0] - color[0]) * weight),
+        int(color[1] + (target[1] - color[1]) * weight),
+        int(color[2] + (target[2] - color[2]) * weight),
+    )
+
+
+# Angular slack, in radians, below which two arcs that are adjacent by
+# construction are treated as touching.  Child spans are accumulated in
+# floating point, so a parent's last child can end a few ULPs short of the
+# next parent's first child; a gap that small is ~10 orders of magnitude
+# under one pixel but would still leave an unowned hairline.
+_SEAM = 1e-9
+
+
+def _build_rings(
+    arcs: list[ArcSegment],
+    geometry: RingGeometry,
+    category_index: CategoryIndex | None = None,
+) -> list[_Ring | None]:
+    """Group arcs by depth into point-lookup tables.
+
+    The boundaries stored here are the ones the rasterizer and the hit
+    test both read, so a shape that rounds its cuts onto the cell grid
+    rounds them once, here: painting and clicking then agree by
+    construction, and the arcs keep their exact angles for the tooltip
+    that reports a share.
+    """
+    two_pi = 2.0 * math.pi
+    collected: dict[int, list[ArcSegment]] = {}
+    for arc in arcs:
+        collected.setdefault(arc.depth, []).append(arc)
+
+    deepest = max(collected)
+    rings: list[_Ring | None] = [None] * (deepest + 1)
+    for depth, group in collected.items():
+        # Arcs are appended depth-first, so within a depth they already
+        # ascend by angle_start; sort defensively anyway.
+        if any(
+            group[i].angle_start > group[i + 1].angle_start
+            for i in range(len(group) - 1)
+        ):
+            group = sorted(group, key=lambda arc: arc.angle_start)
+
+        r_mid = (group[0].r_inner + group[0].r_outer) / 2.0
+        snap = geometry.snap_angle
+        starts = [snap(arc.angle_start, r_mid) for arc in group]
+        ends = [snap(arc.angle_end, r_mid) for arc in group]
+        for i in range(len(ends) - 1):
+            gap = starts[i + 1] - ends[i]
+            if 0.0 < gap < _SEAM:
+                ends[i] = starts[i + 1]
+        if ends and 0.0 < two_pi - ends[-1] < _SEAM:
+            ends[-1] = two_pi
+
+        colors = [_parse_rgb(_arc_color(arc, category_index)) for arc in group]
+        seam_colors = [_scale_rgb(color, _SEAM_DARKEN) for color in colors]
+
+        count = len(group)
+        spans = [ends[i] - starts[i] for i in range(count)]
+        boundary_start = [-1.0] * count
+        boundary_end = [-1.0] * count
+        for i in range(1, count):
+            narrowest = min(spans[i - 1], spans[i])
+            boundary_end[i - 1] = narrowest
+            boundary_start[i] = narrowest
+        # A ring that closes the circle also has a boundary at angle 0,
+        # between its last and first arc.
+        if (
+            count > 1
+            and starts[0] <= _SEAM
+            and ends[-1] >= two_pi - _SEAM
+        ):
+            narrowest = min(spans[-1], spans[0])
+            boundary_end[count - 1] = narrowest
+            boundary_start[0] = narrowest
+
+        rings[depth] = _Ring(
+            arcs=group,
+            starts=starts,
+            ends=ends,
+            colors=colors,
+            seam_colors=seam_colors,
+            boundary_start=boundary_start,
+            boundary_end=boundary_end,
+            r_outer=group[0].r_outer,
+            r_mid=r_mid,
+            full=count == 1 and spans[0] >= two_pi - _SEAM,
+            ring_seam=depth < deepest,
+        )
+    return rings
+
+
+# --- per-geometry sample plan ---------------------------------------------
+
+# What a subsample contributes depends on where it is and on what the tree
+# holds, and the first half is 97 % of the bill.  cProfile of one live
+# frame (182x62, max_depth 2, 553 arcs) counted 618k calls, of which
+# `ringshape._faces` 190k, `angle` 63k, `edge_per_radian` 63k, `cell_edge`
+# 63k, `radius` 86k and `cell_depth` 42k -- every one of them a function of
+# the offset from the centre and the band, and every one recomputed
+# unchanged on the next frame, because a live scan repaints the same
+# widget at the same size dozens of times.
+#
+# So the geometry is computed once per (shape, size, aspect, radial
+# layout) and kept.  What is left in the per-frame loop is the ring
+# lookup, one bisect, the seam comparisons and the colour accumulation:
+# 163 ms to 42 ms for that frame, 223 ms to 62 ms for the final
+# full-depth one.
+#
+# Stored as `array`, not lists: at a 307x69 pane this is 169k subsamples,
+# and boxed floats would be 40 bytes each against 8.
+
+
+class _SamplePlan(NamedTuple):
+    """Per-subsample geometry, flat and indexed by position.
+
+    Sample ``(dx_index, dy_index)`` lives at ``dy_index * 2 * char_width +
+    dx_index``, where a half-cell ``(hx, hy)`` owns the four samples
+    ``dx_index in (2 * hx, 2 * hx + 1)`` and ``dy_index in (2 * hy,
+    2 * hy + 1)`` -- the same quarter points the rasterizer always took.
+    """
+
+    #: Ring index the sample falls in, -1 inside the hole, and a sentinel
+    #: past the last ring the pane has room for.
+    depth: array
+    #: How many ring outer edges the sample is beyond.  The rasterizer's
+    #: ``radius >= reach`` test, asked without keeping the radius: `reach`
+    #: is the outer edge of the deepest ring the *tree* reached, so this
+    #: is the same comparison against every edge it could be.
+    slot: array
+    #: How far around its band the sample is, and what one radian is worth
+    #: in ring edge there.
+    theta: array
+    edge: array
+    #: One cell measured along the face, for the shapes that quantise
+    #: their seams (`ringshape.TileGeometry`); None for the others, which
+    #: never read it.
+    cell: array | None
+    #: The radial separator's coverage here, for a ring that has another
+    #: painted outside it.  Whether it does is the tree's business, so the
+    #: value is stored and applied conditionally.
+    seam: array
+
+
+# Four entries covers what one explorer actually cycles through: the live
+# chart's geometry and the full-depth one it swaps to on completion, twice
+# over across a resize.
+#
+# Entries alone are not a bound, though: one plan is 9k subsamples at a
+# 70x30 chart and 336k at a 300x140 one, so the cache is held to a number
+# of *samples* as well -- 400k, about 14 MB, which is four plans at the
+# 182x62 a 307x69 terminal gives the explorer and one at any size a
+# terminal is unlikely to reach.  The newest plan is kept however big it
+# is: dropping it would mean paying for the geometry on every frame,
+# which is the thing this exists to stop.
+_PLAN_CACHE: dict[tuple, _SamplePlan] = {}
+_PLAN_CACHE_LIMIT = 4
+_PLAN_CACHE_MAX_SAMPLES = 400_000
+_PLAN_CACHE_ENABLED = True
+
+
+def set_sample_cache_enabled(enabled: bool) -> bool:
+    """Turn the geometry cache off, and return what it was.
+
+    Only `tests/test_sunburst_cache.py` calls this: a cache whose key is
+    incomplete draws a stale picture rather than raising, so the test
+    renders the same matrix with and without it and compares frames.
+    """
+    global _PLAN_CACHE_ENABLED
+    was = _PLAN_CACHE_ENABLED
+    _PLAN_CACHE_ENABLED = enabled
+    return was
+
+
+def clear_sample_cache() -> None:
+    """Drop every cached plan (a test seam, and a memory release valve)."""
+    _PLAN_CACHE.clear()
+
+
+def _sample_plan(layout: SunburstLayout, ring_width: float) -> _SamplePlan:
+    """The geometry table for this layout's shape and size."""
+    key = (
+        layout.geometry,
+        layout.shape,
+        layout.char_width,
+        layout.char_height,
+        layout.cell_aspect,
+        layout.hole_radius,
+        ring_width,
+        layout.radius,
+    )
+    if not _PLAN_CACHE_ENABLED:
+        return _build_sample_plan(layout, ring_width)
+    plan = _PLAN_CACHE.get(key)
+    if plan is not None:
+        # dict keeps insertion order, so re-inserting is what makes the
+        # eviction below least-recently-used rather than arbitrary.
+        del _PLAN_CACHE[key]
+        _PLAN_CACHE[key] = plan
+        return plan
+    plan = _build_sample_plan(layout, ring_width)
+    _PLAN_CACHE[key] = plan
+    while len(_PLAN_CACHE) > 1 and (
+        len(_PLAN_CACHE) > _PLAN_CACHE_LIMIT
+        or sum(len(held.depth) for held in _PLAN_CACHE.values())
+        > _PLAN_CACHE_MAX_SAMPLES
+    ):
+        del _PLAN_CACHE[next(iter(_PLAN_CACHE))]
+    return plan
+
+
+def _build_sample_plan(
+    layout: SunburstLayout, ring_width: float
+) -> _SamplePlan:
+    """Answer every geometry question the rasterizer asks, once.
+
+    Deliberately written as the same expressions in the same order the
+    rasterizer used inline, because the frames have to come out byte for
+    byte identical -- `radius >= reach` and `int((radius - hole) / w)` can
+    disagree by an ULP at a ring boundary, so both are kept rather than
+    one being derived from the other.
+    """
+    width = layout.char_width
+    height = layout.char_height
+    hole = layout.hole_radius
+    cell_aspect = layout.cell_aspect
+    half_row = cell_aspect / 2.0
+    cx = layout.center_x
+    cy = layout.center_y
+    inv_ring = 1.0 / ring_width
+
+    radius_of = layout.geometry.radius
+    angle_of = layout.geometry.angle
+    edge_per_radian = layout.geometry.edge_per_radian
+    row_half_width = layout.geometry.row_half_width
+    crisp = layout.geometry.crisp_seams
+    if crisp:
+        cell_depth = layout.geometry.cell_depth
+        cell_edge = layout.geometry.cell_edge
+
+    # Rings the pane has room for.  A sample past the last one is
+    # background whatever the tree turns out to hold, so the tables stop
+    # there (plus one, so the sentinel is never mistaken for a real ring
+    # at a boundary that rounded the wrong way).
+    ring_max = max(1, int(round((layout.radius - hole) / ring_width))) + 1
+    # Spelled the way `_build_arcs` spells them, not merely equal to them:
+    # `hole + d * w + w` and `hole + (d + 1) * w` can differ in the last
+    # place, and the whole point of `slot` is to answer `radius >= reach`
+    # against the very edges the arcs carry.
+    r_inner = [hole + d * ring_width for d in range(ring_max)]
+    r_outer = [inner + ring_width for inner in r_inner]
+    r_mid = [
+        (r_inner[d] + r_outer[d]) / 2.0 for d in range(ring_max)
+    ]
+
+    ring_seam_depth = min(_RING_SEAM, ring_width * _RING_SEAM_MAX_FRACTION)
+    max_seam_depth = ring_width * _RING_SEAM_MAX_FRACTION
+    foot = _FOOTPRINT_HALF
+    inv_foot = 1.0 / _SAMPLE_FOOTPRINT
+
+    two_w = 2 * width
+    # Two sample columns per cell column and two sample rows per half-cell
+    # row, so 2W by 4H.
+    total = two_w * 4 * height
+    # Untouched samples read as "inside the hole", which the frame loop
+    # already resolves to background: the corners a round chart never
+    # reaches are never written, and never read either.
+    # 36 bytes a sample for a shape with quantised seams and 28 for one
+    # without: 3.2 MB at the 182x62 chart a 307x69 terminal gives the
+    # explorer, 6.1 MB if the widget itself were that big.  Ring indices
+    # are single digits, so they are shorts.
+    depths = array("h", [-1]) * total
+    slots = array("h", [0]) * total
+    thetas = array("d", [0.0]) * total
+    edges = array("d", [0.0]) * total
+    # Only a crisp shape ever reads this one.
+    cells = array("d", [0.0]) * total if crisp else None
+    seams = array("d", [0.0]) * total
+
+    # `reach` is the tree's, and is never more than the radius the pane
+    # was fitted to, so bounding the build by the full radius covers every
+    # sample any frame can ask for and skips the corners a round chart
+    # never touches.
+    reach = layout.radius
+
+    for hy in range(2 * height):
+        dy0 = (hy + 0.25) * half_row - cy
+        dy1 = (hy + 0.75) * half_row - cy
+        # The centre of the character cell this half-row belongs to.  A
+        # crisp shape samples from there and nowhere else -- see below.
+        cell_dy = ((hy >> 1) + 0.5) * cell_aspect - cy
+        nearest = 0.0 if dy0 * dy1 <= 0.0 else min(abs(dy0), abs(dy1))
+        chord = row_half_width(nearest, reach)
+        if chord < 0.0:
+            continue
+        x_lo = max(0, int(cx - chord) - 1)
+        x_hi = min(width - 1, int(cx + chord) + 1)
+        for dy, base in ((dy0, 2 * hy * two_w), (dy1, (2 * hy + 1) * two_w)):
+            if crisp:
+                dy = cell_dy
+            for hx in range(x_lo, x_hi + 1):
+                cell_dx = hx + 0.5 - cx
+                # A crisp shape puts every edge it draws on a cell edge,
+                # so there is nothing inside a cell to resolve and all
+                # eight of its subsamples answer from the cell's own
+                # centre.  Sampling the quarter points instead is what
+                # anti-aliasing is for, and it costs this shape the only
+                # thing it is for: at a corner tile the radius comes from
+                # x at one subsample and from y at its neighbour, so a
+                # ring seam covered half a cell and `_render_cells` had to
+                # reach for `▀` -- a glyph a browser terminal draws
+                # narrower than the cell.  Painting from the centre also
+                # makes the picture agree with `hit_test` exactly.
+                samples = (
+                    ((cell_dx, base + 2 * hx), (cell_dx, base + 2 * hx + 1))
+                    if crisp
+                    else (
+                        (hx + 0.25 - cx, base + 2 * hx),
+                        (hx + 0.75 - cx, base + 2 * hx + 1),
+                    )
+                )
+                for dx, index in samples:
+                    radius = radius_of(dx, dy)
+                    if radius < hole:
+                        continue
+                    slots[index] = bisect_right(r_outer, radius)
+                    depth = int((radius - hole) * inv_ring)
+                    if depth >= ring_max:
+                        depths[index] = ring_max
+                        continue
+                    depths[index] = depth
+                    mid = r_mid[depth]
+                    theta = angle_of(dx, dy, mid)
+                    thetas[index] = theta
+                    edges[index] = edge_per_radian(theta, radius, mid)
+                    r_out = r_outer[depth]
+                    if crisp:
+                        cells[index] = cell_edge(theta, mid)
+                        depth_one = cell_depth(dx, dy, mid)
+                        if (
+                            depth_one <= max_seam_depth
+                            and radius >= r_out - depth_one
+                        ):
+                            seams[index] = 1.0
+                    else:
+                        lo = max(r_out - ring_seam_depth, radius - foot)
+                        hi = min(r_out, radius + foot)
+                        if hi > lo:
+                            seams[index] = (hi - lo) * inv_foot
+
+    return _SamplePlan(depths, slots, thetas, edges, cells, seams)
+
+
+def _rasterize_arcs(
+    layout: SunburstLayout,
+    ring_width: float,
+    category_index: CategoryIndex | None = None,
+) -> None:
+    """Supersample the disc into the half-cell framebuffer.
+
+    Each half-cell takes four subsamples at its quarter points in unit
+    space.  A subsample resolves to an arc colour, a separator colour, or
+    the panel background; averaging the four is what anti-aliases the rim,
+    the walls of empty wedges, and the separators alike.  A half-cell no
+    subsample landed on stays None so the caller can leave it unstyled.
+
+    Where each sample is, which ring it lands in and how far around that
+    ring it sits are all answered by `_sample_plan`, which holds them for
+    as long as the widget keeps its shape and size.  Only what depends on
+    the *arcs* is done here.
+    """
+    arcs = layout.arcs
+    if not arcs or ring_width <= 0.0:
+        return
+
+    rings = _build_rings(arcs, layout.geometry, category_index)
+    layout._rings = rings
+    ring_count = len(rings)
+    reach = max(arc.r_outer for arc in arcs)
+
+    width = layout.char_width
+    height = layout.char_height
+    half_row = layout.cell_aspect / 2.0
+    cx = layout.center_x
+    cy = layout.center_y
+
+    frame: list[list[RGB | None]] = [
+        [None] * width for _ in range(2 * height)
+    ]
+    layout.frame = frame
+
+    plan = _sample_plan(layout, ring_width)
+    depths = plan.depth
+    slots = plan.slot
+    thetas = plan.theta
+    edges = plan.edge
+    plan_cells = plan.cell
+    seams = plan.seam
+
+    row_half_width = layout.geometry.row_half_width
+    # A shape whose every edge already lands on a cell edge draws its
+    # seams as whole cells instead: the anti-aliased hairline below is
+    # the right answer for an edge that falls *between* two cells, and
+    # the wrong one for the only soft thing left in the picture.
+    crisp = layout.geometry.crisp_seams
+    bg_r, bg_g, bg_b = layout.panel_bg
+    seam_half = _ARC_SEAM / 2.0
+    # Beyond this arc-length distance no part of a subsample's footprint can
+    # touch the seam.
+    seam_reach = seam_half + _FOOTPRINT_HALF
+    seam_min_span = _ARC_SEAM * _SEAM_MIN_SPAN_FACTOR
+    foot = _FOOTPRINT_HALF
+    inv_foot = 1.0 / _SAMPLE_FOOTPRINT
+    two_w = 2 * width
+
+    for hy in range(2 * height):
+        dy0 = (hy + 0.25) * half_row - cy
+        dy1 = (hy + 0.75) * half_row - cy
+        # Closest this half-row's sample lines get to the centre.
+        nearest = 0.0 if dy0 * dy1 <= 0.0 else min(abs(dy0), abs(dy1))
+        # Half the row's covered width, or negative when the row misses
+        # the chart: a chord under the disc, a flat edge under the rest.
+        chord = row_half_width(nearest, reach)
+        if chord < 0.0:
+            continue
+        x_lo = max(0, int(cx - chord) - 1)
+        x_hi = min(width - 1, int(cx + chord) + 1)
+        row = frame[hy]
+        top = 2 * hy * two_w
+        bottom = top + two_w
+        for hx in range(x_lo, x_hi + 1):
+            first = top + 2 * hx
+            third = bottom + 2 * hx
+            total_r = total_g = total_b = 0
+            # Background subsamples are counted rather than added four
+            # times over: the rim and the walls of every empty wedge are
+            # made of them, and a half-cell that is all background is
+            # never written at all.
+            missed = 0
+            for index in (first, first + 1, third, third + 1):
+                depth = depths[index]
+                if depth < 0 or slots[index] >= ring_count:
+                    # Inside the hole, or past the outermost arc.
+                    missed += 1
+                    continue
+                ring = rings[depth] if depth < ring_count else None
+                if ring is None:
+                    missed += 1
+                    continue
+                if ring.full:
+                    arc_index = 0
+                    theta = 0.0
+                else:
+                    theta = thetas[index]
+                    arc_index = bisect_right(ring.starts, theta) - 1
+                    if arc_index < 0 or theta >= ring.ends[arc_index]:
+                        # An empty slot: this ring has no child here, so the
+                        # wedge is background and its walls anti-alias like
+                        # any other edge.
+                        missed += 1
+                        continue
+                # Radial separator: a band just inside the ring's outer
+                # edge, dividing it from the ring beyond.  Whether the
+                # sample is in it is geometry; whether there is a ring out
+                # there to divide from is the tree's.
+                seam_alpha = seams[index] if ring.ring_seam else 0.0
+                if not ring.full:
+                    # Angular separator: a hairline centred on the boundary
+                    # with each neighbour, skipped where either neighbour is
+                    # too narrow to survive it.  Seam widths are lengths of
+                    # ring edge, and one radian is worth a different length
+                    # of edge in every shape — and, where the angle counts
+                    # area rather than perimeter, on every face of the same
+                    # ring — so each one is asked before the comparison.
+                    span_end = ring.boundary_end[arc_index]
+                    if crisp:
+                        # One whole cell, and only on the far side of each
+                        # arc: a cell on both sides of every boundary would
+                        # be two cells of divider in a band a few cells
+                        # thick.  Every internal boundary still gets its
+                        # one, from the arc that ends there.
+                        if span_end > 0.0:
+                            edge = edges[index]
+                            one = plan_cells[index]
+                            if (
+                                span_end * edge
+                                >= one * _SEAM_MIN_SPAN_FACTOR
+                                * _SEAM_MIN_SPAN_SLACK
+                                and (ring.ends[arc_index] - theta) * edge < one
+                            ):
+                                seam_alpha = 1.0
+                    else:
+                        span_start = ring.boundary_start[arc_index]
+                        if span_start > 0.0 or span_end > 0.0:
+                            edge = edges[index]
+                            arc_d = -1.0
+                            if (
+                                span_start > 0.0
+                                and span_start * edge >= seam_min_span
+                            ):
+                                arc_d = (theta - ring.starts[arc_index]) * edge
+                            if span_end > 0.0 and span_end * edge >= seam_min_span:
+                                other = (ring.ends[arc_index] - theta) * edge
+                                if arc_d < 0.0 or other < arc_d:
+                                    arc_d = other
+                            if 0.0 <= arc_d < seam_reach:
+                                lo = max(-seam_half, arc_d - foot)
+                                hi = min(seam_half, arc_d + foot)
+                                if hi > lo:
+                                    alpha = (hi - lo) * inv_foot
+                                    if alpha > seam_alpha:
+                                        seam_alpha = alpha
+                pixel = ring.colors[arc_index]
+                if seam_alpha > 0.0:
+                    seam = ring.seam_colors[arc_index]
+                    keep = 1.0 - seam_alpha
+                    total_r += int(pixel[0] * keep + seam[0] * seam_alpha)
+                    total_g += int(pixel[1] * keep + seam[1] * seam_alpha)
+                    total_b += int(pixel[2] * keep + seam[2] * seam_alpha)
+                else:
+                    total_r += pixel[0]
+                    total_g += pixel[1]
+                    total_b += pixel[2]
+            if missed < 4:
+                if missed:
+                    total_r += missed * bg_r
+                    total_g += missed * bg_g
+                    total_b += missed * bg_b
+                # Exact for uniform samples: four copies of c average to c.
+                row[hx] = (total_r >> 2, total_g >> 2, total_b >> 2)
+
+
+def _cell_color(rgb: RGB) -> Color:
+    """The Rich colour one framebuffer entry is painted with.
+
+    The renderer supersamples in RGB and has to: there is no averaging two
+    colour *names*, and the rim, the wedge walls and every separator are
+    made of exactly that average. Under the ANSI scheme each fill goes in
+    at its palette coordinate, so a covered cell comes back out at the
+    name it started from and only the anti-aliased edges land between two
+    — and those are snapped to whichever they are nearer, which is the
+    only thing sixteen colours can do with an edge anyway.
+
+    Doing it here rather than leaving it to Rich's own downgrade at write
+    time is what makes the theme work at *any* depth: the style carries an
+    ANSI colour, so a truecolor terminal paints the sixteen colours of its
+    own scheme instead of this table's VGA coordinates.
+    """
+    color = Color.from_rgb(*rgb)
+    if get_color_scheme().ansi:
+        return color.downgrade(ColorSystem.STANDARD)
+    return color
+
+
+def _render_safe_cells(
+    layout: SunburstLayout,
+) -> list[list[tuple[str, Style | None]]]:
+    """Fold the framebuffer into background colour alone, no glyphs.
+
+    Safe rendering exists for terminals whose font has no block elements,
+    which is exactly what the half-block pass draws every rim and wedge
+    wall with.  A cell here is always a space, so the two half-cells have
+    to be resolved into one colour: identical halves keep it, differing
+    halves average, and a lone covered half averages with the panel
+    background so a half-covered cell still reads as half-covered.  The
+    disc loses vertical resolution and keeps its shape, its colours, and
+    its edges.
+    """
+    frame = layout.frame
+    width = layout.char_width
+    panel = layout.panel_bg
+    styles: dict[RGB, Style] = {}
+    rows: list[list[tuple[str, Style | None]]] = []
+
+    for y in range(layout.char_height):
+        top_row = frame[2 * y] if 2 * y < len(frame) else None
+        bottom_row = frame[2 * y + 1] if 2 * y + 1 < len(frame) else None
+        row: list[tuple[str, Style | None]] = []
+        for x in range(width):
+            top = top_row[x] if top_row is not None else None
+            bottom = bottom_row[x] if bottom_row is not None else None
+            if top is None and bottom is None:
+                row.append((" ", None))
+                continue
+            if top is None:
+                color = _mix_rgb(bottom, panel, 0.5)
+            elif bottom is None:
+                color = _mix_rgb(top, panel, 0.5)
+            elif top == bottom:
+                color = top
+            else:
+                color = _mix_rgb(top, bottom, 0.5)
+            cached = styles.get(color)
+            if cached is None:
+                cached = Style(bgcolor=_cell_color(color))
+                styles[color] = cached
+            row.append((" ", cached))
+        rows.append(row)
+    return rows
+
+
+def _render_cells(layout: SunburstLayout) -> list[list[tuple[str, Style | None]]]:
+    """Fold the half-cell framebuffer into one (glyph, style) per cell.
+
+    Where a cell's two halves agree it is a space over that colour, which
+    keeps the disc's interior perfectly flat.  Where only one half is
+    covered the half block is drawn as *foreground only*, so the widget's
+    real background shows through the other half and an imperfect estimate
+    of the panel colour cannot ring the disc with a halo.
+
+    Only `disc` and `fill` ever reach the half blocks.  A crisp shape's
+    two halves are the same sample, so this loop takes the `top ==
+    bottom` branch for every cell it draws -- gated by
+    `test_ring_shapes.py::test_tiles_emits_nothing_but_spaces_at_any_size`
+    rather than by a branch here, because a shape that started producing
+    them would be broken at the geometry, not here.
+    """
+    if is_safe_rendering():
+        return _render_safe_cells(layout)
+
+    frame = layout.frame
+    width = layout.char_width
+    styles: dict[tuple[RGB | None, RGB | None], Style] = {}
+    rows: list[list[tuple[str, Style | None]]] = []
+
+    for y in range(layout.char_height):
+        top_row = frame[2 * y] if 2 * y < len(frame) else None
+        bottom_row = frame[2 * y + 1] if 2 * y + 1 < len(frame) else None
+        row: list[tuple[str, Style | None]] = []
+        for x in range(width):
+            top = top_row[x] if top_row is not None else None
+            bottom = bottom_row[x] if bottom_row is not None else None
+            if top is None and bottom is None:
+                row.append((" ", None))
+                continue
+            key = (top, bottom)
+            cached = styles.get(key)
+            if cached is None:
+                if top is None:
+                    cached = Style(color=_cell_color(bottom))
+                elif bottom is None:
+                    cached = Style(color=_cell_color(top))
+                elif top == bottom:
+                    cached = Style(bgcolor=_cell_color(top))
+                else:
+                    cached = Style(
+                        color=_cell_color(top),
+                        bgcolor=_cell_color(bottom),
+                    )
+                styles[key] = cached
+            if top is None:
+                row.append((_HALF_BOTTOM, cached))
+            elif bottom is None:
+                row.append((_HALF_TOP, cached))
+            elif top == bottom:
+                row.append((" ", cached))
+            else:
+                row.append((_HALF_TOP, cached))
+        rows.append(row)
+    return rows
+
+
+def _build_arcs(
+    node: FSNode,
+    angle_start: float, angle_end: float,
+    depth: int, max_depth: int,
+    hole_radius: float,
+    ring_width: float,
+    arcs: list[ArcSegment],
+    metric: str,
+    weights: Mapping[str, int] | None,
+    visuals: Mapping[str, VisualDelta] | None,
+    selected_path: str | None,
+    child_limit: int,
+    ordinal: int = 0,
+) -> None:
+    """Recursively build arc segments."""
+    if depth > max_depth:
+        return
+
+    span = angle_end - angle_start
+    selected_branch = bool(
+        selected_path
+        and (
+            selected_path == node.path
+            or selected_path.startswith(node.path.rstrip("/") + "/")
+        )
+    )
+    r_inner = hole_radius + depth * ring_width
+    r_outer = r_inner + ring_width
+
+    arcs.append(ArcSegment(
+        node=node,
+        depth=depth,
+        angle_start=angle_start,
+        angle_end=angle_end,
+        r_inner=r_inner,
+        r_outer=r_outer,
+        ordinal=ordinal,
+        visual=visuals.get(node.path) if visuals is not None else None,
+        selected=node.path == selected_path,
+    ))
+
+    if span < math.radians(0.5) and not selected_branch:
+        # Too thin to subdivide, but the segment is still emitted so its
+        # slice of the ring is owned and painted.  Dropping it left the
+        # slice unclaimed, which the rasterizer renders as a hairline crack
+        # running through the ring.
+        return
+
+    sized = bounded_children(
+        node,
+        metric=metric,
+        value=lambda child: _layout_value(child, metric, weights),
+        limit=child_limit,
+        selected_path=selected_path,
+    )
+    if not sized:
+        return
+
+    total = sum(_layout_value(c, metric, weights) for c in sized)
+    if total <= 0:
+        return
+
+    selected_child = next(
+        (
+            child
+            for child in sized
+            if selected_path
+            and (
+                selected_path == child.path
+                or selected_path.startswith(child.path.rstrip("/") + "/")
+            )
+        ),
+        None,
+    )
+    selected_min_span = math.radians(0.75)
+    reserve_selected = (
+        selected_child is not None
+        and (_layout_value(selected_child, metric, weights) / total) * span
+        < selected_min_span
+        and span > selected_min_span
+    )
+    remaining_total = (
+        total - _layout_value(selected_child, metric, weights)
+        if reserve_selected and selected_child is not None
+        else total
+    )
+    remaining_span = span - selected_min_span if reserve_selected else span
+
+    current_angle = angle_start
+    for index, child in enumerate(sized):
+        if reserve_selected and child is selected_child:
+            child_span = selected_min_span
+        elif reserve_selected and remaining_total > 0:
+            child_span = (
+                _layout_value(child, metric, weights) / remaining_total
+            ) * remaining_span
+        else:
+            child_span = (_layout_value(child, metric, weights) / total) * span
+        child_end = current_angle + child_span
+        _build_arcs(
+            child, current_angle, child_end,
+            depth + 1,
+            max_depth,
+            hole_radius,
+            ring_width,
+            arcs,
+            metric,
+            weights,
+            visuals,
+            selected_path,
+            child_limit,
+            index,
+        )
+        current_angle = child_end
+
+
+def _compute_labels(
+    layout: SunburstLayout,
+    root: FSNode,
+    metric: str,
+    visuals: Mapping[str, VisualDelta] | None,
+    category_index: CategoryIndex | None = None,
+) -> None:
+    """Compute text labels for center and large arcs."""
+    labels = layout.labels
+    occupied: set[tuple[int, int]] = set()
+
+    # Center label: root name + total size
+    center_cx = layout.char_width // 2
+    center_cy = layout.char_height // 2
+    root_name = root.name
+    root_visual = visuals.get(root.path) if visuals is not None else None
+    size_text = (
+        format_visual_delta(root_visual, metric)
+        if root_visual is not None
+        else metric_text(root, metric)
+    )
+
+    panel = layout.panel_bg
+    # The centre label sits on the panel, which under the ANSI scheme has
+    # no sRGB value to name — and "black" is the backdrop every arc label
+    # already gets there, so the two agree.
+    center_bg = (
+        "black"
+        if get_color_scheme().ansi
+        else f"rgb({panel[0]},{panel[1]},{panel[2]})"
+    )
+    _place_label(labels, occupied, center_cx, center_cy, root_name, "white", center_bg)
+    _place_label(
+        labels, occupied, center_cx, center_cy + 1, size_text, "bright_white", center_bg,
+    )
+
+    # Arc labels for depth-1 arcs with angular span > 30 degrees.  Placement
+    # runs through the same unit transform the rasterizer used, so a label
+    # sits on its arc whatever the cell aspect is.
+    aspect = layout.cell_aspect
+    for arc in layout.arcs:
+        if arc.depth != 1:
+            continue
+        if arc.angle_span < math.radians(30):
+            continue
+
+        mid_angle = arc.angle_mid
+        # The midline of the arc's own band, which is the rectangle
+        # `tiles` measured that arc's angles against.
+        mid_r = (arc.r_inner + arc.r_outer) / 2
+        # Same transform the rasterizer painted the arc with, run
+        # backwards: on a rectangular ring this walks that band's own
+        # midline rather than a circle, so a label stays on its band
+        # whatever shape is in force.
+        dx, dy = layout.geometry.offset(mid_angle, mid_r)
+        char_x = int(layout.char_width / 2 + dx)
+        char_y = int(layout.char_height / 2 + dy / aspect)
+
+        name = arc.node.name
+        if arc.visual is not None:
+            name = f"{visual_token(arc.visual.state).glyph} {name}"
+        # Suffix glyph marking inaccessibility: denied / partial / none
+        if arc.node.error is not None:
+            name = f"{name} {denied_glyph()}"
+        elif arc.node.inaccessible_count > 0 or arc.node.inaccessible_subtree_count > 0:
+            name = f"{name} {partial_glyph()}"
+        arc_col = _arc_color(arc, category_index)
+        bg = darken_rgb(arc_col, 0.4)
+        _place_label(labels, occupied, char_x, char_y, name, "white", bg)
+
+
+def _place_label(
+    labels: list[_Label],
+    occupied: set[tuple[int, int]],
+    center_x: int, y: int,
+    text: str, fg: str, bg: str | None = None,
+) -> None:
+    """Place a label centered at (center_x, y), skipping on collision.
+
+    Centering and collision use *visible* width, so the trailing VS-15 on
+    accessibility glyphs (zero-width combining mark) does not claim a
+    grid cell of its own and a wide glyph claims both of its cells.
+    """
+    width = visible_width(text)
+    start_x = center_x - width // 2
+    for i in range(width):
+        if (start_x + i, y) in occupied:
+            return
+    for i in range(width):
+        occupied.add((start_x + i, y))
+    labels.append(_Label(char_x=start_x, char_y=y, text=text, fg=fg, bg=bg))
+
+
+def _compute_legend(
+    layout: SunburstLayout,
+    root: FSNode,
+    category_index: CategoryIndex | None = None,
+) -> None:
+    """Build a compact file-type legend for the bottom-left corner."""
+    if layout.char_height <= 10:
+        return
+
+    if layout.diff_mode:
+        states = {arc.visual.state for arc in layout.arcs if arc.visual is not None}
+        present = [
+            state
+            for state in (
+                VisualState.GROWTH,
+                VisualState.SHRINK,
+                VisualState.NEW,
+                VisualState.REMOVED,
+                VisualState.PARTIAL,
+                VisualState.INCOMPATIBLE,
+            )
+            if state in states
+        ]
+        lines: list[list[tuple[str, str]]] = []
+        for index in range(0, len(present), 2):
+            row = []
+            for state in present[index : index + 2]:
+                token = visual_token(state)
+                entry = f"{token.glyph} {token.label}"
+                # Padded by cells, not characters: `＋` is two cells wide.
+                row.append((
+                    entry + " " * max(0, 13 - visible_width(entry)),
+                    delta_background(state),
+                ))
+            lines.append(row)
+        layout.legend_lines = lines
+        layout.legend_start_y = layout.char_height - len(lines)
+        return
+
+    # The swatch is a geometric shape (U+25A0), which is the kind of glyph
+    # safe rendering exists to avoid.
+    swatch = "#" if is_safe_rendering() else "■"
+    heading: str | None = None
+    if category_index is not None:
+        # Shares are already sorted largest first, so the cap keeps the
+        # categories that actually account for the disc.
+        shares = category_index.shares(root.path)
+        # Everything under one percent into one entry. `docs 0%` is not a
+        # measurement anybody can act on, and six of them crowded out the
+        # categories that do account for the disc.
+        major = [(cat, share) for cat, share in shares if share >= 0.01]
+        minor = [(cat, share) for cat, share in shares if share < 0.01]
+        entries = [
+            (f"{swatch} {cat} {share:.0%}", cat)
+            for cat, share in major
+        ][:_LEGEND_MAX_ENTRIES]
+        if minor and len(entries) < _LEGEND_MAX_ENTRIES:
+            entries.append((f"{swatch} {len(minor)} more <1%", "other"))
+        # The index is a *byte* histogram and stays one whatever `t` is
+        # switched to -- four of them per directory is memory a scan of a
+        # million nodes cannot spend. So the legend says which measure it
+        # is quoting rather than silently disagreeing with the arcs.
+        heading = "by bytes"
+    else:
+        categories = {
+            file_category(arc.node.name)
+            for arc in layout.arcs
+            if not arc.node.is_dir
+        }
+        entries = [
+            (f"{swatch} {cat}", cat)
+            for cat in CATEGORIES
+            if cat in categories
+        ][:_LEGEND_MAX_ENTRIES]
+    if not entries:
+        return
+
+    # One column width for the whole legend, so the second entry of every
+    # row starts at the same x.
+    column = max(len(text) for text, _cat in entries) + 1
+    lines: list[list[tuple[str, str]]] = []
+    for index in range(0, len(entries), 2):
+        lines.append([
+            (text.ljust(column), category_legend_color(cat))
+            for text, cat in entries[index : index + 2]
+        ])
+    # One caption row, above the swatches. The chart-height floor at the
+    # top of this function is what protects the disc; six categories never
+    # fill more than three rows, so the caption is the fourth at worst.
+    if heading is not None:
+        lines.insert(0, [(heading.ljust(column), _LEGEND_HEADING_COLOR)])
+
+    layout.legend_lines = lines
+    layout.legend_start_y = layout.char_height - len(lines)
+
+
+def _layout_value(
+    node: FSNode,
+    metric: MetricId | str,
+    weights: Mapping[str, int] | None,
+) -> int:
+    if weights is not None and node.path in weights:
+        return max(0, int(weights[node.path]))
+    selected = metric if isinstance(metric, MetricId) else MetricId.parse(metric)
+    if selected is MetricId.LOGICAL:
+        return node.size
+    if selected is MetricId.ALLOCATED:
+        return node.allocated_size or 0
+    if selected is MetricId.UNIQUE:
+        return node.unique_allocated_size or 0
+    return node.file_count
+
+
+def _delta_intensity(visual: VisualDelta) -> int:
+    percent = abs(visual.percent or 0.0)
+    if percent >= 100:
+        return 4
+    if percent >= 25:
+        return 3
+    if percent > 0:
+        return 2
+    return 1
+
+
+def render_sunburst_line(layout: SunburstLayout, y: int) -> list[Segment]:
+    """Render a single line of the sunburst as Rich Segments."""
+    if not layout.frame or y < 0 or y >= layout.char_height:
+        return []
+
+    cells = layout.rendered_cells
+    if y >= len(cells):
+        return []
+
+    # Build label lookup for this row: x -> (text, fg, bg), one entry per
+    # terminal cell the label covers. `_cell_text` folds a VS-15 into its
+    # glyph's cell and gives a wide glyph two.
+    label_chars: dict[int, tuple[str, str, str | None]] = {}
+    split = False
+    for label in layout.labels:
+        if label.char_y != y:
+            continue
+        for offset, text in enumerate(_cell_text(label.text)):
+            x = label.char_x + offset
+            if 0 <= x < layout.char_width:
+                label_chars[x] = (text, label.fg, label.bg)
+            split = split or not text
+
+    # Build legend lookup for this row: x -> (text, color)
+    legend_chars: dict[int, tuple[str, str]] = {}
+    if layout.legend_lines and y >= layout.legend_start_y:
+        legend_idx = y - layout.legend_start_y
+        if 0 <= legend_idx < len(layout.legend_lines):
+            offset = 1  # 1-char left padding
+            for entry_text, color in layout.legend_lines[legend_idx]:
+                for text in _cell_text(entry_text):
+                    legend_chars[offset] = (text, color)
+                    split = split or not text
+                    offset += 1
+
+    legend_bg = _cell_color(layout.panel_bg) if legend_chars else None
+    row: list[tuple[str, Style | None]] = []
+    for x, (ch, style) in enumerate(cells[y]):
+        if x in legend_chars:
+            lch, lcolor = legend_chars[x]
+            # A round chart leaves the bottom-left corner unpainted and the
+            # legend simply sits on the panel.  A rectangular one reaches into
+            # that corner, so the strip lays the panel colour back down
+            # rather than letting arcs show between its glyphs.
+            ch, style = lch, Style(
+                color=lcolor,
+                bgcolor=None if style is None else legend_bg,
+            )
+        elif x in label_chars:
+            lch, lfg, lbg = label_chars[x]
+            ch, style = lch, Style(color=lfg, bgcolor=lbg)
+        row.append((ch, style))
+    if split:
+        _mend_wide_glyphs(row)
+
+    segments: list[Segment] = []
+    pending: list[str] = []
+    pending_style: Style | None = None
+    have_pending = False
+
+    for ch, style in row:
+        # Runs of identical cells — the disc interior is mostly those —
+        # collapse into one Segment.
+        if have_pending and style == pending_style:
+            pending.append(ch)
+            continue
+        if have_pending:
+            segments.append(Segment("".join(pending), pending_style))
+        pending = [ch]
+        pending_style = style
+        have_pending = True
+
+    if have_pending:
+        segments.append(Segment("".join(pending), pending_style))
+
+    return segments
+
+
+def _cell_text(text: str) -> list[str]:
+    """What each terminal cell `text` covers shows, left to right.
+
+    A zero-width mark -- the VS-15 on the access glyphs -- rides in the
+    cell of the glyph before it. A wide glyph -- the diff views' `＋`, a
+    character of a CJK name -- is drawn from its first cell and leaves the
+    second empty, so a row put together one entry per cell is exactly as
+    many cells wide as it has entries.
+    """
+    cells: list[str] = []
+    for char in text:
+        width = visible_width(char)
+        if width == 0:
+            if cells:
+                cells[-1 if cells[-1] else -2] += char
+            continue
+        cells.append(char)
+        cells.extend([""] * (width - 1))
+    return cells
+
+
+def _mend_wide_glyphs(row: list[tuple[str, Style | None]]) -> None:
+    """Blank whichever half of a wide glyph lost its other half.
+
+    The legend is drawn over labels and a label is clipped at the row's
+    edge, so a wide glyph's empty second cell can end up holding something
+    else, or be off the row. The glyph would then spill into its neighbour
+    and push the rest of the row one cell right; a space keeps the width.
+    """
+    for x, (text, style) in enumerate(row):
+        if not text:
+            if x == 0 or visible_width(row[x - 1][0]) < 2:
+                row[x] = (" ", style)
+        elif visible_width(text) > 1 and (x + 1 == len(row) or row[x + 1][0]):
+            row[x] = (" ", style)

@@ -42,7 +42,7 @@ def classify_symlink(node):                        # called on demand by the UI
 
 The tree label degrades cleanly: a symlink the user has not selected yet shows just its name; the inline `-> /target` arrow appears once they look at it. The Details panel and the `i` action already called `classify_symlink` defensively, so the UI side needed no change.
 
-One small refinement keeps the typical-case UX intact. A user running `fsmonitor ~` reasonably expects to see what the handful of symlinks at home root point to without having to click each one. So the engine eagerly classifies the **first 100 symlinks at the scan root** (and only at the scan root: deeper levels stay fully lazy). 100 is small enough to be invisible (60 ms of NFS RTT in the worst case), large enough to cover any non-pathological home, and bounded so it cannot regress the case where the scan root itself contains 215,000 symlinks.
+One small refinement keeps the typical-case UX intact. A user running `disktide ~` reasonably expects to see what the handful of symlinks at home root point to without having to click each one. So the engine eagerly classifies the **first 100 symlinks at the scan root** (and only at the scan root: deeper levels stay fully lazy). 100 is small enough to be invisible (60 ms of NFS RTT in the worst case), large enough to cover any non-pathological home, and bounded so it cannot regress the case where the scan root itself contains 215,000 symlinks.
 
 ## What it costs
 

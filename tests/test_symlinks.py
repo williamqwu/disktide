@@ -9,14 +9,14 @@ from pathlib import Path
 
 from rich.console import Console
 
-from fs_monitor.app import FSMonitorApp
-from fs_monitor.config import load_config
-from fs_monitor.models.tree import FSNode
-from fs_monitor.scanner.engine import ScanEngine
-from fs_monitor.scanner.walker import classify_symlink
-from fs_monitor.screens.explorer import ExplorerScreen
-from fs_monitor.widgets.info_panel import InfoPanel
-from fs_monitor.widgets.size_tree import SizeTree
+from disktide.app import DiskTideApp
+from disktide.config import load_config
+from disktide.models.tree import FSNode
+from disktide.scanner.engine import ScanEngine
+from disktide.scanner.walker import classify_symlink
+from disktide.widgets.info_panel import InfoPanel
+from disktide.widgets.size_tree import SizeTree
+from tests.waiting import wait_for_explorer
 
 
 def _find(node: FSNode, name: str) -> FSNode | None:
@@ -160,14 +160,6 @@ def test_info_panel_shows_symlink_target():
 # --- explorer: `i` navigates a symlinked directory ------------------------
 
 
-async def _wait_for_explorer(pilot, app) -> None:
-    await pilot.pause(delay=0.2)
-    for _ in range(30):
-        await pilot.pause(delay=0.1)
-        if isinstance(app.screen, ExplorerScreen) and app.screen._root is not None:
-            return
-
-
 async def _cursor_to(pilot, tree, name: str) -> bool:
     """Move the tree cursor onto the first node whose FSNode name matches."""
     for _ in range(tree.last_line + 1):
@@ -188,11 +180,11 @@ def test_press_i_enters_symlinked_directory(tmp_path):
     resolved = str(Path(real).resolve())
 
     async def go():
-        app = FSMonitorApp(
+        app = DiskTideApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
 
@@ -216,11 +208,11 @@ def test_press_i_does_nothing_on_file_symlink(tmp_path):
     os.symlink(tmp_path / "data.txt", tmp_path / "flink")
 
     async def go():
-        app = FSMonitorApp(
+        app = DiskTideApp(
             scan_path=str(tmp_path), show_welcome=False, config=load_config()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            await _wait_for_explorer(pilot, app)
+            await wait_for_explorer(pilot, app)
             screen = app.screen
             tree = screen.query_one("#size-tree", SizeTree)
 
@@ -260,10 +252,10 @@ def test_deeper_symlinks_are_not_classified_during_scan(tmp_path):
 
 def test_top_level_symlinks_classified_up_to_cap(tmp_path):
     """The first 100 symlinks at the scan root are classified eagerly
-    (so a typical `fsmonitor ~` shows target arrows in the tree from the
+    (so a typical `disktide ~` shows target arrows in the tree from the
     start); symlinks past the cap stay lazy. 100 * one extra stat is
     bounded; classifying 215k symlinks at depth 1 is not."""
-    from fs_monitor.scanner.engine import _TOP_LEVEL_CLASSIFY_CAP
+    from disktide.scanner.engine import _TOP_LEVEL_CLASSIFY_CAP
 
     target = tmp_path / "real"
     target.mkdir()
