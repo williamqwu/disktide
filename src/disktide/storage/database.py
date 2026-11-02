@@ -70,6 +70,7 @@ log = logging.getLogger(__name__)
 from disktide.models.tree import FSNode, LeafNode
 from disktide.paths import database_file
 from disktide.textsafe import load_text, store_text
+from disktide.storage.statint import load_stat_int, store_stat_int
 from disktide.storage.migrations import (
     CURRENT_VERSION,
     SchemaTooNewError,
@@ -751,8 +752,8 @@ class Database:
                    last_seen_at = excluded.last_seen_at""",
             (
                 store_text(snapshot.root_path),
-                root_device_id,
-                root_inode,
+                store_stat_int(root_device_id),
+                store_stat_int(root_inode),
                 root_filesystem,
                 timestamp.isoformat(),
             ),
@@ -847,8 +848,8 @@ class Database:
                 snapshot.error_count,
                 snapshot.excluded_count,
                 snapshot.depth_limited_count,
-                root_device_id,
-                root_inode,
+                store_stat_int(root_device_id),
+                store_stat_int(root_inode),
                 root_filesystem,
                 snapshot.timestamp_timezone,
                 json.dumps(snapshot.capabilities),
@@ -1272,8 +1273,8 @@ class Database:
         snapshot.error_count = metadata[15]
         snapshot.excluded_count = metadata[16]
         snapshot.depth_limited_count = metadata[17]
-        snapshot.root_device_id = metadata[18]
-        snapshot.root_inode = metadata[19]
+        snapshot.root_device_id = load_stat_int(metadata[18])
+        snapshot.root_inode = load_stat_int(metadata[19])
         snapshot.root_filesystem = metadata[20]
         snapshot.timestamp_timezone = metadata[21]
         snapshot.capabilities = tuple(json.loads(metadata[22] or "[]"))
@@ -2687,8 +2688,8 @@ class Database:
                    last_seen_at = excluded.last_seen_at""",
             (
                 store_text(run.request.path),
-                root_device_id,
-                root_inode,
+                store_stat_int(root_device_id),
+                store_stat_int(root_inode),
                 root_filesystem,
                 _datetime_text(seen_at),
             ),
