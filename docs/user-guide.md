@@ -63,7 +63,7 @@ visualizations on the right:
 | Left / Right | Collapse / expand tree nodes |
 | Enter | Expand or collapse the highlighted directory in place |
 | `u` | Go up to the parent directory |
-| `i` | Go into the highlighted directory. Uses the tree already scanned, and rescans from it only where that cannot answer: a symlink's target, a directory the scan policy skipped, or a subtree `max_depth` cut short |
+| `i` | Go into the highlighted directory. Uses the tree already scanned, and rescans from it only where that cannot answer: a symlink's target, a directory the scan policy skipped, or a directory `max_depth` folded |
 | `s` | Cycle sort order: size, name, modified |
 | `r` | Rescan (prompts y/n). Rescans the root the scan started from, which is not always where `i` has taken you; the prompt names the path |
 | `d` | Toggle Current / Diff view |
@@ -389,7 +389,7 @@ route the copy takes with whether an exit status stands behind it. See
 ```bash
 disktide scan /path
 disktide scan /path --snapshot          # save to database
-disktide scan /path -d 5 -w 4          # depth 5, 4 workers
+disktide scan /path -d 5 -w 4          # rows to depth 5 (totals complete), 4 workers
 disktide scan /path --metric allocated
 disktide scan /path --one-file-system --exclude-pseudo
 disktide scan /path --include-snapshots  # count .snapshot/.zfs copies
@@ -406,10 +406,27 @@ Run status goes to stderr and the report to stdout, so closing stderr
 (`disktide scan /path 2>&- > report.txt`) costs the narration and keeps the
 report.
 
-`--max-depth 0` scans nothing below the root and says so: totals are zero
-and the report counts the root itself as one depth-limited subtree
-(`Scoped out: 0 policy-excluded, 1 depth-limited`, `coverage.depth_limited_subtrees: 1`),
-so it is distinguishable from scanning an empty directory.
+`--max-depth N` (`-d N`) works like `du --max-depth`: the whole tree is
+read and every total is complete, and what the limit drops is the rows.
+A directory at depth `N` keeps the size, file count and directory count
+of everything under it and has no children of its own -- it is *folded*,
+and the report says how many were (`Folded: 3 directories at depth 2
+(contents counted in the totals, not listed)`, `coverage.depth_limited_subtrees:
+3`). A folded directory whose contents were all at the limit, an empty one,
+is not counted: nothing was hidden. `-d 0` is therefore `du -s`: one row,
+the full total, `Folded: 1 directory at depth 0`. The limit does not make a
+scan cheaper -- a fold has to read what it folds -- but it makes the tree
+it keeps, publishes and saves smaller, which is what a monitor on a deep
+tree wants. In the explorer a folded directory is marked `[folded]`, and
+`i` rescans from it with the limit counted from there, so moving the root
+down buys depth.
+
+Up to v0.3.0 the limit *cut* the walk instead: a directory at depth `N` was
+stat'ed and not entered, so `-d 2` on a tree whose bulk lay deeper reported
+a few KiB and nothing said the total was short. Snapshots saved by those
+versions carry the smaller numbers; a monitor whose policy sets `max_depth`
+takes its next snapshot with complete totals, which the trend will show as
+a step.
 
 Storage snapshot directories are skipped below the scan root by default.
 NetApp exports `.snapshot` at the root of every NFS volume (`~snapshot` over
@@ -579,7 +596,7 @@ creates an empty `disktide/` store.
 
 ```toml
 [scan]
-max_depth = 10                           # omit for unlimited
+max_depth = 10                           # fold rows deeper than this; omit to keep every row
 workers = 4                              # omit for auto-detect
 # one_file_system = true                 # default: false
 # exclude_pseudo_filesystems = false     # default: true

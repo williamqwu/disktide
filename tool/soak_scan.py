@@ -145,10 +145,10 @@ def _unlock(root):
 def _reference(path, depth=0, max_depth=None):
     """Independent single-threaded walker: never follows symlinks.
 
-    Mirrors the engine's depth policy: a directory at ``max_depth`` is still
-    counted by its parent and still contributes its *own* blocks, but is not
-    entered, so nothing inside it is counted. Same for a directory that
-    cannot be listed.
+    ``max_depth`` is accepted and ignored on purpose: the engine's limit
+    folds, so a directory at the limit is read in full and its subtree is in
+    every total -- the reference has to count the same bytes. A directory
+    that cannot be listed contributes its own blocks and nothing inside it.
 
     ``allocated`` is `st_blocks * 512` of every file, symlink and directory,
     this one included -- what `du` reports and what the engine now reports.
@@ -164,9 +164,6 @@ def _reference(path, depth=0, max_depth=None):
         own_dir_allocated = os.lstat(path).st_blocks * 512
     except OSError:
         own_dir_allocated = 0
-    if max_depth is not None and depth >= max_depth:
-        return dict(size=0, allocated=own_dir_allocated, files=0, dirs=0,
-                    denied=0, leaves=[], dir_allocated=own_dir_allocated)
     try:
         entries = list(os.scandir(path))
     except OSError:

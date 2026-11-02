@@ -4,6 +4,33 @@ from __future__ import annotations
 
 from disktide.models.tree import FSNode
 
+__all__ = [
+    "finalize_unique_allocated",
+    "fold_below_depth",
+    "fold_directory",
+    "is_folded",
+    "mark_folded_directories",
+    "mirror_allocated_as_unique",
+]
+
+
+def is_folded(node: FSNode) -> bool:
+    """Whether a directory is a `max_depth` fold: totals, but no rows.
+
+    Decided from shape as well as from the flag, because the flag is not
+    stored: the `nodes` table carries the eleven measurements and `is_dir`,
+    so a folded directory read back from a snapshot arrives with its full
+    totals, an empty child list and `depth_limited` at its default. No
+    other directory has that shape -- an empty one counts nothing, a
+    denied one counts nothing and carries `error` -- so a directory with
+    no children and a non-zero file or directory count can only be a fold.
+    Every pass that recomputes a directory from its children asks this
+    before it does, so a loaded tree is as safe as a live one.
+    """
+    return node.is_dir and not node.children and bool(
+        node.depth_limited or node.file_count or node.dir_count
+    )
+
 
 def finalize_unique_allocated(root: FSNode) -> None:
     """Assign allocated bytes to one deterministic path per hardlinked inode.
@@ -62,6 +89,13 @@ def finalize_unique_allocated(root: FSNode) -> None:
     # rather than re-stat'ed: both sides are exact integers the walk already
     # produced, and summing the leaves is a pass this loop makes anyway.
     for node in reversed(list(root.walk_dirs())):
+        if is_folded(node):
+            # Folded by `max_depth` after an earlier pass: its unique total
+            # was decided with the leaves still present, and the leaves are
+            # gone. Summing its empty child list would reduce it to its own
+            # blocks, so the node keeps its answer and only its ancestors
+            # are recomputed from it.
+            continue
         own: int | None = 0
         total: int | None = 0
         leaf_allocated: int | None = 0
@@ -135,6 +169,10 @@ def mirror_allocated_as_unique(root: FSNode) -> None:
     stack: list[FSNode] = [root]
     while stack:
         node = stack.pop()
+        if is_folded(node):
+            # A folded directory keeps the unique total it folded with --
+            # the same rule `finalize_unique_allocated` applies.
+            continue
         node.own_unique_allocated_size = node.own_allocated_size
         node.unique_allocated_size = node.allocated_size
         for child in node.children:
@@ -144,3 +182,131 @@ def mirror_allocated_as_unique(root: FSNode) -> None:
             allocated = child.own_allocated_size
             child.own_unique_allocated_size = allocated
             child.unique_allocated_size = allocated
+
+
+def fold_directory(node: FSNode) -> bool:
+    """Drop a directory's children, keeping every total it has already summed.
+
+    This is what `max_depth` means: a directory at the limit is measured
+    like every other -- its subtree was walked and every byte, file and
+    subdirectory under it is in `size`, `allocated_size`, `file_count`,
+    `dir_count` and the coverage counters -- but nothing under it is kept
+    as a node. `du --max-depth` prints the same numbers and the same lack
+    of rows. The `own_*` fields keep their meaning: the directory's own
+    blocks and its direct files, so `size - own_size` is what the fold
+    hides inside subdirectories.
+
+    `depth_limited` is set only when something *was* hidden: a directory
+    that had any entry at all, readable or not. An empty directory at the
+    limit folds to the same empty directory and says nothing, because a
+    rescan rooted at it would find nothing more -- and `depth_limited` is
+    exactly the flag the explorer's `i` reads to decide whether to rescan.
+    `depth_limited_subtree_count` is zeroed: it counts folded directories
+    *in the tree*, and nothing under a fold is in the tree.
+
+    Returns whether the fold hid anything. Folding a directory that is
+    already folded is a no-op that answers the same: its children are gone
+    but its flag, or its shape (`is_folded`), says what they were, so a
+    second pass over a tree never un-marks a fold.
+    """
+    hidden = (
+        bool(node.children)
+        or node.inaccessible_count > 0
+        or is_folded(node)
+    )
+    node.children = []
+    node.depth_limited = hidden
+    node.depth_limited_subtree_count = 0
+    node.invalidate_sort()
+    return hidden
+
+
+def fold_below_depth(root: FSNode, max_depth: int | None) -> int:
+    """Fold every directory at `max_depth` or deeper into a childless node.
+
+    Runs on the finished tree, after unique accounting, so hardlinks
+    inside a fold were resolved against the whole tree first and a folded
+    directory's `unique_allocated_size` is the one the full tree computed.
+    Running late costs the scan nothing in time -- a fold has to read what
+    it folds, as `du` does -- and the tree is at its full size until this
+    pass; what the fold buys is the smaller tree that is kept, published,
+    and saved.
+
+    Depth is counted from `root` at 0, the way the scheduler and the walker
+    number nodes. Retained directories get `depth_limited_subtree_count`
+    recounted bottom-up, since the only `depth_limited` nodes left after
+    this pass are the folded ones at exactly `max_depth`.
+
+    Returns the number of directories whose fold hid something -- the
+    figure the report's "Folded" line prints.
+    """
+    if max_depth is None or not root.is_dir:
+        return 0
+    folded = 0
+    # Preorder by stack: a child is appended after the parent that pushed
+    # it, so the reversed list visits every child before its parent.
+    retained: list[FSNode] = []
+    stack: list[FSNode] = [root]
+    while stack:
+        node = stack.pop()
+        retained.append(node)
+        if node.depth >= max_depth:
+            folded += int(fold_directory(node))
+            continue
+        for child in node.children:
+            if child.is_dir:
+                stack.append(child)
+    _recount_folds(retained)
+    return folded
+
+
+def mark_folded_directories(root: FSNode) -> int:
+    """Put the fold marks back on a tree rebuilt from stored rows.
+
+    The snapshot store keeps a node's measurements and not its flags, so
+    `load_tree` hands back folded directories with their totals and
+    nothing to say they are folds. This pass restores what the shape
+    proves (`is_folded`): `depth_limited` on each fold, and
+    `depth_limited_subtree_count` on every ancestor, so the explorer marks
+    the row, Details explains it, `i` knows a rescan would find more, and
+    the provisional projection leaves the fold's totals alone when it
+    recomputes the tree around an overlay.
+
+    Returns the number of folds marked.
+    """
+    if not root.is_dir:
+        return 0
+    marked = 0
+    order: list[FSNode] = []
+    stack: list[FSNode] = [root]
+    while stack:
+        node = stack.pop()
+        order.append(node)
+        if is_folded(node):
+            node.depth_limited = True
+            node.depth_limited_subtree_count = 0
+            marked += 1
+            continue
+        for child in node.children:
+            if child.is_dir:
+                stack.append(child)
+    _recount_folds(order)
+    return marked
+
+
+def _recount_folds(preorder: list[FSNode]) -> None:
+    """Recount `depth_limited_subtree_count` bottom-up over retained dirs.
+
+    `preorder` lists every directory kept, each after its parent, so the
+    reversed walk sees children before parents. Folds themselves are left
+    alone: their count is zero by construction, since nothing under a fold
+    is in the tree.
+    """
+    for node in reversed(preorder):
+        if is_folded(node):
+            continue
+        count = 0
+        for child in node.children:
+            if child.is_dir:
+                count += child.depth_limited_subtree_count + int(child.depth_limited)
+        node.depth_limited_subtree_count = count

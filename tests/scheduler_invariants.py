@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections import Counter
 
 from disktide.scanner import scheduler as scheduler_module
+from disktide.scanner.accounting import is_folded
 
 
 class SchedulerInvariantViolation(AssertionError):
@@ -409,6 +410,11 @@ def validate_tree(root) -> list[str]:
         stack.extend((child, False) for child in node.children if child.is_dir)
 
     for node in order:
+        if is_folded(node):
+            # Folded by `max_depth`: the totals describe a subtree that is
+            # no longer in the tree, so there is nothing to recompute them
+            # from. The ancestors are still checked against this node.
+            continue
         directories = [child for child in node.children if child.is_dir]
         expected = (
             ("size", node.size, node.own_size + sum(c.size for c in directories)),

@@ -1006,7 +1006,7 @@ class MonitorService:
         tracker: DirtyPathTracker,
     ) -> tuple[ScanRun, ...]:
         runs: list[ScanRun] = []
-        for path in batch.paths:
+        for path in self._local_reconciliation_targets(definition, batch.paths):
             request = ScanRequest(
                 path=path,
                 metric=definition.metric,
@@ -2362,7 +2362,7 @@ class MonitorService:
         runs: list[ScanRun] = []
         failure: str | None = None
         try:
-            for path in batch.paths:
+            for path in self._local_reconciliation_targets(definition, batch.paths):
                 policy = self._local_reconciliation_policy(definition, path)
                 request = ScanRequest(
                     path=path,
@@ -2610,22 +2610,63 @@ class MonitorService:
         return None
 
     @staticmethod
+    def _relative_depth(definition: MonitorDefinition, path: str) -> int:
+        try:
+            return len(
+                Path(path).resolve().relative_to(Path(definition.root_path).resolve()).parts
+            )
+        except ValueError:
+            return 0
+
+    @classmethod
+    def _local_reconciliation_targets(
+        cls,
+        definition: MonitorDefinition,
+        paths: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Map dirty paths onto directories the canonical tree has nodes for.
+
+        `max_depth` folds everything below the limit into its ancestor at
+        the limit, so a change three levels under a folded directory
+        changes that directory's totals and nothing the tree has a row
+        for. A local rescan aimed at the changed path would come back as a
+        node with no parent to splice under, and the overlay would have to
+        fall back to a full reconciliation. Aiming it at the folded
+        ancestor instead -- with `max_depth` 0 relative to it, which
+        `_local_reconciliation_policy` works out -- rescans exactly the
+        subtree the fold summarises and replaces the one node that
+        changed. Several dirty paths under one fold collapse to one scan.
+        """
+        max_depth = definition.policy.max_depth
+        if max_depth is None:
+            return paths
+        root = Path(definition.root_path).resolve()
+        targets: dict[str, None] = {}
+        for path in paths:
+            resolved = Path(path).resolve()
+            try:
+                parts = resolved.relative_to(root).parts
+            except ValueError:
+                targets[path] = None
+                continue
+            if len(parts) > max_depth:
+                targets[str(root.joinpath(*parts[:max_depth]))] = None
+            else:
+                targets[path] = None
+        return tuple(targets)
+
+    @classmethod
     def _local_reconciliation_policy(
+        cls,
         definition: MonitorDefinition,
         path: str,
     ):
         max_depth = definition.policy.max_depth
         if max_depth is None:
             return definition.policy
-        try:
-            relative_depth = len(
-                Path(path).resolve().relative_to(Path(definition.root_path).resolve()).parts
-            )
-        except ValueError:
-            relative_depth = 0
         return replace(
             definition.policy,
-            max_depth=max(0, max_depth - relative_depth),
+            max_depth=max(0, max_depth - cls._relative_depth(definition, path)),
         )
 
     def _prepare_snapshot_budget(

@@ -148,14 +148,18 @@ class InfoPanel(Widget):
                 )
             elif node.depth_limited:
                 table.add_row(
-                    "Scan scope", Text("Stopped at max depth", style=ink("warning_strong"))
+                    "Scan scope",
+                    Text(
+                        "Folded at max depth: contents counted, not listed",
+                        style=ink("warning_strong"),
+                    ),
                 )
             elif node.excluded_subtree_count or node.depth_limited_subtree_count:
                 table.add_row(
                     "Scan scope",
                     Text(
                         f"{node.excluded_subtree_count} excluded; "
-                        f"{node.depth_limited_subtree_count} depth-limited",
+                        f"{node.depth_limited_subtree_count} folded",
                         style=ink("warning"),
                     ),
                 )

@@ -643,15 +643,12 @@ def _scan_open_directory(
         node.own_allocated_size = 0
         return DirectoryScanResult(job, node, frozenset(), 0, 0)
 
-    if policy.max_depth is not None and job.depth >= policy.max_depth:
-        # The directory itself was reached and stat'ed; only its contents
-        # are out of scope. Its own blocks are as real as any other
-        # directory's, and `depth_limited_subtree_count` is what says the
-        # subtree under it is missing.
-        node.depth_limited = True
-        node.allocated_size = dir_allocated
-        node.own_allocated_size = dir_allocated
-        return DirectoryScanResult(job, node, frozenset(), 0, 0)
+    # `policy.max_depth` is deliberately not consulted here. A depth limit
+    # folds the tree rather than cutting the walk: every directory is read
+    # and summed, and `accounting.fold_below_depth` drops the nodes below
+    # the limit once the totals are final -- so the scheduler walks the
+    # same tree whatever the limit, and a folded directory carries the
+    # same numbers `du` would print for it.
 
     child_ancestors = job.ancestors
     if stat_result is not None:
@@ -1779,10 +1776,10 @@ class TreeScanScheduler:
             # a node with no allocated size cannot have one either. That now
             # happens for one reason only -- a platform with no `st_blocks`,
             # where every node in the tree is None together. A directory we
-            # were not allowed to read, could not stat, stopped at a depth
-            # limit, excluded, or that vanished under the scan carries a
-            # number and is reported as a coverage gap instead, so no single
-            # unreadable directory can blank the root's totals.
+            # were not allowed to read, could not stat, excluded, or that
+            # vanished under the scan carries a number and is reported as a
+            # coverage gap instead, so no single unreadable directory can
+            # blank the root's totals.
             delta_allocated: int | None = None
         elif previous.allocated_size is None:
             # A value arriving where there was none adds nothing: the old

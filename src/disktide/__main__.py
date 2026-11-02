@@ -133,13 +133,20 @@ def _json_dumps(document, **kwargs) -> str:
     return json.dumps(_json_safe(document), **kwargs)
 
 
+#: Shared by every `--max-depth`: the limit folds, it does not cut. The
+#: scan still reads everything; what it drops is the rows below the limit.
+_MAX_DEPTH_HELP = (
+    "Keep directories to this depth; anything deeper is summed into its "
+    "ancestor at that depth, so totals stay complete (like du --max-depth)"
+)
+
 _TUI_OPTIONS = (
     click.option(
         "--max-depth",
         "-d",
         type=click.IntRange(min=0),
         default=None,
-        help="Maximum scan depth",
+        help=_MAX_DEPTH_HELP,
     ),
     click.option(
         "--workers",
@@ -659,7 +666,7 @@ def doctor(json_output: bool, show_paths: bool, check_integrity: bool) -> None:
     "-d",
     type=click.IntRange(min=0),
     default=None,
-    help="Maximum scan depth",
+    help=_MAX_DEPTH_HELP,
 )
 @click.option(
     "--workers",
@@ -877,12 +884,15 @@ def scan(
 
     root = run.root
     # The two subtree counters count *descendants*, so a root that is itself
-    # scoped out contributes nothing to either: `scan --max-depth 0` reported
-    # `depth_limited_subtrees: 0` beside all-zero totals and no "Scoped out"
-    # line at all -- byte-identical to scanning an empty directory, for a
-    # tree of any size. The scheduler does mark the root (`depth_limited` /
-    # `excluded` on the node itself); only the report was not reading it.
-    # `SnapshotRecord.from_run` has counted it this way all along.
+    # excluded or folded contributes nothing to either; `-d 0` folds the
+    # root, and the only thing that says so is `depth_limited` on the root
+    # node itself. `SnapshotRecord.from_run` counts it the same way.
+    #
+    # The two mean different things. A policy-excluded directory was not
+    # measured, and the totals are short by whatever is in it. A folded
+    # directory was measured in full and its subtree is in every total; what
+    # `-d` dropped is the rows under it, the way `du --max-depth` prints
+    # fewer lines and the same sum.
     excluded_subtrees = root.excluded_subtree_count + int(root.excluded)
     depth_limited_subtrees = (
         root.depth_limited_subtree_count + int(root.depth_limited)
@@ -997,10 +1007,14 @@ def scan(
             f"  Changed during scan: {root.vanished_subtree_count:,} "
             "entries vanished"
         )
-    if excluded_subtrees or depth_limited_subtrees:
+    if excluded_subtrees:
+        click.echo(f"  Scoped out: {excluded_subtrees:,} policy-excluded")
+    if depth_limited_subtrees:
         click.echo(
-            f"  Scoped out: {excluded_subtrees:,} policy-excluded, "
-            f"{depth_limited_subtrees:,} depth-limited"
+            f"  Folded: {depth_limited_subtrees:,} "
+            f"{'directory' if depth_limited_subtrees == 1 else 'directories'}"
+            f" at depth {policy.max_depth} "
+            "(contents counted in the totals, not listed)"
         )
     if duplicate_links:
         click.echo(f"  Hardlinks deduplicated in Unique: {duplicate_links:,}")
@@ -1342,7 +1356,9 @@ def monitor_list(include_archived: bool, json_output: bool) -> None:
 @click.option("--one-file-system/--cross-filesystems", default=None)
 @click.option("--exclude-pseudo/--include-pseudo", default=None)
 @click.option("--exclude-snapshots/--include-snapshots", default=None)
-@click.option("--max-depth", type=click.IntRange(min=0), default=None)
+@click.option(
+    "--max-depth", type=click.IntRange(min=0), default=None, help=_MAX_DEPTH_HELP
+)
 @click.option("--capture-now", is_flag=True, help="Capture the first snapshot now")
 def monitor_add(
     path: Path,
@@ -1446,7 +1462,9 @@ def monitor_add(
 @click.option("--one-file-system/--cross-filesystems", default=None)
 @click.option("--exclude-pseudo/--include-pseudo", default=None)
 @click.option("--exclude-snapshots/--include-snapshots", default=None)
-@click.option("--max-depth", type=click.IntRange(min=0), default=None)
+@click.option(
+    "--max-depth", type=click.IntRange(min=0), default=None, help=_MAX_DEPTH_HELP
+)
 def monitor_edit(
     identifier: str,
     label: str | None,

@@ -69,6 +69,7 @@ log = logging.getLogger(__name__)
 
 from disktide.models.tree import FSNode, LeafNode
 from disktide.paths import database_file
+from disktide.scanner.accounting import mark_folded_directories
 from disktide.textsafe import load_text, store_text
 from disktide.storage.statint import load_stat_int, store_stat_int
 from disktide.storage.migrations import (
@@ -1382,6 +1383,13 @@ class Database:
             if node.is_dir:
                 node.children.sort(key=lambda child: (child.name, child.path))
 
+        if root is not None:
+            # The rows carry measurements, not flags. A directory saved from
+            # a `max_depth` scan comes back with its subtree's totals and no
+            # children, and nothing else has that shape; put the fold mark
+            # back so the explorer, `i` and the provisional projection read
+            # it as the scan left it.
+            mark_folded_directories(root)
         return root
 
     def load_measurements(

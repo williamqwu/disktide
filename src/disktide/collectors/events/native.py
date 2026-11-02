@@ -485,8 +485,12 @@ class InotifyEventBackend:
             if not self._path_allowed(current_path, state):
                 continue
             self._add_one(current_path, state)
-            if watch.policy.max_depth is not None and depth >= watch.policy.max_depth:
-                continue
+            # Every depth, whatever `policy.max_depth` says: the limit folds
+            # deeper directories into their ancestor's totals rather than
+            # leaving them out of the scan, so a write three levels under a
+            # folded directory is a change to a number the monitor reports.
+            # Watching only to the limit would miss it until the next
+            # periodic full scan.
             try:
                 with os.scandir(current_path) as entries:
                     for entry in entries:
@@ -701,14 +705,7 @@ class InotifyEventBackend:
                 except ValueError:
                     new_depth = state.depth
                 updates.append((wd, state, new_path, new_depth))
-            remove: list[int] = []
             for wd, state, new_path, new_depth in updates:
-                if (
-                    state.policy.max_depth is not None
-                    and new_depth > state.policy.max_depth
-                ):
-                    remove.append(wd)
-                    continue
                 self._wd_by_path.pop(state.path, None)
                 replacement = _WatchState(
                     path=new_path,
@@ -720,8 +717,6 @@ class InotifyEventBackend:
                 )
                 self._watches_by_wd[wd] = replacement
                 self._wd_by_path[new_path] = wd
-        for wd in remove:
-            self._forget_watch(wd)
 
     def _remove_path_prefix(self, path: str) -> None:
         prefix = path.rstrip(os.sep) + os.sep

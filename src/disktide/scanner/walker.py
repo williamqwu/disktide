@@ -9,6 +9,7 @@ from typing import Callable, Mapping
 
 from disktide.domain.metrics import sum_available
 from disktide.models.tree import FSNode, LeafNode
+from disktide.scanner.accounting import fold_directory
 from disktide.scanner.policy import is_snapshot_dir_name, lookup_excluded_mount
 
 
@@ -302,11 +303,11 @@ def scan_directory(
         node.own_allocated_size = 0
         return node
 
-    if max_depth is not None and depth >= max_depth:
-        node.depth_limited = True
-        node.allocated_size = dir_allocated
-        node.own_allocated_size = dir_allocated
-        return node
+    # No early return for `max_depth` here: the limit folds, it does not
+    # cut. This directory is read and summed like any other, and the fold
+    # at the bottom of this function drops its children once the totals
+    # are in -- the same answer the scheduler path gives through
+    # `accounting.fold_below_depth`.
 
     # Cycle guard: a bind mount (or container rootfs) can make a
     # directory reappear inside itself. If this directory's identity is
@@ -468,6 +469,13 @@ def scan_directory(
     node.partial_dir_subtree_count = partial_sub
     node.excluded_subtree_count = excluded_sub
     node.depth_limited_subtree_count = depth_limited_sub
+
+    if max_depth is not None and depth >= max_depth:
+        # Bottom-up, so the children being dropped were folded one level
+        # earlier and have already been summed into this node. Only the
+        # recursive walker pays the subtree's memory one level at a time;
+        # the scheduler folds the finished tree in one pass.
+        fold_directory(node)
 
     if on_dir_done is not None:
         # Tick at the end of this directory so live progress moves per

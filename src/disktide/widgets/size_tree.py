@@ -568,7 +568,8 @@ class SizeTree(Tree[FSNode]):
             marker = "xdev" if node.filesystem_boundary else node.exclusion_reason
             text.append(f"  [{marker or 'excluded'}]", style=ink("warning_strong"))
         elif node.depth_limited:
-            text.append("  [max-depth]", style=ink("warning_strong"))
+            # Folded, not cut: the row's size is the whole subtree's.
+            text.append("  [folded]", style=ink("warning_strong"))
 
         # Accessibility indicators (full denial vs partial). Rendered last,
         # but resolved here so the bar can reserve room for them: they sit

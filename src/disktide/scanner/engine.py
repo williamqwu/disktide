@@ -12,6 +12,7 @@ from disktide.domain.scan import ScanTreeUpdate, ScanWorkerSelection
 from disktide.models.tree import FSNode
 from disktide.scanner.accounting import (
     finalize_unique_allocated,
+    fold_below_depth,
     mirror_allocated_as_unique,
 )
 from disktide.scanner.gcpause import (
@@ -210,6 +211,11 @@ class ScanEngine:
             finalize_unique_allocated(root)
         else:
             mirror_allocated_as_unique(root)
+        # After the unique walk, so a hardlink inside a fold was resolved
+        # against every other path to its inode before the leaf went away.
+        # A cancelled scan folds too: the partial tree still has to be the
+        # shape the policy promised.
+        fold_below_depth(root, self._policy.max_depth)
 
         if not self.cancelled:
             self._progress.update(

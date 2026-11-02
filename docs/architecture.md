@@ -559,7 +559,7 @@ empty queue and no workers.
   `~snapshot`) excluded by default; decided from the name before the
   directory is opened, because listing one is what triggers the per-snapshot
   automounts. Explicit snapshot root allowed, as for pseudo mounts.
-- Max-depth and policy exclusions are separate from access errors.
+- Max-depth folds: a directory at the limit is read in full and keeps its subtree's totals with no children. Policy exclusions and access errors are the only things that leave bytes out.
 
 See ADR 0001 for the storage metric contract.
 
@@ -574,9 +574,11 @@ entry carrying that errno, so everything read before it is kept and the
 failure is counted once.
 
 Coverage gaps are counted, never subtracted from the metric's *kind*. A
-denied directory contributes its own blocks and nothing under it; a
-depth-limited one the same; vanished, excluded and self-ancestor directories
-contribute zero. `allocated_size` and `unique_allocated_size` are `None` only
+denied directory contributes its own blocks and nothing under it; vanished,
+excluded and self-ancestor directories contribute zero. A depth-limited
+directory is not a gap: `fold_below_depth` runs on the finished tree, after
+unique accounting, and drops the rows under the limit while every total
+they summed to stays on the directory that folded them. `allocated_size` and `unique_allocated_size` are `None` only
 where the platform has no `st_blocks`, so one unreadable directory cannot
 blank the scan root's totals — the invariant is checked on every applied
 result (`scheduler_invariants` I8).

@@ -221,8 +221,12 @@ def test_tui_refuses_a_non_interactive_terminal_instead_of_hanging():
 # --- coverage the report has to admit to -----------------------------------
 
 
-def test_max_depth_zero_says_it_scanned_nothing(tmp_path):
-    """It used to be byte-identical to scanning an empty directory."""
+def test_max_depth_zero_folds_the_whole_tree_into_the_root(tmp_path):
+    """`-d 0` is `du -s`: one row, the full total, and it says it folded.
+
+    It used to scan nothing below the root and report zero -- and before
+    that, zero with no sign anything had been left out.
+    """
     (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "inner.bin").write_bytes(b"y" * 8192)
@@ -232,16 +236,20 @@ def test_max_depth_zero_says_it_scanned_nothing(tmp_path):
     )
     assert document.exit_code == 0, document.output
     payload = json.loads(document.stdout)
-    assert payload["totals"]["logical_bytes"] == 0
+    assert payload["totals"]["logical_bytes"] == 4096 + 8192
+    assert payload["totals"]["file_count"] == 2
+    assert payload["totals"]["dir_count"] == 1
     assert payload["coverage"]["depth_limited_subtrees"] == 1
+    assert payload["children"] == []
 
     report = CliRunner().invoke(cli, ["scan", str(tmp_path), "-d", "0"])
     assert report.exit_code == 0, report.output
-    assert "Scoped out: 0 policy-excluded, 1 depth-limited" in report.stdout
+    assert "Folded: 1 directory at depth 0" in report.stdout
+    assert "Scoped out" not in report.stdout
 
 
-def test_max_depth_one_is_unchanged(tmp_path):
-    """Only the root's own scoping was missing; descendants always counted."""
+def test_max_depth_one_keeps_the_total_and_drops_the_rows(tmp_path):
+    """The folded subdirectory carries its contents; nothing is scoped out."""
     (tmp_path / "payload.bin").write_bytes(b"x" * 4096)
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "inner.bin").write_bytes(b"y" * 8192)
@@ -250,8 +258,15 @@ def test_max_depth_one_is_unchanged(tmp_path):
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["totals"]["logical_bytes"] == 4096
+    assert payload["totals"]["logical_bytes"] == 4096 + 8192
     assert payload["coverage"]["depth_limited_subtrees"] == 1
+    assert len(payload["children"]) == 1
+    assert payload["children"][0]["logical_bytes"] == 8192
+    assert payload["children"][0]["file_count"] == 1
+
+    report = CliRunner().invoke(cli, ["scan", str(tmp_path), "-d", "1"])
+    assert report.exit_code == 0, report.output
+    assert "Folded: 1 directory at depth 1" in report.stdout
 
 
 # --- launching the TUI on a path -------------------------------------------

@@ -1350,7 +1350,7 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
                 )
             if self._root.depth_limited_subtree_count:
                 parts.append(
-                    f"{self._root.depth_limited_subtree_count} depth-limited"
+                    f"{self._root.depth_limited_subtree_count} folded"
                 )
             suffix = "  |  " + ", ".join(parts)
         run_prefix = ""
@@ -1738,9 +1738,10 @@ class ExplorerScreen(RenderEpochRefreshMixin, Screen):
           stopped at, a pseudo filesystem, a snapshot directory -- was
           never descended into, and re-rooting the scan there re-anchors
           the policy against that directory, so a rescan does find more.
-        * `depth_limited`, here or anywhere below, means `max_depth` cut
-          the walk short. The limit counts from the root, so moving the
-          root down buys real depth.
+        * `depth_limited`, here or anywhere below, means `max_depth` folded
+          a subtree into one row: measured, but with nothing under it to
+          open. The limit counts from the root, so moving the root down
+          buys real depth.
         * An `excluded` node *deeper inside* is not a reason: the same
           policy excludes it again from the new root, so the rescan returns
           the same picture. `has_policy_omissions` counts those, which is

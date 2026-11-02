@@ -19,6 +19,7 @@ from disktide.domain.provisional import (
 from disktide.domain.snapshot import Snapshot
 from disktide.models.tree import FSNode
 from disktide.repositories.snapshots import SnapshotRepository
+from disktide.scanner.accounting import is_folded
 from disktide.scanner.scheduler import clone_tree
 
 
@@ -346,6 +347,15 @@ def _shift_depth(root: FSNode, amount: int) -> None:
 def _recalculate_tree(root: FSNode) -> None:
     for node in reversed(list(root.walk())):
         if not node.is_dir:
+            continue
+        if is_folded(node):
+            # Folded by `max_depth`: its totals describe a subtree that is
+            # not in the tree, so summing its (empty) child list would
+            # replace them with its own blocks and direct files. The node
+            # is the authority on what it folded; only its ancestors are
+            # recomputed from it. Decided from shape as well as flag, since
+            # a tree `load_tree` rebuilt carries the mark only because the
+            # loader put it back.
             continue
         directories = [child for child in node.children if child.is_dir]
         node.size = node.own_size + sum(child.size for child in directories)

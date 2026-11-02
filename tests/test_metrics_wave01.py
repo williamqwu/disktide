@@ -294,23 +294,34 @@ def test_the_two_shapes_of_unreadable_report_the_same_kind_of_answer(tmp_path):
     assert shapes[0o000] == shapes[0o444]
 
 
-def test_a_coverage_gap_contributes_its_own_blocks_and_nothing_else(tmp_path):
-    """Depth-limited, like denied: the directory is real, its contents are out."""
+def test_a_folded_directory_contributes_its_whole_subtree(tmp_path):
+    """Depth-limited is not a coverage gap: the directory is measured in full.
+
+    It used to be treated like a denied directory -- own blocks and nothing
+    else -- which made `-d N` report a fraction of the tree with no way to
+    get the total. The limit folds now: the subtree is summed into the
+    directory at the limit and only the rows under it are dropped.
+    """
     child = tmp_path / "child"
     grandchild = child / "grandchild"
     grandchild.mkdir(parents=True)
     (grandchild / "deep.bin").write_bytes(b"x" * 9000)
 
     root = ScanEngine(workers=1, max_depth=1).scan(str(tmp_path))
+    full = ScanEngine(workers=1).scan(str(tmp_path))
     if root.allocated_size is None:
         pytest.skip("platform does not expose st_blocks")
     child_node = root.find(str(child))
     assert child_node is not None
     assert child_node.depth_limited is True
-    assert child_node.allocated_size == _directory_blocks(child)
-    assert root.allocated_size == (
-        _directory_blocks(tmp_path) + _directory_blocks(child)
-    )
+    assert child_node.children == []
+    assert child_node.size == 9000
+    assert child_node.file_count == 1
+    assert child_node.dir_count == 1
+    assert child_node.allocated_size == full.find(str(child)).allocated_size
+    assert child_node.allocated_size > _directory_blocks(child)
+    assert root.allocated_size == full.allocated_size
+    assert root.size == full.size == 9000
     assert root.depth_limited_subtree_count == 1
 
 
